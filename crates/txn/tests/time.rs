@@ -20,6 +20,7 @@ fn opts(history_time: Duration) -> EngineOptions {
         store: StoreOptions {
             cache_pages: 64,
             wal_segment_size: 8192,
+            ..Default::default()
         },
         checkpoint_wal_bytes: 32 << 10,
         history: 0,

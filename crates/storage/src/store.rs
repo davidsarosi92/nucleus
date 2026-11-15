@@ -82,6 +82,10 @@ pub struct StoreOptions {
     pub cache_pages: usize,
     /// WAL segment size in bytes.
     pub wal_segment_size: u64,
+    /// The key the data file's pages are sealed under (PLAN.md §M14.30
+    /// K2b): a new store is created encrypted, an existing one must be
+    /// encrypted under it.  `None`: in the clear.
+    pub page_key: Option<crate::PageCipher>,
 }
 
 impl Default for StoreOptions {
@@ -89,6 +93,7 @@ impl Default for StoreOptions {
         Self {
             cache_pages: 1024,
             wal_segment_size: 16 << 20,
+            page_key: None,
         }
     }
 }
@@ -656,9 +661,9 @@ impl Store {
         })?;
         let data = dir.join("data");
         let pager = if fs.exists(&data)? {
-            Pager::open(fs, &data)?
+            Pager::open_with(fs, &data, opts.page_key.clone())?
         } else {
-            Pager::create(fs, &data)?
+            Pager::create_with(fs, &data, opts.page_key.clone())?
         };
         let pager = Arc::new(pager);
         let pool = Arc::new(BufferPool::new(Arc::clone(&pager), opts.cache_pages));

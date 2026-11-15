@@ -1,5 +1,6 @@
 //! Store tests: WAL replay, checkpoints, torn logs, poisoning, and a crash
-//! at every I/O point of a workload of batches and checkpoints.
+//! at every I/O point of a workload of batches and checkpoints — the odd
+//! seeds' with the data file encrypted (PLAN.md §M14.30 K2b).
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -10,16 +11,27 @@ use nucleus_platform::harness;
 use nucleus_platform::real::RealPlatform;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
 use nucleus_platform::{OpenMode, Platform, Rng, SplitMix64};
-use nucleus_storage::{Batch, Error, Store, StoreOptions};
+use nucleus_storage::{Batch, Error, PageCipher, Store, StoreOptions};
 
 const DIR: &str = "/db";
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
+thread_local! {
+    /// Whether this thread's stores are encrypted ([`encrypt_if_odd`]).
+    static ENCRYPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The odd seeds of a crash test run with the data file encrypted.
+fn encrypt_if_odd(seed: u64) {
+    ENCRYPTED.set(seed % 2 == 1);
+}
+
 fn opts() -> StoreOptions {
     StoreOptions {
         cache_pages: 8,
         wal_segment_size: 2048,
+        page_key: ENCRYPTED.get().then(|| PageCipher::new([7; 32])),
     }
 }
 
@@ -363,6 +375,7 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
 fn crash_at_every_io_point() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
         harness::run("store_crash_at_every_io_point", 8, |seed| {
+            encrypt_if_odd(seed);
             let dry = sim(seed);
             let (models, acked) = workload(&dry, seed);
             assert!(acked >= 18);
@@ -465,10 +478,68 @@ fn checkpoints_overlapping_writes() {
     store.read().unwrap().check().unwrap();
 }
 
+/// An encrypted store's data file (PLAN.md §M14.30 K2b): a value
+/// planted in it is found in a file in the clear and not in an encrypted
+/// one, which reopens under its key only.
+#[test]
+fn a_planted_value_is_not_in_an_encrypted_data_file() {
+    let planted = b"planted-value-4cb1e0f2-searched-for".to_vec();
+    for encrypted in [false, true] {
+        ENCRYPTED.set(encrypted);
+        let p = sim(3);
+        {
+            let (store, _) = open(&p).unwrap();
+            for i in 0..50u64 {
+                let mut v = planted.clone();
+                v.extend_from_slice(&i.to_le_bytes());
+                store
+                    .write(&Batch {
+                        meta: i + 1,
+                        ops: vec![(format!("k{i:03}").into_bytes(), Some(v))],
+                    })
+                    .unwrap();
+            }
+            store.checkpoint().unwrap();
+        }
+        let file = p
+            .fs()
+            .open(Path::new("/db/data"), OpenMode::ReadOnly)
+            .unwrap();
+        let mut bytes = vec![0u8; file.size().unwrap() as usize];
+        file.read_exact_at(&mut bytes, 0).unwrap();
+        let found = bytes.windows(planted.len()).any(|w| w == planted);
+        assert_eq!(found, !encrypted, "encrypted: {encrypted}");
+
+        let (store, rec) = open(&p).unwrap();
+        assert_eq!(rec.meta, 50);
+        assert_eq!(contents(&store).len(), 50);
+        drop(store);
+        ENCRYPTED.set(!encrypted);
+        let refused = open(&p).err().map(|e| e.to_string());
+        assert!(
+            matches!(&refused, Some(e) if e.contains("encrypted") || e.contains("key")),
+            "{refused:?}"
+        );
+    }
+    let p = sim(3);
+    ENCRYPTED.set(true);
+    drop(open(&p).unwrap());
+    let other = StoreOptions {
+        page_key: Some(PageCipher::new([8; 32])),
+        ..opts()
+    };
+    let Err(e) = Store::open(Arc::clone(&p) as Arc<dyn Platform>, Path::new(DIR), &other) else {
+        panic!("another key accepted");
+    };
+    assert!(e.to_string().contains("another key"), "{e}");
+    ENCRYPTED.set(false);
+}
+
 #[test]
 fn crash_at_every_io_point_of_overlapping_checkpoints() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
         harness::run("store_crash_overlapping_checkpoints", 8, |seed| {
+            encrypt_if_odd(seed);
             let dry = sim(seed);
             let (models, _) = workload_overlapping(&dry, seed);
             let total = dry.sim_fs().op_count();
@@ -524,6 +595,7 @@ fn checkpoints_while_writing_on_real_files() {
     let o = StoreOptions {
         cache_pages: 16,
         wal_segment_size: 64 << 10,
+        ..Default::default()
     };
     let (store, _) = Store::open(Arc::clone(&real), &dir, &o).unwrap();
     let done = std::sync::atomic::AtomicBool::new(false);

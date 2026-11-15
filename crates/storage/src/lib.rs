@@ -6,6 +6,7 @@
 
 pub mod btree;
 pub mod buffer;
+pub mod cipher;
 pub mod crc32c;
 mod error;
 pub mod lz;
@@ -19,6 +20,7 @@ pub mod wal;
 
 pub use btree::BTree;
 pub use buffer::{BufferPool, PageRef};
+pub use cipher::PageCipher;
 pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::Pager;

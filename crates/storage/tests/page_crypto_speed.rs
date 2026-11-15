@@ -1,13 +1,21 @@
 //! What sealing a page costs (PLAN.md §M14.30 K2a): an 8 KiB page through
 //! CRC-32C (today's checksum), ChaCha20-Poly1305 (RFC 8439) and the
-//! misuse-resistant `nucleus_crypto::siv`, in MB/s on one core.
+//! misuse-resistant `nucleus_crypto::siv`, in MB/s on one core; and what
+//! it costs a store (K2b): a load checkpointed, then a scan through a
+//! cold buffer pool, in the clear and encrypted.
 //!
 //! `cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture`
 
+use std::ops::Bound;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use nucleus_crypto::{aead, siv};
+use nucleus_platform::Platform;
+use nucleus_platform::real::RealPlatform;
 use nucleus_storage::crc32c::crc32c;
+use nucleus_storage::{Batch, PageCipher, Store, StoreOptions};
 
 const PAGE: usize = 8192;
 const PAGES: usize = 4096; // 32 MiB a pass
@@ -52,4 +60,66 @@ fn page_sealing_speed() {
         assert!(siv::open_in_place(&key, &[0u8; 12], &aad, p, &t));
     });
     println!("({sink})");
+}
+
+/// A load of `ROWS` rows (100-byte values) in batches, checkpointed, and
+/// a scan of them all from a buffer pool too small to hold them, on the
+/// real file system: in the clear, then encrypted.
+#[test]
+#[ignore = "a measurement: run it in release"]
+fn store_load_and_scan_encrypted() {
+    const ROWS: u64 = 400_000;
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("page_crypto_store");
+    for key in [None, Some(PageCipher::new([9; 32]))] {
+        let name = if key.is_some() {
+            "encrypted"
+        } else {
+            "in the clear"
+        };
+        let dir = root.join(name.replace(' ', "-"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let platform: Arc<dyn Platform> = Arc::new(RealPlatform::new().unwrap());
+        let opts = StoreOptions {
+            cache_pages: 1024,
+            wal_segment_size: 64 << 20,
+            page_key: key,
+        };
+        let t = Instant::now();
+        {
+            let (store, _) = Store::open(Arc::clone(&platform), &dir, &opts).unwrap();
+            for b in 0..ROWS / 1000 {
+                let ops = (b * 1000..(b + 1) * 1000)
+                    .map(|i| {
+                        let v: Vec<u8> = (0..100).map(|j| (i * 31 + j * 7) as u8).collect();
+                        (format!("key{i:010}").into_bytes(), Some(v))
+                    })
+                    .collect();
+                store.write(&Batch { meta: b + 1, ops }).unwrap();
+            }
+            store.checkpoint().unwrap();
+        }
+        let load = t.elapsed();
+        let (store, _) = Store::open(Arc::clone(&platform), &dir, &opts).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let t = Instant::now();
+            let n = store
+                .read()
+                .unwrap()
+                .range(Bound::Unbounded, Bound::Unbounded)
+                .unwrap()
+                .count();
+            assert_eq!(n as u64, ROWS);
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        let size = std::fs::metadata(dir.join("data")).unwrap().len();
+        println!(
+            "{name:14} load + checkpoint {:7.1} ms   scan {:7.1} ms   ({} MB)",
+            load.as_secs_f64() * 1e3,
+            best * 1e3,
+            size >> 20
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

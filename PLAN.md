@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2a–K2b ✅ (2026-11-15) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9875,11 +9875,32 @@ in poly1305-donna's 64-bit form (44/44/42-bit limbs, 128-bit products)
 → 2,220 MB/s from 1,350.  Now 11.9 µs a page seal, the SIV as fast as
 the AEAD; CRC-32C is 0.35 µs.  Next for speed, when K2b measures it in
 the store: the CPU's AES (AES-GCM-SIV proper), which needs the
-platform layer's `unsafe`.  **K2b** pages: an
-encrypted file's header records the cipher and the DEK's id (format
-version 3 only for an encrypted file); `nucleus_kv::Options` takes the
-key; the crash tests run encrypted; a planted value searched for in
-the file.  **K2c** WAL records.  **K2d** the other files: spill and
+platform layer's `unsafe`.  **K2b ✅** pages (`nucleus_storage::cipher`,
+2026-11-15): every data page — free-list pages too — sealed on its way
+to the file, opened on its way back, never while cached; on disk the
+SIV tag, `birth << 8 | type` (authenticated), the payload encrypted, the
+page id as nonce and associated data (not stored).  The two header
+pages stay readable without the key: format version 3 (older builds
+refuse it; a file in the clear stays at 2), the cipher, the key's check
+value instead of the DEK's id — the wrong key refused by name
+(`Error::Key`) without the keyring's ids in the storage layer — and a
+tag over the header, so a header rewritten with a correct CRC is passed
+over like a torn copy.  `StoreOptions::page_key`,
+`nucleus_kv::Options::encryption_key`.  Tests: the cipher's own (moved,
+changed, another key), `an_encrypted_files_headers_are_authenticated`,
+`a_planted_value_is_not_in_an_encrypted_data_file` (found in the clear,
+not encrypted; the other key refused); the store's two crash-at-every-
+I/O-point tests run their odd seeds encrypted (3 and 5 of 8).
+*Measured* (`docs/benchmarks.md`, *Sealing a page*): load and checkpoint
++24 %, a cold-pool scan ×2.6 (50 → 128 ms for 52 MB in the OS cache) —
+the ~12 µs a page of ChaCha20 in portable Rust, far over the 10 %
+target.  Next for it, before K2e measures the edition: the CPU's AES
+(AES-GCM-SIV proper, RFC 8452: ARMv8 AES + PMULL, AES-NI + PCLMULQDQ,
+~5–10 GB/s where present) behind a runtime check, and the read-ahead's
+pages opened on several cores.  The erasure scan of §M14.24
+(`nucleus_storage::scan`) reads files raw: in an encrypted file it finds
+nothing by construction — it must open the pages to say something;
+with K2e.  **K2c** WAL records.  **K2d** the other files: spill and
 scratch, column segments, index files, the embedding queue.  **K2e**
 the edition: the keyring's data key `data`, an existing database
 encrypted by rewriting its pages (`nucleus keys <dir> encrypt`, the

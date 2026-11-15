@@ -36,6 +36,14 @@
 //! | 32 | 8 | first free-list page (0 = none) |
 //! | 40 | 8 | number of free pages |
 //! | 48 | 8 × [`META_SLOTS`] | meta slots, owned by the layers above |
+//! | 176 | 4 | the cipher (0: in the clear; [`crate::cipher`]) |
+//! | 180 | 4 | reserved, zero |
+//! | 184 | 16 | the key's check value (encrypted files) |
+//! | 200 | 16 | the tag of bytes `0..200` under the key (encrypted files) |
+//!
+//! An encrypted file (PLAN.md §M14.30 K2b) is format version
+//! [`ENCRYPTED_FORMAT_VERSION`]: its data pages are sealed
+//! ([`crate::cipher`]), its headers stay readable and are authenticated.
 //!
 //! # The free list
 //!
@@ -53,6 +61,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use nucleus_platform::{File, FileSystem, OpenMode};
 
+use crate::cipher::{CIPHER_NONE, PageCipher};
 use crate::error::{Error, Result};
 use crate::page::{
     PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType, read_u32, read_u64, write_u32, write_u64,
@@ -66,6 +75,16 @@ pub const FORMAT_VERSION: u32 = 2;
 
 /// The oldest format version this code reads.
 pub const OLDEST_FORMAT_VERSION: u32 = 1;
+
+/// The format version of an encrypted file (PLAN.md §M14.30 K2b): a
+/// file in the clear stays at [`FORMAT_VERSION`], so encryption alone
+/// makes older builds refuse a file.
+pub const ENCRYPTED_FORMAT_VERSION: u32 = 3;
+
+/// Where the header's cipher fields start, in its payload.
+const CIPHER_AT: usize = 48 + 8 * META_SLOTS;
+/// The bytes of the header payload its tag covers.
+const TAGGED: usize = CIPHER_AT + 24;
 
 /// The first page that can hold data; 0 and 1 are the header copies.
 pub const FIRST_DATA_PAGE: PageId = PageId(2);
@@ -93,16 +112,22 @@ pub struct Header {
     pub free_count: u64,
     /// The meta slots.
     pub meta: [u64; META_SLOTS],
+    /// The cipher its pages are sealed with ([`CIPHER_NONE`]: none).
+    pub cipher: u32,
+    /// The key's check value ([`PageCipher::check_value`]).
+    pub key_check: [u8; 16],
 }
 
 impl Header {
-    fn new() -> Self {
+    fn new(cipher: Option<&PageCipher>) -> Self {
         Self {
             seq: 0,
             page_count: FIRST_DATA_PAGE.0,
             freelist_head: 0,
             free_count: 0,
             meta: [0; META_SLOTS],
+            cipher: cipher.map_or(CIPHER_NONE, PageCipher::code),
+            key_check: cipher.map_or([0; 16], PageCipher::check_value),
         }
     }
 
@@ -110,7 +135,12 @@ impl Header {
         let mut page = Page::new(PageType::HEADER);
         let p = page.payload_mut();
         p[0..8].copy_from_slice(MAGIC);
-        write_u32(p, 8, FORMAT_VERSION);
+        let version = if self.cipher == CIPHER_NONE {
+            FORMAT_VERSION
+        } else {
+            ENCRYPTED_FORMAT_VERSION
+        };
+        write_u32(p, 8, version);
         write_u32(p, 12, PAGE_SIZE as u32);
         write_u64(p, 16, self.seq);
         write_u64(p, 24, self.page_count);
@@ -119,6 +149,8 @@ impl Header {
         for (i, m) in self.meta.iter().enumerate() {
             write_u64(p, 48 + 8 * i, *m);
         }
+        write_u32(p, CIPHER_AT, self.cipher);
+        p[CIPHER_AT + 8..CIPHER_AT + 24].copy_from_slice(&self.key_check);
         page
     }
 
@@ -128,10 +160,16 @@ impl Header {
             return Err(Error::NotADatabase("bad magic".into()));
         }
         let version = read_u32(p, 8);
-        if !(OLDEST_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
+        if !(OLDEST_FORMAT_VERSION..=ENCRYPTED_FORMAT_VERSION).contains(&version) {
             return Err(Error::NotADatabase(format!(
                 "format version {version}, this build reads {OLDEST_FORMAT_VERSION} to \
-                 {FORMAT_VERSION}"
+                 {ENCRYPTED_FORMAT_VERSION}"
+            )));
+        }
+        let cipher = read_u32(p, CIPHER_AT);
+        if (version == ENCRYPTED_FORMAT_VERSION) != (cipher != CIPHER_NONE) {
+            return Err(Error::NotADatabase(format!(
+                "format version {version} with cipher {cipher}"
             )));
         }
         let page_size = read_u32(p, 12);
@@ -150,6 +188,10 @@ impl Header {
             freelist_head: read_u64(p, 32),
             free_count: read_u64(p, 40),
             meta,
+            cipher,
+            key_check: p[CIPHER_AT + 8..CIPHER_AT + 24]
+                .try_into()
+                .expect("16 bytes"),
         })
     }
 }
@@ -266,6 +308,8 @@ pub struct Accounting {
 /// reads and writes run in parallel, allocation and `sync` take a lock.
 pub struct Pager {
     file: Box<dyn File>,
+    /// The key its pages are sealed under, if it is encrypted.
+    cipher: Option<PageCipher>,
     state: Mutex<State>,
     /// The state's page count and poisoned flag, mirrored (changed under
     /// the state lock, read without it): a page read checks its id against
@@ -296,6 +340,16 @@ impl Pager {
     /// place, so after a crash `path` either does not exist or is a complete,
     /// empty database — never a half-written header.
     pub fn create(fs: &dyn FileSystem, path: &Path) -> Result<Self> {
+        Self::create_with(fs, path, None)
+    }
+
+    /// [`create`](Self::create), its pages sealed under `cipher` if one
+    /// is given (PLAN.md §M14.30 K2b).
+    pub fn create_with(
+        fs: &dyn FileSystem,
+        path: &Path,
+        cipher: Option<PageCipher>,
+    ) -> Result<Self> {
         if fs.exists(path)? {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -311,9 +365,9 @@ impl Pager {
             Err(e) => return Err(e.into()),
         }
         let file = fs.open(&tmp, OpenMode::CreateNew)?;
-        let mut hdr = Header::new();
+        let mut hdr = Header::new(cipher.as_ref());
         for _ in 0..2 {
-            write_header(file.as_ref(), &hdr)?;
+            write_header(file.as_ref(), &hdr, cipher.as_ref())?;
             hdr.seq += 1;
         }
         hdr.seq -= 1;
@@ -321,13 +375,44 @@ impl Pager {
         fs.rename(&tmp, path)?;
         let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
         fs.sync_dir(dir.unwrap_or(Path::new(".")))?;
-        Ok(Self::with(file, hdr, BTreeSet::new(), Vec::new()))
+        Ok(Self::with(file, cipher, hdr, BTreeSet::new(), Vec::new()))
     }
 
     /// Opens the database file at `path`.
     pub fn open(fs: &dyn FileSystem, path: &Path) -> Result<Self> {
+        Self::open_with(fs, path, None)
+    }
+
+    /// [`open`](Self::open) with the key its pages are sealed under: an
+    /// encrypted file needs it ([`Error::Key`] without it, or with
+    /// another), a file in the clear refuses one.
+    pub fn open_with(fs: &dyn FileSystem, path: &Path, cipher: Option<PageCipher>) -> Result<Self> {
         let file = fs.open(path, OpenMode::ReadWrite)?;
-        let hdr = read_best_header(file.as_ref())?;
+        let hdr = read_best_header(file.as_ref(), cipher.as_ref())?;
+        match (&cipher, hdr.cipher) {
+            (None, CIPHER_NONE) => {}
+            (None, _) => {
+                return Err(Error::Key(format!(
+                    "{} is encrypted; its key is needed",
+                    path.display()
+                )));
+            }
+            (Some(_), CIPHER_NONE) => {
+                return Err(Error::Key(format!(
+                    "{} is not encrypted (encrypting a database in the clear is \
+                     `nucleus keys <dir> encrypt`)",
+                    path.display()
+                )));
+            }
+            (Some(c), code) => {
+                if code != c.code() || hdr.key_check != c.check_value() {
+                    return Err(Error::Key(format!(
+                        "{} is sealed under another key",
+                        path.display()
+                    )));
+                }
+            }
+        }
         let header_page = PageId(hdr.seq % 2);
         if hdr.page_count < FIRST_DATA_PAGE.0 {
             return Err(Error::Corrupt {
@@ -341,16 +426,23 @@ impl Pager {
                 reason: "file shorter than its header says",
             });
         }
-        let (free, freelist_pages) = read_freelist(file.as_ref(), &hdr)?;
-        Ok(Self::with(file, hdr, free, freelist_pages))
+        let (free, freelist_pages) = read_freelist(file.as_ref(), &hdr, cipher.as_ref())?;
+        Ok(Self::with(file, cipher, hdr, free, freelist_pages))
     }
 
-    fn with(file: Box<dyn File>, hdr: Header, free: BTreeSet<u64>, fl: Vec<u64>) -> Self {
+    fn with(
+        file: Box<dyn File>,
+        cipher: Option<PageCipher>,
+        hdr: Header,
+        free: BTreeSet<u64>,
+        fl: Vec<u64>,
+    ) -> Self {
         let known_len = file.size().map_or(0, |n| n / PAGE_SIZE as u64);
         Self {
             pages: AtomicU64::new(hdr.page_count),
             poisoned: AtomicBool::new(false),
             file,
+            cipher,
             state: Mutex::new(State {
                 durable: hdr.clone(),
                 hdr,
@@ -370,14 +462,15 @@ impl Pager {
     /// Writes `page` at `id`; past the pages the file is known to hold,
     /// under the state lock (an extension of the file).
     fn write_at(&self, id: PageId, page: &mut Page) -> Result<()> {
+        let cipher = self.cipher.as_ref();
         if id.0 < self.lock().known_len {
-            return write_raw(self.file.as_ref(), id, page);
+            return write_raw(self.file.as_ref(), id, page, cipher);
         }
         let mut s = self.lock();
         if id.0 >= s.known_len {
             s.known_len = extend(self.file.as_ref(), s.known_len, id.0 + 1)?;
         }
-        write_raw(self.file.as_ref(), id, page)
+        write_raw(self.file.as_ref(), id, page, cipher)
     }
 
     /// Whether `id` may be written back: allocated since the last freeze,
@@ -416,7 +509,7 @@ impl Pager {
         if id < FIRST_DATA_PAGE || id.0 >= self.pages.load(Ordering::Acquire) {
             return Err(Error::InvalidPage(id));
         }
-        read_raw(self.file.as_ref(), id)
+        read_raw(self.file.as_ref(), id, self.cipher.as_ref())
     }
 
     /// Reads and verifies the `n` pages from `first` on with one read of
@@ -429,7 +522,12 @@ impl Pager {
         if first < FIRST_DATA_PAGE || end.is_none_or(|e| e > self.pages.load(Ordering::Acquire)) {
             return Err(Error::InvalidPage(first));
         }
-        read_run(self.file.as_ref(), first, n)
+        read_run(self.file.as_ref(), first, n, self.cipher.as_ref())
+    }
+
+    /// Whether its pages are sealed (PLAN.md §M14.30 K2b).
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
     }
 
     /// Writes `page` at `id`, stamping its id and checksum.  Only pages
@@ -631,7 +729,12 @@ impl Pager {
         // (Past the file's known length a page was never written.)
         for &id in s.free.range(..s.known_len) {
             let mut page = Page::new(PageType::UNUSED);
-            write_raw(self.file.as_ref(), PageId(id), &mut page)?;
+            write_raw(
+                self.file.as_ref(),
+                PageId(id),
+                &mut page,
+                self.cipher.as_ref(),
+            )?;
             zeroed += 1;
         }
         drop(s);
@@ -811,7 +914,7 @@ impl Pager {
         // The data the new header refers to, before it (ordering is all it
         // needs: the header's sync makes both durable).
         self.file.sync_order()?;
-        write_header(self.file.as_ref(), &f.hdr)?;
+        write_header(self.file.as_ref(), &f.hdr, self.cipher.as_ref())?;
         self.file.sync()?; // the header itself
         Ok(())
     }
@@ -820,7 +923,7 @@ impl Pager {
     /// no page is in two places at once.
     pub fn check(&self) -> Result<()> {
         let s = self.begin()?;
-        let (on_disk, pages) = read_freelist(self.file.as_ref(), &s.durable)?;
+        let (on_disk, pages) = read_freelist(self.file.as_ref(), &s.durable, self.cipher.as_ref())?;
         let corrupt = |reason| Error::Corrupt {
             page: PageId(s.durable.seq % 2),
             reason,
@@ -869,8 +972,8 @@ impl Pager {
     }
 }
 
-fn read_raw(file: &dyn File, id: PageId) -> Result<Page> {
-    let mut pages = read_run(file, id, 1)?;
+fn read_raw(file: &dyn File, id: PageId, cipher: Option<&PageCipher>) -> Result<Page> {
+    let mut pages = read_run(file, id, 1, cipher)?;
     Ok(pages.pop().expect("one page read"))
 }
 
@@ -882,7 +985,12 @@ thread_local! {
 
 /// Reads and verifies the `n` pages from `first` on with one read of the
 /// file, into the thread's buffer, each copied out once into its page.
-fn read_run(file: &dyn File, first: PageId, n: usize) -> Result<Vec<Page>> {
+fn read_run(
+    file: &dyn File,
+    first: PageId,
+    n: usize,
+    cipher: Option<&PageCipher>,
+) -> Result<Vec<Page>> {
     READ_BUFFER.with_borrow_mut(|buf| {
         if buf.len() < n * PAGE_SIZE {
             buf.resize(n * PAGE_SIZE, 0);
@@ -903,11 +1011,15 @@ fn read_run(file: &dyn File, first: PageId, n: usize) -> Result<Vec<Page>> {
             .iter()
             .zip(first.0..)
             .map(|(bytes, id)| {
-                let page = Page::from_bytes(bytes);
-                page.verify(PageId(id)).map_err(|reason| Error::Corrupt {
+                let corrupt = |reason| Error::Corrupt {
                     page: PageId(id),
                     reason,
-                })?;
+                };
+                if let Some(c) = cipher {
+                    return c.open(PageId(id), bytes).map_err(corrupt);
+                }
+                let page = Page::from_bytes(bytes);
+                page.verify(PageId(id)).map_err(corrupt)?;
                 Ok(page)
             })
             .collect()
@@ -946,14 +1058,37 @@ fn extend(file: &dyn File, known: u64, upto: u64) -> Result<u64> {
     Ok(to)
 }
 
-fn write_raw(file: &dyn File, id: PageId, page: &mut Page) -> Result<()> {
+thread_local! {
+    /// A thread's buffer for an encrypted page on its way to the file
+    /// (the page itself stays in the clear, in the buffer pool).
+    static WRITE_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn write_raw(
+    file: &dyn File,
+    id: PageId,
+    page: &mut Page,
+    cipher: Option<&PageCipher>,
+) -> Result<()> {
     page.seal(id);
-    Ok(file.write_all_at(page.bytes(), id.offset())?)
+    let Some(c) = cipher else {
+        return Ok(file.write_all_at(page.bytes(), id.offset())?);
+    };
+    WRITE_BUFFER.with_borrow_mut(|buf| {
+        buf.resize(PAGE_SIZE, 0);
+        c.seal(id, page, buf)
+            .map_err(|reason| Error::Corrupt { page: id, reason })?;
+        Ok(file.write_all_at(buf, id.offset())?)
+    })
 }
 
 /// Reads the free list of `hdr`: the free page numbers and the pages that
 /// hold them.
-fn read_freelist(file: &dyn File, hdr: &Header) -> Result<(BTreeSet<u64>, Vec<u64>)> {
+fn read_freelist(
+    file: &dyn File,
+    hdr: &Header,
+    cipher: Option<&PageCipher>,
+) -> Result<(BTreeSet<u64>, Vec<u64>)> {
     let mut free = BTreeSet::new();
     let mut pages = Vec::new();
     let mut id = hdr.freelist_head;
@@ -966,7 +1101,7 @@ fn read_freelist(file: &dyn File, hdr: &Header) -> Result<(BTreeSet<u64>, Vec<u6
         if !in_range(id) || pages.contains(&id) {
             return Err(corrupt("free list chain out of range or cyclic"));
         }
-        let page = read_raw(file, PageId(id))?;
+        let page = read_raw(file, PageId(id), cipher)?;
         if page.page_type() != PageType::FREELIST {
             return Err(corrupt("free list chain reaches a non-free-list page"));
         }
@@ -993,16 +1128,22 @@ fn read_freelist(file: &dyn File, hdr: &Header) -> Result<(BTreeSet<u64>, Vec<u6
     Ok((free, pages))
 }
 
-fn write_header(file: &dyn File, hdr: &Header) -> Result<()> {
+fn write_header(file: &dyn File, hdr: &Header, cipher: Option<&PageCipher>) -> Result<()> {
     let slot = PageId(hdr.seq % 2);
     let mut page = hdr.encode();
+    if let Some(c) = cipher {
+        let tag = c.header_tag(slot, &page.payload()[..TAGGED]);
+        page.payload_mut()[TAGGED..TAGGED + 16].copy_from_slice(&tag);
+    }
     page.seal(slot);
     Ok(file.write_all_at(page.bytes(), slot.offset())?)
 }
 
 /// Reads both header copies and returns the valid one with the highest
-/// sequence number.
-fn read_best_header(file: &dyn File) -> Result<Header> {
+/// sequence number.  With `cipher`, an encrypted copy counts as valid
+/// only if its tag is the key's (a copy of a file in the clear, or under
+/// another key, is told apart afterwards by its fields).
+fn read_best_header(file: &dyn File, cipher: Option<&PageCipher>) -> Result<Header> {
     let mut best: Option<Header> = None;
     let mut not_ours = None;
     for slot in [PageId(0), PageId(1)] {
@@ -1016,7 +1157,7 @@ fn read_best_header(file: &dyn File) -> Result<Header> {
             continue; // torn or damaged: the other copy decides
         }
         match Header::decode(&page) {
-            Ok(h) if h.seq % 2 == slot.0 => {
+            Ok(h) if h.seq % 2 == slot.0 && !tag_fails(&page, &h, slot, cipher) => {
                 if best.as_ref().is_none_or(|b| h.seq > b.seq) {
                     best = Some(h);
                 }
@@ -1043,6 +1184,18 @@ fn read_best_header(file: &dyn File) -> Result<Header> {
     }
 }
 
+/// Whether an encrypted header copy's tag is not what `cipher` gives
+/// (under the key it was written with: one under another key is refused
+/// by its key check instead).
+fn tag_fails(page: &Page, h: &Header, slot: PageId, cipher: Option<&PageCipher>) -> bool {
+    let Some(c) = cipher.filter(|c| h.cipher != CIPHER_NONE && h.key_check == c.check_value())
+    else {
+        return false;
+    };
+    let p = page.payload();
+    !nucleus_crypto::constant_time_eq(&c.header_tag(slot, &p[..TAGGED]), &p[TAGGED..TAGGED + 16])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,16 +1215,16 @@ mod tests {
         let set_version = |v: u32| {
             let file = fs.open(path, OpenMode::ReadWrite).unwrap();
             for id in [PageId(0), PageId(1)] {
-                let mut page = read_raw(file.as_ref(), id).unwrap();
+                let mut page = read_raw(file.as_ref(), id, None).unwrap();
                 write_u32(page.payload_mut(), 8, v);
-                write_raw(file.as_ref(), id, &mut page).unwrap();
+                write_raw(file.as_ref(), id, &mut page, None).unwrap();
             }
             file.sync().unwrap();
         };
         let version = || {
             let file = fs.open(path, OpenMode::ReadOnly).unwrap();
             [PageId(0), PageId(1)]
-                .map(|id| read_u32(read_raw(file.as_ref(), id).unwrap().payload(), 8))
+                .map(|id| read_u32(read_raw(file.as_ref(), id, None).unwrap().payload(), 8))
         };
         set_version(1);
         let pager = Pager::open(fs, path).unwrap();
@@ -1080,7 +1233,59 @@ mod tests {
         pager.close().unwrap();
         assert!(version().contains(&FORMAT_VERSION));
         assert_eq!(Pager::open(fs, path).unwrap().meta(0), 7);
-        set_version(FORMAT_VERSION + 1);
+        set_version(ENCRYPTED_FORMAT_VERSION);
         assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
+        set_version(ENCRYPTED_FORMAT_VERSION + 1);
+        assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
+    }
+
+    /// An encrypted file's header copies are authenticated (PLAN.md
+    /// §M14.30 K2b): one changed and its checksum made right again is
+    /// passed over like a torn one; both so changed, the file does not
+    /// open.  A page in the clear in an encrypted file does not open.
+    #[test]
+    fn an_encrypted_files_headers_are_authenticated() {
+        let p = SimPlatform::new(1);
+        let fs = p.fs();
+        fs.create_dir_all(Path::new("/db")).unwrap();
+        let path = Path::new("/db/data");
+        let key = || Some(PageCipher::new([5; 32]));
+        let pager = Pager::create_with(fs, path, key()).unwrap();
+        let id = pager.allocate().unwrap();
+        let mut page = Page::new(PageType::FIRST_USER);
+        page.payload_mut()[..5].copy_from_slice(b"hello");
+        pager.write_page(id, &mut page).unwrap();
+        pager.set_meta(0, 7).unwrap();
+        pager.sync().unwrap();
+        pager.set_meta(0, 8).unwrap();
+        pager.sync().unwrap();
+        drop(pager);
+        let pager = Pager::open_with(fs, path, key()).unwrap();
+        assert_eq!(pager.meta(0), 8);
+        assert_eq!(&pager.read_page(id).unwrap().payload()[..5], b"hello");
+        let seq = pager.durable_header().seq;
+        drop(pager);
+
+        let file = fs.open(path, OpenMode::ReadWrite).unwrap();
+        let tamper = |slot: u64| {
+            let mut page = Page::new(PageType::UNUSED);
+            file.read_exact_at(page.bytes_mut(), slot * PAGE_SIZE as u64)
+                .unwrap();
+            write_u64(page.payload_mut(), 48, 1000);
+            page.seal(PageId(slot));
+            file.write_all_at(page.bytes(), slot * PAGE_SIZE as u64)
+                .unwrap();
+        };
+        tamper(seq % 2);
+        let pager = Pager::open_with(fs, path, key()).unwrap();
+        assert_eq!(pager.meta(0), 7, "the older copy, the newer passed over");
+        drop(pager);
+        tamper(1 - seq % 2);
+        assert!(Pager::open_with(fs, path, key()).is_err());
+
+        let mut clear = Page::new(PageType::FIRST_USER);
+        write_raw(file.as_ref(), id, &mut clear, None).unwrap();
+        let c = PageCipher::new([5; 32]);
+        assert!(read_raw(file.as_ref(), id, Some(&c)).is_err());
     }
 }

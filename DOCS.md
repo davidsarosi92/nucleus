@@ -6531,6 +6531,26 @@ and every bit of tag, data and associated data flipped; 11.9 µs an
 8 KiB page (`docs/benchmarks.md`, *Sealing a page*).  `Key` overwrites its bytes with
 zeros when dropped (a best effort without `unsafe`) and never prints.
 
+*Encrypted data files* (K2b; `nucleus_storage::cipher`).  A store opened
+with a page key (`StoreOptions::page_key`, `nucleus_kv::Options::
+encryption_key`) is created encrypted, and an existing one opens only
+under the key it was made with.  Every data page, free-list pages
+included, is sealed on its way to the file and opened on its way back —
+never while cached, so nothing above the pager changes.  On disk: the
+16-byte SIV tag, then `birth << 8 | page type` (8 bytes, in the clear,
+authenticated), then the 8,168-byte payload encrypted; the page id is
+the nonce's first 8 bytes and associated data, not stored — a page read
+anywhere else does not open, as a plain page's stored id catches a
+misdirected write.  The tag replaces the CRC.  The two header pages
+stay readable without the key and say what is needed: format version 3
+(older builds refuse the file), the cipher at payload offset 176, the
+key's check value (the tag of a fixed empty message: the wrong key is
+refused as such, `Error::Key`, not as damage) and a tag over the
+header's bytes, so a header changed with its CRC made right again is
+passed over like a torn copy.  A file in the clear opened with a key is
+refused (encrypting one comes with `nucleus keys <dir> encrypt`, K2e).
+The WAL, spill and scratch files are not encrypted yet (K2c, K2d).
+
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
 FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |
 certificate | oidc | ldap | trust, …] [WITH TLS | WITHOUT TLS] {ALLOW

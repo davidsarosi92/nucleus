@@ -24,6 +24,7 @@ fn opts() -> StoreOptions {
     StoreOptions {
         cache_pages: 16,
         wal_segment_size: 4096,
+        ..Default::default()
     }
 }
 

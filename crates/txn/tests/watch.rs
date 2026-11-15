@@ -68,6 +68,7 @@ fn spilled_writes_into_a_watched_range_count() {
         store: StoreOptions {
             cache_pages: 64,
             wal_segment_size: 1 << 16,
+            ..Default::default()
         },
         checkpoint_wal_bytes: 1 << 20,
         history: 0,

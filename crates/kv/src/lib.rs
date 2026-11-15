@@ -823,6 +823,10 @@ pub struct Options {
     /// keys) skip the WAL, made durable by a checkpoint at the commit
     /// (PLAN.md D16; the default).  Off, every write is logged.
     pub wal_minimal: bool,
+    /// The key the data file's pages are sealed under (PLAN.md §M14.30
+    /// K2b): a new database is created encrypted, an existing one must
+    /// have been made under it.  `None` (the default): in the clear.
+    pub encryption_key: Option<nucleus_storage::PageCipher>,
 }
 
 impl Options {
@@ -862,6 +866,7 @@ impl Default for Options {
             txn_memory_bytes: 64 << 20,
             sync: SyncPolicy::default(),
             wal_minimal: true,
+            encryption_key: None,
         }
     }
 }
@@ -1016,6 +1021,7 @@ impl Database {
                 store: StoreOptions {
                     cache_pages: (opts.cache_bytes / nucleus_storage::PAGE_SIZE).max(16),
                     wal_segment_size: opts.wal_segment_bytes,
+                    page_key: opts.encryption_key.clone(),
                 },
                 checkpoint_wal_bytes: opts.checkpoint_wal_bytes,
                 history: opts.history,
