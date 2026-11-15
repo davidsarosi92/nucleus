@@ -43,3 +43,6 @@ statement for many rows, all or none, one commit for all:
 `db.executeMany(sql, rows)`.  Tests:
 `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.
+Types from your schema: `nucleus codegen java <db> --package com.example
+--out Schema.java` writes a record per table with its `SELECT` and
+`fromRow(row)` (DOCS §8.37).

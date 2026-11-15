@@ -2,7 +2,7 @@
 # Starts `nucleus server` (default credentials) on a free port and runs the
 # drivers' test suites and the examples against it (PLAN.md §M14.8).
 #
-#   scripts/driver-tests.sh <path-to-nucleus-binary> [rust|python|js|java|c|cpp|python-embedded|js-embedded|js-wasm ...]
+#   scripts/driver-tests.sh <path-to-nucleus-binary> [rust|python|js|java|c|cpp|python-embedded|js-embedded|js-wasm|codegen ...]
 #
 # Without a list it runs every language whose toolchain is installed.
 # python-embedded and js-embedded (PLAN.md §M14.23) run the Python and
@@ -12,7 +12,8 @@
 # connection string.  js-wasm runs the JavaScript suite on the edition in
 # WebAssembly (the browser's), in Node, on files and in memory, then the
 # browser example in headless Chrome (when there is one) across reloads,
-# and the playground with its tour.
+# and the playground with its tour.  codegen checks `nucleus codegen`'s
+# types in TypeScript, Python, Java and Rust against a schema of every type.
 set -euo pipefail
 bin=$(cd "$(dirname "${1:?usage: scripts/driver-tests.sh <nucleus binary> [langs]}")" && pwd)/$(basename "$1")
 shift
@@ -168,6 +169,33 @@ for lang in "${langs[@]}"; do
       else
         echo "no Chrome: the browser test is skipped"
       fi ;;
+    codegen)
+      # nucleus codegen (PLAN.md §M14.16 M5): the types of a schema of
+      # every type, in each language, compiled strictly and reading its rows.
+      fx="$root/scripts/fixtures/codegen" cg="$work/codegen"
+      mkdir -p "$cg/rust/src"
+      "$bin" sql -h "127.0.0.1:$port" <"$fx/schema.sql" >/dev/null
+      js="$root/drivers/js/src/index.ts"
+      "$bin" codegen ts -h "127.0.0.1:$port" --import "$js" --out "$cg/schema.ts"
+      sed "s|\"nucleus-db\"|\"$js\"|" "$fx/check.ts" >"$cg/check.ts"
+      echo '{"type": "module"}' >"$cg/package.json"
+      [ -x "$root/drivers/js/node_modules/.bin/tsc" ] ||
+        (cd "$root/drivers/js" && npm install --no-package-lock --no-audit --no-fund --silent)
+      printf '{"compilerOptions": {"target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noEmit": true, "allowImportingTsExtensions": true, "skipLibCheck": true, "types": ["node"], "typeRoots": ["%s"]}, "files": ["check.ts", "schema.ts"]}\n' \
+        "$root/drivers/js/node_modules/@types" >"$cg/tsconfig.json"
+      "$root/drivers/js/node_modules/.bin/tsc" -p "$cg/tsconfig.json"
+      node "$cg/check.ts"
+      "$bin" codegen python -h "127.0.0.1:$port" --out "$cg/schema.py"
+      python3 "$fx/check.py" "$cg"
+      "$bin" codegen java -h "127.0.0.1:$port" --out "$cg/Schema.java"
+      javac -Xlint:all -Werror -d "$cg/java" $(find "$root/drivers/java/src/main" -name '*.java') "$cg/Schema.java" "$fx/Check.java"
+      java -cp "$cg/java" Check
+      "$bin" codegen rust -h "127.0.0.1:$port" --out "$cg/rust/src/schema.rs"
+      cp "$fx/check.rs" "$cg/rust/src/main.rs"
+      printf '[package]\nname = "codegen-check"\nversion = "0.0.0"\nedition = "2024"\n\n[dependencies]\nnucleus-client = { path = "%s" }\n\n[workspace]\n' \
+        "$root/crates/client" >"$cg/rust/Cargo.toml"
+      CARGO_TARGET_DIR="$root/target/codegen-check" cargo clippy -q --manifest-path "$cg/rust/Cargo.toml" -- -D warnings
+      CARGO_TARGET_DIR="$root/target/codegen-check" cargo run -q --manifest-path "$cg/rust/Cargo.toml" ;;
     *) echo "unknown language $lang"; exit 1 ;;
   esac
 done

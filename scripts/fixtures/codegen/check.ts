@@ -1,0 +1,40 @@
+// The TypeScript nucleus codegen makes (scripts/driver-tests.sh codegen):
+// it type-checks (tsc --strict) and its values are what the types say.
+import assert from "node:assert/strict";
+import { connect, Decimal, Interval, Time, Inet, Cidr, SparseVector } from "nucleus-db";
+import { CgEvery, CgEvents } from "./schema.ts";
+
+const db = await connect({ port: Number(process.env.NUCLEUS_PORT) });
+const rows = (await db.query(CgEvery.select + " ORDER BY id")).rows.map(CgEvery.fromRow);
+const [a, b] = rows;
+assert.equal(a.id, 1);
+assert.equal(a.b, true);
+assert.equal(a.s, 2);
+assert.equal(a.i, 3);
+assert.equal(a.r, 1.5);
+assert.equal(a.d, 2.5);
+assert.ok(a.n instanceof Decimal && a.n.toString() === "12.34");
+assert.equal(a.t, "x");
+assert.equal(a.c, "abc");
+const mood: "sad" | "ok" | "happy" | null = a.m;
+assert.equal(mood, "happy");
+assert.ok(a.bin instanceof Uint8Array && a.bin.length === 2);
+assert.ok(a.dt instanceof Date && a.ts instanceof Date && a.tz instanceof Date);
+assert.ok(a.iv instanceof Interval);
+assert.ok(a.tm instanceof Time);
+assert.ok(a.ip instanceof Inet && a.net instanceof Cidr);
+assert.equal(a.u, "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+assert.deepEqual(a.j, { a: [1, 2] });
+assert.ok(a.vec instanceof Float32Array && a.vec.length === 3);
+assert.ok(a.sv instanceof SparseVector);
+assert.deepEqual(a.ia, [1, null, 3]);
+assert.deepEqual(a.ta, ["a", "b"]);
+assert.equal(a.select, "sel");
+assert.equal(a["Two Words"], "tw");
+assert.equal(b.i, 7);
+assert.equal(b.n, null);
+assert.equal(b.ia, null);
+const ev = (await db.query(CgEvents.select)).rows.map(CgEvents.fromRow);
+assert.equal(ev[0].kind, "start");
+await db.close();
+console.log("codegen ts: ok");

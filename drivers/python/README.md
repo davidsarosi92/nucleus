@@ -66,6 +66,8 @@ records the reads that serve a request in `nc_catalog.reads`), `conn.forget("not
 her rows from every table with subject columns (`FORGET SUBJECT`), scrubs
 the files and searches them (`found == 0`: none of their values is left).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.
+Types from your schema: `nucleus codegen python <db> --out schema.py` writes
+a dataclass per table with its `SELECT` and `from_row(row)` (DOCS §8.37).
 
 ## In this process (the embedded edition)
 

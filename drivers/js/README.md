@@ -59,6 +59,8 @@ erases her rows from every table with subject columns (`FORGET SUBJECT`),
 scrubs the files and searches them (`found === 0`: none of their values is
 left).
 Tests: `npm test`; example: `examples/js/quickstart.ts`.
+Types from your schema: `nucleus codegen ts <db> --out schema.ts` writes an
+interface per table with its `select` and `fromRow(row)` (DOCS §8.37).
 
 ## In this process (the embedded edition)
 

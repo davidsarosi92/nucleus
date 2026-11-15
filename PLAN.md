@@ -284,7 +284,7 @@ are marked ✅.
 | | M14.13 | Database branches (copy-on-write) | ✅ (2026-11-14) B1–B5: pages' births and dead lists (ZFS's) on the copy-on-write pages, a tree and a WAL per branch in one file, an engine per branch, `CREATE BRANCH [AS OF …]`, a client naming the branch as its database; a branch made in ms whatever the size, dropped in time following the internal nodes it copied |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
-| | M14.16 | Migrations and code generation | ◐ M1–M4 ✅ (2026-11-14): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; next M5 code from the schema |
+| | M14.16 | Migrations and code generation | ◐ M1–M5 ✅ (2026-11-14): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; next M6 code from SQL files |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
@@ -8928,10 +8928,42 @@ Steps (planned 2026-11-14):
   one code path for local and remote targets; Atlas's declarative mode
   (a desired-schema file as the source of truth): migrations stay the
   record, the diff writes the next one.
-- **M5 — code from the schema**: `nucleus codegen ts|rust|python|java`:
+- **M5 — code from the schema** ✅: `nucleus codegen ts|rust|python|java`:
   a type per table (its columns in their languages' types, as each
   driver returns them; nullable columns optional), for each language's
   nucleus driver.
+  *Built:* `editions/nucleus/src/codegen.rs` reads `nc_catalog.tables`
+  (not partitions), `columns` and `enums` and writes, per table, a
+  TypeScript interface and a same-named object (`table`, `select`,
+  `fromRow`), a Python dataclass (`TABLE`, `SELECT`, `from_row`), a Java
+  record in one `Schema` class (`TABLE`, `SELECT`, `fromRow`), a Rust
+  struct (`TABLE`, `SELECT`, `from_row` → `Result<Self, String>`, each
+  value taken apart by its `Value` variant, a wrong one an error naming
+  the column); `--tables`, `--out`, `--import`, `--package`.  The types
+  are what each driver's decoding returns — the drivers are the source of
+  truth, so a `bigint` is `number | bigint` in TypeScript (a value past
+  2^53 is a `bigint`), bytea a `Uint8Array` (Node's Buffer and the
+  browser's shim both are one); an enum is a TypeScript union and a
+  Python `Literal` of its labels; the Rust driver's types without one
+  payload (numeric, interval, inet, cidr, sparsevec) stay `Value`.
+  Names that are no identifier (`"Two Words"`), reserved words and type
+  names the generated code itself uses (a table `value`, `date`, `list`)
+  are made safe (`Two_Words`, `ValueRow`), two tables of one name
+  numbered.  Checked by `scripts/driver-tests.sh … codegen` (in CI's
+  drivers job): a schema of every type (`scripts/fixtures/codegen`), its
+  code in each language compiled strictly — `tsc --strict`, `javac
+  -Xlint:all -Werror`, `clippy -D warnings` — and run against the server,
+  each field's value checked against its declared type (Python by its
+  annotations, at run time).  *Prior art:* kysely-codegen and Prisma's
+  generated types (TypeScript), sqlacodegen (Python), jOOQ's generator
+  (Java), Diesel's `print-schema` and SeaORM's entity generator (Rust).
+  *Not taken:* an ORM (query builders, relations, insert and update
+  types): M6's typed queries from SQL files cover what a program runs;
+  Pydantic or Zod validation (a dependency; the driver already decodes
+  each value to its type); Java and Rust enum types for SQL enums (the
+  drivers return the label as text; a generated enum would need its own
+  decoding — later, if asked); chrono / `time` types in Rust (the driver
+  has none: dates are its day and microsecond counts).
 - **M6 — code from SQL files**: queries in `.sql` files, each named
   (`-- name: user_by_email :one`, `:many`, `:exec`, as sqlc); the
   engine describes each one's parameters and result columns (the

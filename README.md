@@ -255,6 +255,7 @@ nucleus migrate up ./mydb               # the pending ones, each in one transact
 nucleus migrate up ./mydb --dry-run     # … on a branch dropped after: what would change
 nucleus migrate diff ./mydb --new x     # the database's schema change as a migration
 nucleus dump --schema ./mydb            # the schema as the SQL that makes it
+nucleus codegen ts ./mydb --out schema.ts   # a type per table (also rust, python, java)
 ```
 
 Or nothing to install: the playground ([`playground/`](playground)) is

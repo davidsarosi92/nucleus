@@ -72,7 +72,7 @@ jobs:
         # On failure the log's end is also an annotation (job logs need admin).
         run: |
           set -o pipefail
-          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp swift python-embedded js-embedded js-wasm 2>&1 | tee drivers.log; then
+          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp swift python-embedded js-embedded js-wasm codegen 2>&1 | tee drivers.log; then
             tail -c 20000 drivers.log > failures.txt
             echo "::error title=driver tests failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
             exit 1

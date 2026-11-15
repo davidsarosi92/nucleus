@@ -415,6 +415,58 @@ fn the_schema_dumped_replays() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
+#[test]
+fn code_from_the_schema() {
+    // The generated code compiled and run is scripts/driver-tests.sh's
+    // codegen step; here, what the command takes and refuses.
+    let a = temp_dir("codegen");
+    let da = a.to_str().unwrap();
+    let (ok, out) = nucleus(
+        &["sql", da],
+        "CREATE TYPE mood AS ENUM ('sad', 'ok');\n\
+         CREATE TABLE emp (id int PRIMARY KEY, name text NOT NULL, mood mood, pay numeric(10,2));\n\
+         CREATE TABLE dept (id int PRIMARY KEY);\n",
+    );
+    assert!(ok, "{out}");
+    let (ok, ts) = nucleus(&["codegen", "ts", da, "--tables", "emp"], "");
+    assert!(ok, "{ts}");
+    assert!(
+        ts.contains("export interface Emp {\n  id: number;\n  name: string;\n  mood: \"sad\" | \"ok\" | null;\n  pay: nucleus.Decimal | null;\n}")
+            && ts.contains("select: \"SELECT id, name, mood, pay FROM emp\"")
+            && !ts.contains("Dept"),
+        "{ts}"
+    );
+    let file = a.join("schema.py");
+    let (ok, out) = nucleus(
+        &["codegen", "python", da, "--out", file.to_str().unwrap()],
+        "",
+    );
+    assert!(ok && out.is_empty(), "{out}");
+    let py = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        py.contains("class Dept:") && py.contains("    mood: Optional[Literal[\"sad\", \"ok\"]]\n"),
+        "{py}"
+    );
+    let (ok, java) = nucleus(&["codegen", "java", da, "--package", "com.example"], "");
+    assert!(
+        ok && java.contains("package com.example;\n")
+            && java.contains(
+                "public record Emp(Integer id, String name, String mood, java.math.BigDecimal pay)"
+            ),
+        "{java}"
+    );
+    let (ok, rust) = nucleus(&["codegen", "rust", da, "--tables", "dept"], "");
+    assert!(
+        ok && rust.contains("pub struct Dept {\n    pub id: i32,\n}"),
+        "{rust}"
+    );
+    let (ok, out) = nucleus(&["codegen", "ts", da, "--tables", "nope"], "");
+    assert!(!ok && out.contains("no table nope"), "{out}");
+    let (ok, out) = nucleus(&["codegen", "cobol", da], "");
+    assert!(!ok && out.contains("unknown language cobol"), "{out}");
+    std::fs::remove_dir_all(&a).unwrap();
+}
+
 fn ncsql(args: &[&str], stdin: &str) -> (bool, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ncsql"))
         .args(args)

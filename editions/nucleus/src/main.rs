@@ -1,6 +1,7 @@
 //! The `nucleus` command-line tool.
 
 mod branch;
+mod codegen;
 mod dump;
 mod init;
 mod kv;
@@ -34,6 +35,10 @@ usage:
                                     one transaction with its record
   nucleus dump --schema [<dir>] [connection options of nucleus sql]
                                     the schema as the SQL that makes it
+  nucleus codegen <ts|rust|python|java> [<dir>] [connection options of nucleus sql]
+                  [--out <file>] [--tables <a,b>] [--import <m>] [--package <p>]
+                                    a type per table for the language's driver,
+                                    with its SELECT and a function reading a row
   nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
               [--memory] [--max-rows <n>] [--timeout <ms>]
                                     a Model Context Protocol server on stdin and
@@ -126,6 +131,7 @@ fn main() -> ExitCode {
         Some("branch") => branch::run(&args[1..]),
         Some("dump") => dump::run(&args[1..]),
         Some("migrate") => migrate::run(&args[1..]),
+        Some("codegen") => codegen::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

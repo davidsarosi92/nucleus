@@ -219,6 +219,9 @@ them on a branch dropped after and prints how the schema would change;
 `nucleus migrate diff <db>` prints the statements from the schema the
 files make to the database's (`--new name`: as the next migration, with
 its `down`) — check its notes: a rename shows as a drop and an add.
+Typed code from the schema: `nucleus codegen ts|python|java|rust <db>
+[--out file]` — a type per table in the driver's types, with `select` and
+`fromRow` / `from_row` (generate it again after each migration).
 `COMMENT ON TABLE t IS '…'`, `COMMENT ON COLUMN t.c IS '…'` — read them
 (`describe_table`, `nc_catalog.tables.comment`, `nc_catalog.columns.comment`)
 to learn what the data means.

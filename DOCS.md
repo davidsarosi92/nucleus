@@ -1235,6 +1235,7 @@ nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
 nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
+nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b>] [--import <module>] [--package <name>]   # §8.37
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -5724,6 +5725,47 @@ column order `ADD COLUMN` cannot give.  The law, over every script of the
 test kit: the diff from an empty database makes the script's schema, and
 the diff back leaves an empty one (`crates/sql/tests/schema_diff.rs`).
 
+### 8.37 Code from the schema (`nucleus codegen`, §M14.16 M5)
+
+`nucleus codegen ts|rust|python|java <db>` writes a type per table (not
+partitions; `--tables a,b` for some) for that language's nucleus driver:
+each column in the type the driver returns its values as, a nullable one
+optional (`| null`, `Optional[…]`, `Option<…>`; Java's boxed types are
+`null`), with the table's name, the `SELECT` of its columns in order and
+a function making the type from a row of it:
+
+| | TypeScript | Python | Java | Rust |
+|---|---|---|---|---|
+| a table | `interface T` + `const T` | `@dataclass class T` | `record Schema.T` | `struct T` |
+| its query | `T.select` | `T.SELECT` | `T.SELECT` | `T::SELECT` |
+| a row | `T.fromRow(row)` | `T.from_row(row)` | `T.fromRow(row)` | `T::from_row(row)?` |
+| integer, bigint | `number`, `number \| bigint` | `int` | `Integer`, `Long` | `i32`, `i64` |
+| numeric | `nucleus.Decimal` | `decimal.Decimal` | `BigDecimal` | `Value` |
+| an enum | `"a" \| "b"` | `Literal["a", "b"]` | `String` | `String` |
+| timestamptz | `Date` | `datetime.datetime` | `OffsetDateTime` | `i64` (µs) |
+| bytea, uuid | `Uint8Array`, `string` | `bytes`, `uuid.UUID` | `byte[]`, `UUID` | `Vec<u8>`, `[u8; 16]` |
+| `T[]` | `(T \| null)[]` | `List[Optional[T]]` | `List<T>` | `Vec<Option<T>>` |
+
+(The rest as each driver's README lists.)  A name that is no identifier
+of the language becomes one (`"Two Words"` → `Two_Words`, a reserved word
+gets `_`); a type named as one the generated code uses (`Value`, `Date`,
+`List`, `String`) gets `Row`.  `--out` writes a file; `--import` names
+the driver (TypeScript's module, default `nucleus-db`; Python's,
+`nucleus`; Rust's crate, `nucleus_client`); `--package` is the Java
+class's package.  The Rust file is a module of its own (`mod schema;`,
+`#![allow(dead_code)]`).
+
+```ts
+import { connect } from "nucleus-db";
+import { Emp } from "./schema.ts";        // nucleus codegen ts ./mydb --out schema.ts
+const db = await connect();
+const emps: Emp[] = (await db.query(Emp.select + " WHERE pay > $1", [100])).rows.map(Emp.fromRow);
+```
+
+`scripts/driver-tests.sh … codegen` compiles each language's code from a
+schema of every type strictly (`tsc --strict`, `javac -Werror`, `clippy
+-D warnings`) and reads its rows with it.
+
 ## 9. Server (`nucleus-server`)
 
 ```
@@ -6744,6 +6786,8 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.16 M5, code from the schema:** `nucleus codegen
+  ts|rust|python|java` (§8.37).
 - **2026-11-14 — §M14.16 M4, dry runs and diffs:** `nucleus migrate up
   | down --dry-run` on a branch dropped after; `nucleus migrate diff
   [--new name]`, `nucleus_sql::schema_diff` (§8.36).
