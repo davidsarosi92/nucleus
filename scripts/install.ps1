@@ -50,10 +50,11 @@ New-Item -ItemType Directory $tmp | Out-Null
 try {
     Get-File "$base/SHA256SUMS" "$tmp\SHA256SUMS"
     $line = Get-Content "$tmp\SHA256SUMS" |
-        Where-Object { $_ -match "^([0-9a-f]{64})  (nucleus-[0-9][^ ]*$([regex]::Escape($suffix)))$" } |
+        Where-Object { $_ -match "^([0-9a-f]{64}) [ *](nucleus-[0-9][^ ]*$([regex]::Escape($suffix)))$" } |
         Select-Object -First 1
     if (-not $line) { throw "install.ps1: the release has no archive *$suffix" }
-    $null = $line -match "^([0-9a-f]{64})  (\S+)$"
+    # "  " or " *" (binary mode, as Windows' sha256sum writes).
+    $null = $line -match "^([0-9a-f]{64}) [ *](\S+)$"
     $sum, $file = $Matches[1], $Matches[2]
     $version = $file.Substring('nucleus-'.Length, $file.Length - 'nucleus-'.Length - $suffix.Length)
 

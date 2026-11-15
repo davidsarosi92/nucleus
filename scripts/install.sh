@@ -78,11 +78,13 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || fail "could not download $base/SHA256SUMS"
-# The release's archive for this platform: nucleus-<version><suffix>.
-line=$(grep -E "  nucleus-[0-9][^ ]*$(printf '%s' "$suffix" | sed 's/\./\\./g')\$" "$tmp/SHA256SUMS" | head -1) ||
+# The release's archive for this platform: nucleus-<version><suffix>
+# (after "  ", or " *": a sum made in binary mode, as Windows' sha256sum's).
+line=$(grep -E " [ *]nucleus-[0-9][^ ]*$(printf '%s' "$suffix" | sed 's/\./\\./g')\$" "$tmp/SHA256SUMS" | head -1) ||
   fail "the release has no archive *$suffix"
 sum=${line%% *}
 file=${line##* }
+file=${file#\*}
 version=${file#nucleus-}
 version=${version%"$suffix"}
 

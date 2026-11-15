@@ -350,6 +350,8 @@ jobs:
         run: |
           scripts/package.sh ${{ matrix.target }} dist
           for f in dist/*; do
+            # The .deb and the .rpm: installed in the next step.
+            case $f in *.deb|*.rpm) continue ;; esac
             echo "== $f"
             rm -rf unpacked && mkdir unpacked
             case $f in
