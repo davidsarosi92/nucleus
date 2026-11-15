@@ -2,7 +2,7 @@
 name = "nucleus-fuzz"
 version = "0.0.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
 description = "Fuzz targets for every input that crosses a trust boundary (PLAN.md §M14.29 S2)"
 

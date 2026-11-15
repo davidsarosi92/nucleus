@@ -3,7 +3,7 @@ name = "nucleus-tls"
 description = "TLS for nucleus: rustls for the server's front ends and for the Rust client"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/davidsarosi92/nucleus"
 readme = "README.md"
 

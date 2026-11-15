@@ -3,7 +3,7 @@ name = "nucleus-local-models"
 description = "Embedding models run inside nucleus on its own kernels: BERT-family encoders with their WordPiece and SentencePiece tokenizers, read from Hugging Face's files"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/davidsarosi92/nucleus"
 readme = "README.md"
 

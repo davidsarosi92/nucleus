@@ -66,4 +66,4 @@ test (`cargo package`, which builds it from its packaged form alone).
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE) and the repository's [COPYRIGHT](../../COPYRIGHT).

@@ -119,7 +119,15 @@ fn main() -> ExitCode {
     sql::registry();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
-            println!("nucleus {}", env!("CARGO_PKG_VERSION"));
+            // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).
+            println!(
+                "nucleus {}\n\
+                 Copyright (C) 2026 Dávid Sárosi. Original author: Dávid Sárosi.\n\
+                 License AGPL-3.0-only <https://www.gnu.org/licenses/agpl-3.0.html>.\n\
+                 This is free software: you are free to change and redistribute it.\n\
+                 There is NO WARRANTY, to the extent permitted by law.",
+                env!("CARGO_PKG_VERSION")
+            );
             Ok(())
         }
         Some("init") => init::run(&args[1..]),

@@ -115,3 +115,10 @@ the engine has produced whole, at most 256 MB of it.
 `examples/browser/index.html` is a page that keeps its visits;
 `test/browser.mjs` runs it in headless Chrome across reloads.
 
+## Licence
+
+The driver: MIT — see [LICENSE](LICENSE).  The edition in WebAssembly (`wasm/nucleus.wasm`)
+and the Node addon is the database,
+AGPL-3.0-only (the repository's [COPYRIGHT](../../COPYRIGHT)): a program that
+opens a database in its own process with it is a work based on the
+database; one that only reaches a nucleus server is not.

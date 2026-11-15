@@ -8,7 +8,7 @@
 name = "nucleus-json-bench"
 version = "0.0.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
 description = "JSON parsing and access measured for nucleus (a measurement, not a product)"
 

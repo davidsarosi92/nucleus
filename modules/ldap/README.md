@@ -49,4 +49,4 @@ search as an account, anonymous search) and with `psql` (`sslmode=require`).
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE) and the repository's [COPYRIGHT](../../COPYRIGHT).

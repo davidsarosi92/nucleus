@@ -58,4 +58,4 @@ of another CA.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE) and the repository's [COPYRIGHT](../../COPYRIGHT).

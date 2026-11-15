@@ -31,7 +31,7 @@ class Nucleus < Formula
   desc "$summary"
   homepage "https://github.com/$repo"
   version "$version"
-  license "MIT"
+  license "AGPL-3.0-only"
 
 RUBY
   for os in macos linux; do
@@ -98,8 +98,8 @@ PackageLocale: en-US
 Publisher: davidsarosi92
 PackageName: nucleus
 PackageUrl: https://github.com/$repo
-License: MIT
-LicenseUrl: https://github.com/$repo/blob/main/LICENSE
+License: AGPL-3.0-only
+LicenseUrl: https://github.com/$repo/blob/main/COPYRIGHT
 ShortDescription: $summary
 Moniker: nucleus
 Tags:

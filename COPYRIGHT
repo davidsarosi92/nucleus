@@ -1,0 +1,78 @@
+nucleus
+Copyright (C) 2026 Dávid Sárosi (https://github.com/davidsarosi92)
+
+Original author: Dávid Sárosi
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, version 3 of the License only
+(SPDX-License-Identifier: AGPL-3.0-only).
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero
+General Public License for more details: LICENSE, or
+https://www.gnu.org/licenses/agpl-3.0.html.
+
+
+Additional term (GNU AGPL version 3, section 7(b))
+--------------------------------------------------
+
+Every copy of this program, and every modified version of it, in source
+or object form, must preserve the copyright notice above and the author
+attribution "Original author: Dávid Sárosi" — in this file and in the
+Appropriate Legal Notices the program displays (`nucleus --version`).
+
+
+What is under which licence
+---------------------------
+
+AGPL-3.0-only (LICENSE) — the database: everything in this repository not
+listed below, among it crates/ (but the three below), editions/,
+modules/, playground/, bench/, fuzz/, integrations/, scripts/.
+
+MIT (the LICENSE file in each directory) — what programs use to reach
+the database, so that any program, open or closed, can:
+
+  drivers/          the drivers (C, C++, Java, JavaScript/TypeScript,
+                    Python, Swift, Android) — their source
+  crates/client/    the Rust driver, and what it is built from:
+  crates/wire/      the protocol's wire format
+  crates/crypto/    the hashes and SCRAM it authenticates with
+  examples/         the examples, to copy from
+
+The database itself, where a driver's package carries it — the embedded
+edition's library in the Python wheel, drivers/js/wasm/nucleus.wasm in
+the npm package, its Node addon, NucleusEmbedded.xcframework for Swift,
+the Android library's native libraries — stays under AGPL-3.0-only (such a
+package is "MIT AND AGPL-3.0-only").  A program that talks to a nucleus
+server through a driver is not a work based on the database; a program
+that opens a database in its own process with the embedded edition is.
+
+Network use (AGPL section 13): whoever runs a modified database for users
+who reach it over a network must offer those users its source — the
+version they run, with the changes.  Running it unmodified, or reaching it
+through the drivers, asks nothing more.
+
+Licences other than these, for the database (a commercial licence, for
+one), are given by the copyright holder.
+
+
+Third-party material
+--------------------
+
+crates/sql/src/text/snowball/, crates/sql/src/text/stop_words.rs and
+crates/sql/tests/data/*_stems.txt: from Snowball
+(https://snowballstem.org).  Copyright (c) 2001, Dr Martin Porter;
+Copyright (c) 2004, 2005, Richard Boulton; Copyright (c) 2013, Yoshiki
+Shibukawa; Copyright (c) 2006, 2007, 2009, 2010, 2011, 2014-2019, Olly
+Betts, and the Snowball contributors.  BSD 3-clause licence, its text in
+crates/sql/src/text/snowball/mod.rs.
+
+crates/sql/src/text/word_breaks.rs, sentence_breaks.rs,
+modules/local-models/src/tokenizer/bert_tables.rs, grapheme_breaks.rs and
+the break tests' data: generated from the Unicode Character Database.
+Copyright (c) 1991-2024 Unicode, Inc.  Unicode License v3
+(https://www.unicode.org/license.txt).
+
+Each file keeps its notice.  The authors of nucleus: AUTHORS.

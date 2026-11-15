@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Licence: the driver stays MIT; the embedded edition's library in the
+  wheel is AGPL-3.0-only — the wheel is `MIT AND AGPL-3.0-only`, with
+  both licences and COPYRIGHT in its `dist-info` (the repository's
+  COPYRIGHT).
 - json (nucleus PLAN.md §M14.15): a `json` value arrives as what
   `json.loads` makes; a `dict` parameter goes as json, `nucleus.Json(x)`
   sends a list or a string as json; in batches too (Arrow: `string`).

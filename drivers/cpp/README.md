@@ -30,3 +30,9 @@ c++ -std=c++17 -I../c -I. your.cpp nucleus.o
 ```
 
 Example: `examples/cpp/quickstart.cpp`.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a
+program that reaches a nucleus server through this driver is not bound by
+it (the repository's [COPYRIGHT](../../COPYRIGHT)).

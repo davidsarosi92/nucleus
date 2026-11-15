@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Licence: the driver stays MIT; the database in the package
+  (`wasm/nucleus.wasm`, its licence beside it) is AGPL-3.0-only — the
+  package is `MIT AND AGPL-3.0-only` (the repository's COPYRIGHT).
 - `queryText(sql)`: a script of statements with values as the server
   writes them — every statement's result and the first error beside them,
   not thrown (nucleus PLAN.md §M14.17 E4; the playground's backend).

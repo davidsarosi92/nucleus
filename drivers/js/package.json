@@ -2,7 +2,7 @@
   "name": "nucleus-db",
   "version": "0.1.0",
   "description": "JavaScript/TypeScript driver for the nucleus database (the nucleus protocol, ncp); in a browser, the database itself in WebAssembly",
-  "license": "MIT",
+  "license": "MIT AND AGPL-3.0-only",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,7 +20,8 @@
   "files": [
     "dist",
     "src",
-    "wasm/nucleus.wasm"
+    "wasm/nucleus.wasm",
+    "wasm/LICENSE"
   ],
   "engines": {
     "node": ">=20"

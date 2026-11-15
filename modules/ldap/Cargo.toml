@@ -3,7 +3,7 @@ name = "nucleus-ldap"
 description = "LDAP for nucleus: passwords checked by a directory (bind, or search and bind)"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/davidsarosi92/nucleus"
 readme = "README.md"
 

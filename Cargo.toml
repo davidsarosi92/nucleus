@@ -5,7 +5,7 @@ members = ["crates/*", "modules/*", "editions/*", "integrations/d-os", "examples
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/davidsarosi92/nucleus"
 
 [workspace.dependencies]

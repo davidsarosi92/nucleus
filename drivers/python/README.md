@@ -94,3 +94,9 @@ carries it (`build_wheel.py` makes one from a build: `cargo build
 target/release/libnucleus_embedded.dylib`), or `NUCLEUS_EMBEDDED_LIB`
 names it.  The pure-Python wheel speaks to servers only.
 
+## Licence
+
+The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's library in the wheel is the database,
+AGPL-3.0-only (the repository's [COPYRIGHT](../../COPYRIGHT)): a program that
+opens a database in its own process with it is a work based on the
+database; one that only reaches a nucleus server is not.

@@ -66,3 +66,10 @@ also on the iOS simulator:
 cd drivers/swift && xcodebuild test -scheme Nucleus-Package \
   -destination "platform=iOS Simulator,name=iPhone 16"
 ```
+
+## Licence
+
+The driver: MIT — see [LICENSE](LICENSE).  `NucleusEmbedded` (its XCFramework) is the database,
+AGPL-3.0-only (the repository's [COPYRIGHT](../../COPYRIGHT)): a program that
+opens a database in its own process with it is a work based on the
+database; one that only reaches a nucleus server is not.

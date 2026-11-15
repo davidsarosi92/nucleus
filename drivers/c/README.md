@@ -50,3 +50,9 @@ make test           # build/test_nucleus (needs a running server)
 ```
 
 Or compile `nucleus.c` into your program.  Example: `examples/c/quickstart.c`.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a
+program that reaches a nucleus server through this driver is not bound by
+it (the repository's [COPYRIGHT](../../COPYRIGHT)).

@@ -45,3 +45,10 @@ runs the Java driver's conformance cases on a database in the app (in
 memory and in a directory), that a directory keeps its data, and that a
 closed database refuses sessions.  `examples/android/run.sh` runs the
 Notes example twice.
+
+## Licence
+
+The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's native libraries is the database,
+AGPL-3.0-only (the repository's [COPYRIGHT](../../COPYRIGHT)): a program that
+opens a database in its own process with it is a work based on the
+database; one that only reaches a nucleus server is not.

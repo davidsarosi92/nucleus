@@ -32,7 +32,10 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 #[test]
 fn version() {
     let (ok, out) = nucleus(&["--version"], "");
-    assert!(ok && out.starts_with("nucleus "), "{out}");
+    assert!(
+        ok && out.starts_with("nucleus ") && out.contains("Original author: Dávid Sárosi."),
+        "{out}"
+    );
 }
 
 #[test]

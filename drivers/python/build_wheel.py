@@ -77,12 +77,16 @@ def main():
         "Summary: Python driver for the nucleus database, with the embedded edition "
         "(a database in this process)\n"
         "Home-page: https://github.com/davidsarosi92/nucleus\n"
-        "License: MIT\nRequires-Python: >=3.8\n"
+        "License: MIT AND AGPL-3.0-only\nRequires-Python: >=3.8\n"
         "Description-Content-Type: text/markdown\n\n" + readme).encode()
     files[f"{info}/WHEEL"] = (
         "Wheel-Version: 1.0\nGenerator: nucleus build_wheel.py\nRoot-Is-Purelib: false\n"
         f"Tag: py3-none-{plat}\n").encode()
     files[f"{info}/LICENSE"] = open(os.path.join(HERE, "LICENSE"), "rb").read()
+    # The library inside is the database: AGPL-3.0-only (COPYRIGHT).
+    for name in ("COPYING", "COPYRIGHT"):
+        src = "LICENSE" if name == "COPYING" else name
+        files[f"{info}/{name}"] = open(os.path.join(HERE, "..", "..", src), "rb").read()
     record = [record_line(n, d) for n, d in files.items()] + [f"{info}/RECORD,,"]
     files[f"{info}/RECORD"] = ("\n".join(record) + "\n").encode()
 

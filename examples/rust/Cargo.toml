@@ -3,7 +3,7 @@ name = "nucleus-example"
 description = "nucleus from Rust: the quickstart"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 publish = false
 
 [[bin]]

@@ -6,7 +6,7 @@
 name = "nucleus-ann-bench"
 version = "0.0.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
 description = "HNSW storage-model prototypes for nucleus (a measurement, not a product)"
 

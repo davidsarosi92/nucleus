@@ -3,7 +3,7 @@ name = "nucleus-pg-compat"
 description = "PostgreSQL compatibility for nucleus: the PostgreSQL protocol, pg_catalog and information_schema, the pg_* functions"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/davidsarosi92/nucleus"
 readme = "README.md"
 

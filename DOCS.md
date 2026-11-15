@@ -6786,6 +6786,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — licence:** the database under AGPL-3.0-only, the
+  drivers, the Rust client (`crates/client`, `wire`, `crypto`) and the
+  examples under MIT; COPYRIGHT (what is under which, third-party
+  notices, the original-author term), AUTHORS, CONTRIBUTING.md (the terms
+  of contributions); `nucleus --version` shows the notice.
 - **2026-11-14 — §M14.16 M5, code from the schema:** `nucleus codegen
   ts|rust|python|java` (§8.37).
 - **2026-11-14 — §M14.16 M4, dry runs and diffs:** `nucleus migrate up

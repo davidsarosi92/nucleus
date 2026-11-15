@@ -61,4 +61,4 @@ discovery from an issuer on a loopback address.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE) and the repository's [COPYRIGHT](../../COPYRIGHT).

@@ -46,3 +46,9 @@ main); example: `examples/java/Quickstart.java`.
 Types from your schema: `nucleus codegen java <db> --package com.example
 --out Schema.java` writes a record per table with its `SELECT` and
 `fromRow(row)` (DOCS §8.37).
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a
+program that reaches a nucleus server through this driver is not bound by
+it (the repository's [COPYRIGHT](../../COPYRIGHT)).

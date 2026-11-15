@@ -3,7 +3,7 @@ name = "nucleus-oidc"
 description = "OpenID Connect for nucleus: logins by identity tokens (JWTs), their claims mapped to roles and to the session"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/davidsarosi92/nucleus"
 readme = "README.md"
 
