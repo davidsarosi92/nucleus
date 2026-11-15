@@ -30,7 +30,20 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
-fail() { echo "monitoring test: $*" >&2; for f in "$work"/*.log; do echo "== $f"; tail -20 "$f"; done >&2; exit 1; }
+# A failure, with the logs' ends; on GitHub Actions as annotations too
+# (a job's log is not readable without the repository's admin rights).
+fail() {
+  echo "monitoring test: $*" >&2
+  for f in "$work"/*.log; do echo "== $f"; tail -20 "$f"; done >&2
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::error title=monitoring test::$*"
+    for f in "$work"/*.log; do
+      [ -s "$f" ] || continue
+      echo "::error title=$(basename "$f")::$(tail -15 "$f" | cut -c1-300 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+    done
+  fi
+  exit 1
+}
 wait_for() { # <what> <command…>: tries for 60 s
   local what=$1; shift
   for _ in $(seq 120); do "$@" >/dev/null 2>&1 && return 0; sleep 0.5; done
@@ -38,8 +51,11 @@ wait_for() { # <what> <command…>: tries for 60 s
 }
 
 echo "== promtool: the rules and their tests"
-"$promtool" check rules "$here/prometheus/nucleus.rules.yml"
-(cd "$here/prometheus" && "$promtool" test rules nucleus.rules.test.yml)
+"$promtool" check rules "$here/prometheus/nucleus.rules.yml" >"$work/promtool.log" 2>&1 ||
+  fail "promtool check rules failed"
+(cd "$here/prometheus" && "$promtool" test rules nucleus.rules.test.yml) >>"$work/promtool.log" 2>&1 ||
+  fail "promtool test rules failed"
+cat "$work/promtool.log"
 
 echo "== a server, an OpenTelemetry Collector, a Prometheus"
 metrics=127.0.0.1:29137
@@ -86,8 +102,9 @@ pids+=($!)
 wait_for "Prometheus did not start" curl -sf http://127.0.0.1:29090/-/ready
 
 echo "== the metrics the rules and the dashboard read are served"
-curl -sf "http://$metrics/metrics" >"$work/metrics.txt"
-python3 - "$work/metrics.txt" "$here/prometheus/nucleus.rules.yml" "$here/grafana/nucleus.json" <<'PY'
+curl -sf "http://$metrics/metrics" >"$work/metrics.txt" || fail "no metrics at $metrics"
+if python3 - "$work/metrics.txt" "$here/prometheus/nucleus.rules.yml" "$here/grafana/nucleus.json" \
+  >"$work/coverage.log" 2>&1 <<'PY'
 import re, sys
 served = set()
 for line in open(sys.argv[1]):
@@ -104,6 +121,7 @@ if missing:
     sys.exit(f"read but not served: {missing}")
 print(f"{len(used)} metrics read, all served")
 PY
+then cat "$work/coverage.log"; else fail "metrics read but not served"; fi
 
 echo "== a workload; Prometheus sees the numbers move"
 query() { # <promql>: the first value, or nothing
@@ -112,7 +130,8 @@ query() { # <promql>: the first value, or nothing
 }
 wait_for "Prometheus did not scrape nucleus" test "$(query 'up{job="nucleus"}')" = 1
 before=$(query 'nucleus_statements_total{job="nucleus",kind="write"}')
-"$nucleus" sql -h "$addr" -c "CREATE TABLE m (id INT PRIMARY KEY); INSERT INTO m SELECT * FROM generate_series(1, 1000); UPDATE m SET id = id + 1000" >/dev/null
+"$nucleus" sql -h "$addr" -c "CREATE TABLE m (id INT PRIMARY KEY); INSERT INTO m SELECT * FROM generate_series(1, 1000); UPDATE m SET id = id + 1000" >"$work/sql.log" 2>&1 ||
+  fail "the workload failed"
 moved() { python3 -c "import sys; sys.exit(0 if float('$(query 'nucleus_statements_total{job="nucleus",kind="write"}')' or 0) >= float('${before:-0}') + 3 else 1)"; }
 wait_for "the statements did not move in Prometheus" moved
 test "$(query 'nucleus_ready{job="nucleus"}')" = 1 || fail "not ready in Prometheus"
