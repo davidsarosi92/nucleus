@@ -897,6 +897,33 @@ impl Session {
                 })?;
                 Ok(Output::Command("ALTER TABLE".into()))
             }
+            Statement::AlterColumnType {
+                table,
+                column,
+                ty,
+                typmod,
+                using,
+                using_text,
+                concurrently: true,
+            } => {
+                // In transactions of its own, a part at a time, while
+                // others use the table.
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "ALTER COLUMN … TYPE … CONCURRENTLY cannot run inside a transaction block",
+                    ));
+                }
+                {
+                    let txn = self.kv.begin(TxnOptions::read_only())?;
+                    crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                }
+                let using = using.as_ref().zip(using_text.as_deref());
+                let now = crate::datetime::from_system(self.kv.wall_clock());
+                crate::datetime::with_now(now, &self.kv, || {
+                    crate::retype::alter(&self.kv, &self.registry, table, column, ty, typmod, using)
+                })?;
+                Ok(Output::Command("ALTER TABLE".into()))
+            }
             Statement::Forget { .. } if self.block.is_some() => Err(Error::active_txn(
                 "FORGET SUBJECT cannot run inside a transaction block",
             )),
@@ -1909,6 +1936,13 @@ pub(crate) fn execute_statement(
                 "ALTER TABLE … SET STORAGE runs as a statement of its own",
             ));
         }
+        Statement::AlterColumnType {
+            concurrently: true, ..
+        } => {
+            return Err(Error::active_txn(
+                "ALTER COLUMN … TYPE … CONCURRENTLY runs as a statement of its own",
+            ));
+        }
         Statement::Vacuum => {
             return Err(Error::active_txn(
                 "VACUUM cannot run inside a transaction block",
@@ -2707,6 +2741,7 @@ pub(crate) fn execute_statement(
             ty,
             typmod,
             using,
+            ..
         } => {
             refuse_partitioned(&*txn, table, "ALTER COLUMN … TYPE")?;
             alter_column_type(txn, reg, table, column, ty, typmod, using.as_ref())?;
@@ -3684,6 +3719,7 @@ pub(crate) fn create_table(
         chunks: None,
         expiry: None,
         subject: Vec::new(),
+        converting: None,
         memory: None,
     };
     if let Some((kind, names)) = partition_by {
@@ -4045,39 +4081,13 @@ fn alter_column_type(
             "changing the type of generated column \"{column}\" is not supported: drop and add it"
         )));
     }
-    let from = old.columns[c].ty;
+    if old.converting.is_some() {
+        return Err(Error::object_in_use(format!(
+            "a column of \"{table}\" is having its type changed; wait for it to finish"
+        )));
+    }
     let to = crate::binder::column_type(&*txn, reg, ty)?;
-    let conversion = {
-        let mut binder = Binder::new(&*txn, reg);
-        let scope = dml::table_scope(&old);
-        match using {
-            Some(e) => binder.expr(e, &scope)?.0,
-            None => {
-                let column_expr = crate::expr::Expr::Column(c);
-                let name = |t: DataType| crate::builtin::type_of(t).name().to_string();
-                let taught = catalog::get_cast(&*txn, &name(from), &name(to))?
-                    .filter(|k| k.context != catalog::CastContext::Explicit);
-                if let Some(k) = taught {
-                    let f = reg.function(&k.function).cloned().ok_or_else(|| {
-                        Error::undefined_function(format!("function {} does not exist", k.function))
-                    })?;
-                    crate::expr::Expr::Call(f, vec![column_expr])
-                } else if from == to {
-                    column_expr
-                } else if to == DataType::Text
-                    || (from.is_number() && to.is_number())
-                    || (from.is_datetime() && to.is_datetime())
-                {
-                    crate::expr::Expr::Cast(Box::new(column_expr), to)
-                } else {
-                    return Err(Error::type_mismatch(format!(
-                        "column \"{column}\" cannot be cast automatically to type {}; give USING",
-                        name(to)
-                    )));
-                }
-            }
-        }
-    };
+    let conversion = crate::retype::conversion_expr(&*txn, reg, &old, c, to, using)?;
     let mut new = old.clone();
     crate::binder::check_modifier(to, typmod.max_len)?;
     new.columns[c].ty = to;
@@ -4260,7 +4270,12 @@ pub(crate) fn bind_index_exprs(
     Ok(())
 }
 
-fn require_keys(columns: &[Column], cols: &[usize], unique: bool, what: &str) -> Result<()> {
+pub(crate) fn require_keys(
+    columns: &[Column],
+    cols: &[usize],
+    unique: bool,
+    what: &str,
+) -> Result<()> {
     use crate::binder::{Need, require};
     let needs: &[Need] = if unique {
         &[Need::KeyEncoding, Need::Equality]

@@ -581,6 +581,7 @@ fn def_table(k: usize) -> Table {
         chunks: None,
         expiry: None,
         subject: Vec::new(),
+        converting: None,
         memory: None,
     }
 }

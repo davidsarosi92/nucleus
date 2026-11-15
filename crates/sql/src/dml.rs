@@ -48,6 +48,24 @@ pub fn bind_index_expr(
     sql: &str,
 ) -> Result<(Expr, Option<DataType>)> {
     let (x, ty) = binder.expr(&parse_expr(sql)?, &table_scope(table))?;
+    if let Some(p) = immutability_problem(&x, table) {
+        return Err(Error::invalid_object_definition(format!(
+            "an index expression must be immutable; {sql} uses {p}"
+        )));
+    }
+    if x.columns().is_empty() {
+        return Err(Error::invalid_object_definition(format!(
+            "an index expression must read a column; {sql} reads none"
+        )));
+    }
+    Ok((x, ty))
+}
+
+/// What keeps `x` (over a row of `table`) from being immutable — one value
+/// for one row whoever computes it: a subquery, a parameter, an outer
+/// reference, a function that may vary, or a conversion that depends on
+/// the session (a time zone's).  `None`: nothing.
+pub fn immutability_problem(x: &Expr, table: &Table) -> Option<String> {
     let mut problem = None;
     x.walk(&mut |e| match e {
         Expr::Subquery(_) | Expr::Param(_) | Expr::Outer { .. } => {
@@ -66,17 +84,7 @@ pub fn bind_index_expr(
         }
         _ => {}
     });
-    if let Some(p) = problem {
-        return Err(Error::invalid_object_definition(format!(
-            "an index expression must be immutable; {sql} uses {p}"
-        )));
-    }
-    if x.columns().is_empty() {
-        return Err(Error::invalid_object_definition(format!(
-            "an index expression must read a column; {sql} reads none"
-        )));
-    }
-    Ok((x, ty))
+    problem
 }
 
 /// How a table's index entries are made: per B-tree index, per column,
@@ -85,6 +93,10 @@ pub fn bind_index_expr(
 /// ([`crate::index_method`]) keeps itself, told each change ([`keep`](Self::keep)).
 pub struct IndexKeys {
     maps: Vec<Vec<Option<Expr>>>,
+    /// Per index, the last column it reads: an index reading past a row's
+    /// end has no entry for it (a shadow index, `crate::retype`, of a row
+    /// without its hidden value).
+    last: Vec<usize>,
     /// The B-tree indexes' positions.
     btrees: Vec<usize>,
     /// The other indexes' positions and methods.
@@ -96,6 +108,11 @@ impl IndexKeys {
     pub fn new(txn: &dyn KvTxn, reg: &Registry, table: &Table) -> Result<Self> {
         let mut binder = Binder::new(txn, reg);
         let mut maps = Vec::with_capacity(table.indexes.len());
+        let last = table
+            .indexes
+            .iter()
+            .map(|ix| ix.columns.iter().copied().max().unwrap_or(0))
+            .collect();
         let (mut btrees, mut methods) = (Vec::new(), Vec::new());
         for (i, ix) in table.indexes.iter().enumerate() {
             match crate::index_method::of(ix)? {
@@ -122,6 +139,7 @@ impl IndexKeys {
         }
         Ok(Self {
             maps,
+            last,
             btrees,
             methods,
         })
@@ -171,6 +189,7 @@ impl IndexKeys {
         };
         self.btrees
             .iter()
+            .filter(|&&i| self.last[i] < row.len())
             .map(|&i| {
                 let (k, unique) = self.entry_in(&env, t, row, pk, i)?;
                 Ok((i, k, unique))
@@ -577,6 +596,9 @@ pub struct Writer {
     /// A partitioned table: how, and its partitions' writers (rows go to
     /// them).
     partitions: Option<(crate::partition::Spec, Vec<Writer>)>,
+    /// A column's type being changed (`crate::retype`): what its writes
+    /// keep beside their own.
+    shadow: Option<crate::retype::Shadow>,
     /// A partition: the key a row must have — its partitioning, its bound,
     /// and (a default partition) its siblings' bounds.
     bound: Option<(
@@ -620,7 +642,8 @@ impl Writer {
                 None => {}
             }
         }
-        let keys = IndexKeys::new(txn, reg, &table)?;
+        let shadow = crate::retype::Shadow::of(txn, reg, &table)?;
+        let keys = IndexKeys::new(txn, reg, shadow.as_ref().map_or(&table, |s| &s.view))?;
         let storage = crate::storage::of(&table)?;
         catalog::validate_table(txn, &table.name)?;
         let chunked = if table.referenced_by.is_empty() {
@@ -666,8 +689,16 @@ impl Writer {
             keys,
             storage,
             partitions,
+            shadow,
             bound,
         })
+    }
+
+    /// The table as its rows are written: during a column's type change
+    /// (`crate::retype`), with the hidden value's column and the shadow
+    /// indexes.
+    pub fn write_table(&self) -> &Table {
+        self.shadow.as_ref().map_or(&self.table, |s| &s.view)
     }
 
     /// A new or changed row made whole: its stored generated columns
@@ -682,7 +713,11 @@ impl Writer {
             })?;
             row[*c] = assign(ctx.txn, v, &self.table, *c)?;
         }
-        self.validate(row, ctx)
+        self.validate(row, ctx)?;
+        if let Some(s) = &self.shadow {
+            s.fill(row, ctx)?;
+        }
+        Ok(())
     }
 
     /// The default value of column `c`.
@@ -1456,7 +1491,7 @@ fn store_batch(
             (None, None) => Ok(()),
         };
     }
-    let t = &w.table;
+    let t = w.write_table();
     let at_row = |place: usize| move |e: Error| (Some(place), e);
     let none = |e: Error| (None, e);
     let first_id = if t.primary_key.is_empty() {
@@ -1574,8 +1609,22 @@ pub fn update_rows(
     w: &Writer,
     changes: &[(Vec<u8>, Row, Row)],
 ) -> Result<()> {
-    let t = &w.table;
-    for (key, old, new) in changes {
+    let t = w.write_table();
+    // A column's type being changed: the old rows with their hidden
+    // values, whose shadow entries go.
+    let extended: Vec<Row> = match &w.shadow {
+        None => Vec::new(),
+        Some(s) => changes
+            .iter()
+            .map(|(key, old, _)| {
+                let mut o = old.clone();
+                s.extend(&*txn, key, &mut o)?;
+                Ok(o)
+            })
+            .collect::<Result<_>>()?,
+    };
+    for (n, (key, old, new)) in changes.iter().enumerate() {
+        let old = extended.get(n).unwrap_or(old);
         let new_key = if t.primary_key.is_empty() {
             key.clone()
         } else {
@@ -1591,17 +1640,25 @@ pub fn update_rows(
             w.storage.write(txn, t, key, new, Some(old))?;
         }
         let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
-        let olds = w.keys.entries(&*txn, t, old, old_pk)?;
+        let mut olds = w.keys.entries(&*txn, t, old, old_pk)?;
         let news = w.keys.entries(&*txn, t, new, new_pk)?;
-        for ((_, ok, _), (i, nk, unique)) in olds.into_iter().zip(news) {
-            if ok == nk && old_pk == new_pk {
-                continue;
+        for (i, nk, unique) in news {
+            // The same index's old entry (a row without its hidden value
+            // has no shadow entry).
+            if let Some(at) = olds.iter().position(|(j, _, _)| *j == i) {
+                let (_, ok, _) = olds.swap_remove(at);
+                if ok == nk && old_pk == new_pk {
+                    continue;
+                }
+                txn.delete(&ok)?;
             }
-            txn.delete(&ok)?;
             if unique && txn.get(&nk)?.is_some() {
                 return Err(duplicate(&t.indexes[i].name));
             }
             txn.put(&nk, new_pk)?;
+        }
+        for (_, ok, _) in olds {
+            txn.delete(&ok)?;
         }
         w.keys
             .keep(txn, t, Some((old_pk, old)), Some((new_pk, new)))?;
@@ -1644,10 +1701,29 @@ pub fn delete_rows(
     t: &Table,
     rows: &[(Vec<u8>, Row)],
 ) -> Result<()> {
-    let keys = IndexKeys::new(&*txn, reg, t)?;
+    let shadow = crate::retype::Shadow::of(&*txn, reg, t)?;
+    let keys = IndexKeys::new(&*txn, reg, shadow.as_ref().map_or(t, |s| &s.view))?;
     let storage = crate::storage::of(t)?;
     catalog::validate_table(&*txn, &t.name)?;
     let embedded: Vec<usize> = crate::embedding::columns_of(t).collect();
+    // A column's type being changed: the rows with their hidden values,
+    // whose shadow entries go.
+    let extended: Vec<(Vec<u8>, Row)>;
+    let rows = match &shadow {
+        None => rows,
+        Some(s) => {
+            extended = rows
+                .iter()
+                .map(|(k, r)| {
+                    let mut r = r.clone();
+                    s.extend(&*txn, k, &mut r)?;
+                    Ok((k.clone(), r))
+                })
+                .collect::<Result<_>>()?;
+            &extended
+        }
+    };
+    let t = shadow.as_ref().map_or(t, |s| &s.view);
     for (key, row) in rows {
         storage.remove_row(txn, t, key, row)?;
         for &c in &embedded {

@@ -2685,17 +2685,21 @@ impl<'a> Parser<'a> {
             let _ = self.eat_kws(&["set", "data"]);
             self.expect_kw("type")?;
             let (ty, typmod) = self.data_type()?;
-            let using = if self.eat_kw("using") {
-                Some(self.expr()?)
+            let (using, using_text) = if self.eat_kw("using") {
+                let (e, text) = self.text_of(|p| p.expr())?;
+                (Some(e), Some(text))
             } else {
-                None
+                (None, None)
             };
+            let concurrently = self.eat_kw("concurrently");
             return Ok(Statement::AlterColumnType {
                 table,
                 column,
                 ty,
                 typmod,
                 using,
+                using_text,
+                concurrently,
             });
         }
         if !self.eat_kw("add") {

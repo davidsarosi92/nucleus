@@ -207,6 +207,13 @@ the other, `CREATE BRANCH before AS OF TIMESTAMP …` is the database as
 it was then, and `DROP BRANCH` gives back what the branch changed (a
 branch of 548 MiB made in 8 ms;
 [`examples/python/branches.py`](examples/python/branches.py)).
+A column's type changes while the table is in use (§M14.18 O5): `ALTER
+TABLE t ALTER COLUMN v TYPE bigint CONCURRENTLY` converts it a part at a
+time — writers keep each row's converted value and the column's indexes
+over it beside the old ones until a one-transaction cutover — and a
+value that does not convert leaves the table as it was (1,000,000 rows
+converted in 26 s while another session updates them; the
+one-transaction form never finishes under those writes).
 Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …), then

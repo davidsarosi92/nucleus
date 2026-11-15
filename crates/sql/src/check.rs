@@ -57,10 +57,19 @@ pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>>
         .iter()
         .map(|t| {
             let own = crate::storage::of(t).map(|s| s.index_ids(t));
+            // A column's type being changed: its shadow indexes, and the
+            // indexes whose entries are being removed (`crate::retype`).
+            let converting = t.converting.iter().flat_map(|cv| {
+                cv.shadows
+                    .iter()
+                    .map(|s| s.id)
+                    .chain(cv.stale.iter().copied())
+            });
             let ids = own
                 .unwrap_or_else(|_| vec![0])
                 .into_iter()
-                .chain(t.indexes.iter().map(|i| i.id));
+                .chain(t.indexes.iter().map(|i| i.id))
+                .chain(converting);
             (t.id, ids.collect())
         })
         .collect();
@@ -97,12 +106,22 @@ fn check_table(
     t: &Table,
     problems: &mut Vec<String>,
 ) -> Result<Vec<Row>> {
+    // A column's type being changed (`crate::retype`): before the cutover
+    // the shadow indexes hold the entries of the rows' hidden values.
+    let shadow = crate::retype::Shadow::of(txn, reg, t)?;
+    let table = t;
+    let t = shadow.as_ref().map_or(t, |s| &s.view);
     let keys = crate::dml::IndexKeys::new(txn, reg, t)?;
     let mut rows = Vec::new();
     // Rows by primary key bytes, for the registered methods' indexes.
     let mut keyed = Vec::new();
     let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); t.indexes.len()];
-    for (key, row) in crate::storage::of(t)?.check(txn, t, problems)? {
+    for (key, mut row) in crate::storage::of(table)?.check(txn, table, problems)? {
+        if shadow.is_some()
+            && let Some(v) = crate::retype::stored_hidden(txn, table, &key)?
+        {
+            row.push(v);
+        }
         if !t.primary_key.is_empty() && row_key_of(t, &row, None) != key {
             problems.push(format!(
                 "{}: row {row:?} is not under its primary key",
@@ -126,6 +145,7 @@ fn check_table(
                 ));
             }
         }
+        row.truncate(table.columns.len());
         rows.push(row);
     }
     for (i, ix) in t.indexes.iter().enumerate() {

@@ -1040,6 +1040,38 @@ nucleus sql db -c "BACKUP TO '/abs/backups/db'"      # full, then what changed
 nucleus restore /abs/backups/db restored --at 000003-incr --subject-keys db.subject-keys
 ```
 
+## Changing a column's type
+
+PLAN.md §M14.18 O5: `ALTER TABLE t ALTER COLUMN v TYPE … [CONCURRENTLY]`,
+release, real files, an M2 Pro.  A table of 1,000,000 rows (`id` the
+key, `g`, `v` with a B-tree index, `s` text of about 12 bytes); `v`
+changed from `integer` to `bigint` and back, five times for each figure
+(the median, the fastest and the slowest).  Under writes, another
+session updates single rows by key (`g` and `v`) as fast as it can,
+retrying conflicts; the transactional form is tried three times a run.
+
+| | time | the writer meanwhile |
+|---|---:|---|
+| idle, in one transaction | 5.63 s (3.93–7.05) | |
+| idle, `CONCURRENTLY` | 11.26 s (11.13–11.69) | |
+| a writer alone | | 3,510 updates/s, p50 0.27 ms, p99 0.50 ms |
+| under writes, in one transaction | not done: 5 of 5 runs failed three tries (`40001`), 147 s each | 2,806 updates/s, p99 0.76 ms |
+| under writes, `CONCURRENTLY` | 26.12 s (25.24–27.26), 5 of 5 done | 2,988 updates/s, p50 0.25 ms, p99 2.31 ms |
+
+The transactional form cannot finish while the table is written: it
+reads every row in one transaction, and some row it read is written
+before it commits.  `CONCURRENTLY` finishes in each run, and the
+writer goes on at 85 % of its rate alone; its p99 rises to about
+2.3 ms where it meets a part (up to 4,096 rows) being written.  On an
+idle table it costs twice the transactional form's time: each row is
+written twice (its hidden value, then the rewrite) and the old index's
+entries are removed in parts, each part a transaction of its own.
+
+```sh
+RETYPE_DIR=/abs/retype-bench RETYPE_ROWS=1000000 cargo test --release \
+    -p nucleus-sql --test retype_bench -- --ignored --nocapture
+```
+
 ## JSON
 
 PLAN.md §M14.15 J1–J4: the `json` type, its operators, SQL/JSON paths and indexes, release, an

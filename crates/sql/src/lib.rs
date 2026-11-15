@@ -86,6 +86,7 @@ pub mod privileges;
 pub mod profile;
 pub mod prune;
 pub mod regression;
+pub mod retype;
 pub mod roles;
 pub mod rules;
 pub mod sample;

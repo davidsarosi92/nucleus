@@ -108,6 +108,13 @@ fn encode(
         },
         None => Vec::new(),
     };
+    // After a type change's cutover, the column's value read (from a row's
+    // hidden value) is not the one stored in its place (`crate::retype`).
+    let converted = t
+        .converting
+        .as_ref()
+        .filter(|cv| cv.phase == crate::catalog::ConversionPhase::Rewrite)
+        .map(|cv| cv.column);
     let mut w = RowWriter::new(row.len());
     for (c, v) in row.iter().enumerate() {
         // Encoded in place; moved out when too long to stay.
@@ -121,6 +128,7 @@ fn encode(
         }
         let enc = w.take_last(at);
         let same = was
+            && converted != Some(c)
             && old.and_then(|o| o.get(c)).is_some_and(|o| {
                 let mut before = Vec::new();
                 encode_row_value(&mut before, o);
@@ -148,8 +156,13 @@ fn encode(
 }
 
 /// Deletes the row at `key`, whose values are `row`: when none is long
-/// enough to have been stored out of line, without reading it again.
+/// enough to have been stored out of line, without reading it again —
+/// unless a column's type is being changed, when the stored row may hold
+/// values `row` does not (`crate::retype`).
 pub fn remove_row(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<()> {
+    if t.converting.is_some() {
+        return remove(txn, t, key);
+    }
     let mut enc = Vec::new();
     let short = row.iter().all(|v| {
         enc.clear();
@@ -298,9 +311,13 @@ pub fn read_some(
     labels: &mut Labels,
     wanted: Option<&[bool]>,
 ) -> Result<Row> {
-    let mut row = crate::encoding::decode_some(bytes, t.columns.len(), wanted, &mut |c, len| {
-        fetch(txn, t, pk_suffix(t, key), c, len)
-    })?;
+    let mut resolve = |c, len| fetch(txn, t, pk_suffix(t, key), c, len);
+    let mut row = match &t.converting {
+        // A column's type being changed: a row's hidden value
+        // (`crate::retype`).
+        Some(cv) => crate::retype::read_some(t, cv, bytes, wanted, &mut resolve)?,
+        None => crate::encoding::decode_some(bytes, t.columns.len(), wanted, &mut resolve)?,
+    };
     for (v, c) in row.iter_mut().zip(&t.columns) {
         if matches!(c.ty, DataType::Enum(_)) {
             labels.fill(txn, c.ty, v)?;

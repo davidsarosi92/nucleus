@@ -86,8 +86,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// on the table and its columns; version 14 an index's access method,
 /// operator classes and options; version 17 a row expiry and a memory
 /// store's definition; version 18 the subject columns (a memory store's
-/// `subject` before it); older versions still read.
-const TABLE_VERSION: u8 = 19;
+/// `subject` before it); version 19 index expressions; version 20 a
+/// column's type being changed online ([`Conversion`]); older versions
+/// still read.
+const TABLE_VERSION: u8 = 20;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -426,6 +428,134 @@ pub struct Table {
     /// `FORGET SUBJECT` erases the rows any of them names
     /// ([`crate::forget`]).
     pub subject: Vec<usize>,
+    /// `ALTER COLUMN … TYPE … CONCURRENTLY` under way ([`crate::retype`]).
+    pub converting: Option<Conversion>,
+}
+
+/// A column's type being changed online (PLAN.md §M14.18 O5,
+/// [`crate::retype`]).  Its converted value is kept as a hidden last
+/// value of each row — the table's columns and one more — until the rows
+/// are rewritten.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversion {
+    /// The column, by position.
+    pub column: usize,
+    /// Its new type and modifiers.
+    pub ty: DataType,
+    /// `VARCHAR(n)`.
+    pub max_len: Option<u32>,
+    /// `NUMERIC(p, s)`.
+    pub numeric: Option<(u32, u32)>,
+    /// `USING`, as SQL over the row; `None`: a cast.
+    pub using: Option<String>,
+    /// [`ConversionPhase::Backfill`]: the indexes on the column made again
+    /// over the converted value — the hidden value's position in place of
+    /// the column's — with ids of their own; they replace the old ones at
+    /// the cutover.
+    pub shadows: Vec<Index>,
+    /// Where it is.
+    pub phase: ConversionPhase,
+    /// Index ids whose entries are left to remove (the old indexes after
+    /// the cutover, the shadows after a failure).
+    pub stale: Vec<u32>,
+}
+
+/// The phases of a [`Conversion`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversionPhase {
+    /// Before the cutover: writers store the converted value as the
+    /// row's hidden last value (and the shadow indexes' entries); rows
+    /// without one are given theirs a part at a time.  Readers ignore it.
+    Backfill,
+    /// After the cutover: the column has its new type; a row still
+    /// holding a hidden value is read with it as the column's, until it
+    /// is rewritten.
+    Rewrite,
+    /// Failed before the cutover: the hidden values are being removed;
+    /// readers and writers ignore them.
+    Abandon,
+}
+
+impl Conversion {
+    /// The hidden value's position in a row of `t`.
+    pub fn hidden(t: &Table) -> usize {
+        t.columns.len()
+    }
+
+    fn encode(&self, w: &mut Writer) {
+        w.u32(self.column as u32);
+        write_type(w, self.ty);
+        w.u32(self.max_len.map_or(0, |n| n + 1));
+        let (p, s) = self.numeric.map_or((0, 0), |(p, s)| (p + 1, s));
+        w.u32(p).u32(s);
+        w.opt_str(self.using.as_deref());
+        w.u32(self.shadows.len() as u32);
+        for i in &self.shadows {
+            w.u32(i.id)
+                .str(&i.name)
+                .u8(u8::from(i.unique))
+                .u32(i.columns.len() as u32);
+            for &c in &i.columns {
+                w.u32(c as u32);
+            }
+            for o in &i.orderings {
+                w.opt_str(o.as_deref());
+            }
+        }
+        w.u8(match self.phase {
+            ConversionPhase::Backfill => 0,
+            ConversionPhase::Rewrite => 1,
+            ConversionPhase::Abandon => 2,
+        });
+        w.u32(self.stale.len() as u32);
+        for &i in &self.stale {
+            w.u32(i);
+        }
+    }
+
+    fn decode(r: &mut Reader) -> Result<Self> {
+        let column = r.u32()? as usize;
+        let ty = read_type(r)?;
+        let max_len = match r.u32()? {
+            0 => None,
+            n => Some(n - 1),
+        };
+        let numeric = match (r.u32()?, r.u32()?) {
+            (0, _) => None,
+            (p, s) => Some((p - 1, s)),
+        };
+        let using = r.opt_str()?;
+        let mut shadows = Vec::new();
+        for _ in 0..r.u32()? {
+            let id = r.u32()?;
+            let name = r.str()?;
+            let unique = r.u8()? == 1;
+            let m = r.u32()? as usize;
+            let columns = (0..m)
+                .map(|_| r.u32().map(|c| c as usize))
+                .collect::<Result<_>>()?;
+            let mut ix = Index::plain(id, name, columns, unique);
+            ix.orderings = (0..m).map(|_| r.opt_str()).collect::<Result<_>>()?;
+            shadows.push(ix);
+        }
+        let phase = match r.u8()? {
+            0 => ConversionPhase::Backfill,
+            1 => ConversionPhase::Rewrite,
+            2 => ConversionPhase::Abandon,
+            _ => return Err(Error::internal("an unknown conversion phase")),
+        };
+        let stale = (0..r.u32()?).map(|_| r.u32()).collect::<Result<_>>()?;
+        Ok(Self {
+            column,
+            ty,
+            max_len,
+            numeric,
+            using,
+            shadows,
+            phase,
+            stale,
+        })
+    }
 }
 
 /// What makes a table a memory store (PLAN.md §M14.24 R1).
@@ -675,6 +805,15 @@ impl Table {
                 }
             }
         }
+        match &self.converting {
+            None => {
+                w.u8(0);
+            }
+            Some(c) => {
+                w.u8(1);
+                c.encode(&mut w);
+            }
+        }
         w.0
     }
 
@@ -907,6 +1046,11 @@ impl Table {
                 }
             }
         }
+        let converting = if version >= 20 && r.u8()? == 1 {
+            Some(Conversion::decode(&mut r)?)
+        } else {
+            None
+        };
         Ok(Self {
             id,
             name,
@@ -932,6 +1076,7 @@ impl Table {
             expiry,
             memory,
             subject,
+            converting,
         })
     }
 }
@@ -1169,8 +1314,16 @@ pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
     Ok(table)
 }
 
-/// Replaces a table's definition (same name).
+/// Replaces a table's definition (same name).  Refused while a column's
+/// type is being changed online, but for the conversion's own switches
+/// ([`crate::retype::allows_change`]).
 pub fn update_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
+    if let Some(old) = txn.get(&table_key(&table.name))?
+        && old.len() > 1
+    {
+        let old = Table::decode(&old)?;
+        crate::retype::allows_change(&old, table)?;
+    }
     txn.put(&table_key(&table.name), &table.encode())?;
     Ok(())
 }
@@ -1178,6 +1331,14 @@ pub fn update_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
 /// Stores `table` under its (new) name, its definition under `from`
 /// removed (`ALTER TABLE from RENAME TO …`).
 pub fn rename_table(txn: &mut dyn KvTxn, from: &str, table: &Table) -> Result<()> {
+    if let Some(t) = get_table(&*txn, from)?
+        && let Some(cv) = &t.converting
+    {
+        return Err(Error::object_in_use(format!(
+            "the type of column \"{}\" of \"{from}\" is being changed; it can be renamed when that is done",
+            t.columns[cv.column].name
+        )));
+    }
     txn.delete(&table_key(from))?;
     update_table(txn, table)
 }
@@ -1744,6 +1905,16 @@ mod tests {
             memory: Some(MemorySpec {
                 model: "e5".into(),
                 merge: 0.95,
+            }),
+            converting: Some(Conversion {
+                column: 1,
+                ty: DataType::Numeric,
+                max_len: None,
+                numeric: Some((12, 2)),
+                using: Some("round(dept * 1.5, 2)".into()),
+                shadows: vec![Index::plain(7, "people_dept".into(), vec![3, 0], true)],
+                phase: ConversionPhase::Rewrite,
+                stale: vec![2, 4],
             }),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);

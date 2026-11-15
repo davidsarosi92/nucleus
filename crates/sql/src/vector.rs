@@ -2039,6 +2039,26 @@ fn decode_into(
     if cols.is_empty() {
         return Ok(()); // no column read (`count(*)`): the row is not looked at
     }
+    // A column's type changed and this row not rewritten yet: its hidden
+    // value is the column's (`crate::retype`) — read a value at a time.
+    if let Some(cv) = &t.converting
+        && cv.phase == crate::catalog::ConversionPhase::Rewrite
+        && crate::encoding::row_header(b)?.n > t.columns.len()
+    {
+        let wanted: Vec<bool> = (0..t.columns.len())
+            .map(|c| cols.get(c).is_some_and(|b| !matches!(b, Builder::Skip)))
+            .collect();
+        let pk = crate::exec::pk_suffix(t, key);
+        let row = crate::retype::read_some(t, cv, b, Some(&wanted), &mut |c, len| {
+            large.fetch(t, pk, c, len)
+        })?;
+        for (col, v) in cols.iter_mut().zip(row) {
+            if !matches!(col, Builder::Skip) {
+                col.push(v);
+            }
+        }
+        return Ok(());
+    }
     let bad = |_| Error::internal("malformed row encoding");
     let h = crate::encoding::row_header(b)?;
     let n = h.n;

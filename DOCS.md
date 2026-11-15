@@ -3109,6 +3109,65 @@ transaction: readers keep the old column until it commits.  A column a
 foreign key uses cannot change type yet.  `22_alter_column_type.slt`'s
 results came from PostgreSQL 18.
 
+**Online: `ALTER TABLE t ALTER COLUMN c TYPE type [USING expr]
+CONCURRENTLY`** (`retype`, §M14.18 O5) converts the same way while other
+sessions read and write the table — in transactions of its own, a part
+at a time; not inside a transaction block (`25001`); it returns when
+done.  The table's record holds the conversion (`catalog::Conversion`),
+and each switch of phase is a small transaction rewriting it, which a
+write begun under the old phase meets as `40001` (the write's own
+retry runs it under the new one):
+
+- *Backfill.*  The converted value is kept as a hidden last value of
+  each row — the row stores the table's columns and one more, which
+  readers do not decode — and the indexes on the column are made again
+  over it as *shadow indexes* with ids of their own.  Writers compute it
+  for every row they write (`retype::Shadow`, bound once per statement
+  in `dml::Writer`): a value that does not convert, a `NULL` under `NOT
+  NULL`, a check broken under the new type or a shadow unique index's
+  duplicate fails their statement (`22…`, `23502`, `23514`, `23505`).  An
+  updated or deleted row's shadow entries are found from the hidden value
+  it has stored.  The rows without one are given theirs a part at a time
+  in key order; a part that conflicts with writers runs again smaller
+  (down to a row), one that commits lets the next grow back (to 512).
+- *Cutover* (one transaction): the column takes its new type, the shadow
+  indexes take the old ones' places and names, the checks and default
+  are bound against the new type, the statistics go.
+- *Rewrite.*  A row still holding a hidden value is read with it as the
+  column's — the row's length says which, without a lookup
+  (`retype::read_some` under `large::read_some` and the vectorized
+  scan) — until it is rewritten, a part at a time; then the old indexes'
+  entries are removed a part at a time and the record cleared.
+
+A backfill that finds a value that does not convert (or a duplicate, or
+a check broken) abandons the change: the shadows' entries and the hidden
+values are removed, the table is as before, and the statement fails with
+what was found.  While a change runs, other changes of the table's
+definition wait (`55006`), and so does a second change of the same table
+(`55006`).  A change cut short (a crash, the session gone) leaves a
+table that reads and writes correctly in its phase; running the statement
+again finishes it, and so does the server's maintenance thread
+(`retype::resume_all`); a restore finishes a backed-up one, abandoning
+one caught before its cutover (its shadow indexes are not backed up).
+The conversion is computed by every writer in its own session, so it
+must be immutable: `CONCURRENTLY` refuses (`0A000`, pointing at the
+transactional form) a `USING` with a function that may vary, a
+subquery or a parameter, a change from or to `timestamptz` (it depends
+on the time zone), and — first cut — primary key columns, columns a
+foreign key or a chunk table uses or a generated column reads,
+generated and expiry columns, indexes on the column that are an
+expression's, a method's or in a taught ordering, tables not stored as
+rows alone, chunk tables and memory stores, and partitioned tables and
+partitions.
+`crates/sql/tests/retype.rs` converts a twin of a table through
+several types and compares it with the transactional form, converts
+while another session writes (inserts, deletes, updates of the column and
+of a value stored out of line), provokes each failure, and crashes a
+change at I/O points: the rows read the same, the integrity check holds
+(it knows the shadow indexes and the hidden values), and running it
+again or resuming it finishes it.  `tests/retype_bench.rs` measures it
+(docs/benchmarks.md, "Changing a column's type").
+
 **Operators outside the grammar's own.**  The lexer reads operators as
 PostgreSQL does — the longest run of `+-*/<>=~!@#%^&|`?`, not into a
 comment, a run of more than one not ending in `+` or `-` unless it holds

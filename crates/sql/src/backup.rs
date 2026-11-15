@@ -2136,6 +2136,9 @@ fn rebuild(
     lost: &HashSet<u32>,
     out: &mut Restored,
 ) -> Result<()> {
+    // Column type changes under way when the backup was made: settled
+    // first (`crate::retype::settle`).
+    crate::retype::settle(kv, reg)?;
     let tables = {
         let txn = kv.begin(TxnOptions::read_only())?;
         catalog::tables(&*txn)?

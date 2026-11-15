@@ -616,6 +616,22 @@ pub fn maintain_with(
                 if let Err(e) = nucleus_sql::expiry::expire(&kv, &registry, None, now) {
                     nucleus_platform::log!("nucleus-server: expiry: {}", e.message);
                 }
+                // Column type changes cut short (a crash, a session gone):
+                // finished.
+                match nucleus_sql::datetime::with_now(now, &kv, || {
+                    nucleus_sql::retype::resume_all(&kv, &registry)
+                }) {
+                    Ok(done) => {
+                        for t in done {
+                            nucleus_platform::log!(
+                                "nucleus-server: a column type change of {t} finished"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        nucleus_platform::log!("nucleus-server: column type changes: {}", e.message)
+                    }
+                }
             }
             seen = kv.activity();
         }

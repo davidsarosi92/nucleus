@@ -286,9 +286,10 @@ are marked ✅.
 | | M14.15 | JSON type and functions | ✅ (2026-11-14) study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
-| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O4 |
+| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns, a confidential-computing mode | ⬜ planned (2026-11-15) |
+| | M14.31 | Public benchmarks, reliably measured: a method every published number follows (environment recorded, repeated runs, spread and intervals, fair baselines, one script to reproduce), runs on dedicated cloud machines with regressions caught, results on the public leaderboards | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -9141,9 +9142,9 @@ Steps (planned 2026-11-14):
   several — a step is a comment heading, so a reader of the raw file
   and the tour see the same thing.
 
-### §M14.18 — Operations ◐
+### §M14.18 — Operations ✅ (O1–O5, 2026-11-15)
 
-- **Online schema changes on large tables** (moved from §M14.11, first
+- ✅ **Online schema changes on large tables** (O5; moved from §M14.11, first
   planned in §M14.19): `ALTER COLUMN … TYPE` converting a very large
   column in the background in chunks while the table stays writable — it
   runs as one transaction today, bounded in memory by spilling.
@@ -9418,54 +9419,74 @@ Steps (planned 2026-11-14):
     of entries, holding again once mended; the CLI's scheduled restore tests failing on a flipped
     byte, `nucleus restore --test`.  This meets the milestone's "the
     scheduled restore test catches a deliberately corrupted backup".
-  - **Next steps:** O5 online `ALTER COLUMN … TYPE`.
-  - **O5 design (sketched 2026-11-15, not built).**  Today's
-    `alter_column_type` (`session.rs`) converts every row in one
-    transaction.  What the code offers: table rows are read through one
-    place (`large::read_some`) and written through `TableStorage`
-    (`storage.rs`, `large::write` / `insert` / `encode_inline`); rows are
-    positional (`alter.rs`: no dropped-column holes), so a column cannot
-    simply be swapped for a hidden one without rewriting rows.  The
-    shape considered — CockroachDB's online type change (a hidden
-    computed column backfilled, then swapped; the F1 schema-change
-    states) with a side keyspace instead of a hidden column:
-    1. *Converting* (a short transaction): the table's catalog records
-       the conversion (column, new type and modifiers, the `USING` text,
-       new index ids for the indexes on the column); from then writers
-       (`dml::Writer`) also put the converted value under a side prefix
-       keyed by the primary key, and the shadow indexes' entries — a
-       conversion error fails the writer's statement, as a check would;
-       a shadow unique index refuses duplicates as `CREATE UNIQUE INDEX
-       CONCURRENTLY` does.
-    2. *Backfill* in chunks of the primary key, each its own
-       serializable transaction (a concurrent write conflicts and the
-       chunk retries): side entries and shadow index entries for rows
-       without them; checks evaluated on the converted rows.  A failure
-       stops it: the side prefix and shadow indexes dropped, the
-       catalog's record removed — the table as before.
-    3. *Cutover* (a short transaction): the column's type is the new
-       one, the shadow indexes take the old ones' names, the old ones'
-       entries left for step 4.
-    4. *Rewrite* in chunks: each row's value replaced by its side entry
-       and the side entry deleted; until done, `read_some` takes a
-       row's value from the side entry when there is one; then the old
-       indexes' entries deleted in chunks (`check::check` tolerating
-       them meanwhile) and the record cleared.
-    Statement form: `ALTER TABLE … ALTER COLUMN … TYPE … CONCURRENTLY`
-    (not in a transaction block; it returns when done, others writing
-    throughout; inside a block the transactional form as now) — a
-    session dying midway leaves the record, which the maintenance
-    thread resumes or rolls back.  First cut refuses (falls back to the
-    transactional form with a message): primary-key columns (every key
-    changes: a shadow table, gh-ost's or pg_repack's way, would be
-    needed), foreign keys, generated columns and expression or method
-    indexes over the column, chunk and embedding columns, tables stored
-    as columns, partitioned tables; a `USING` that is not immutable.
-    Prior art to record when built: CockroachDB's online schema changes
-    and F1's paper (states, two versions at a time), gh-ost and
-    pt-online-schema-change (shadow table, cut-over), pg_repack,
-    PostgreSQL's `CREATE INDEX CONCURRENTLY`, MySQL's `ALGORITHM=INPLACE,
-    LOCK=NONE`.
+  - **O5 ✅ (2026-11-15) — `ALTER COLUMN … TYPE … CONCURRENTLY`.**
+    `retype` (DOCS §8.11): the conversion in transactions of its own, a
+    part at a time, while the table is read and written; its state in the
+    table's record (`catalog::Conversion`, table version 20), each switch
+    of phase a small transaction that writes meeting it retry (`40001`),
+    as §M14.20 V8's storage changes do.  *Backfill:* the converted value
+    kept as a **hidden last value of the row** — the row stores the
+    table's columns and one more, which readers do not decode — and the
+    indexes on the column made again over it as shadow indexes; writers
+    compute it for each row they write (`retype::Shadow` in
+    `dml::Writer`: a value that does not convert, a check, `NOT NULL` or a
+    unique shadow broken under the new type fails their statement), the
+    other rows given theirs in parts by key.  *Cutover:* the column's type,
+    the shadows in the old indexes' places and names.  *Rewrite:* a row
+    still holding a hidden value is read with it as the column's — the
+    row's length tells, no lookup — until rewritten; the old indexes'
+    entries removed in parts, the record cleared.  A backfill that finds a
+    value that does not convert abandons the change (the table as before,
+    the statement failing with what was found).  A change cut short reads
+    and writes correctly in its phase; running it again, the maintenance
+    thread (`resume_all`) or a restore finishes it.  *Changed from the
+    sketch:* the hidden value in the row instead of a side keyspace keyed
+    by the primary key — the sketch's rewrite phase would have looked the
+    side entry up for every row read; the row's length is the
+    discriminator, the rewrite moves nothing between keys, and a row's
+    values out of line keep their per-column chunks
+    (`large::encode` told that the column's stored chunks are not the
+    value read after the cutover); shadow indexes as ordinary B-tree
+    indexes over the hidden position, so the writers' index upkeep is the
+    existing code's (`IndexKeys` skipping an index past a row's end).
+    *Found by the tests:* an old row's shadow entries recomputed from its
+    value were wrong for a row not yet backfilled (an update that left
+    the column alone skipped the entry as unchanged, and the backfill then
+    skipped the row) — they are read from the stored hidden value; a
+    fixed part size starved under a stream of deletes (`40001` after a
+    hundred tries) — parts halve on a conflict and double on a commit
+    (AIMD, as TCP's congestion window; gh-ost sizes its chunks and
+    throttles against replica lag, the same idea against writers).
+    Prior art: CockroachDB's online schema changes and F1's paper
+    (Rae et al., VLDB 2013: a change as states, at most two versions in
+    use at once — here the record's phase, writes validating it), gh-ost
+    and pt-online-schema-change (a shadow table filled in chunks, then a
+    cut-over — taken: the chunks and the cut-over; not taken: the shadow
+    table, which would need a key's every index and a rename), pg_repack,
+    PostgreSQL's `CREATE INDEX CONCURRENTLY` (a unique index's duplicate
+    refused to writers while it is built — taken for the shadows),
+    MySQL's `ALGORITHM=INPLACE, LOCK=NONE` (an online log of changes
+    replayed — not needed: writers keep the shadows themselves).  *First
+    cut refuses* (`0A000`, the transactional form still there): primary
+    key columns, foreign key and chunk table columns, generated and
+    expiry columns, columns a generated column reads, expression,
+    method and taught-ordering indexes on the column, non-row storage,
+    partitioned tables; a conversion that is not immutable (a function
+    that may vary, from or to `timestamptz`).  *Measured* (docs/benchmarks.md
+    "Changing a column's type", 1,000,000 rows, an index on the column):
+    idle, 5.6 s in one transaction, 11.3 s `CONCURRENTLY`; under a
+    writer updating rows by key, the transactional form never finished
+    (5 of 5 runs, three tries each), `CONCURRENTLY` finished in 26.1 s
+    with the writer at 85 % of its rate alone (p99 0.50 → 2.31 ms).  The
+    first cut took 32.7 s idle and 49.5 s under writes: the old index's
+    entries were removed in parts each scanning from the index's start,
+    over the tombstones of the parts before (quadratic) — a cursor now
+    carries on from the last key removed; and the parts were 512 rows,
+    a commit each — they now start at 512 and double on each commit up
+    to 4,096 (halving on a conflict).  At 200,000 rows: 2.25 → 1.02 s
+    (transactional 0.59 s).
+  - **Next steps:** none — §M14.18 ✅ (2026-11-15); next §M14.29 S5
+    (the order agreed is in §M14.30).
 - **Health checks**: liveness and readiness endpoints for orchestrators
   (`/health/live`, `/health/ready` — ready only once recovery is done and
   the store is open), and `nucleus status` for people.
@@ -9624,6 +9645,10 @@ to run nucleus in production; the distributed layer's analysis is
   each).
 - **S3 — OSS-Fuzz**: the same targets submitted to Google's OSS-Fuzz,
   which runs them continuously and files what it finds privately.
+  *When* (decided 2026-11-15): with S4, before the first production
+  release — OSS-Fuzz admits projects in wide use or critical to
+  infrastructure, which a project without users is not yet; until
+  then the targets run in CI (S2).
 - **S4 — an independent security audit through OSTIF** (the Open Source
   Technology Improvement Fund, which arranges and funds audits of open
   source projects), before the first release meant for production: the
@@ -9644,8 +9669,13 @@ forbids in nucleus's own histories.
 
 ### §M14.30 — Encryption and key custody ⬜
 
-Planned 2026-11-15, after §M14.18 O5 (the order agreed: §M14.18 O5,
-then §M14.29 S5 and S3, then this; §M14.28 when needed).  Asked for:
+Planned 2026-11-15, after §M14.18 O5.  The order agreed (2026-11-15):
+§M14.18 O5, §M14.29 S5, this milestone's K1–K5, §M14.31 P1 (the method
+of measuring: §M14.28's verdict is a benchmark's), §M14.28 L1–L5,
+§M14.15's open performance items, then §F2.  What waits on others comes before the
+first production release, not before §F2: §M14.29 S3 (OSS-Fuzz admits
+projects in wide use) and S4 (an auditor, funding), K6 (the hardware),
+§M14.31's runs in the cloud and its leaderboards.  Asked for:
 data hidden from whoever should not read it — with the keys held by the
 database, by its user, or by an external KMS — and, for serving AI
 models' users (memories of a model's users kept by a provider), data
@@ -9750,8 +9780,10 @@ large for what it buys).  Embeddings are not hidden by this: a vector
 gives away much of its text (inversion attacks, vec2text) — a column
 whose vector the server computes is not zero-knowledge, and is said so.
 
-**K6 — a confidential-computing mode.**  For full features with an
-operator who cannot look: the server runs inside an attested trusted
+**K6 — a confidential-computing mode.**  *When:* after K1–K5, before
+the first production release (it needs SEV-SNP, TDX or Nitro hardware;
+decided 2026-11-15).  For full features with an operator who cannot
+look: the server runs inside an attested trusted
 execution environment (AMD SEV-SNP, Intel TDX, AWS Nitro Enclaves); the
 KMS releases the root only to the measured binary (the attestation
 document checked by the KMS's key policy), so the operator, the host
@@ -9776,6 +9808,80 @@ live rows readable; a client-side encrypted column round-trips through
 every driver with the server never seeing the plaintext; and the
 confidential mode's key release is refused to a binary whose
 measurement differs.
+
+### §M14.31 — Public benchmarks, reliably measured ⬜
+
+Planned 2026-11-15.  Asked for: nucleus on the public leaderboards, and
+measured on dedicated machines in the cloud — and above both, numbers
+that can be trusted.  A number is worth its method: a leaderboard entry
+that cannot be reproduced, or a comparison with a system run untuned,
+costs more trust than it wins.
+
+**Where it stands.**  Each milestone measured itself locally
+(`docs/benchmarks.md`): an Apple M2 Pro, nucleus native and PostgreSQL in
+Docker's Linux VM (not the same conditions), mostly the best of three
+runs, often one session; changes compared by alternating two builds
+(`bench/phases.py`), since the machine's load moves numbers by 10 % and
+more.  CI runs `bench/run.py` on every push without thresholds: shared
+runners are too noisy.  Good enough to steer the work; not enough to
+publish against others.
+
+**P1 — the method** (no one else needed: before §M14.28, whose L5
+verdict is a benchmark's — decided 2026-11-15).
+One harness every published number goes through:
+- *The environment recorded with the result*: machine (instance type,
+  CPU model, cores, memory, disk and its provisioned throughput), OS and
+  kernel, frequency governor, turbo and SMT, NUMA placement, versions
+  and settings of every system measured, the data's checksum.
+- *Repetition and statistics*: cold and warm runs reported apart; n runs
+  (≥ 5) per query and the median with a bootstrap confidence interval
+  and the coefficient of variation — a result whose spread exceeds a
+  bound is rerun or flagged, never reported as a point; comparisons by
+  interleaved runs (ABAB) on one machine, a difference claimed only
+  outside both intervals.
+- *Correctness*: every query's answer checked against a reference (the
+  other system's, or a stored one) — a fast wrong answer is no result.
+- *Fair baselines*: every other system at its documented tuning for the
+  machine (or the leaderboard's own configuration of it), on the same
+  machine in the same session, its version recorded; nucleus not tuned
+  per query.  The local runs of `docs/benchmarks.md` move to it too
+  (PostgreSQL native, not in a VM).
+- *Reproducible*: one script from a fresh machine to the results
+  (infrastructure as code); raw results and logs published beside the
+  summary.
+Prior art: Raasveldt, Holanda, Gubner, Mühleisen, "Fair Benchmarking
+Considered Difficult" (DBTest 2018: the common pitfalls — untuned
+baselines, cold/hot mixed, wrong answers, unequal settings — as a
+checklist); Georges, Buytaert, Eeckhout, "Statistically Rigorous Java
+Performance Evaluation" (OOPSLA 2007: intervals, not best-of-n);
+Mytkowicz et al., "Producing Wrong Data Without Doing Anything Obviously
+Wrong!" (ASPLOS 2009: layout and environment bias — the environment
+varied, not fixed once); Uta et al., "Is Big Data Performance
+Reproducible in Modern Cloud Networks?" (NSDI 2020: cloud variability
+needs repeated runs across instances and days).
+
+**P2 — dedicated runs in the cloud** (needs an account and a budget: the
+user's decision).  Non-burstable instances on dedicated hosts or bare
+metal; the suites (`bench/run.py`, TPC-H, ClickBench, the vector, text,
+JSON and memory benchmarks of §M14.12–§M14.24) on a schedule and on
+release candidates, each on more than one fresh instance; a regression
+reported when it is a change point beyond the noise, not a single bad
+run.  Prior art: MongoDB's change-point detection in its performance CI
+(Daly et al., ICPE 2020), DataStax's Hunter, ClickHouse's per-commit
+performance tests (old and new build on one machine, interleaved).
+
+**P3 — the leaderboards**, each entry by its own rules, its scripts
+submitted upstream for anyone to rerun: ClickBench (its instance and
+disk, cold and hot runs), JSONBench (§M14.15), ann-benchmarks and
+VectorDBBench (§M14.12), DuckDB Labs' db-benchmark (group by, join);
+TPC-H and TPC-DS results published as "derived from" (an audited TPC
+result is not the aim).
+
+**Done when:** every number nucleus publishes — in `docs/benchmarks.md`
+and on a leaderboard — carries its environment, its runs, its spread
+and the script that made it; a second fresh instance reproduces each
+within its interval; the scheduled cloud runs catch a regression
+planted in a test build; and the entries are merged upstream.
 
 ---
 

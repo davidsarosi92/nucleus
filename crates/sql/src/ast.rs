@@ -223,7 +223,8 @@ pub enum Statement {
         /// `IF EXISTS`.
         if_exists: bool,
     },
-    /// `ALTER TABLE t ALTER [COLUMN] c [SET DATA] TYPE type [USING expr]`.
+    /// `ALTER TABLE t ALTER [COLUMN] c [SET DATA] TYPE type [USING expr]
+    /// [CONCURRENTLY]`.
     AlterColumnType {
         /// Table.
         table: String,
@@ -235,6 +236,11 @@ pub enum Statement {
         typmod: TypeMod,
         /// How each value converts (over the row): else a cast.
         using: Option<Expr>,
+        /// `using`'s SQL text.
+        using_text: Option<String>,
+        /// `CONCURRENTLY`: online, in transactions of its own
+        /// ([`crate::retype`]).
+        concurrently: bool,
     },
     /// `CREATE ROLE name [WITH] options` (`CREATE USER`: `LOGIN` by
     /// default).
