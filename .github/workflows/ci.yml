@@ -42,6 +42,37 @@ jobs:
       - run: scripts/check-boundaries.py
       - run: scripts/detach-test.sh
 
+  # The monitoring shipped with nucleus (PLAN.md §M14.18 O2): the alert
+  # rules' tests in promtool, a Prometheus scraping a server with the rules
+  # loaded, an OpenTelemetry Collector receiving its metrics over OTLP.
+  monitoring:
+    name: monitoring (Prometheus, OpenTelemetry)
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_VERSION: 3.5.0
+      OTELCOL_VERSION: 0.130.0
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: monitoring
+      - name: Prometheus and the OpenTelemetry Collector
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          p=prometheus-$PROMETHEUS_VERSION.linux-amd64
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v$PROMETHEUS_VERSION/$p.tar.gz"
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v$PROMETHEUS_VERSION/sha256sums.txt" | grep " $p.tar.gz\$" | sha256sum -c -
+          tar -xzf "$p.tar.gz" && cp "$p/prometheus" "$p/promtool" .
+          o=otelcol_${OTELCOL_VERSION}_linux_amd64.tar.gz
+          curl -fsSLO "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTELCOL_VERSION/$o"
+          curl -fsSL "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTELCOL_VERSION/opentelemetry-collector-releases_otelcol_checksums.txt" | grep " $o\$" | sha256sum -c -
+          tar -xzf "$o" otelcol
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+      - run: cargo build -p nucleus-cli
+      - run: monitoring/test.sh target/debug/nucleus
+
   # The drivers (PLAN.md §M14.8) and the examples, against a real server.
   drivers:
     name: drivers (Rust, C, C++, Python, JS/TS, Java, Swift)

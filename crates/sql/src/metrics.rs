@@ -5,7 +5,7 @@
 
 use std::sync::OnceLock;
 
-use nucleus_platform::metrics::{Collector, Counter, CounterFamily, Histogram, global};
+use nucleus_platform::metrics::{Collector, Counter, CounterFamily, Histogram, Kind, global};
 
 /// Statements that read only.
 pub static READS: Counter = Counter::labeled(
@@ -149,10 +149,12 @@ pub fn register() {
                 &[],
                 f64::from(u8::from(nucleus_platform::metrics::ready())),
             );
+            const SESSIONS: &str = "Sessions open now, by front end.";
+            s.declare("nucleus_sessions", SESSIONS, Kind::Gauge);
             for (front_end, n) in crate::sessions::by_front_end() {
                 s.gauge(
                     "nucleus_sessions",
-                    "Sessions open now, by front end.",
+                    SESSIONS,
                     &[("front_end", &front_end)],
                     n as f64,
                 );

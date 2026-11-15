@@ -164,6 +164,19 @@ impl Snapshot {
         });
     }
 
+    /// Declares family `name` without a sample (yet): exporters show it
+    /// with none, so a series that is sometimes absent (no session open)
+    /// has its family there all the same.
+    pub fn declare(&mut self, name: &str, help: &str, kind: Kind) {
+        self.families
+            .entry(name.to_string())
+            .or_insert_with(|| Family {
+                help: help.to_string(),
+                kind,
+                samples: Vec::new(),
+            });
+    }
+
     /// A counter's sample.
     pub fn counter(&mut self, name: &str, help: &str, labels: &[(&str, &str)], v: u64) {
         self.add(name, help, labels, Value::Counter(v));
@@ -433,16 +446,8 @@ impl CounterFamily {
 impl Instrument for CounterFamily {
     fn collect(&self, out: &mut Snapshot) {
         let c = lock(&self.children);
-        if c.is_empty() {
-            // The family is there, without series, until one is used.
-            out.families
-                .entry(self.name.to_string())
-                .or_insert_with(|| Family {
-                    help: self.help.to_string(),
-                    kind: Kind::Counter,
-                    samples: Vec::new(),
-                });
-        }
+        // The family is there, without series, until one is used.
+        out.declare(self.name, self.help, Kind::Counter);
         for (v, a) in c.iter() {
             out.counter(
                 self.name,

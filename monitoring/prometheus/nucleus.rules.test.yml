@@ -1,0 +1,329 @@
+# promtool test rules nucleus.rules.test.yml (monitoring/test.sh): each
+# alert provoked by series made for it — quiet before its time, firing
+# after — and healthy numbers firing none.
+rule_files:
+  - nucleus.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: NucleusDown
+    interval: 1m
+    input_series:
+      - series: 'up{job="nucleus",instance="db:20037"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: NucleusDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: NucleusDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'nucleus at db:20037 does not answer scrapes'
+              runbook: 'DOCS.md §8.39 NucleusDown'
+  - name: NucleusNotReady
+    interval: 1m
+    input_series:
+      - series: 'nucleus_ready{job="nucleus",instance="db:20037"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NucleusNotReady
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: NucleusNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'nucleus at db:20037 is up but not ready'
+              runbook: 'DOCS.md §8.39 NucleusNotReady'
+  - name: NucleusDiskSpaceLow
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
+        values: '5x20'
+      - series: 'node_filesystem_size_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NucleusDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: NucleusDiskSpaceLow
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: 'node'
+              instance: 'node:9100'
+              mountpoint: '/data'
+              fstype: 'ext4'
+              device: 'sda'
+            exp_annotations:
+              summary: '/data on node:9100 has less than 10% free'
+              runbook: 'DOCS.md §8.39 NucleusDiskSpaceLow'
+  - name: NucleusDiskFillingUp
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
+        values: '1000-1x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NucleusDiskFillingUp
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NucleusDiskFillingUp
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'node'
+              instance: 'node:9100'
+              mountpoint: '/data'
+              fstype: 'ext4'
+              device: 'sda'
+            exp_annotations:
+              summary: '/data on node:9100 fills within a day at this rate'
+              runbook: 'DOCS.md §8.39 NucleusDiskFillingUp'
+  - name: NucleusWalNotCheckpointed
+    interval: 1m
+    input_series:
+      - series: 'nucleus_wal_since_checkpoint_bytes{job="nucleus",instance="db:20037"}'
+        values: '5e9x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NucleusWalNotCheckpointed
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: NucleusWalNotCheckpointed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'nucleus at db:20037 has over 4 GiB of WAL since its last checkpoint'
+              runbook: 'DOCS.md §8.39 NucleusWalNotCheckpointed'
+  - name: NucleusLongTransaction
+    interval: 1m
+    input_series:
+      - series: 'nucleus_oldest_transaction_seconds{job="nucleus",instance="db:20037"}'
+        values: '4000+60x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NucleusLongTransaction
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: NucleusLongTransaction
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'a transaction on db:20037 has run for over an hour'
+              runbook: 'DOCS.md §8.39 NucleusLongTransaction'
+  - name: NucleusConflictRateHigh
+    interval: 1m
+    input_series:
+      - series: 'nucleus_conflicts_total{job="nucleus",instance="db:20037"}'
+        values: '0+60x40'
+      - series: 'nucleus_commits_total{job="nucleus",instance="db:20037"}'
+        values: '0+600x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NucleusConflictRateHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NucleusConflictRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'over 5% of transactions on db:20037 meet a serialization conflict'
+              runbook: 'DOCS.md §8.39 NucleusConflictRateHigh'
+  - name: NucleusCacheHitRatioLow
+    interval: 1m
+    input_series:
+      - series: 'nucleus_cache_hits_total{job="nucleus",instance="db:20037"}'
+        values: '0+6000x60'
+      - series: 'nucleus_cache_misses_total{job="nucleus",instance="db:20037"}'
+        values: '0+3000x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NucleusCacheHitRatioLow
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: NucleusCacheHitRatioLow
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'the page cache of db:20037 answers under 90% of page reads'
+              runbook: 'DOCS.md §8.39 NucleusCacheHitRatioLow'
+  - name: NucleusLoginFailures
+    interval: 1m
+    input_series:
+      - series: 'nucleus_logins_refused_total{job="nucleus",instance="db:20037",front_end="ncp"}'
+        values: '0+120x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NucleusLoginFailures
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NucleusLoginFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'db:20037 refuses over one login a second'
+              runbook: 'DOCS.md §8.39 NucleusLoginFailures'
+  - name: NucleusRoleLocked
+    interval: 1m
+    input_series:
+      - series: 'nucleus_logins_locked_total{job="nucleus",instance="db:20037"}'
+        values: '0 0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NucleusRoleLocked
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: NucleusRoleLocked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'a role on db:20037 is locked after failed logins'
+              runbook: 'DOCS.md §8.39 NucleusRoleLocked'
+  - name: NucleusStatementErrors
+    interval: 1m
+    input_series:
+      - series: 'nucleus_statement_errors_total{job="nucleus",instance="db:20037"}'
+        values: '0+60x40'
+      - series: 'nucleus_statements_total{job="nucleus",instance="db:20037",kind="read"}'
+        values: '0+300x40'
+      - series: 'nucleus_statements_total{job="nucleus",instance="db:20037",kind="write"}'
+        values: '0+300x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NucleusStatementErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NucleusStatementErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'over 5% of statements on db:20037 fail'
+              runbook: 'DOCS.md §8.39 NucleusStatementErrors'
+  - name: NucleusSlowStatements
+    interval: 1m
+    input_series:
+      - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="0.262144"}'
+        values: '0x40'
+      - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="1.048576"}'
+        values: '0x40'
+      - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="4.194304"}'
+        values: '0+60x40'
+      - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="+Inf"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NucleusSlowStatements
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: NucleusSlowStatements
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'the slowest 1% of statements on db:20037 take over a second'
+              runbook: 'DOCS.md §8.39 NucleusSlowStatements'
+  - name: healthy
+    interval: 1m
+    input_series:
+      - series: 'up{job="nucleus",instance="db:20037"}'
+        values: '1x60'
+      - series: 'nucleus_ready{job="nucleus",instance="db:20037"}'
+        values: '1x60'
+      - series: 'nucleus_wal_since_checkpoint_bytes{job="nucleus",instance="db:20037"}'
+        values: '1e8x60'
+      - series: 'nucleus_oldest_transaction_seconds{job="nucleus",instance="db:20037"}'
+        values: '2x60'
+      - series: 'nucleus_conflicts_total{job="nucleus",instance="db:20037"}'
+        values: '0+1x60'
+      - series: 'nucleus_commits_total{job="nucleus",instance="db:20037"}'
+        values: '0+600x60'
+      - series: 'nucleus_cache_hits_total{job="nucleus",instance="db:20037"}'
+        values: '0+60000x60'
+      - series: 'nucleus_cache_misses_total{job="nucleus",instance="db:20037"}'
+        values: '0+100x60'
+      - series: 'nucleus_logins_refused_total{job="nucleus",instance="db:20037",front_end="ncp"}'
+        values: '0+1x60'
+      - series: 'nucleus_logins_locked_total{job="nucleus",instance="db:20037"}'
+        values: '0x60'
+      - series: 'nucleus_statement_errors_total{job="nucleus",instance="db:20037"}'
+        values: '0+1x60'
+      - series: 'nucleus_statements_total{job="nucleus",instance="db:20037",kind="read"}'
+        values: '0+600x60'
+      - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="0.001024"}'
+        values: '0+600x60'
+      - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="+Inf"}'
+        values: '0+600x60'
+      - series: 'node_filesystem_avail_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
+        values: '500x60'
+      - series: 'node_filesystem_size_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
+        values: '1000x60'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: NucleusDown
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusNotReady
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusDiskFillingUp
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusWalNotCheckpointed
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusLongTransaction
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusConflictRateHigh
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusCacheHitRatioLow
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusLoginFailures
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusRoleLocked
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusStatementErrors
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusSlowStatements
+        exp_alerts: []

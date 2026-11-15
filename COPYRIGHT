@@ -40,6 +40,7 @@ the database, so that any program, open or closed, can:
   crates/wire/      the protocol's wire format
   crates/crypto/    the hashes and SCRAM it authenticates with
   examples/         the examples, to copy from
+  monitoring/       the alert rules and the dashboard, to copy from
 
 The database itself, where a driver's package carries it — the embedded
 edition's library in the Python wheel, drivers/js/wasm/nucleus.wasm in

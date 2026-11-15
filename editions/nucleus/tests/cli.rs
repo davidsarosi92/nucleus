@@ -743,6 +743,12 @@ fn metrics_and_health_checks() {
         after.contains("# TYPE nucleus_statement_duration_seconds histogram"),
         "{after}"
     );
+    // No session open while scraped: the family is there all the same.
+    assert!(after.contains("# TYPE nucleus_sessions gauge"), "{after}");
+    assert!(
+        sample(&after, "nucleus_oldest_transaction_seconds") < 60.0,
+        "{after}"
+    );
     // OpenMetrics when asked.
     let (_, om) = http_get(
         &metrics,

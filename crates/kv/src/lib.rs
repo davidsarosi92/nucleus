@@ -952,6 +952,12 @@ fn collect_metrics(engine: nucleus_txn::Engine) -> nucleus_platform::metrics::Co
             engine.running() as f64,
         );
         s.gauge(
+            "nucleus_oldest_transaction_seconds",
+            "How long the oldest running transaction has run (0 when none runs).",
+            &[],
+            engine.oldest_running().map_or(0.0, |d| d.as_secs_f64()),
+        );
+        s.gauge(
             "nucleus_branches",
             "The database's branches, main included.",
             &[],

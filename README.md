@@ -321,8 +321,8 @@ Report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
 
 The database is free software under the GNU Affero General Public
 License, version 3 only — see [LICENSE](LICENSE) and [COPYRIGHT](COPYRIGHT), which
-also says what is under MIT: the drivers, the Rust client and the
-examples, so that any program — open or closed — can use nucleus.  Who
+also says what is under MIT: the drivers, the Rust client, the
+examples and the monitoring rules, so that any program — open or closed — can use nucleus.  Who
 offers a modified nucleus as a network service shares its changes.  A
 commercial licence for the database is available from the copyright
 holder.  Original author: Dávid Sárosi ([AUTHORS](AUTHORS)); contributing:

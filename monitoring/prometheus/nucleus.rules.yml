@@ -1,0 +1,124 @@
+# Alert rules for nucleus (PLAN.md §M14.18 O2): load them into
+# Prometheus (rule_files) beside a scrape job named `nucleus` of
+# `nucleus server --metrics`.  Each has a runbook entry in DOCS.md §8.39.
+# Tested by promtool (nucleus.rules.test.yml; monitoring/test.sh).
+# The disk rules read node_exporter's file-system metrics: scope them to
+# the data directory's file system with a mountpoint matcher.
+groups:
+  - name: nucleus
+    rules:
+      - alert: NucleusDown
+        expr: up{job="nucleus"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "nucleus at {{ $labels.instance }} does not answer scrapes"
+          runbook: "DOCS.md §8.39 NucleusDown"
+
+      - alert: NucleusNotReady
+        expr: nucleus_ready == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nucleus at {{ $labels.instance }} is up but not ready"
+          runbook: "DOCS.md §8.39 NucleusNotReady"
+
+      - alert: NucleusDiskSpaceLow
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} < 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} has less than 10% free"
+          runbook: "DOCS.md §8.39 NucleusDiskSpaceLow"
+
+      - alert: NucleusDiskFillingUp
+        expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[6h], 24 * 3600) < 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} fills within a day at this rate"
+          runbook: "DOCS.md §8.39 NucleusDiskFillingUp"
+
+      - alert: NucleusWalNotCheckpointed
+        expr: nucleus_wal_since_checkpoint_bytes > 4 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nucleus at {{ $labels.instance }} has over 4 GiB of WAL since its last checkpoint"
+          runbook: "DOCS.md §8.39 NucleusWalNotCheckpointed"
+
+      - alert: NucleusLongTransaction
+        expr: nucleus_oldest_transaction_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "a transaction on {{ $labels.instance }} has run for over an hour"
+          runbook: "DOCS.md §8.39 NucleusLongTransaction"
+
+      - alert: NucleusConflictRateHigh
+        expr: |
+          rate(nucleus_conflicts_total[10m]) > 0.1
+            and rate(nucleus_conflicts_total[10m]) > 0.05 * rate(nucleus_commits_total[10m])
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "over 5% of transactions on {{ $labels.instance }} meet a serialization conflict"
+          runbook: "DOCS.md §8.39 NucleusConflictRateHigh"
+
+      - alert: NucleusCacheHitRatioLow
+        expr: |
+          rate(nucleus_cache_hits_total[15m])
+            / (rate(nucleus_cache_hits_total[15m]) + rate(nucleus_cache_misses_total[15m])) < 0.90
+          and (rate(nucleus_cache_hits_total[15m]) + rate(nucleus_cache_misses_total[15m])) > 100
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "the page cache of {{ $labels.instance }} answers under 90% of page reads"
+          runbook: "DOCS.md §8.39 NucleusCacheHitRatioLow"
+
+      - alert: NucleusLoginFailures
+        expr: sum by (instance, job) (rate(nucleus_logins_refused_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} refuses over one login a second"
+          runbook: "DOCS.md §8.39 NucleusLoginFailures"
+
+      - alert: NucleusRoleLocked
+        expr: increase(nucleus_logins_locked_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "a role on {{ $labels.instance }} is locked after failed logins"
+          runbook: "DOCS.md §8.39 NucleusRoleLocked"
+
+      - alert: NucleusStatementErrors
+        expr: |
+          rate(nucleus_statement_errors_total[5m])
+            > 0.05 * sum without (kind) (rate(nucleus_statements_total[5m]))
+          and rate(nucleus_statement_errors_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "over 5% of statements on {{ $labels.instance }} fail"
+          runbook: "DOCS.md §8.39 NucleusStatementErrors"
+
+      - alert: NucleusSlowStatements
+        expr: |
+          histogram_quantile(0.99, sum by (instance, job, le) (rate(nucleus_statement_duration_seconds_bucket[5m]))) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the slowest 1% of statements on {{ $labels.instance }} take over a second"
+          runbook: "DOCS.md §8.39 NucleusSlowStatements"

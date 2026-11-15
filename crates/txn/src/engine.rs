@@ -135,6 +135,11 @@ struct Inner {
     /// Start timestamps of running transactions (with counts), guarding
     /// their versions from garbage collection.
     active: Mutex<BTreeMap<u64, usize>>,
+    /// When each running transaction began (µs since the epoch) and a
+    /// number telling it apart: the oldest's age is a metric (PLAN.md
+    /// §M14.18).
+    began: Mutex<std::collections::BTreeSet<(u64, u64)>>,
+    began_seq: AtomicU64,
     /// What recent commits wrote (keys, and the spans of those that
     /// spilled), with their timestamps: what writes check conflicts and
     /// serializable transactions validate their reads against.  Commits
@@ -575,6 +580,8 @@ impl Engine {
                 commit: Mutex::new(recovery.meta),
                 visible: AtomicU64::new(recovery.meta),
                 active: Mutex::new(BTreeMap::new()),
+                began: Mutex::new(std::collections::BTreeSet::new()),
+                began_seq: AtomicU64::new(0),
                 recent: Mutex::new(Recent::default()),
                 next_id: AtomicU64::new(1),
                 spilling: RwLock::new(BTreeMap::new()),
@@ -718,6 +725,15 @@ impl Engine {
         lock(&self.inner.active).values().sum()
     }
 
+    /// How long the oldest running transaction has run (`None`: none
+    /// runs) — by the platform's wall clock.
+    pub fn oldest_running(&self) -> Option<std::time::Duration> {
+        let oldest = lock(&self.inner.began).first()?.0;
+        Some(std::time::Duration::from_micros(
+            self.inner.wall_micros().saturating_sub(oldest),
+        ))
+    }
+
     /// The newest snapshot a transaction would see.
     pub fn visible(&self) -> Timestamp {
         Timestamp(self.inner.visible.load(Ordering::Acquire))
@@ -800,9 +816,15 @@ impl Engine {
             start
         };
         self.inner.begun.fetch_add(1, Ordering::Relaxed);
+        let began = (
+            self.inner.wall_micros(),
+            self.inner.began_seq.fetch_add(1, Ordering::Relaxed),
+        );
+        lock(&self.inner.began).insert(began);
         Ok(Transaction {
             engine: Arc::clone(&self.inner),
             start,
+            began,
             writes: WriteSet::default(),
             write_bytes: 0,
             spilled: None,
@@ -1918,6 +1940,8 @@ pub struct Transaction {
     read_only: bool,
     isolation: Isolation,
     done: bool,
+    /// When it began, in [`Inner::began`].
+    began: (u64, u64),
     /// What was read, for validation at commit: every read of a
     /// serializable transaction, and the validated reads
     /// ([`Transaction::get_validated`], [`Transaction::scan_validated`]) of
@@ -2065,6 +2089,8 @@ impl Drop for Transaction {
                 active.remove(&self.start);
             }
         }
+        drop(active);
+        lock(&self.engine.began).remove(&self.began);
     }
 }
 

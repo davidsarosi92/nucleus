@@ -57,6 +57,7 @@
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
 | `packaging` | — | the container image's `Dockerfile` (§6.3) | §M14.17 |
+| `monitoring` | — | Prometheus alert rules and their `promtool` tests, a Grafana dashboard, `test.sh` (the real Prometheus and OpenTelemetry Collector against a server; MIT, to copy from) (§8.39) | §M14.18 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
 | `docs/memory.md` | — | the guide to memory for AI applications: a knowledge base with citations, a memory per user, read records, erasure, backups — in SQL, Python, JavaScript and over MCP | §M14.24 ✅ |
 | `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL; `bench/text/`, the full-text data), its latest results and targets | §M14.11, §M14.12 V4, §M14.21 |
@@ -5858,6 +5859,7 @@ schedule.
 | `nucleus_commits_total`, `nucleus_rollbacks_total` | counter | transactions committed; ended otherwise (rolled back, dropped, a failed commit) |
 | `nucleus_conflicts_total` | counter | serialization conflicts (`40001`) |
 | `nucleus_transactions_running` | gauge | transactions running |
+| `nucleus_oldest_transaction_seconds` | gauge | how long the oldest running transaction has run |
 | `nucleus_wal_bytes_total`, `nucleus_wal_syncs_total` | counter | bytes appended to the WAL; syncs that made it durable (a group commit is one) |
 | `nucleus_wal_since_checkpoint_bytes` | gauge | the main branch's WAL since its last checkpoint |
 | `nucleus_checkpoints_total` | counter | checkpoints finished |
@@ -5902,6 +5904,40 @@ when sending works; TLS to anything but loopback.
 Recording costs nothing measurable: the kv benchmark and `bench/run.py`
 against the commit before, within the runs' spread
 (`docs/benchmarks.md`, Metrics).
+
+### 8.39 Alerts and their runbook (`monitoring/`, §M14.18 O2)
+
+`monitoring/prometheus/nucleus.rules.yml` holds the recommended alert
+rules, for a scrape job named `nucleus`; `monitoring/grafana/nucleus.json`
+a dashboard of the same metrics (readiness, sessions, statements and
+their p50/p99, transactions, rows, the page cache, the WAL, the data
+file, logins, models).  `monitoring/prometheus/nucleus.rules.test.yml`
+provokes each alert with series made for it in `promtool test rules`
+(quiet before its time, firing after, and none on healthy numbers), and
+`monitoring/test.sh` checks the rest against the real tools: every
+`nucleus_*` metric the rules and the dashboard read is served, a
+Prometheus scrapes a server with the rules loaded and sees its numbers
+move, an OpenTelemetry Collector receives them over OTLP — CI's job
+**monitoring**.  The disk rules read node_exporter's file-system
+metrics: nucleus does not measure the disk.
+
+| alert | fires when | what to do |
+|---|---|---|
+| `NucleusDown` (critical) | a scrape fails for 1 min | Is the process running (`nucleus status`, the service's log)?  A crash leaves its message on stderr; restart — recovery replays the WAL.  If it runs, check the `--metrics` listener and the network. |
+| `NucleusNotReady` | `nucleus_ready` 0 for 5 min | It is recovering (a long WAL replays after a crash) or failed to open: its log says which.  A recovery ends by itself; a store that will not open is a case for `nucleus restore`. |
+| `NucleusDiskSpaceLow` (critical) | under 10% free | Free space or grow the volume before writes fail; `nucleus_data_file_free_bytes` is space the file reuses before it grows; `VACUUM` frees versions no one reads, a shorter `--history` keeps fewer. |
+| `NucleusDiskFillingUp` | full within a day at the 6-hour rate | As above, before it is urgent; find what writes (`nc_catalog.statements` by rows). |
+| `NucleusWalNotCheckpointed` | over 4 GiB of WAL since a checkpoint for 15 min | Checkpoints normally run every 1 GiB: one failing (the log says why, often the disk) or a branch's writes very fast.  A long WAL makes a crash's recovery long. |
+| `NucleusLongTransaction` | one transaction over an hour | Find it (`nc_catalog.sessions`); an idle client holding `BEGIN` keeps every version since alive (vacuum waits) and its writes' conflicts open.  End the session if it is abandoned. |
+| `NucleusConflictRateHigh` | over 5% of commits meet a serialization conflict (and > 0.1/s) | Clients must retry `40001`; many conflicts mean hot rows written by many — narrow the transactions or the rows they write. |
+| `NucleusCacheHitRatioLow` (info) | under 90% of page reads from the cache, at > 100 reads/s, for 30 min | The working set outgrew `--cache`: give it more memory, or find the scans (`nc_catalog.statements` by `rows_read`, `nc_catalog.index_advice`). |
+| `NucleusLoginFailures` | over one refused login a second for 5 min | A misconfigured client or someone guessing passwords: the audit log (`nc_catalog.audit`) has who and from where; the throttle locks a role after repeated failures. |
+| `NucleusRoleLocked` | a role was locked after failed logins | As above; the lock ends by itself (`login_lock_time`). |
+| `NucleusStatementErrors` | over 5% of statements fail (and > 0.1/s) for 10 min | Read the errors' codes in the clients' logs; `nc_catalog.statements` counts `errors` per statement. |
+| `NucleusSlowStatements` | p99 over a second for 15 min | `nc_catalog.statements` by `mean_ms`, then `EXPLAIN ANALYZE` and `nc_catalog.index_advice`. |
+
+Backups' and restore tests' alerts come with them (O3, O4), replication
+lag's with §M17.5.
 
 ## 9. Server (`nucleus-server`)
 
@@ -6928,6 +6964,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — §M14.18 O2, alerts:** `monitoring/` — alert rules
+  and their promtool tests, a Grafana dashboard, `test.sh` with a real
+  Prometheus and OpenTelemetry Collector (CI's **monitoring**);
+  `nucleus_oldest_transaction_seconds`; the runbook (§8.39).
 - **2026-11-15 — §M14.18 O1, metrics:** the registry and the
   `Exporter` interface (`nucleus_platform::metrics`), the layers'
   instruments, `nc_catalog.metrics`, `nucleus status`, the modules
