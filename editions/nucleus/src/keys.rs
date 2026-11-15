@@ -133,9 +133,50 @@ pub fn install(
         kv,
         subject_file.unwrap_or_else(|| keyring::beside(dir, "subject-keys")),
     )?;
-    nucleus_sql::subject_keys::set_subject_keys(Some(subjects));
+    nucleus_sql::subject_keys::set_subject_keys(Some(subjects.clone()));
+    // A rotation of a data key cut short: finished now.
+    finish_rotations(&ring, kv, &subjects)?;
     nucleus_sql::keys::set_custody(Some(ring.clone() as Arc<dyn nucleus_sql::keys::Custody>));
     Ok(ring)
+}
+
+/// Finishes the rotations of data keys begun before (§M14.30 K1e): what
+/// the key being replaced sealed sealed again with the new one, then the
+/// old one dropped from the keyring — `secrets` (the secrets' records, in
+/// one transaction), `subjects` (the subject keys' table).  Run at start
+/// and by `nucleus keys rotate`; each step may be repeated.
+fn finish_rotations(
+    ring: &Arc<Keyring>,
+    kv: &Arc<dyn Kv>,
+    subjects: &SubjectKeyFile,
+) -> Result<(), String> {
+    if ring.rotating("secrets")? {
+        let ts = nucleus_sql::datetime::from_system(kv.wall_clock());
+        let n = nucleus_sql::datetime::with_now(ts, kv, || -> Result<u64, String> {
+            let mut txn = kv
+                .begin(nucleus_kv::TxnOptions::default())
+                .map_err(|e| e.to_string())?;
+            let n = nucleus_sql::secrets::reseal(&mut *txn).map_err(|e| e.message)?;
+            txn.commit().map_err(|e| e.to_string())?;
+            Ok(n)
+        })?;
+        ring.retire("secrets")?;
+        nucleus_platform::log!(
+            "nucleus: the secrets' key rotated: {n} secret{} sealed again",
+            if n == 1 { "" } else { "s" }
+        );
+    }
+    if ring.rotating("subjects")? {
+        if subjects.in_the_clear()?.is_some() {
+            subjects.seal_now()?;
+        }
+        ring.retire("subjects")?;
+        nucleus_platform::log!(
+            "nucleus: the subject keys' key rotated: {} sealed again",
+            subjects.path().display()
+        );
+    }
+    Ok(())
 }
 
 /// The subjects' keys in `file`, sealed under `ring` (§M14.30 K1d): a
@@ -167,14 +208,39 @@ pub fn subject_keys(
     Ok(Arc::new(sealed))
 }
 
-/// `nucleus keys <dir> list | import [options]`.
+/// The usage of `nucleus keys`.
+pub const USAGE: &str = "usage: nucleus keys <dir> list|import [options]
+       nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
+                  | --to-root-passphrase-env <var> | --to-managed-root  [options]
+       nucleus keys <dir> rotate secrets|subjects|backup  [options]";
+
+/// `nucleus keys <dir> list | import | rotate-root | rotate [options]`.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let usage = format!("usage: nucleus keys <dir> list|import {OPTIONS}");
+    let usage = format!("{USAGE}\noptions: {OPTIONS}");
     let mut opts = KeyOptions::default();
+    let mut to = None::<Root>;
     let mut positional = Vec::new();
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         if opts.take(a, &mut rest)? {
+            continue;
+        }
+        let mut value = || {
+            rest.next()
+                .cloned()
+                .ok_or_else(|| format!("{a} needs a value"))
+        };
+        let new = match a.as_str() {
+            "--to-root-key" => Some(Root::File(value()?.into())),
+            "--to-root-key-env" => Some(Root::Env(value()?)),
+            "--to-root-passphrase-env" => Some(Root::Passphrase(value()?)),
+            "--to-managed-root" => Some(Root::Managed(PathBuf::new())),
+            _ => None,
+        };
+        if let Some(r) = new {
+            if to.replace(r).is_some() {
+                return Err("one new root (--to-…)".into());
+            }
             continue;
         }
         if a.starts_with("--") {
@@ -182,9 +248,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         positional.push(a.clone());
     }
-    let [dir, what] = positional.as_slice() else {
-        return Err(usage);
+    let (dir, what, purpose) = match positional.as_slice() {
+        [dir, what] => (dir, what, None),
+        [dir, what, purpose] if what == "rotate" => (dir, what, Some(purpose.as_str())),
+        _ => return Err(usage),
     };
+    if (what == "rotate-root") != to.is_some() {
+        return Err(usage);
+    }
     // The database opened: its lock keeps a server from running beside.
     let db = nucleus_kv::Database::open(dir, nucleus_kv::Options::default())
         .map_err(|e| format!("{dir}: {e}"))?;
@@ -224,6 +295,122 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        "rotate-root" => {
+            let ring = Keyring::new(dir, settings, kv);
+            let to = match to.expect("checked") {
+                Root::Managed(_) => Root::Managed(keyring::beside(dir, "root-key")),
+                r => r,
+            };
+            let done = ring.rotate_root_to(&to)?;
+            println!(
+                "root: {} → {} ({}); the data keys wrapped again",
+                done.old, done.new, done.describe
+            );
+            if let Some(f) = &done.removed {
+                println!("the old root's file {} is removed", f.display());
+            }
+            if let Some(f) = &done.retired {
+                println!(
+                    "the old root is kept as {}: the backups made before carry their keys \
+                     wrapped by it — keep it as long as them",
+                    f.display()
+                );
+            } else if !matches!(ring.settings().root, Root::Managed(_)) {
+                println!(
+                    "the old root ({}) is yours: backups made before carry their keys wrapped by \
+                     it — keep it as long as them",
+                    done.old
+                );
+            }
+            println!("start the database with the new root from now on");
+            Ok(())
+        }
+        "rotate" => {
+            let purpose = purpose.expect("matched");
+            let ring = Arc::new(Keyring::new(dir, settings, Arc::clone(&kv)));
+            let began = match purpose {
+                "secrets" | "subjects" => ring.rotate_dek(purpose, true)?,
+                // A backup chain starts again (a full backup) with the new
+                // key; the backups before carry theirs, wrapped by the root.
+                "backup" => ring.rotate_dek(purpose, false)?,
+                _ => return Err(usage),
+            };
+            if !began {
+                println!("{purpose}: a rotation begun before is finished first");
+            }
+            nucleus_sql::secrets::set_keyring(Some(Arc::new(SecretsKey(Arc::clone(&ring)))));
+            let subjects = SubjectKeyFile::sealed(
+                keyring::beside(dir, "subject-keys"),
+                Arc::clone(&kv),
+                Arc::clone(&ring),
+            );
+            let r = finish_rotations(&ring, &kv, &subjects);
+            nucleus_sql::secrets::set_keyring(None);
+            r?;
+            println!(
+                "{purpose}: a new key{}",
+                if purpose == "backup" {
+                    " — the next backup is a full one"
+                } else {
+                    ", what the old one sealed sealed again"
+                }
+            );
+            Ok(())
+        }
         _ => Err(usage),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rotation of the secrets' key: every secret sealed again with the
+    /// new key, its value the same; a rotation cut short still opens them.
+    #[test]
+    fn the_secrets_are_sealed_again_after_a_rotation() {
+        let d = std::env::temp_dir().join(format!("nucleus-rotate-secrets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let db = d.join("db");
+        let db = db.to_str().unwrap();
+        let kv: Arc<dyn Kv> =
+            Arc::new(nucleus_kv::Database::open_in_memory(nucleus_kv::Options::default()).unwrap());
+        let ring = Arc::new(Keyring::new(db, Settings::default_for(db), Arc::clone(&kv)));
+        nucleus_sql::secrets::set_keyring(Some(Arc::new(SecretsKey(Arc::clone(&ring)))));
+        let sealed_with = |kv: &Arc<dyn Kv>| {
+            let txn = kv.begin(nucleus_kv::TxnOptions::read_only()).unwrap();
+            nucleus_sql::secrets::get(&*txn, "api")
+                .unwrap()
+                .map(|s| s.source)
+        };
+        let reveal = |kv: &Arc<dyn Kv>| {
+            let txn = kv.begin(nucleus_kv::TxnOptions::read_only()).unwrap();
+            nucleus_sql::secrets::reveal(&*txn, "api")
+                .unwrap()
+                .expose()
+                .to_string()
+        };
+        nucleus_sql::datetime::with_now(0, &kv, || {
+            let mut txn = kv.begin(nucleus_kv::TxnOptions::default()).unwrap();
+            let v = nucleus_sql::secrets::Given::Value("Badacsony".into());
+            nucleus_sql::secrets::create(&mut *txn, "api", &v, false).unwrap();
+            txn.commit().unwrap();
+        });
+        let before = sealed_with(&kv);
+        assert!(ring.rotate_dek("secrets", true).unwrap());
+        // Cut short: the old key still opens it.
+        assert_eq!(reveal(&kv), "Badacsony");
+        let subjects = SubjectKeyFile::sealed(
+            d.join("db.subject-keys"),
+            Arc::clone(&kv),
+            Arc::clone(&ring),
+        );
+        finish_rotations(&ring, &kv, &subjects).unwrap();
+        assert!(!ring.rotating("secrets").unwrap());
+        assert_ne!(sealed_with(&kv), before);
+        assert_eq!(reveal(&kv), "Badacsony");
+        nucleus_sql::secrets::set_keyring(None);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

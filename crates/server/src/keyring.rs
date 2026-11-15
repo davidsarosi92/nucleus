@@ -18,7 +18,16 @@
 //! root <root id> <custody>
 //! salt <hex> <iterations>                      (a passphrase's root only)
 //! dek <purpose> <key id> <wrapped, hex> <made, µs since 1970>
+//! prev <purpose> <key id> <wrapped, hex> <made>   (a data key being replaced)
 //! ```
+//!
+//! Rotation (K1e): a new root wraps the data keys again — seconds, the
+//! data untouched ([`Keyring::rotate_root_to`]); a database-managed root's
+//! new file is written as `<dir>.root-key.next` and renamed over the old
+//! one after the keyring names it, so a crash between finishes at the next
+//! start.  A new data key ([`Keyring::rotate_dek`]) keeps the one it
+//! replaces as `prev` until what it sealed is sealed again
+//! ([`Keyring::retire`]).
 //!
 //! Each change is a new file, synced and renamed over the old one, the
 //! directory synced.  The key files of before (`<dir>.secrets-key`, …)
@@ -126,6 +135,8 @@ struct Contents {
     /// A passphrase root's salt and iterations.
     salt: Option<(Vec<u8>, u32)>,
     deks: BTreeMap<String, Wrapped>,
+    /// Data keys being replaced: what they sealed is not all sealed again.
+    prev: BTreeMap<String, Wrapped>,
 }
 
 impl Contents {
@@ -137,13 +148,15 @@ impl Contents {
         if let Some((salt, n)) = &self.salt {
             s.push_str(&format!("salt {} {n}\n", keys::to_hex(salt)));
         }
-        for (purpose, w) in &self.deks {
-            s.push_str(&format!(
-                "dek {purpose} {} {} {}\n",
-                w.id,
-                keys::to_hex(&w.blob),
-                w.created
-            ));
+        for (tag, deks) in [("dek", &self.deks), ("prev", &self.prev)] {
+            for (purpose, w) in deks {
+                s.push_str(&format!(
+                    "{tag} {purpose} {} {} {}\n",
+                    w.id,
+                    keys::to_hex(&w.blob),
+                    w.created
+                ));
+            }
         }
         s
     }
@@ -168,8 +181,13 @@ impl Contents {
                         iterations.parse().map_err(|_| bad())?,
                     ))
                 }
-                ["dek", purpose, id, blob, created] => {
-                    c.deks.insert(
+                [tag @ ("dek" | "prev"), purpose, id, blob, created] => {
+                    let deks = if *tag == "dek" {
+                        &mut c.deks
+                    } else {
+                        &mut c.prev
+                    };
+                    deks.insert(
                         purpose.to_string(),
                         Wrapped {
                             id: id.to_string(),
@@ -224,6 +242,55 @@ pub fn read_key_file(path: &Path) -> Result<Option<Key>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
+}
+
+/// A database-managed root's next file during a rotation: `<file>.next`.
+fn next_of(path: &Path) -> PathBuf {
+    let mut n = path.as_os_str().to_owned();
+    n.push(".next");
+    PathBuf::from(n)
+}
+
+/// A rotation of the database-managed root in `path` that a crash cut
+/// short: the keyring names the root of `<path>.next` (`recorded`) — its
+/// rename over the old file done now; a next file the keyring does not
+/// name (the crash came before) removed.
+fn finish_rotation(path: &Path, recorded: Option<&str>) -> Result<(), String> {
+    let next = next_of(path);
+    let Some(n) = read_key_file(&next)? else {
+        return Ok(());
+    };
+    if recorded == Some(n.id(keys::ROOT_ID_LABEL).as_str()) {
+        std::fs::rename(&next, path).map_err(|e| format!("{}: {e}", path.display()))?;
+        nucleus_platform::log!(
+            "nucleus: the rotation of the root key {} finished",
+            path.display()
+        );
+    } else {
+        std::fs::remove_file(&next).map_err(|e| format!("{}: {e}", next.display()))?;
+    }
+    sync_dir(path);
+    Ok(())
+}
+
+/// The cache slot of a data key being replaced.
+fn prev_slot(purpose: &str) -> String {
+    format!("{purpose}\0prev")
+}
+
+/// What [`Keyring::rotate_root_to`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootRotated {
+    /// The old root's id.
+    pub old: String,
+    /// The new root's id.
+    pub new: String,
+    /// Where the new root is.
+    pub describe: String,
+    /// The old database-managed root kept aside (encrypted backups need it).
+    pub retired: Option<PathBuf>,
+    /// The old database-managed root's file, removed.
+    pub removed: Option<PathBuf>,
 }
 
 /// How a variable is read (the process's environment; a test's own).
@@ -333,7 +400,55 @@ impl Keyring {
             return Ok(Some(Arc::clone(r)));
         }
         self.load(st)?;
-        let provider: Arc<dyn KeyProvider> = match &self.settings.root {
+        let c = st.contents.as_mut().expect("loaded");
+        if let Root::Managed(path) = &self.settings.root {
+            finish_rotation(path, c.root.as_ref().map(|r| r.0.as_str()))?;
+        }
+        let mut salt = c.salt.clone();
+        // A root is made only while the keyring names none: one it names
+        // and is not there is an error, never replaced.
+        let create = create && c.root.is_none();
+        let Some(provider) = self.open_root(&self.settings.root, &mut salt, create)? else {
+            return match &c.root {
+                Some((id, _)) => Err(format!(
+                    "{} was wrapped by the root key {id}, which is not there ({})",
+                    self.path.display(),
+                    self.describe_root()
+                )),
+                None => Ok(None),
+            };
+        };
+        match &c.root {
+            Some((id, _)) if *id != provider.id() => {
+                return Err(format!(
+                    "{} was wrapped by the root key {id}; the root given ({}) is {}",
+                    self.path.display(),
+                    provider.describe(),
+                    provider.id()
+                ));
+            }
+            Some(_) => {}
+            None => {
+                // The root's first use: recorded (with a passphrase's salt).
+                c.root = Some((provider.id(), provider.kind()));
+                c.salt = salt;
+                let c = c.clone();
+                self.save(&c)?;
+            }
+        }
+        st.root = Some(Arc::clone(&provider));
+        Ok(Some(provider))
+    }
+
+    /// The root `root` names, as found — a database-managed one made, and a
+    /// passphrase's `salt` made, when `create`.
+    fn open_root(
+        &self,
+        root: &Root,
+        salt: &mut Option<(Vec<u8>, u32)>,
+        create: bool,
+    ) -> Result<Option<Arc<dyn KeyProvider>>, String> {
+        Ok(Some(match root {
             Root::Managed(path) => {
                 let key = match read_key_file(path)? {
                     Some(k) => k,
@@ -369,19 +484,17 @@ impl Keyring {
                 if pass.is_empty() {
                     return Err(format!("the root's passphrase in {var} is empty"));
                 }
-                let c = st.contents.as_mut().expect("loaded");
-                let (salt, iterations) = match &c.salt {
+                let (s, iterations) = match salt {
                     Some(s) => s.clone(),
                     None if create => {
-                        let mut salt = vec![0u8; 16];
-                        self.kv.random_bytes(&mut salt);
-                        let s = (salt, keys::PASSPHRASE_ITERATIONS);
-                        c.salt = Some(s.clone());
-                        s
+                        let mut b = vec![0u8; 16];
+                        self.kv.random_bytes(&mut b);
+                        *salt = Some((b, keys::PASSPHRASE_ITERATIONS));
+                        salt.clone().expect("set")
                     }
                     None => return Ok(None),
                 };
-                let key = keys::root_from_passphrase(pass.as_bytes(), &salt, iterations);
+                let key = keys::root_from_passphrase(pass.as_bytes(), &s, iterations);
                 Arc::new(LocalRoot::new(
                     key,
                     "user",
@@ -389,27 +502,7 @@ impl Keyring {
                 ))
             }
             Root::Provider(h) => h.provider(),
-        };
-        let c = st.contents.as_mut().expect("loaded");
-        match &c.root {
-            Some((id, _)) if *id != provider.id() => {
-                return Err(format!(
-                    "{} was wrapped by the root key {id}; the root given ({}) is {}",
-                    self.path.display(),
-                    provider.describe(),
-                    provider.id()
-                ));
-            }
-            Some(_) => {}
-            None => {
-                // The root's first use: recorded (with a passphrase's salt).
-                c.root = Some((provider.id(), provider.kind()));
-                let c = c.clone();
-                self.save(&c)?;
-            }
-        }
-        st.root = Some(Arc::clone(&provider));
-        Ok(Some(provider))
+        }))
     }
 
     fn make_root_file(&self, path: &Path) -> Result<Key, String> {
@@ -598,32 +691,234 @@ impl Keyring {
         self.root_in(&mut st, create)
     }
 
-    /// Wraps every data key again under `new`, and writes the keyring:
-    /// the data keys — and so what they sealed — stay as they are (PLAN.md
-    /// §M14.30 K1's root rotation, seconds whatever the data).
-    pub fn rotate_root(&self, new: Arc<dyn KeyProvider>) -> Result<(), String> {
+    /// Wraps every data key again under `new` (a passphrase's root with
+    /// its `salt`), and writes the keyring: the data keys — and so what
+    /// they sealed — stay as they are (PLAN.md §M14.30 K1's root rotation,
+    /// seconds whatever the data).
+    pub fn rotate_root(
+        &self,
+        new: Arc<dyn KeyProvider>,
+        salt: Option<(Vec<u8>, u32)>,
+    ) -> Result<(), String> {
         let mut st = self.lock();
-        self.load(&mut st)?;
-        let purposes: Vec<String> = st
-            .contents
-            .as_ref()
-            .map(|c| c.deks.keys().cloned().collect())
-            .unwrap_or_default();
+        self.rewrap_in(&mut st, new, salt)
+    }
+
+    fn rewrap_in(
+        &self,
+        st: &mut State,
+        new: Arc<dyn KeyProvider>,
+        salt: Option<(Vec<u8>, u32)>,
+    ) -> Result<(), String> {
+        self.load(st)?;
         let mut c = st.contents.clone().expect("loaded");
+        let purposes: Vec<String> = c.deks.keys().cloned().collect();
         for p in &purposes {
-            let k = self
-                .dek_in(&mut st, p, false)?
-                .expect("listed in the keyring");
-            let w = c.deks.get_mut(p).expect("listed");
-            w.blob = new.wrap(p, &k)?;
+            let k = self.dek_in(st, p, false)?.expect("listed in the keyring");
+            c.deks.get_mut(p).expect("listed").blob = new.wrap(p, &k)?;
+        }
+        let previous: Vec<String> = c.prev.keys().cloned().collect();
+        for p in &previous {
+            let k = self.previous_in(st, p)?.expect("listed in the keyring");
+            c.prev.get_mut(p).expect("listed").blob = new.wrap(p, &k)?;
         }
         c.root = Some((new.id(), new.kind()));
-        if !matches!(self.settings.root, Root::Passphrase(_)) {
-            c.salt = None;
-        }
+        c.salt = salt;
         self.save(&c)?;
         st.contents = Some(c);
         st.root = Some(new);
+        Ok(())
+    }
+
+    /// Rotates the root to the one `to` names (PLAN.md §M14.30 K1e): the
+    /// data keys wrapped again under it.  A database-managed root is made
+    /// new (`<file>.next`, renamed over the old file once the keyring
+    /// names it); a passphrase gets a new salt.  The old database-managed
+    /// root's file is removed — or, when backups were encrypted with the
+    /// hierarchy's key (their manifests wrap it under the old root), kept
+    /// as `<file>.retired-<old id>`; a user's old root is the user's.
+    pub fn rotate_root_to(&self, to: &Root) -> Result<RootRotated, String> {
+        let mut st = self.lock();
+        let old = self.root_in(&mut st, false)?.ok_or_else(|| {
+            format!(
+                "no root key yet ({}): nothing to rotate",
+                self.describe_root()
+            )
+        })?;
+        let mut salt = None;
+        let (new, next): (Arc<dyn KeyProvider>, _) = match to {
+            Root::Managed(path) => {
+                let mut b = [0u8; keys::KEY_LEN];
+                self.kv.random_bytes(&mut b);
+                let key = Key::new(b);
+                b.fill(0);
+                let next = next_of(path);
+                write_private(&next, &format!("{}\n", key.to_hex()))?;
+                let describe = format!("the file {}", path.display());
+                (
+                    Arc::new(LocalRoot::new(key, "database", &describe)),
+                    Some((next, path.clone())),
+                )
+            }
+            _ => (
+                self.open_root(to, &mut salt, true)?
+                    .ok_or_else(|| "the new root is not there".to_string())?,
+                None,
+            ),
+        };
+        if new.id() == old.id() {
+            if let Some((next, _)) = &next {
+                let _ = std::fs::remove_file(next);
+            }
+            return Err(format!(
+                "the new root ({}) is the one there now",
+                new.describe()
+            ));
+        }
+        let mut out = RootRotated {
+            old: old.id(),
+            new: new.id(),
+            describe: new.describe(),
+            retired: None,
+            removed: None,
+        };
+        // The old database-managed root, kept aside first when backups need it.
+        let old_file = match &self.settings.root {
+            Root::Managed(p) => Some(p.clone()),
+            _ => None,
+        };
+        let backups = st
+            .contents
+            .as_ref()
+            .is_some_and(|c| c.deks.contains_key("backup") || c.prev.contains_key("backup"));
+        if let Some(p) = &old_file
+            && backups
+            && let Some(k) = read_key_file(p)?
+        {
+            let mut r = p.as_os_str().to_owned();
+            r.push(format!(".retired-{}", out.old));
+            let r = PathBuf::from(r);
+            write_private(&r, &format!("{}\n", k.to_hex()))?;
+            out.retired = Some(r);
+        }
+        self.rewrap_in(&mut st, new, salt)?;
+        if let Some((next, path)) = &next {
+            std::fs::rename(next, path).map_err(|e| format!("{}: {e}", path.display()))?;
+            sync_dir(path);
+        }
+        if let Some(p) = old_file
+            && next.as_ref().is_none_or(|(_, path)| *path != p)
+            && p.exists()
+        {
+            std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            sync_dir(&p);
+            out.removed = Some(p);
+        }
+        Ok(out)
+    }
+
+    /// Begins a new data key for `purpose` (PLAN.md §M14.30 K1e): the one
+    /// there kept as `prev` while what it sealed is sealed again (unless
+    /// `keep_previous` is false: a backup chain starts again with the new
+    /// key, the old backups carrying theirs).  `Ok(false)`: a rotation
+    /// begun before is not finished — finish it first ([`retire`]).
+    ///
+    /// [`retire`]: Self::retire
+    pub fn rotate_dek(&self, purpose: &str, keep_previous: bool) -> Result<bool, String> {
+        let mut st = self.lock();
+        self.load(&mut st)?;
+        let c = st.contents.as_ref().expect("loaded");
+        if c.prev.contains_key(purpose) {
+            return Ok(false);
+        }
+        let Some(current) = c.deks.get(purpose).cloned() else {
+            return Err(format!(
+                "{} holds no key for {purpose}",
+                self.path.display()
+            ));
+        };
+        // Unwrapped first: the root must be there.
+        self.dek_in(&mut st, purpose, false)?;
+        let mut b = [0u8; keys::KEY_LEN];
+        self.kv.random_bytes(&mut b);
+        let key = Key::new(b);
+        b.fill(0);
+        let root = self
+            .root_in(&mut st, false)?
+            .ok_or_else(|| format!("no root key ({})", self.describe_root()))?;
+        let mut c = st.contents.clone().expect("loaded");
+        if keep_previous {
+            c.prev.insert(purpose.to_string(), current);
+        }
+        c.deks.insert(
+            purpose.to_string(),
+            Wrapped {
+                id: key.id(DEK_ID_LABEL),
+                blob: root.wrap(purpose, &key)?,
+                created: self.now_us(),
+            },
+        );
+        self.save(&c)?;
+        st.contents = Some(c);
+        st.open.remove(&prev_slot(purpose));
+        st.open.insert(purpose.to_string(), key);
+        Ok(true)
+    }
+
+    /// The data key `purpose` is being rotated from, while what it sealed
+    /// is not all sealed again.
+    pub fn previous(&self, purpose: &str) -> Result<Option<Key>, String> {
+        let mut st = self.lock();
+        self.previous_in(&mut st, purpose)
+    }
+
+    fn previous_in(&self, st: &mut State, purpose: &str) -> Result<Option<Key>, String> {
+        let slot = prev_slot(purpose);
+        if let Some(k) = st.open.get(&slot) {
+            return Ok(Some(k.clone()));
+        }
+        self.load(st)?;
+        let Some(w) = st
+            .contents
+            .as_ref()
+            .and_then(|c| c.prev.get(purpose))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let root = self.root_in(st, false)?.ok_or_else(|| {
+            format!(
+                "{} holds a key for {purpose}, but the root key is not there ({})",
+                self.path.display(),
+                self.describe_root()
+            )
+        })?;
+        let k = root.unwrap(purpose, &w.blob)?;
+        st.open.insert(slot, k.clone());
+        Ok(Some(k))
+    }
+
+    /// Whether a rotation of `purpose`'s key is not finished.
+    pub fn rotating(&self, purpose: &str) -> Result<bool, String> {
+        let mut st = self.lock();
+        self.load(&mut st)?;
+        Ok(st
+            .contents
+            .as_ref()
+            .is_some_and(|c| c.prev.contains_key(purpose)))
+    }
+
+    /// Ends a rotation of `purpose`'s key: what the old key sealed is all
+    /// sealed again, and the old key is dropped from the keyring.
+    pub fn retire(&self, purpose: &str) -> Result<(), String> {
+        let mut st = self.lock();
+        self.load(&mut st)?;
+        let mut c = st.contents.clone().expect("loaded");
+        if c.prev.remove(purpose).is_some() {
+            self.save(&c)?;
+        }
+        st.contents = Some(c);
+        st.open.remove(&prev_slot(purpose));
         Ok(())
     }
 
@@ -643,10 +938,11 @@ impl Keyring {
                 created: None,
             });
         }
-        for (purpose, w) in &c.deks {
+        let all = c.deks.iter().map(|d| (d, "data"));
+        for ((purpose, w), role) in all.chain(c.prev.iter().map(|d| (d, "previous"))) {
             out.push(KeyInfo {
                 name: purpose.clone(),
-                role: "data".into(),
+                role: role.into(),
                 id: w.id.clone(),
                 custody: c.root.as_ref().map_or(String::new(), |(id, _)| id.clone()),
                 location: self.path.display().to_string(),
@@ -686,6 +982,10 @@ pub struct SecretsKey(pub Arc<Keyring>);
 impl nucleus_sql::secrets::Keyring for SecretsKey {
     fn key(&self, create: bool) -> Result<Option<[u8; keys::KEY_LEN]>, String> {
         Ok(self.0.dek("secrets", create)?.map(|k| *k.bytes()))
+    }
+
+    fn previous(&self) -> Result<Option<[u8; keys::KEY_LEN]>, String> {
+        Ok(self.0.previous("secrets")?.map(|k| *k.bytes()))
     }
 
     fn describe(&self) -> String {
@@ -813,7 +1113,7 @@ mod tests {
         // A new root wraps the same data keys.
         let new: Arc<dyn KeyProvider> =
             Arc::new(LocalRoot::new(Key::new([5; 32]), "user", "a test's"));
-        k.rotate_root(new.clone()).unwrap();
+        k.rotate_root(new.clone(), None).unwrap();
         let mut s2 = s.clone();
         s2.root = Root::Provider(Arc::new(Fixed(new)));
         assert_eq!(
@@ -827,6 +1127,88 @@ mod tests {
                 .dek("backup", false)
                 .is_err()
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_managed_root_rotated_and_a_crash_in_between() {
+        let d = dir("rotate");
+        let db = d.join("db");
+        let db = db.to_str().unwrap();
+        let s = Settings::default_for(db);
+        let k = Keyring::new(db, s.clone(), kv());
+        let a = k.dek("secrets", true).unwrap().unwrap();
+        let b = k.dek("backup", true).unwrap().unwrap();
+        let old = std::fs::read_to_string(beside(db, "root-key")).unwrap();
+        let done = k.rotate_root_to(&s.root).unwrap();
+        assert_ne!(done.old, done.new);
+        let new = std::fs::read_to_string(beside(db, "root-key")).unwrap();
+        assert_ne!(old, new);
+        // Encrypted backups need the old root: kept aside, not lost.
+        let retired = done.retired.expect("a backup key in the keyring");
+        assert_eq!(std::fs::read_to_string(&retired).unwrap(), old);
+        let again = Keyring::new(db, s.clone(), kv());
+        assert_eq!(again.dek("secrets", false).unwrap(), Some(a.clone()));
+        assert_eq!(again.dek("backup", false).unwrap(), Some(b));
+        // A crash after the keyring named the new root, before the rename:
+        // the next start finishes it.
+        let k = Keyring::new(db, s.clone(), kv());
+        k.dek("secrets", false).unwrap();
+        let next = next_of(&beside(db, "root-key"));
+        std::fs::write(&next, format!("{}\n", "77".repeat(32))).unwrap();
+        let n = LocalRoot::new(Key::new([0x77; 32]), "database", "t");
+        k.rotate_root(Arc::new(n), None).unwrap();
+        assert!(next.exists());
+        let again = Keyring::new(db, s.clone(), kv());
+        assert_eq!(again.dek("secrets", false).unwrap(), Some(a.clone()));
+        assert!(!next.exists());
+        assert_eq!(
+            read_key_file(&beside(db, "root-key")).unwrap(),
+            Some(Key::new([0x77; 32]))
+        );
+        // A crash before: the next file is not the keyring's root, dropped.
+        std::fs::write(&next, format!("{}\n", "88".repeat(32))).unwrap();
+        let again = Keyring::new(db, s.clone(), kv());
+        assert_eq!(again.dek("secrets", false).unwrap(), Some(a));
+        assert!(!next.exists());
+        // To a user's root: the database-managed file removed.
+        let user = d.join("user.key");
+        std::fs::write(&user, format!("{}\n", "99".repeat(32))).unwrap();
+        let done = again.rotate_root_to(&Root::File(user.clone())).unwrap();
+        assert_eq!(
+            done.removed.as_deref(),
+            Some(beside(db, "root-key").as_path())
+        );
+        assert!(!beside(db, "root-key").exists());
+        let e = again.rotate_root_to(&Root::File(user)).unwrap_err();
+        assert!(e.contains("the one there now"), "{e}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_data_key_rotated() {
+        let d = dir("rotate-dek");
+        let db = d.join("db");
+        let db = db.to_str().unwrap();
+        let s = Settings::default_for(db);
+        let k = Keyring::new(db, s.clone(), kv());
+        let a = k.dek("secrets", true).unwrap().unwrap();
+        assert!(k.rotate_dek("secrets", true).unwrap());
+        let b = k.dek("secrets", false).unwrap().unwrap();
+        assert_ne!(a, b);
+        // Not finished: another rotation waits, both keys read back.
+        assert!(!k.rotate_dek("secrets", true).unwrap());
+        let again = Keyring::new(db, s.clone(), kv());
+        assert!(again.rotating("secrets").unwrap());
+        assert_eq!(again.previous("secrets").unwrap(), Some(a));
+        assert_eq!(again.dek("secrets", false).unwrap(), Some(b.clone()));
+        let roles: Vec<String> = again.list().unwrap().into_iter().map(|i| i.role).collect();
+        assert_eq!(roles, ["root", "data", "previous"]);
+        again.retire("secrets").unwrap();
+        let again = Keyring::new(db, s, kv());
+        assert!(!again.rotating("secrets").unwrap());
+        assert_eq!(again.previous("secrets").unwrap(), None);
+        assert_eq!(again.dek("secrets", false).unwrap(), Some(b));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

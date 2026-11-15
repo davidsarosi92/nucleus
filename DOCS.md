@@ -1272,6 +1272,7 @@ nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   #
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
 nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b> | --queries <file|dir> …] [--import <module>] [--package <name>] [--class <name>]   # §8.37
 nucleus status [<dir>] [connection options]   # a server's health for people, §8.38
+nucleus keys <dir> list | import | rotate-root --to-… | rotate <secrets|subjects|backup> [root key options]   # the key hierarchy, §9
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -6461,8 +6462,9 @@ hierarchy*), and `subjects`, which seals the subject keys' table
 (§8.30) — which are kept only wrapped, in the keyring
 `<dir>.keyring` beside the data directory (text: `nucleus keyring 1`,
 `root <id> <custody>`, a passphrase root's `salt <hex> <iterations>`,
-`dek <purpose> <id> <wrapped> <made>`; mode 0600, each change a new
-file synced and renamed over the old one).  A wrapped key is
+`dek <purpose> <id> <wrapped> <made>`, and `prev …` for a data key
+being replaced; mode 0600, each change a new file synced and renamed
+over the old one).  A wrapped key is
 deterministic authenticated encryption (RFC 3394's key wrap and SIV's
 synthetic IV): the nonce an HMAC of the purpose and the key under a
 key derived from the root, ChaCha20-Poly1305 under another, the
@@ -6484,9 +6486,32 @@ before until `nucleus keys <dir> import` (`manual`).
 `--encrypt-backups yes|no` encrypts backups unasked (default: yes with
 a root given or a backup key in the keyring, no with the
 database-managed root alone, which a lost disk takes with it).
-`nc_catalog.keys` (an administrator's: `name`, `role` root or data,
-`id`, `custody`, `location`, `created`) and `nucleus keys <dir> list`
-show the hierarchy — never a key.  `Key` overwrites its bytes with
+`nc_catalog.keys` (an administrator's: `name`, `role` root, data or
+previous, `id`, `custody`, `location`, `created`) and `nucleus keys
+<dir> list` show the hierarchy — never a key.  A root the keyring names
+and that is not there is an error, never replaced by a new one.
+
+*Rotation* (K1e; the server stopped — `nucleus keys` takes the
+database's lock).  `nucleus keys <dir> rotate-root` with the new root
+(`--to-root-key FILE`, `--to-root-key-env VAR`,
+`--to-root-passphrase-env VAR` — a new salt —, or `--to-managed-root`,
+a new `<dir>.root-key`) and the present one's options wraps every data
+key again under it: seconds whatever the data, nothing sealed is
+touched.  A new database-managed root is written to `<dir>.root-key.next`
+and renamed over the old file once the keyring names it; a crash
+between is finished at the next start (a next file the keyring does not
+name, from a crash before, is dropped).  The old database-managed
+root's file is removed — or, when the keyring holds a backup key (the
+backups made before carry it wrapped by the old root), kept as
+`<dir>.root-key.retired-<old id>`; a user's old root is the user's,
+needed as long as those backups.  `nucleus keys <dir> rotate secrets |
+subjects` makes a new data key, keeps the old one as `prev` — what it
+sealed opens with either meanwhile —, seals everything again (the
+secrets' records in one transaction, `secrets::reseal`; the subject
+keys' table rewritten) and then drops the old key; a rotation cut short
+is finished at the next start (or by the command again).  `rotate
+backup` makes a new backup key: the next backup is a full one, the
+backups before carrying their own key wrapped by the root.  `Key` overwrites its bytes with
 zeros when dropped (a best effort without `unsafe`) and never prints.
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |

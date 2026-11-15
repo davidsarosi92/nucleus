@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1a–K1d ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅ (2026-11-15) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9788,8 +9788,24 @@ the new keyring *before* it reads the table (`backup::carried_keys`),
 so the root and the sealed file restore the rows of subjects; tests:
 `a_table_in_the_clear_is_sealed_and_reads_back`
 (`subject_keyfile.rs`) and the CLI's
-`the_subject_keys_are_sealed_under_the_keyring`.  **K1e** root rotation (`nucleus keys rotate-root`) and the DEKs'
-re-encryption.
+`the_subject_keys_are_sealed_under_the_keyring`.  **K1e ✅** rotation,
+the server stopped: `nucleus keys rotate-root --to-…` wraps the data
+keys again under the new root (seconds); a new database-managed root is
+written as `<dir>.root-key.next` and renamed after the keyring names
+it — a crash between finished at the next start; the old managed root
+removed, or kept as `.retired-<id>` while encrypted backups need it.
+`nucleus keys rotate secrets|subjects` keeps the old data key as `prev`
+(both open meanwhile), seals everything again (`secrets::reseal` in one
+transaction; the subject keys' table rewritten), then drops it — a
+rotation cut short finished at start; `rotate backup` starts a new
+chain.  *Found:* a keyring whose database-managed root file was gone
+would have made a new root at the next key needed (then refused it,
+leaving a stray file): a root the keyring names is now never made
+again.  Tests: `a_managed_root_rotated_and_a_crash_in_between`,
+`a_data_key_rotated` (`keyring.rs`),
+`the_secrets_are_sealed_again_after_a_rotation` (the edition's
+`keys.rs`), the CLI's `keys_rotate`.  Online rotation (from SQL, the
+server running) comes with K2's background re-encryption.
 
 **K2 — encryption at rest.**  Every page of the data file sealed by an
 AEAD under the database's DEK: the nonce from the page's id and its

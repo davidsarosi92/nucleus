@@ -72,8 +72,10 @@ impl SubjectKeyFile {
         }
     }
 
-    /// Seals a table kept in the clear now (rewritten in place: no copy in
-    /// the clear stays, so a key `FORGET` destroys is gone from it).
+    /// Seals the table now under the keyring's key `subjects`: one kept in
+    /// the clear (rewritten in place: no copy in the clear stays, so a key
+    /// `FORGET` destroys is gone from it), or one sealed with the key a
+    /// rotation replaces (§M14.30 K1e).
     pub fn seal_now(&self) -> Result<(), String> {
         let mut cached = self.table.lock().unwrap_or_else(|e| e.into_inner());
         let t = match cached.take() {
@@ -119,7 +121,14 @@ impl SubjectKeyFile {
             .ok_or_else(|| at("damaged".into()))?;
         let (nonce, sealed) = b.split_at(aead::NONCE_LEN);
         let nonce: [u8; aead::NONCE_LEN] = nonce.try_into().expect("nonce");
-        let mut plain = aead::open(key.bytes(), &nonce, AAD, sealed).ok_or_else(|| {
+        // The key, or — a rotation cut short — the one it replaces.
+        let opened = match aead::open(key.bytes(), &nonce, AAD, sealed) {
+            Some(p) => Some(p),
+            None => ring
+                .previous("subjects")?
+                .and_then(|k| aead::open(k.bytes(), &nonce, AAD, sealed)),
+        };
+        let mut plain = opened.ok_or_else(|| {
             at("does not open with the keyring's key: damaged, or another's".into())
         })?;
         let t = String::from_utf8(plain.clone()).map_err(|_| at("damaged".into()));

@@ -1504,3 +1504,77 @@ fn the_subject_keys_are_sealed_under_the_keyring() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// PLAN.md §M14.30 K1e: `nucleus keys rotate-root` wraps the data keys
+/// again under a new root (the database-managed file removed), and
+/// `nucleus keys rotate` gives a data key a new one, what the old sealed
+/// sealed again — the database reads on with the new root.
+#[test]
+fn keys_rotate() {
+    let dir = temp_dir("rotate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (db, repo, user) = (dir.join("db"), dir.join("repo"), dir.join("user.key"));
+    std::fs::write(&user, format!("{}\n", "e1".repeat(32))).unwrap();
+    let (db, repo, user) = (
+        db.to_str().unwrap(),
+        repo.to_str().unwrap(),
+        user.to_str().unwrap(),
+    );
+    let (ok, out) = nucleus(
+        &["sql", db],
+        &format!(
+            "CREATE TABLE m (id INT PRIMARY KEY, who TEXT);\n\
+             ALTER TABLE m SET SUBJECT (who);\n\
+             INSERT INTO m VALUES (1, 'ann');\n\
+             CREATE SECRET s VALUE 'x';\nBACKUP TO '{repo}/a';\n"
+        ),
+    );
+    assert!(ok, "{out}");
+    let keyring = || std::fs::read_to_string(dir.join("db.keyring")).unwrap();
+    // No new root named: the usage.
+    let (ok, out) = nucleus(&["keys", db, "rotate-root"], "");
+    assert!(!ok && out.contains("--to-root-key"), "{out}");
+    let (ok, out) = nucleus(&["keys", db, "rotate-root", "--to-root-key", user], "");
+    assert!(
+        ok && out.contains("the data keys wrapped again") && out.contains("is removed"),
+        "{out}"
+    );
+    assert!(!dir.join("db.root-key").exists());
+    // The old root is gone: without the new one no key opens, and no
+    // other root is made in its place.
+    let (ok, out) = nucleus(&["sql", db, "-c", "CREATE SECRET t VALUE 'y'"], "");
+    assert!(!ok && out.contains("is not there"), "{out}");
+    assert!(!dir.join("db.root-key").exists());
+    for purpose in ["secrets", "subjects"] {
+        let id = |ring: &str| {
+            ring.lines()
+                .find(|l| l.starts_with(&format!("dek {purpose} ")))
+                .unwrap()
+                .split(' ')
+                .nth(2)
+                .unwrap()
+                .to_string()
+        };
+        let before = id(&keyring());
+        let (ok, out) = nucleus(&["keys", db, "rotate", purpose, "--root-key", user], "");
+        assert!(ok && out.contains("sealed again"), "{out}");
+        let ring = keyring();
+        assert!(id(&ring) != before && !ring.contains("\nprev "), "{ring}");
+    }
+    // The subject keys open under the new key: a backup reads them.
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            db,
+            "--root-key",
+            user,
+            "-c",
+            &format!("BACKUP TO '{repo}/b'"),
+        ],
+        "",
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = nucleus(&["keys", db, "list", "--root-key", user], "");
+    assert!(ok && out.contains("root") && out.contains("user"), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

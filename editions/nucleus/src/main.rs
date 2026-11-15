@@ -159,6 +159,15 @@ usage:
                                     a key; also nc_catalog.keys); import takes
                                     the old key files in (with the server
                                     stopped)
+  nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
+                 | --to-root-passphrase-env <var> | --to-managed-root
+                 [the root key's options of nucleus server]
+                                    a new root: the data keys wrapped again
+                                    (seconds; the server stopped)
+  nucleus keys <dir> rotate secrets|subjects|backup [the root key's options]
+                                    a new data key: what the old one sealed
+                                    sealed again (backup: the next backup a
+                                    full one)
   nucleus restore <repository> <dir> [--at <commit|backup|time>]
                  [--subject-keys <file>] [--backup-key <file>]
                  [the root key's options of nucleus server]

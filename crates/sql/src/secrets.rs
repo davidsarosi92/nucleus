@@ -40,6 +40,12 @@ pub trait Keyring: Send + Sync {
     /// `Ok(None)`: there is none, and none was made.
     fn key(&self, create: bool) -> std::result::Result<Option<[u8; aead::KEY_LEN]>, String>;
 
+    /// The key being replaced, while a rotation re-seals the secrets
+    /// (§M14.30 K1e): what it sealed still opens.
+    fn previous(&self) -> std::result::Result<Option<[u8; aead::KEY_LEN]>, String> {
+        Ok(None)
+    }
+
     /// Where the key is, for messages (never the key).
     fn describe(&self) -> String;
 }
@@ -354,6 +360,64 @@ pub fn rename_owner(txn: &mut dyn KvTxn, from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
+/// The key whose id is `id`: the keyring's, or the one a rotation is
+/// replacing.
+fn opening_key(name: &str, id: &[u8; 8]) -> Result<[u8; aead::KEY_LEN]> {
+    let key = key(false)?;
+    if key_id(&key) == *id {
+        return Ok(key);
+    }
+    let ring = keyring().ok_or_else(no_key)?;
+    match ring.previous() {
+        Ok(Some(k)) if key_id(&k) == *id => Ok(k),
+        Ok(_) => Err(Error::prerequisite(format!(
+            "secret \"{name}\" was sealed with another key than this server's"
+        ))
+        .with_hint(
+            "start the server with the root key (and keyring) it was made with, or set the secret again",
+        )),
+        Err(e) => Err(Error::io(format!("the key for secrets ({}): {e}", ring.describe()))),
+    }
+}
+
+/// Seals again with the keyring's key every secret sealed with another
+/// it can open — the one a rotation is replacing (§M14.30 K1e): how many.
+pub fn reseal(txn: &mut dyn KvTxn) -> Result<u64> {
+    let key = key(false)?;
+    let mut n = 0;
+    for mut s in all(&*txn)? {
+        let Source::Sealed {
+            key_id: id,
+            nonce,
+            sealed,
+        } = &s.source
+        else {
+            continue;
+        };
+        if *id == key_id(&key) {
+            continue;
+        }
+        let old = opening_key(&s.name, id)?;
+        let mut v = aead::open(&old, nonce, &aad(&s.name), sealed).ok_or_else(|| {
+            Error::data_exception(format!(
+                "secret \"{}\" does not open: its record is damaged",
+                s.name
+            ))
+        })?;
+        let mut nonce = [0u8; aead::NONCE_LEN];
+        crate::datetime::random_bytes(&mut nonce)?;
+        s.source = Source::Sealed {
+            key_id: key_id(&key),
+            nonce,
+            sealed: aead::seal(&key, &nonce, &aad(&s.name), &v),
+        };
+        v.fill(0);
+        put(txn, &s)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// A secret's value, for the code that uses it on the database's behalf
 /// (a model provider) — never for a client.  The caller checks `USAGE`
 /// where the secret is named (a model's definition).
@@ -365,13 +429,7 @@ pub fn reveal(txn: &dyn KvTxn, name: &str) -> Result<Revealed> {
             nonce,
             sealed,
         } => {
-            let key = key(false)?;
-            if key_id(&key) != *id {
-                return Err(Error::prerequisite(format!(
-                    "secret \"{name}\" was sealed with another key than this server's"
-                ))
-                .with_hint("start the server with the root key (and keyring) it was made with, or set the secret again"));
-            }
+            let key = opening_key(name, id)?;
             let v = aead::open(&key, nonce, &aad(name), sealed).ok_or_else(|| {
                 Error::data_exception(format!("secret \"{name}\" does not open: its record is damaged"))
             })?;
