@@ -7,7 +7,8 @@ later — without changing the layers above.
 
 **Status:** the core (PLAN.md §F0) and the SQL layer (§F1) exist: a
 crash-safe copy-on-write B+tree with a write-ahead log, MVCC transactions
-(snapshot isolation and serializable), the KV contract, a PostgreSQL-like
+(snapshot isolation and serializable — histories checked by Jepsen's
+Elle as strong snapshot isolation and strict serializability), the KV contract, a PostgreSQL-like
 SQL dialect (joins of every kind, CTEs, foreign keys; integers by width,
 `real` and `double`, `numeric`, text and `char(n)`, `bytea` — large
 values stored out of line —, date, time and timestamps, intervals,
@@ -323,7 +324,10 @@ cargo test --workspace
 
 The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on
 first use.  Fuzz targets for every input that crosses a trust boundary
-are in `fuzz/` (a nightly toolchain and `cargo-fuzz`; `fuzz/README.md`).  nucleus builds for Linux, macOS, Windows and
+are in `fuzz/` (a nightly toolchain and `cargo-fuzz`; `fuzz/README.md`).
+The transaction histories `crates/sql/tests/elle.rs` makes are checked
+by Elle when `ELLE_JAR` names elle-cli's jar (`scripts/ci-tools.sh`
+fetches it; Java 21).  nucleus builds for Linux, macOS, Windows and
 [d-os](https://github.com/davidsarosi92/d-os) (PLAN.md, "Build targets").
 
 ## Security

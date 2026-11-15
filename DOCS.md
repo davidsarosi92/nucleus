@@ -1103,6 +1103,26 @@ the highest key not raised by logged writes, overlapping ranges both
 registered, `put_new` looking at the tree before the pending batch is in
 it.
 
+**Checked by Elle** (§M14.29 S5; `crates/sql/tests/elle.rs`).  Eight
+sessions run transactions of appends to and reads of short lists
+(Jepsen's list-append workload: eight lists at a time, each retired
+after 32 appends; a list a row, an append `UPDATE … SET v = v || 'x,'`,
+a read a key's lookup or a scan of a range) at one isolation level, on
+real files; the history — each transaction's invocation and its
+completion, committed or failed with `40001`, in real-time order — is
+written in Elle's format and checked by Jepsen's checker, Elle, through
+elle-cli (CI's `elle` job, 8,000 transactions a level).  `SERIALIZABLE`
+is checked as *strict* serializability and `REPEATABLE READ` and
+`READ COMMITTED` as *strong* snapshot isolation: on one node a
+transaction begins at the visible snapshot and a commit returns once it
+is visible, so real-time order holds too.  The snapshot-isolation
+histories, checked for serializability, show `G2-item` — the write skew
+the level allows.  A control makes a write skew on purpose: Elle must
+find it under `REPEATABLE READ` asked for serializability, and under
+`SERIALIZABLE` the second commit fails.  Without Java the test checks
+what needs no graph: each list's reads are prefixes of one another, and
+every element read was appended once, by a committed transaction.
+
 `tests/branch.rs` (§M14.13): a branch from its parent's commits, its
 own way after, the engine one per branch, both through a crash;
 transactions running at the branch point (spilled, unlogged) not in

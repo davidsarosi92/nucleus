@@ -287,7 +287,7 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
-| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
+| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns, a confidential-computing mode | ⬜ planned (2026-11-15) |
 | | M14.31 | Public benchmarks, reliably measured: a method every published number follows (environment recorded, repeated runs, spread and intervals, fair baselines, one script to reproduce), runs on dedicated cloud machines with regressions caught, results on the public leaderboards | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
@@ -9656,10 +9656,40 @@ to run nucleus in production; the distributed layer's analysis is
   security, secrets (§M14.22), `nucleus-crypto`'s own primitives, and
   the modules that reach out (OIDC, LDAP, embedding providers); its
   report and the fixes published.
-- **S5 — Elle on one node**: the transaction guarantees as documented
+- **S5 ✅ (2026-11-15) — Elle on one node**: the transaction guarantees as documented
   (serializable, snapshot isolation, read committed; DOCS §5.2) checked
   by Jepsen's history checker, Elle, over nucleus's own workloads in CI —
   cheap now, and the ground §M23.5 stands on.
+  `crates/sql/tests/elle.rs` (DOCS §5.3): Jepsen's list-append workload
+  — eight sessions, eight lists at a time, 32 appends each, transactions
+  of one to four appends and reads, a read a key's lookup or a range's
+  scan — over SQL sessions on real files, one isolation level a run; the
+  history in Elle's EDN, checked by elle-cli 0.1.11 (Elle, Jepsen 0.3.11;
+  Java 21) in CI's `elle` job (pinned with the zip's SHA-256: the release
+  publishes none; `scripts/ci-tools.sh` fetches the same).  *Found:*
+  `SERIALIZABLE` histories are strict serializable and `REPEATABLE
+  READ`/`READ COMMITTED` ones strong snapshot isolation — real-time order
+  kept, as a commit returns once visible and a transaction begins at the
+  visible snapshot; the snapshot-isolation histories show `G2-item`
+  (write skew) when asked for serializability, as DOCS says they may.
+  Checked so: 8,000 transactions a level in CI (42–48 % committed: the
+  rest `40001`), 40,000 a level once locally, no anomaly.  No bug found.
+  A control — a write skew made on purpose — must be found by Elle
+  (`G2-item`) under `REPEATABLE READ` and refused at commit under
+  `SERIALIZABLE`, so a checker or a history format that finds nothing
+  cannot pass for a database that does nothing wrong.  Without Java the
+  test still checks what needs no graph (one order per list, nothing
+  aborted or duplicated read).  *Prior art:* Kingsbury and Alvaro, "Elle:
+  Inferring Isolation Anomalies from Experimental Observations" (VLDB
+  2020) — list-append's appends make each list's order of writes
+  recoverable from reads, so the dependency graph needs no version
+  order guessed; Adya's anomalies (G0–G2) as Elle names them; Jepsen's
+  own append workload's key rotation (`key-count`, `max-writes-per-key`);
+  elle-cli (Bronnikov) for running Elle outside Clojure.  *Not yet:*
+  crashes and restarts during the workload (a crashed transaction
+  `:info`, its outcome unknown), the network front end in the loop
+  (the same sessions behind a protocol), and rw-register's single-value
+  reads — the next steps where §M23.5 needs them.
 
 **Done when:** `SECURITY.md` is in the repository and GitHub's private
 reporting is on; every listed input has a fuzz target that runs in CI

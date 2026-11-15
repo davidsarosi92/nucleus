@@ -100,6 +100,47 @@ jobs:
       - run: cargo build -p nucleus-cli
       - run: monitoring/test.sh target/debug/nucleus
 
+  # The transaction guarantees checked by Jepsen's Elle (PLAN.md §M14.29
+  # S5): crates/sql/tests/elle.rs's histories, through elle-cli.
+  elle:
+    name: Elle (transaction histories)
+    runs-on: ubuntu-latest
+    env:
+      ELLE_CLI_VERSION: 0.1.11
+      # elle-cli's release publishes no sums: this one is the zip's, taken
+      # when the version was pinned.
+      ELLE_CLI_SHA256: 9d3c72eaf3ccc4d0c7dc1da710264dee01f03af58c9fa177fec3f78ff5af1779
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: elle
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: elle-cli
+        run: |
+          mkdir -p "$RUNNER_TEMP/elle" && cd "$RUNNER_TEMP/elle"
+          z=elle-cli-bin-$ELLE_CLI_VERSION.zip
+          curl -fsSLO "https://github.com/ligurio/elle-cli/releases/download/$ELLE_CLI_VERSION/$z"
+          echo "$ELLE_CLI_SHA256  $z" | sha256sum -c -
+          unzip -q "$z"
+          echo "ELLE_JAR=$RUNNER_TEMP/elle/target/elle-cli-$ELLE_CLI_VERSION-standalone.jar" >> "$GITHUB_ENV"
+      - name: Histories checked
+        env:
+          ELLE_TXNS: 8000
+          ELLE_OUT: ${{ runner.temp }}/histories
+        run: cargo test --release -p nucleus-sql --test elle -- --nocapture --test-threads 1
+      - name: The histories, when a check failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: elle-histories
+          path: ${{ runner.temp }}/histories
+
   # The drivers (PLAN.md §M14.8) and the examples, against a real server.
   drivers:
     name: drivers (Rust, C, C++, Python, JS/TS, Java, Swift)
