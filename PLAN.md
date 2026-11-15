@@ -289,8 +289,8 @@ are marked ✅.
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns, a confidential-computing mode | ⬜ planned (2026-11-15) |
-| | M14.31 | Public benchmarks, reliably measured: a method every published number follows (environment recorded, repeated runs, spread and intervals, fair baselines, one script to reproduce), runs on dedicated cloud machines with regressions caught, results on the public leaderboards | ⬜ planned (2026-11-15) |
-| | M14.32 | Releases and distribution: versioning of the server, modules and drivers with a compatibility matrix; drivers in their own repositories (or published from this one); packages on npm, PyPI, Maven Central, crates.io and the other registries; the image on Docker Hub; native installers (MSI, macOS `.pkg`) built in CI | ⬜ planned (2026-11-15), last before the first production release |
+| | M14.31 | Public benchmarks, reliably measured: a method every published number follows (environment recorded, repeated runs, spread and intervals, fair baselines, one script to reproduce), runs on dedicated cloud machines with regressions caught, results on the public leaderboards | ⬜ planned (2026-11-15): P1 in §F1, P2/P3 in §M26 |
+| | M14.32 | Releases and distribution: versioning of the server, modules and drivers with a compatibility matrix; drivers in their own repositories (or published from this one); packages on npm, PyPI, Maven Central, crates.io and the other registries; the image on Docker Hub; native installers (MSI, macOS `.pkg`) built in CI | ⬜ planned (2026-11-15); done in §M26, after §F4 |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -307,6 +307,7 @@ are marked ✅.
 | | M23.5 | Jepsen's own analysis of the distributed guarantees, published | ⬜ |
 | **F4 — Above** | M24 | Federation / connectors | ⬜ |
 | | M25 | Multi-region (changefeeds moved to M16.5) | ⏸ |
+| | M26 | Before the first production release: §M14.29 S3 (OSS-Fuzz) and S4 (an independent audit), §M14.30 K6 (confidential computing), §M14.31 P2/P3 (cloud runs, leaderboards), §M14.32 (releases and distribution) — after everything else (decided 2026-11-15) | ⬜ |
 
 ---
 
@@ -9646,13 +9647,13 @@ to run nucleus in production; the distributed layer's analysis is
   each).
 - **S3 — OSS-Fuzz**: the same targets submitted to Google's OSS-Fuzz,
   which runs them continuously and files what it finds privately.
-  *When* (decided 2026-11-15): with S4, before the first production
-  release — OSS-Fuzz admits projects in wide use or critical to
+  *When* (decided 2026-11-15): in §M26, after §F4, before the first
+  production release — OSS-Fuzz admits projects in wide use or critical to
   infrastructure, which a project without users is not yet; until
   then the targets run in CI (S2).
 - **S4 — an independent security audit through OSTIF** (the Open Source
   Technology Improvement Fund, which arranges and funds audits of open
-  source projects), before the first release meant for production: the
+  source projects), in §M26 (after §F4), of the code as released: the
   network front ends, authentication, privileges and row-level
   security, secrets (§M14.22), `nucleus-crypto`'s own primitives, and
   the modules that reach out (OIDC, LDAP, embedding providers); its
@@ -9703,11 +9704,11 @@ forbids in nucleus's own histories.
 Planned 2026-11-15, after §M14.18 O5.  The order agreed (2026-11-15):
 §M14.18 O5, §M14.29 S5, this milestone's K1–K5, §M14.31 P1 (the method
 of measuring: §M14.28's verdict is a benchmark's), §M14.28 L1–L5,
-§M14.15's open performance items, then §F2.  What waits on others comes before the
-first production release, not before §F2: §M14.29 S3 (OSS-Fuzz admits
-projects in wide use) and S4 (an auditor, funding), K6 (the hardware),
-§M14.31's runs in the cloud and its leaderboards, and last §M14.32
-(releases and distribution).  Asked for:
+§M14.15's open performance items, then §F2.  What waits on others —
+§M14.29 S3 (OSS-Fuzz admits projects in wide use) and S4 (an auditor,
+funding), K6 (the hardware), §M14.31's runs in the cloud and its
+leaderboards — and §M14.32 (releases and distribution) are §M26's,
+after §F4 (decided 2026-11-15).  Asked for:
 data hidden from whoever should not read it — with the keys held by the
 database, by its user, or by an external KMS — and, for serving AI
 models' users (memories of a model's users kept by a provider), data
@@ -9840,9 +9841,9 @@ large for what it buys).  Embeddings are not hidden by this: a vector
 gives away much of its text (inversion attacks, vec2text) — a column
 whose vector the server computes is not zero-knowledge, and is said so.
 
-**K6 — a confidential-computing mode.**  *When:* after K1–K5, before
-the first production release (it needs SEV-SNP, TDX or Nitro hardware;
-decided 2026-11-15).  For full features with an operator who cannot
+**K6 — a confidential-computing mode.**  *When:* in §M26, after §F4,
+before the first production release (it needs SEV-SNP, TDX or Nitro
+hardware; decided 2026-11-15).  For full features with an operator who cannot
 look: the server runs inside an attested trusted
 execution environment (AMD SEV-SNP, Intel TDX, AWS Nitro Enclaves); the
 KMS releases the root only to the measured binary (the attestation
@@ -9921,7 +9922,7 @@ Reproducible in Modern Cloud Networks?" (NSDI 2020: cloud variability
 needs repeated runs across instances and days).
 
 **P2 — dedicated runs in the cloud** (needs an account and a budget: the
-user's decision).  Non-burstable instances on dedicated hosts or bare
+user's decision; in §M26, after §F4).  Non-burstable instances on dedicated hosts or bare
 metal; the suites (`bench/run.py`, TPC-H, ClickBench, the vector, text,
 JSON and memory benchmarks of §M14.12–§M14.24) on a schedule and on
 release candidates, each on more than one fresh instance; a regression
@@ -9930,7 +9931,7 @@ run.  Prior art: MongoDB's change-point detection in its performance CI
 (Daly et al., ICPE 2020), DataStax's Hunter, ClickHouse's per-commit
 performance tests (old and new build on one machine, interleaved).
 
-**P3 — the leaderboards**, each entry by its own rules, its scripts
+**P3 — the leaderboards** (in §M26, after §F4), each entry by its own rules, its scripts
 submitted upstream for anyone to rerun: ClickBench (its instance and
 disk, cold and hot runs), JSONBench (§M14.15), ann-benchmarks and
 VectorDBBench (§M14.12), DuckDB Labs' db-benchmark (group by, join);
@@ -9946,8 +9947,7 @@ planted in a test build; and the entries are merged upstream.
 ### §M14.32 — Releases and distribution ⬜
 
 Planned 2026-11-15, at the owner's request: the last steps before the
-first production release, after the rest of the external block
-(§M14.29 S3/S4, §M14.30 K6, §M14.31 P2/P3); not gating §F2.
+first production release — done in §M26, after §F4.
 
 **Where it stands.**  One semantic version for the server, the CLI, the
 Rust crates and the embedded library, each format versioned on its own
@@ -10214,6 +10214,34 @@ is fixed or documented as the guarantee it is.
 ### §M25 — Multi-region ⏸
 
 - Multi-region placement, follower reads.  (Changefeeds moved to §M16.5.)
+
+### §M26 — Before the first production release ⬜
+
+Decided with the owner (2026-11-15): the first production release
+comes after the whole plan (§F0–§F4), and what prepares it — audits of
+the final code, published numbers of the final system, the release's
+packages — comes last, here, rather than in §F1 where it was planned:
+done earlier it would be done twice or go stale.  Each step's design
+stays in its own section; the order:
+
+1. §M14.29 S3 — nucleus in OSS-Fuzz (its fuzz targets run in CI since
+   S2; OSS-Fuzz admits projects in wide use).
+2. §M14.30 K6 — the confidential-computing mode (SEV-SNP, TDX or Nitro
+   hardware; on K1–K5).
+3. §M14.31 P2 — runs on dedicated cloud machines, regressions caught
+   (P1, the method, is done in §F1: every measurement until then
+   follows it); P3 — the public leaderboards.
+4. §M14.29 S4 — an independent security audit (OSTIF) of the code as
+   released, its report and fixes published.
+5. §M14.32 — releases and distribution: versions and the compatibility
+   matrix, the drivers' repositories, the registries, Docker Hub, the
+   native installers.
+
+Meanwhile CI keeps building and installing the packages and the image
+it builds now (§M14.17 E1), so the release machinery does not rot.
+
+**Done when:** each step's own "done when" holds, and a tag publishes
+the first production release.
 
 ---
 
@@ -10910,6 +10938,12 @@ is fixed or documented as the guarantee it is.
   operations with §M14.29 S5 (Elle) beside it and S3's files (OSS-Fuzz)
   made ready; §M14.28's LSM when a write-heavy load asks for it.  S3's
   submission and S4's audit are the owner's to request.
+- **2026-11-15** — The order to §F2 agreed (§M14.30's first
+  paragraph); §M14.31 (public benchmarks, reliably measured) and §M14.32
+  (releases and distribution) planned; the first production release
+  after the whole plan: §M26 (in §F4) gathers what prepares it —
+  §M14.29 S3/S4, §M14.30 K6, §M14.31 P2/P3, §M14.32 — while §M14.31 P1
+  stays in §F1.
 - **2026-11-14** — Found while measuring §M14.15 J1, fixed: a table
   dropped after a bulk `CREATE TABLE AS` came back, empty, once later
   commits rewrote its catalog leaf.  A commit's leaf filter (`Collect`)
