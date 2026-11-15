@@ -9828,6 +9828,50 @@ by a keyring plugin, SQLCipher's per-page AEAD with the page number in
 the nonce, CockroachDB's encryption at rest (store keys rotated, data
 keys per file), RocksDB's `EncryptedEnv`.
 
+*K2's nonce, corrected (2026-11-15, read against the pager).*  A
+(page, birth) pair *is* sealed more than once: a page allocated since
+the last commit may be written again before it (the buffer pool evicts
+it, it changes, it is evicted again — `Pager::write_page` allows it),
+and after a crash the next commit takes the same sequence number, so
+the pages of the lost one are written again under the same birth while
+the old bytes may stay on the disk (APFS keeps old blocks; an image
+taken twice holds both).  With ChaCha20-Poly1305 or AES-GCM a repeated
+nonce under one key gives away the XOR of two pages and the
+authentication key — the scheme must not depend on it.  The WAL has the
+same flaw: a torn tail cut at opening is written again at the same
+LSNs.  Taken instead: a *nonce-misuse-resistant* AEAD, deterministic,
+in the 16 bytes a page can spare — the structure of AES-GCM-SIV (RFC
+8452) with ChaCha20 in place of AES: a universal hash (Poly1305's
+polynomial under a fixed secret key) of the associated data and the
+plaintext, passed through a PRF (a ChaCha20 block keyed apart) as the
+synthetic IV, which is both the tag and the nonce of ChaCha20 over the
+payload.  The same inputs give the same bytes (a page rewritten
+unchanged shows as such — nothing more); different ones never share a
+keystream but with probability ~2^-96 a pair.  No counter to keep
+across crashes.  Its cost is one Poly1305 pass more than an AEAD's
+(both passes over the page: ~2 per byte of ChaCha20 work); measured in
+K2a.  On disk an encrypted page's header holds the 16-byte IV, the
+birth and the page type (packed in 8 bytes; the page id is the
+associated data, its position — a page moved does not open); the
+in-memory page keeps today's layout, so nothing above the pager
+changes.  A WAL record: the IV in place of the CRC (header 16 → 28
+bytes), the LSN as associated data.  Prior art for the construction:
+RFC 8452 (AES-GCM-SIV), RFC 5297 (SIV), Rogaway–Shrimpton's DAE; the
+`unsafe` the hardware AES needs stays the platform layer's question.
+
+*K2 in steps:* **K2a** `nucleus_crypto::siv` — the deterministic AEAD,
+tested (round trip, every bit of tag, AAD and ciphertext flipped,
+a known-answer test against a reference computed apart) and measured
+(MB/s against ChaCha20-Poly1305 and CRC-32C).  **K2b** pages: an
+encrypted file's header records the cipher and the DEK's id (format
+version 3 only for an encrypted file); `nucleus_kv::Options` takes the
+key; the crash tests run encrypted; a planted value searched for in
+the file.  **K2c** WAL records.  **K2d** the other files: spill and
+scratch, column segments, index files, the embedding queue.  **K2e**
+the edition: the keyring's data key `data`, an existing database
+encrypted by rewriting its pages (`nucleus keys <dir> encrypt`, the
+server stopped), the overhead measured (`docs/benchmarks.md`).
+
 **K3 — KMS modules.**  `modules/aws-kms` first (SigV4 is written),
 then Google Cloud KMS, Azure Key Vault, Vault Transit, PKCS#11; each
 tested against the provider's local emulator or a real test account in
