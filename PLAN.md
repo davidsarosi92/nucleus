@@ -287,10 +287,9 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
-| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns, a confidential-computing mode | ⬜ planned (2026-11-15) |
-| | M14.31 | Public benchmarks, reliably measured: a method every published number follows (environment recorded, repeated runs, spread and intervals, fair baselines, one script to reproduce), runs on dedicated cloud machines with regressions caught, results on the public leaderboards | ⬜ planned (2026-11-15): P1 in §F1, P2/P3 in §M26 |
-| | M14.32 | Releases and distribution: versioning of the server, modules and drivers with a compatibility matrix; drivers in their own repositories (or published from this one); packages on npm, PyPI, Maven Central, crates.io and the other registries; the image on Docker Hub; native installers (MSI, macOS `.pkg`) built in CI | ⬜ planned (2026-11-15); done in §M26, after §F4 |
+| | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1a, K1b ✅ (2026-11-15) |
+| | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -307,7 +306,9 @@ are marked ✅.
 | | M23.5 | Jepsen's own analysis of the distributed guarantees, published | ⬜ |
 | **F4 — Above** | M24 | Federation / connectors | ⬜ |
 | | M25 | Multi-region (changefeeds moved to M16.5) | ⏸ |
-| | M26 | Before the first production release: §M14.29 S3 (OSS-Fuzz) and S4 (an independent audit), §M14.30 K6 (confidential computing), §M14.31 P2/P3 (cloud runs, leaderboards), §M14.32 (releases and distribution) — after everything else (decided 2026-11-15) | ⬜ |
+| | M26 | Assurance from outside, on the code as released: OSS-Fuzz, a confidential-computing mode, an independent security audit (OSTIF) | ⬜ |
+| | M27 | Public benchmarks in the cloud and on the leaderboards, by §M14.31's method | ⬜ |
+| | M28 | Releases and distribution: versions and a compatibility matrix of server, modules and drivers; the drivers' repositories; npm, PyPI, Maven Central, crates.io; Docker Hub; native installers (MSI, `.pkg`) built in CI — then the first production release | ⬜ |
 
 ---
 
@@ -9510,7 +9511,7 @@ reach a Prometheus and an OpenTelemetry collector in tests; readiness
 waits for recovery; and every shipped alert rule fires in a test that
 provokes it.
 
-### §M14.29 — Security and assurance from outside ◐
+### §M14.29 — Security and assurance ✅
 
 nucleus's own tests (the simulator, crash tests, the laws, the fixtures
 of other systems' answers) show what its authors thought to check; a
@@ -9518,9 +9519,9 @@ database that holds other people's data is also checked by people and
 machines that did not write it.  Not one block at the end: each step
 comes when it costs least and protects most (decided 2026-11-12) —
 reporting from the day the repository is public, fuzzing while formats
-and parsers are still cheap to change, an audit before anyone is asked
-to run nucleus in production; the distributed layer's analysis is
-§M23.5.
+and parsers are still cheap to change, Elle while the guarantees are
+one node's; OSS-Fuzz and an independent audit are §M26's, on the code
+as released, and the distributed layer's analysis is §M23.5.
 
 - **S1 — `SECURITY.md`** ✅ (2026-11-12): how to report a vulnerability
   privately (GitHub's private vulnerability reporting), what is answered
@@ -9645,19 +9646,6 @@ to run nucleus in production; the distributed layer's analysis is
   second, `values` ~9,000, `copy` and `text_search` ~4,500, `ncp` and
   `pg_wire` ~300, `disk` ~18 (a database opened, checked and queried
   each).
-- **S3 — OSS-Fuzz**: the same targets submitted to Google's OSS-Fuzz,
-  which runs them continuously and files what it finds privately.
-  *When* (decided 2026-11-15): in §M26, after §F4, before the first
-  production release — OSS-Fuzz admits projects in wide use or critical to
-  infrastructure, which a project without users is not yet; until
-  then the targets run in CI (S2).
-- **S4 — an independent security audit through OSTIF** (the Open Source
-  Technology Improvement Fund, which arranges and funds audits of open
-  source projects), in §M26 (after §F4), of the code as released: the
-  network front ends, authentication, privileges and row-level
-  security, secrets (§M14.22), `nucleus-crypto`'s own primitives, and
-  the modules that reach out (OIDC, LDAP, embedding providers); its
-  report and the fixes published.
 - **S5 ✅ (2026-11-15) — Elle on one node**: the transaction guarantees as documented
   (serializable, snapshot isolation, read committed; DOCS §5.2) checked
   by Jepsen's history checker, Elle, over nucleus's own workloads in CI —
@@ -9694,21 +9682,17 @@ to run nucleus in production; the distributed layer's analysis is
   reads — the next steps where §M23.5 needs them.
 
 **Done when:** `SECURITY.md` is in the repository and GitHub's private
-reporting is on; every listed input has a fuzz target that runs in CI
-and nucleus is in OSS-Fuzz; an audit's report and its fixes are
-published; and Elle finds no anomaly the documented isolation level
-forbids in nucleus's own histories.
+reporting is on; every listed input has a fuzz target that runs in CI;
+and Elle finds no anomaly the documented isolation level forbids in
+nucleus's own histories.
 
 ### §M14.30 — Encryption and key custody ⬜
 
 Planned 2026-11-15, after §M14.18 O5.  The order agreed (2026-11-15):
 §M14.18 O5, §M14.29 S5, this milestone's K1–K5, §M14.31 P1 (the method
 of measuring: §M14.28's verdict is a benchmark's), §M14.28 L1–L5,
-§M14.15's open performance items, then §F2.  What waits on others —
-§M14.29 S3 (OSS-Fuzz admits projects in wide use) and S4 (an auditor,
-funding), K6 (the hardware), §M14.31's runs in the cloud and its
-leaderboards — and §M14.32 (releases and distribution) are §M26's,
-after §F4 (decided 2026-11-15).  Asked for:
+§M14.15's open performance items, then §F2.  The confidential-computing
+mode planned with these is §M26's (2026-11-15).  Asked for:
 data hidden from whoever should not read it — with the keys held by the
 database, by its user, or by an external KMS — and, for serving AI
 models' users (memories of a model's users kept by a provider), data
@@ -9841,23 +9825,6 @@ large for what it buys).  Embeddings are not hidden by this: a vector
 gives away much of its text (inversion attacks, vec2text) — a column
 whose vector the server computes is not zero-knowledge, and is said so.
 
-**K6 — a confidential-computing mode.**  *When:* in §M26, after §F4,
-before the first production release (it needs SEV-SNP, TDX or Nitro
-hardware; decided 2026-11-15).  For full features with an operator who cannot
-look: the server runs inside an attested trusted
-execution environment (AMD SEV-SNP, Intel TDX, AWS Nitro Enclaves); the
-KMS releases the root only to the measured binary (the attestation
-document checked by the KMS's key policy), so the operator, the host
-and the cloud see only ciphertext — at rest (K2), in transit (TLS
-terminated inside), in use (the enclave's encrypted memory).  The
-binary reproducible, its measurement published per release, so a
-client can check what it talks to.  Prior art: Apple's Private Cloud
-Compute (attested nodes, published measurements), Azure SQL's Always
-Encrypted with secure enclaves, Signal's SGX contact discovery, AWS
-KMS's Nitro attestation conditions.  This, with K4 and K5, is the
-answer for keeping memories of an AI model's users that its provider
-cannot read.
-
 **Done when:** each of the three custody models runs the test suite
 and the crash tests with every file encrypted (no plaintext of a
 planted value found on disk, in the WAL, in spill files or backups —
@@ -9866,15 +9833,13 @@ re-encrypted online; a KMS revocation makes the database unreadable;
 `modules/aws-kms` passes against LocalStack in CI; the overhead is
 measured and recorded; a tenant's key destroyed leaves none of its
 live rows readable; a client-side encrypted column round-trips through
-every driver with the server never seeing the plaintext; and the
-confidential mode's key release is refused to a binary whose
-measurement differs.
+every driver with the server never seeing the plaintext.
 
-### §M14.31 — Public benchmarks, reliably measured ⬜
+### §M14.31 — Reliable measurement ⬜
 
-Planned 2026-11-15.  Asked for: nucleus on the public leaderboards, and
-measured on dedicated machines in the cloud — and above both, numbers
-that can be trusted.  A number is worth its method: a leaderboard entry
+Planned 2026-11-15.  Asked for: numbers that can be trusted — above the
+public leaderboards and the cloud runs (§M27), which follow this
+method.  A number is worth its method: a leaderboard entry
 that cannot be reproduced, or a comparison with a system run untuned,
 costs more trust than it wins.
 
@@ -9887,8 +9852,8 @@ more.  CI runs `bench/run.py` on every push without thresholds: shared
 runners are too noisy.  Good enough to steer the work; not enough to
 publish against others.
 
-**P1 — the method** (no one else needed: before §M14.28, whose L5
-verdict is a benchmark's — decided 2026-11-15).
+**P1 — the method** (before §M14.28, whose L5 verdict is a
+benchmark's — decided 2026-11-15).
 One harness every published number goes through:
 - *The environment recorded with the result*: machine (instance type,
   CPU model, cores, memory, disk and its provisioned throughput), OS and
@@ -9921,92 +9886,9 @@ varied, not fixed once); Uta et al., "Is Big Data Performance
 Reproducible in Modern Cloud Networks?" (NSDI 2020: cloud variability
 needs repeated runs across instances and days).
 
-**P2 — dedicated runs in the cloud** (needs an account and a budget: the
-user's decision; in §M26, after §F4).  Non-burstable instances on dedicated hosts or bare
-metal; the suites (`bench/run.py`, TPC-H, ClickBench, the vector, text,
-JSON and memory benchmarks of §M14.12–§M14.24) on a schedule and on
-release candidates, each on more than one fresh instance; a regression
-reported when it is a change point beyond the noise, not a single bad
-run.  Prior art: MongoDB's change-point detection in its performance CI
-(Daly et al., ICPE 2020), DataStax's Hunter, ClickHouse's per-commit
-performance tests (old and new build on one machine, interleaved).
-
-**P3 — the leaderboards** (in §M26, after §F4), each entry by its own rules, its scripts
-submitted upstream for anyone to rerun: ClickBench (its instance and
-disk, cold and hot runs), JSONBench (§M14.15), ann-benchmarks and
-VectorDBBench (§M14.12), DuckDB Labs' db-benchmark (group by, join);
-TPC-H and TPC-DS results published as "derived from" (an audited TPC
-result is not the aim).
-
-**Done when:** every number nucleus publishes — in `docs/benchmarks.md`
-and on a leaderboard — carries its environment, its runs, its spread
-and the script that made it; a second fresh instance reproduces each
-within its interval; the scheduled cloud runs catch a regression
-planted in a test build; and the entries are merged upstream.
-
-### §M14.32 — Releases and distribution ⬜
-
-Planned 2026-11-15, at the owner's request: the last steps before the
-first production release — done in §M26, after §F4.
-
-**Where it stands.**  One semantic version for the server, the CLI, the
-Rust crates and the embedded library, each format versioned on its own
-(D15); `release.yml` builds the archives with their `SHA256SUMS`, the
-`.deb` and `.rpm`, a container image on GitHub's registry (amd64,
-arm64), a Homebrew formula and winget manifests, and the install
-scripts (§M14.17 E1).  Prometheus scrapes the server's own `/metrics`
-(no exporter needed), and the alert rules and the Grafana dashboard are
-in `monitoring/` (§M14.18 O1–O2).  *Not there:* any package on a
-language's registry, the image on Docker Hub, native installers,
-drivers versioned apart from the server, and a statement of which
-module and driver versions work with which server.
-
-- **D1 — versions and the compatibility matrix.**  The server's version
-  and, apart from it, each module's (`modules/*`, the extension API
-  version it was built against, §M14.19) and each driver's (per
-  language, naming the protocol versions it speaks, D15); one matrix —
-  server × module × driver × protocol and format versions — generated
-  from the manifests (not written by hand), checked in CI by running
-  each driver's tests against the oldest and the newest server it
-  claims, and published in DOCS and with each release.  Semantic
-  versioning's rules for each, a changelog per component.
-- **D2 — drivers in their own repositories.**  Each language's driver
-  in a repository of its own (what each registry's tooling and each
-  language's users expect), mirrored from this one so its tests keep
-  running against the server they belong to — or published from here
-  if mirroring costs more than it gives (decided at the step; both
-  keep the drivers MIT, §licence).
-- **D3 — the registries.**  npm (one package per platform for the
-  embedded edition's native library), PyPI (wheels per platform),
-  Maven Central (the Java driver, the Android AAR), crates.io (the
-  client crates), Swift Package Manager (a tagged repository with the
-  XCFramework as a binary asset), NuGet and Go modules when those
-  drivers exist; each published by the release workflow from the
-  tagged build, signed where the registry supports it (npm provenance,
-  Sigstore for PyPI, GPG for Maven Central).
-- **D4 — the image on Docker Hub.**  The same multi-architecture image
-  `release.yml` already pushes to GitHub's registry, pushed to Docker
-  Hub too (an official-style `nucleus` repository: tags per version,
-  `latest`, the README with `docker run` lines), its SBOM and
-  provenance attached.
-- **D5 — native installers built in CI.**  Windows: an MSI (WiX), with
-  the service registered optionally and the PATH set; macOS: a signed
-  and notarized `.pkg` (and the Homebrew formula as now); Linux: the
-  `.deb` and `.rpm` (as now) and their repositories (apt, dnf) so
-  updates arrive with the system's; each installer installed and
-  uninstalled on its own platform in CI, as E1's packages are.
-  Installers for the monitoring pieces too: the Grafana dashboard
-  published to grafana.com and the alert rules packaged (a Helm chart
-  or `kube-prometheus` mixin) for Prometheus users.
-
-**Done when:** a release tag publishes every package, image and
-installer from CI without a manual step but the maintainer's signing
-keys; each installs and runs its first query on its platform in CI; the
-compatibility matrix is generated, tested and published with the
-release; and the drivers live where their languages' users look for
-them.
-
----
+**Done when:** every number in `docs/benchmarks.md` carries its
+environment, its runs, its spread and the script that made it; and a
+second run on the same machine reproduces each within its interval.
 
 ## §F2 — NoSQL layer
 
@@ -10215,33 +10097,139 @@ is fixed or documented as the guarantee it is.
 
 - Multi-region placement, follower reads.  (Changefeeds moved to §M16.5.)
 
-### §M26 — Before the first production release ⬜
-
-Decided with the owner (2026-11-15): the first production release
-comes after the whole plan (§F0–§F4), and what prepares it — audits of
-the final code, published numbers of the final system, the release's
-packages — comes last, here, rather than in §F1 where it was planned:
-done earlier it would be done twice or go stale.  Each step's design
-stays in its own section; the order:
-
-1. §M14.29 S3 — nucleus in OSS-Fuzz (its fuzz targets run in CI since
-   S2; OSS-Fuzz admits projects in wide use).
-2. §M14.30 K6 — the confidential-computing mode (SEV-SNP, TDX or Nitro
-   hardware; on K1–K5).
-3. §M14.31 P2 — runs on dedicated cloud machines, regressions caught
-   (P1, the method, is done in §F1: every measurement until then
-   follows it); P3 — the public leaderboards.
-4. §M14.29 S4 — an independent security audit (OSTIF) of the code as
-   released, its report and fixes published.
-5. §M14.32 — releases and distribution: versions and the compatibility
-   matrix, the drivers' repositories, the registries, Docker Hub, the
-   native installers.
-
+The first production release comes after the whole plan (decided
+2026-11-15), and what prepares it comes last: audits of the final code
+(§M26), published numbers of the final system (§M27), the release's
+packages (§M28) — done earlier, each would be done twice or go stale.
 Meanwhile CI keeps building and installing the packages and the image
 it builds now (§M14.17 E1), so the release machinery does not rot.
 
-**Done when:** each step's own "done when" holds, and a tag publishes
-the first production release.
+### §M26 — Assurance from outside ⬜
+
+What nucleus's own tests cannot give (§M14.29 gave the rest: reporting,
+fuzzing in CI, Elle on one node), on the code as it will be released.
+
+**A1 — OSS-Fuzz.**  The fuzz targets that run in CI (§M14.29 S2)
+submitted to Google's OSS-Fuzz, which runs them continuously and files
+what it finds privately.  OSS-Fuzz admits projects in wide use or
+critical to infrastructure, which a project without users is not yet.
+
+**A2 — a confidential-computing mode** (on §M14.30's K1–K5; it needs
+SEV-SNP, TDX or Nitro hardware).  For full features with an operator who cannot
+look: the server runs inside an attested trusted
+execution environment (AMD SEV-SNP, Intel TDX, AWS Nitro Enclaves); the
+KMS releases the root only to the measured binary (the attestation
+document checked by the KMS's key policy), so the operator, the host
+and the cloud see only ciphertext — at rest (K2), in transit (TLS
+terminated inside), in use (the enclave's encrypted memory).  The
+binary reproducible, its measurement published per release, so a
+client can check what it talks to.  Prior art: Apple's Private Cloud
+Compute (attested nodes, published measurements), Azure SQL's Always
+Encrypted with secure enclaves, Signal's SGX contact discovery, AWS
+KMS's Nitro attestation conditions.  This, with K4 and K5, is the
+answer for keeping memories of an AI model's users that its provider
+cannot read.
+
+**A3 — an independent security audit through OSTIF** (the Open Source
+Technology Improvement Fund, which arranges and funds audits of open
+source projects), of the code as released: the network front ends,
+authentication, privileges and row-level security, secrets (§M14.22),
+the key hierarchy and encryption (§M14.30), `nucleus-crypto`'s own
+primitives, and the modules that reach out (OIDC, LDAP, KMS, embedding
+providers); its report and the fixes published.
+
+**Done when:** nucleus is in OSS-Fuzz; the confidential mode's key
+release is refused to a binary whose measurement differs; and an
+audit's report and its fixes are published.
+
+### §M27 — Public benchmarks in the cloud and on the leaderboards ⬜
+
+Asked for (2026-11-15): nucleus on the public leaderboards and
+measured on dedicated machines in the cloud — every number by
+§M14.31's method, which every measurement follows until then.
+
+**B1 — dedicated runs in the cloud** (needs an account and a budget: the
+owner's decision), by §M14.31's method.  Non-burstable instances on dedicated hosts or bare
+metal; the suites (`bench/run.py`, TPC-H, ClickBench, the vector, text,
+JSON and memory benchmarks of §M14.12–§M14.24) on a schedule and on
+release candidates, each on more than one fresh instance; a regression
+reported when it is a change point beyond the noise, not a single bad
+run.  Prior art: MongoDB's change-point detection in its performance CI
+(Daly et al., ICPE 2020), DataStax's Hunter, ClickHouse's per-commit
+performance tests (old and new build on one machine, interleaved).
+
+**B2 — the leaderboards**, each entry by its own rules, its scripts
+submitted upstream for anyone to rerun: ClickBench (its instance and
+disk, cold and hot runs), JSONBench (§M14.15), ann-benchmarks and
+VectorDBBench (§M14.12), DuckDB Labs' db-benchmark (group by, join);
+TPC-H and TPC-DS results published as "derived from" (an audited TPC
+result is not the aim).
+
+**Done when:** the scheduled cloud runs catch a regression planted in a
+test build; a second fresh instance reproduces each published number
+within its interval; and the leaderboard entries are merged upstream.
+
+### §M28 — Releases and distribution ⬜
+
+Planned 2026-11-15, at the owner's request: the last steps before the
+first production release.
+
+**Where it stands.**  One semantic version for the server, the CLI, the
+Rust crates and the embedded library, each format versioned on its own
+(D15); `release.yml` builds the archives with their `SHA256SUMS`, the
+`.deb` and `.rpm`, a container image on GitHub's registry (amd64,
+arm64), a Homebrew formula and winget manifests, and the install
+scripts (§M14.17 E1).  Prometheus scrapes the server's own `/metrics`
+(no exporter needed), and the alert rules and the Grafana dashboard are
+in `monitoring/` (§M14.18 O1–O2).  *Not there:* any package on a
+language's registry, the image on Docker Hub, native installers,
+drivers versioned apart from the server, and a statement of which
+module and driver versions work with which server.
+
+- **D1 — versions and the compatibility matrix.**  The server's version
+  and, apart from it, each module's (`modules/*`, the extension API
+  version it was built against, §M14.19) and each driver's (per
+  language, naming the protocol versions it speaks, D15); one matrix —
+  server × module × driver × protocol and format versions — generated
+  from the manifests (not written by hand), checked in CI by running
+  each driver's tests against the oldest and the newest server it
+  claims, and published in DOCS and with each release.  Semantic
+  versioning's rules for each, a changelog per component.
+- **D2 — drivers in their own repositories.**  Each language's driver
+  in a repository of its own (what each registry's tooling and each
+  language's users expect), mirrored from this one so its tests keep
+  running against the server they belong to — or published from here
+  if mirroring costs more than it gives (decided at the step; both
+  keep the drivers MIT, §licence).
+- **D3 — the registries.**  npm (one package per platform for the
+  embedded edition's native library), PyPI (wheels per platform),
+  Maven Central (the Java driver, the Android AAR), crates.io (the
+  client crates), Swift Package Manager (a tagged repository with the
+  XCFramework as a binary asset), NuGet and Go modules when those
+  drivers exist; each published by the release workflow from the
+  tagged build, signed where the registry supports it (npm provenance,
+  Sigstore for PyPI, GPG for Maven Central).
+- **D4 — the image on Docker Hub.**  The same multi-architecture image
+  `release.yml` already pushes to GitHub's registry, pushed to Docker
+  Hub too (an official-style `nucleus` repository: tags per version,
+  `latest`, the README with `docker run` lines), its SBOM and
+  provenance attached.
+- **D5 — native installers built in CI.**  Windows: an MSI (WiX), with
+  the service registered optionally and the PATH set; macOS: a signed
+  and notarized `.pkg` (and the Homebrew formula as now); Linux: the
+  `.deb` and `.rpm` (as now) and their repositories (apt, dnf) so
+  updates arrive with the system's; each installer installed and
+  uninstalled on its own platform in CI, as E1's packages are.
+  Installers for the monitoring pieces too: the Grafana dashboard
+  published to grafana.com and the alert rules packaged (a Helm chart
+  or `kube-prometheus` mixin) for Prometheus users.
+
+**Done when:** a release tag publishes every package, image and
+installer from CI without a manual step but the maintainer's signing
+keys; each installs and runs its first query on its platform in CI; the
+compatibility matrix is generated, tested and published with the
+release; and the drivers live where their languages' users look for
+them.
 
 ---
 
@@ -10952,6 +10940,8 @@ the first production release.
 - **2026-11-15** — The order to §F2 agreed (§M14.30's first
   paragraph); §M14.31 (public benchmarks, reliably measured) and §M14.32
   (releases and distribution) planned; the first production release
-  after the whole plan: §M26 (in §F4) gathers what prepares it —
-  §M14.29 S3/S4, §M14.30 K6, §M14.31 P2/P3, §M14.32 — while §M14.31 P1
-  stays in §F1.
+  after the whole plan: what prepares it moved to §F4's end — §M26
+  (OSS-Fuzz, the confidential-computing mode, the audit: §M14.29's S3
+  and S4, §M14.30's K6), §M27 (cloud runs and leaderboards: §M14.31's
+  P2 and P3), §M28 (releases and distribution, planned as §M14.32);
+  §M14.31 keeps the method (P1), and §M14.29 is done (S1, S2, S5).

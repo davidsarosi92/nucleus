@@ -53,9 +53,10 @@ documentation lead to them, in which case please report it.
 
 ## How nucleus is checked
 
-PLAN.md §M14.29 lists what is in place and what is planned: this
-policy; fuzzing of every input that crosses a trust boundary — in
-place: `fuzz/` (SQL, value input, text search, `COPY`, both wire
-protocols, SCRAM, OIDC tokens, the files on disk, model files), run in
-CI on each change, OSS-Fuzz next; an independent security audit; and
-checks of the transaction guarantees with Jepsen's tools.
+PLAN.md §M14.29 lists what is in place: this policy; fuzzing of every
+input that crosses a trust boundary — `fuzz/` (SQL, value input, text
+search, `COPY`, both wire protocols, SCRAM, OIDC tokens, the files on
+disk, model files), run in CI on each change; and checks of the
+transaction guarantees with Jepsen's Elle (`crates/sql/tests/elle.rs`).
+Planned before the first production release (§M26): OSS-Fuzz and an
+independent security audit.
