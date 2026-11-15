@@ -123,7 +123,12 @@ fn backups_restored_to_a_point() {
         "{second}"
     );
     let count = |at: &str| {
-        let out = dir.join(format!("restored-{at}"));
+        // (A time's colons are no file name on Windows.)
+        let name: String = at
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+            .collect();
+        let out = dir.join(format!("restored-{name}"));
         let o = out.to_str().unwrap();
         let mut args = vec!["restore", r, o];
         if !at.is_empty() {

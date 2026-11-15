@@ -56,7 +56,7 @@
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `playground` | — | the console's page on the browser edition, the tutorial as its tour; `build.sh` (a static site), `test.mjs` (headless Chrome) | §M14.17 |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
-| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
+| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`, `ci-tools.sh` (CI's tools for running its scripts locally), `s3-test.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
 | `packaging` | — | the container image's `Dockerfile` (§6.3) | §M14.17 |
 | `monitoring` | — | Prometheus alert rules and their `promtool` tests, a Grafana dashboard, `test.sh` (the real Prometheus and OpenTelemetry Collector against a server; MIT, to copy from) (§8.39) | §M14.18 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
@@ -101,6 +101,10 @@ scripts/driver-tests.sh target/release/nucleus [rust python js java c cpp]
 scripts/psql-smoke.sh target/release/nucleus     # needs psql
 scripts/check-boundaries.py                      # core ↛ modules; modules → public API only
 scripts/detach-test.sh [<module package> …]      # cargo package, then test each unpacked copy
+scripts/ci-tools.sh                              # CI's tools, pinned and checked, into target/ci-tools
+T=target/ci-tools; PROMTOOL=$T/promtool PROMETHEUS=$T/prometheus OTELCOL=$T/otelcol \
+  monitoring/test.sh target/release/nucleus      # the rules' tests, a real Prometheus and collector
+RCLONE=$T/rclone scripts/s3-test.sh target/release/nucleus   # backups in a real S3 server
 ```
 
 A test-kit script whose results claim PostgreSQL's is checked against a

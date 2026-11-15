@@ -6,9 +6,10 @@ set -euo pipefail
 bin=${1:?usage: scripts/psql-smoke.sh <nucleus binary>}
 work=$(mktemp -d)
 port=54329
-# A self-signed certificate, so TLS is offered (and checked below).
+# A self-signed certificate, so TLS is offered (and checked below); an
+# extension makes it X.509 v3 with macOS's LibreSSL too (rustls takes no v1).
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$work/key.pem" -out "$work/cert.pem" -days 1 \
-  -subj "/CN=127.0.0.1" >/dev/null 2>&1
+  -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
 "$bin" server "$work/db" --listen 127.0.0.1:0 --pg-compat "127.0.0.1:$port" \
   --tls-cert "$work/cert.pem" --tls-key "$work/key.pem" 2>"$work/server.log" &
 pid=$!
