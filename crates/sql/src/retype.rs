@@ -43,7 +43,7 @@ use std::collections::HashSet;
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
 
-use nucleus_kv::{Kv, KvTxn};
+use nucleus_kv::{Kv, KvTxn, TxnOptions};
 
 use crate::catalog::{self, Conversion, ConversionPhase, Index, Table};
 use crate::convert::attempt;
@@ -721,18 +721,24 @@ fn drop_stale(kv: &Arc<dyn Kv>, table: &str) -> Result<()> {
     Ok(())
 }
 
+/// The tables whose column's type is being changed, read in a read-only
+/// transaction: the maintenance thread's look, run beside every session,
+/// conflicts with none of their changes of the catalog.
+fn converting(kv: &Arc<dyn Kv>) -> Result<Vec<String>> {
+    let txn = kv.begin(TxnOptions::read_only())?;
+    Ok(catalog::tables(&*txn)?
+        .into_iter()
+        .filter(|t| t.converting.is_some())
+        .map(|t| t.name)
+        .collect())
+}
+
 /// Finishes every conversion cut short (the maintenance thread): those
 /// not run by a statement in this process.  Returns the tables finished;
 /// a conversion that failed is reported and left (its statement's error
 /// is the table's again at the next try).
 pub fn resume_all(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Vec<String>> {
-    let names: Vec<String> = attempt(kv, |txn| {
-        Ok(catalog::tables(&*txn)?
-            .into_iter()
-            .filter(|t| t.converting.is_some())
-            .map(|t| t.name)
-            .collect())
-    })?;
+    let names = converting(kv)?;
     let mut done = Vec::new();
     for name in names {
         let Some(_running) = Running::claim(kv, &name) else {
@@ -751,13 +757,7 @@ pub fn resume_all(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Vec<String>> {
 /// indexes are rebuilt from its rows): one before its cutover is abandoned
 /// — its shadow indexes were not backed up — and every one finished.
 pub(crate) fn settle(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<()> {
-    let names: Vec<String> = attempt(kv, |txn| {
-        Ok(catalog::tables(&*txn)?
-            .into_iter()
-            .filter(|t| t.converting.is_some())
-            .map(|t| t.name)
-            .collect())
-    })?;
+    let names = converting(kv)?;
     for name in names {
         abandon(kv, &name)?;
         finish(kv, reg, &name)?;
