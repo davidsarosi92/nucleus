@@ -184,8 +184,8 @@ columns are marked as saying whose a row is — all of them or none —,
 scrubs every file of their bytes (old versions, index pages, free pages,
 the log) and searches the files to prove none is left, recording the
 erasure without the subject's data — and reaches its backups too:
-`BACKUP TO '/backups/db'` (online, without index pages; after the
-first, only what changed; `nucleus restore --at` rebuilds the database
+`BACKUP TO '/backups/db'` or `'s3://bucket/db'` (online, without index
+pages; after the first, only what changed; `nucleus restore --at` rebuilds the database
 as it was at any of them) seals each row of a subject under that subject's
 own key, kept apart (`<dir>.subject-keys`), which `FORGET` destroys, so
 a restore of an older backup leaves the subject out —, and `nucleus mcp

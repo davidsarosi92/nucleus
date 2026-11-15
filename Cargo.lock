@@ -413,6 +413,7 @@ dependencies = [
  "nucleus-pg-compat",
  "nucleus-platform",
  "nucleus-prometheus",
+ "nucleus-s3",
  "nucleus-server",
  "nucleus-sql",
  "nucleus-tls",
@@ -604,6 +605,15 @@ version = "0.1.0"
 dependencies = [
  "nucleus-platform",
  "nucleus-server",
+]
+
+[[package]]
+name = "nucleus-s3"
+version = "0.1.0"
+dependencies = [
+ "nucleus-http",
+ "nucleus-kv",
+ "nucleus-sql",
 ]
 
 [[package]]

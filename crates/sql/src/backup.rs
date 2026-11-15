@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nucleus_crypto::{aead, sha256};
@@ -122,10 +122,6 @@ impl Backup {
         row.push(Value::Text(self.name.as_str().into()));
         row
     }
-}
-
-fn io(what: &str, path: &Path, e: std::io::Error) -> Error {
-    Error::io(format!("{what} {}: {e}", path.display()))
 }
 
 /// Where an entry's subjects are found: by table, the rows of subjects
@@ -479,8 +475,9 @@ fn row_of(key: &[u8]) -> Option<(u32, &[u8], bool)> {
 
 /// The parts being written.
 struct Parts<'a> {
-    fs: &'a dyn FileSystem,
-    dir: PathBuf,
+    target: &'a dyn Target,
+    /// The backup's directory in the repository.
+    dir: String,
     buf: Vec<u8>,
     done: Vec<(String, u64, [u8; 32])>,
 }
@@ -491,14 +488,7 @@ impl Parts<'_> {
             return Ok(());
         }
         let name = format!("part-{:06}", self.done.len());
-        let path = self.dir.join(&name);
-        let f = self
-            .fs
-            .open(&path, OpenMode::CreateNew)
-            .map_err(|e| io("could not create", &path, e))?;
-        f.write_all_at(&self.buf, 0)
-            .and_then(|()| f.sync())
-            .map_err(|e| io("could not write", &path, e))?;
+        put(self.target, &format!("{}/{name}", self.dir), &self.buf)?;
         self.done
             .push((name, self.buf.len() as u64, sha256(&self.buf)));
         self.buf.clear();
@@ -572,22 +562,159 @@ fn backup_number(name: &str) -> Option<u64> {
         .flatten()
 }
 
-/// The backups in repository `dir` (none if it is not there), by number.
-fn listing(fs: &dyn FileSystem, dir: &Path) -> Result<Vec<(u64, String)>> {
-    if !fs
-        .exists(dir)
-        .map_err(|e| io("could not look at", dir, e))?
-    {
-        return Ok(Vec::new());
+/// Where a repository's backups are kept (PLAN.md §M14.18 O3b): files
+/// named by paths within it (`000001-full/part-000000`) — a directory of
+/// the database's file system built in, an object store a module adds
+/// ([`register_target`]).  A file is written whole and seen only whole
+/// (the manifest last: no manifest, no backup).
+pub trait Target: Send + Sync {
+    /// The names right under `dir` (`""`: the repository): a backup's
+    /// directory, a backup's files.  None if there is nothing there.
+    fn list(&self, dir: &str) -> std::io::Result<Vec<String>>;
+    /// File `name`'s bytes; `None` if there is none.
+    fn get(&self, name: &str) -> std::io::Result<Option<Vec<u8>>>;
+    /// Writes file `name` whole, durably before this returns.
+    fn put(&self, name: &str, data: &[u8]) -> std::io::Result<()>;
+    /// Removes file `name` (none: done).
+    fn delete(&self, name: &str) -> std::io::Result<()>;
+    /// Where it is, for messages (never a secret).
+    fn describe(&self) -> String;
+}
+
+/// Opens the repository at a URL of a module's scheme.
+pub type Opener = fn(&str) -> std::result::Result<Box<dyn Target>, String>;
+
+static SCHEMES: std::sync::RwLock<Vec<(String, Opener)>> = std::sync::RwLock::new(Vec::new());
+
+/// Registers the repositories at `<scheme>://…` (a module's: `s3`).
+pub fn register_target(scheme: &str, open: Opener) {
+    let mut s = SCHEMES.write().unwrap_or_else(|e| e.into_inner());
+    s.retain(|(n, _)| n != scheme);
+    s.push((scheme.to_string(), open));
+}
+
+/// A repository in a directory of the database's file system: each file
+/// written beside as `.tmp`, synced, renamed, the directory synced.
+struct DirTarget<'a> {
+    fs: &'a dyn FileSystem,
+    root: PathBuf,
+}
+
+impl DirTarget<'_> {
+    fn path(&self, name: &str) -> PathBuf {
+        name.split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root.clone(), |p, s| p.join(s))
     }
+}
+
+impl Target for DirTarget<'_> {
+    fn list(&self, dir: &str) -> std::io::Result<Vec<String>> {
+        let p = self.path(dir);
+        if !self.fs.exists(&p)? {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .fs
+            .list_dir(&p)?
+            .into_iter()
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect())
+    }
+
+    fn get(&self, name: &str) -> std::io::Result<Option<Vec<u8>>> {
+        let p = self.path(name);
+        if !self.fs.exists(&p)? {
+            return Ok(None);
+        }
+        let f = self.fs.open(&p, OpenMode::ReadOnly)?;
+        let mut b = vec![0u8; f.size()? as usize];
+        f.read_exact_at(&mut b, 0)?;
+        Ok(Some(b))
+    }
+
+    fn put(&self, name: &str, data: &[u8]) -> std::io::Result<()> {
+        let p = self.path(name);
+        let dir = p.parent().unwrap_or(&self.root).to_path_buf();
+        self.fs.create_dir_all(&dir)?;
+        let tmp = PathBuf::from(format!("{}.tmp", p.display()));
+        if self.fs.exists(&tmp)? {
+            self.fs.remove_file(&tmp)?;
+        }
+        let f = self.fs.open(&tmp, OpenMode::CreateNew)?;
+        f.write_all_at(data, 0)?;
+        f.sync()?;
+        drop(f);
+        self.fs.rename(&tmp, &p)?;
+        self.fs.sync_dir(&dir)
+    }
+
+    fn delete(&self, name: &str) -> std::io::Result<()> {
+        let p = self.path(name);
+        if self.fs.exists(&p)? {
+            self.fs.remove_file(&p)?;
+        }
+        Ok(())
+    }
+
+    fn describe(&self) -> String {
+        self.root.display().to_string()
+    }
+}
+
+/// The repository `spec` names: `<scheme>://…` a module's, else an
+/// absolute path on the server.
+fn open_target<'a>(kv: &'a Arc<dyn Kv>, spec: &str) -> Result<Box<dyn Target + 'a>> {
+    if let Some((scheme, _)) = spec.split_once("://") {
+        let open = SCHEMES
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(n, _)| n == scheme)
+            .map(|(_, o)| *o)
+            .ok_or_else(|| {
+                Error::feature(format!(
+                    "no module keeps backups at {scheme}:// (a local directory is an absolute path)"
+                ))
+            })?;
+        return open(spec).map_err(Error::invalid_parameter);
+    }
+    let fs = kv
+        .files()
+        .ok_or_else(|| Error::feature("this database has no files to keep backups beside"))?;
+    let root = PathBuf::from(spec);
+    // From the root: on Windows a path without a drive (`\backups`) is
+    // the current drive's.
+    if !root.has_root() {
+        return Err(Error::invalid_parameter(format!(
+            "a repository of backups is an absolute path or a URL, not '{spec}'"
+        )));
+    }
+    Ok(Box::new(DirTarget { fs, root }))
+}
+
+fn target_error(t: &dyn Target, what: &str, name: &str, e: std::io::Error) -> Error {
+    Error::io(format!("could not {what} {name} in {}: {e}", t.describe()))
+}
+
+fn put(t: &dyn Target, name: &str, data: &[u8]) -> Result<()> {
+    t.put(name, data)
+        .map_err(|e| target_error(t, "write", name, e))
+}
+
+fn get(t: &dyn Target, name: &str) -> Result<Option<Vec<u8>>> {
+    t.get(name).map_err(|e| target_error(t, "read", name, e))
+}
+
+/// The backups in a repository (none if it is not there), by number.
+fn listing(t: &dyn Target) -> Result<Vec<(u64, String)>> {
     let mut out = Vec::new();
-    for name in fs.list_dir(dir).map_err(|e| io("could not list", dir, e))? {
-        let name = name.to_string_lossy().into_owned();
+    for name in t.list("").map_err(|e| target_error(t, "list", "", e))? {
         if name == MANIFEST {
             return Err(Error::invalid_parameter(format!(
                 "{} holds one backup (as made before repositories of backups): \
                  back up to a new directory",
-                dir.display()
+                t.describe()
             )));
         }
         match backup_number(&name) {
@@ -597,7 +724,7 @@ fn listing(fs: &dyn FileSystem, dir: &Path) -> Result<Vec<(u64, String)>> {
                 return Err(Error::invalid_parameter(format!(
                     "{} is not a repository of backups (it holds {name}): \
                      back up to a new or empty directory, or a repository",
-                    dir.display()
+                    t.describe()
                 )));
             }
         }
@@ -606,27 +733,17 @@ fn listing(fs: &dyn FileSystem, dir: &Path) -> Result<Vec<(u64, String)>> {
     Ok(out)
 }
 
-fn read_file(fs: &dyn FileSystem, path: &Path) -> Result<Vec<u8>> {
-    let f = fs
-        .open(path, OpenMode::ReadOnly)
-        .map_err(|e| io("could not open", path, e))?;
-    let len = f.size().map_err(|e| io("could not read", path, e))?;
-    let mut b = vec![0u8; len as usize];
-    f.read_exact_at(&mut b, 0)
-        .map_err(|e| io("could not read", path, e))?;
-    Ok(b)
-}
-
 /// A backup's manifest, if it has one (one without did not finish).
-fn read_manifest(fs: &dyn FileSystem, dir: &Path) -> Result<Option<Manifest>> {
-    let path = dir.join(MANIFEST);
-    if !fs
-        .exists(&path)
-        .map_err(|e| io("could not look at", &path, e))?
-    {
-        return Ok(None);
+fn read_manifest(t: &dyn Target, dir: &str) -> Result<Option<Manifest>> {
+    let name = if dir.is_empty() {
+        MANIFEST.to_string()
+    } else {
+        format!("{dir}/{MANIFEST}")
+    };
+    match get(t, &name)? {
+        None => Ok(None),
+        Some(b) => manifest(&String::from_utf8_lossy(&b)).map(Some),
     }
-    manifest(&String::from_utf8_lossy(&read_file(fs, &path)?)).map(Some)
 }
 
 /// The branch a backup keeps for the next one to compare with: of the
@@ -909,23 +1026,14 @@ fn as_ref(b: &Bound<Vec<u8>>) -> Bound<&[u8]> {
 /// holds on to the pages it shares, as a snapshot does; `FULL`, or the
 /// branch dropped, starts a new chain.
 pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
-    let fs = kv
-        .files()
-        .ok_or_else(|| Error::feature("this database has no files to back up beside"))?;
-    let repo = PathBuf::from(to);
-    // From the root: on Windows a path without a drive (`\backups`) is
-    // the current drive's.
-    if !repo.has_root() {
-        return Err(Error::invalid_parameter(format!(
-            "BACKUP TO needs an absolute path, not '{to}'"
-        )));
-    }
-    let listed = listing(fs, &repo)?;
+    let target = open_target(kv, to)?;
+    let target = &*target;
+    let listed = listing(target)?;
     let number = listed.last().map_or(1, |(n, _)| n + 1);
     // The last backup finished, and what it kept to compare with.
     let mut last = None;
     for (_, name) in listed.iter().rev() {
-        if let Some(m) = read_manifest(fs, &repo.join(name))? {
+        if let Some(m) = read_manifest(target, name)? {
             last = Some((name.clone(), m));
             break;
         }
@@ -948,7 +1056,6 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     }
     let incremental = base.is_some();
     let name = backup_name(number, incremental);
-    let dir = repo.join(&name);
     // The branch read, kept for the next backup.
     let made = Made {
         kv,
@@ -987,8 +1094,6 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
         .iter()
         .map(|t| (t.id, t.indexes.iter().map(|i| i.id).collect()))
         .collect();
-    fs.create_dir_all(&dir)
-        .map_err(|e| io("could not create", &dir, e))?;
     let mut nonces = Nonces {
         base: [0; aead::NONCE_LEN],
         n: 0,
@@ -996,8 +1101,8 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     kv.random_bytes(&mut nonces.base);
     let mut w = Writer {
         parts: Parts {
-            fs,
-            dir: dir.clone(),
+            target,
+            dir: name.clone(),
             buf: Vec::with_capacity(PART_BYTES + (1 << 16)),
             done: Vec::new(),
         },
@@ -1115,18 +1220,7 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     for (name, len, hash) in &w.parts.done {
         m.push_str(&format!("part {name} {len} {}\n", crate::audit::hex(hash)));
     }
-    let tmp = dir.join("manifest.tmp");
-    let f = fs
-        .open(&tmp, OpenMode::CreateNew)
-        .map_err(|e| io("could not create", &tmp, e))?;
-    f.write_all_at(m.as_bytes(), 0)
-        .and_then(|()| f.sync())
-        .map_err(|e| io("could not write", &tmp, e))?;
-    drop(f);
-    let path = dir.join(MANIFEST);
-    fs.rename(&tmp, &path)
-        .and_then(|()| fs.sync_dir(&dir))
-        .map_err(|e| io("could not write", &path, e))?;
+    put(target, &format!("{name}/{MANIFEST}"), m.as_bytes())?;
     // Done: this backup's branch kept, the repository's older ones
     // (the last backup's, any a failure left) dropped.
     let mut made = made;
@@ -1250,32 +1344,36 @@ pub enum Until {
 /// The backups a restore reads, in order — a full one, and the
 /// incremental ones after it up to the one `until` names — with their
 /// directories.
-fn chain(fs: &dyn FileSystem, from: &Path, until: &Until) -> Result<Vec<(PathBuf, Manifest)>> {
-    let (mut dir, mut m) = match read_manifest(fs, from)? {
-        // A backup's own directory.
-        Some(m) => (from.to_path_buf(), m),
+fn chain(t: &dyn Target, start: Option<String>, until: &Until) -> Result<Vec<(String, Manifest)>> {
+    let (mut dir, mut m) = match start {
+        // A backup named: its own directory.
+        Some(name) => {
+            let m = read_manifest(t, &name)?.ok_or_else(|| {
+                Error::invalid_parameter(format!("{name} in {} is no backup", t.describe()))
+            })?;
+            (name, m)
+        }
         None => {
             let mut found = None;
-            for (_, name) in listing(fs, from)?.into_iter().rev() {
-                let dir = from.join(&name);
-                let Some(m) = read_manifest(fs, &dir)? else {
+            for (_, name) in listing(t)?.into_iter().rev() {
+                let Some(m) = read_manifest(t, &name)? else {
                     continue;
                 };
                 let fits = match until {
                     Until::Latest => true,
                     Until::Commit(c) => m.commit <= *c,
-                    Until::Time(t) => m.time <= *t,
+                    Until::Time(time) => m.time <= *time,
                     Until::Name(n) => *n == name,
                 };
                 if fits {
-                    found = Some((dir, m));
+                    found = Some((name, m));
                     break;
                 }
             }
             found.ok_or_else(|| {
                 Error::invalid_parameter(format!(
                     "{} holds no backup {}",
-                    from.display(),
+                    t.describe(),
                     match until {
                         Until::Latest => "finished".to_string(),
                         Until::Commit(c) => format!("of commit {c} or before"),
@@ -1288,28 +1386,39 @@ fn chain(fs: &dyn FileSystem, from: &Path, until: &Until) -> Result<Vec<(PathBuf
     };
     let mut out = Vec::new();
     while let Some(base) = m.base.clone().filter(|_| m.incremental) {
-        let parent = dir.parent().unwrap_or(Path::new("/")).join(&base);
-        let next = read_manifest(fs, &parent)?.ok_or_else(|| {
+        let next = read_manifest(t, &base)?.ok_or_else(|| {
             Error::data_exception(format!(
-                "{} follows {base}, which is missing or unfinished",
-                dir.display()
+                "{dir} follows {base}, which is missing or unfinished"
             ))
         })?;
         // (The same commit: nothing written between.)
         if next.commit > m.commit {
             return Err(Error::data_exception(format!(
-                "{} follows {base}, a later backup",
-                dir.display()
+                "{dir} follows {base}, a later backup"
             )));
         }
         out.push((
-            std::mem::replace(&mut dir, parent),
+            std::mem::replace(&mut dir, base),
             std::mem::replace(&mut m, next),
         ));
     }
     out.push((dir, m));
     out.reverse();
     Ok(out)
+}
+
+/// `spec` without its last part, and that part: a backup's own directory
+/// named is that backup of the repository around it.
+fn split_last(spec: &str) -> Option<(String, String)> {
+    let trimmed = spec.trim_end_matches(['/', '\\']);
+    let i = trimmed.rfind(['/', '\\'])?;
+    let (parent, name) = (&trimmed[..i], &trimmed[i + 1..]);
+    let parent = if parent.is_empty() || parent.ends_with(':') {
+        &trimmed[..=i]
+    } else {
+        parent
+    };
+    (!name.is_empty()).then(|| (parent.to_string(), name.to_string()))
 }
 
 /// Reads a part's entries.
@@ -1387,7 +1496,7 @@ fn tampered() -> Error {
 
 /// Makes a new database of the last backup in repository `from` (or of
 /// the backup in directory `from`): [`restore_to`] the latest.
-pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &Path) -> Result<Restored> {
+pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &str) -> Result<Restored> {
     restore_to(kv, reg, from, &Until::Latest)
 }
 
@@ -1399,16 +1508,19 @@ pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &Path) -> Result<Restored
 /// analyzed again; an entry whose subject's key is destroyed is left
 /// out, an audit record's detail blanked, a key referencing a row left
 /// out set to `NULL` or its default as declared.
-pub fn restore_to(
-    kv: &Arc<dyn Kv>,
-    reg: &Registry,
-    from: &Path,
-    until: &Until,
-) -> Result<Restored> {
-    let fs = kv
-        .files()
-        .ok_or_else(|| Error::feature("this database has no files to restore from"))?;
-    let chain = chain(fs, from, until)?;
+pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -> Result<Restored> {
+    let mut target = open_target(kv, from)?;
+    let mut start = None;
+    // A backup's own directory: that backup of the repository around it.
+    if read_manifest(&*target, "")?.is_some() {
+        let (parent, name) = split_last(from).ok_or_else(|| {
+            Error::invalid_parameter(format!("{from}: a backup's directory needs one around it"))
+        })?;
+        target = open_target(kv, &parent)?;
+        start = Some(name);
+    }
+    let target = &*target;
+    let chain = chain(target, start, until)?;
     {
         let txn = kv.begin(TxnOptions::read_only())?;
         if let Some(e) = txn
@@ -1437,12 +1549,14 @@ pub fn restore_to(
         .iter()
         .flat_map(|(dir, m)| m.parts.iter().map(move |p| (dir, p)));
     for (dir, (name, len, hash)) in parts {
-        let path = dir.join(name);
-        let b = read_file(fs, &path)?;
+        let path = format!("{dir}/{name}");
+        let b = get(target, &path)?.ok_or_else(|| {
+            Error::data_exception(format!("{path} is missing from {}", target.describe()))
+        })?;
         if b.len() as u64 != *len || crate::audit::hex(&sha256(&b)) != *hash {
             return Err(Error::data_exception(format!(
                 "{} is not the part the manifest names (its length or SHA-256 differ)",
-                path.display()
+                path
             )));
         }
         let mut r = Reader { b: &b, at: 0 };
@@ -1527,7 +1641,7 @@ pub fn restore_to(
                 other => {
                     return Err(Error::data_exception(format!(
                         "an entry of an unknown kind ({other}) in {}",
-                        path.display()
+                        path
                     )));
                 }
             };

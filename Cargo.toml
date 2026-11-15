@@ -33,6 +33,7 @@ nucleus-mcp = { version = "0.1.0", path = "modules/mcp" }
 nucleus-console = { version = "0.1.0", path = "modules/console" }
 nucleus-prometheus = { version = "0.1.0", path = "modules/prometheus" }
 nucleus-otlp = { version = "0.1.0", path = "modules/otlp" }
+nucleus-s3 = { version = "0.1.0", path = "modules/s3" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

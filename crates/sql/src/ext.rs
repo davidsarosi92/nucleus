@@ -74,6 +74,8 @@ pub use crate::text::{Analyzer, Token};
 pub use crate::types::{DataType, Row, Value};
 /// The vectorized executor's columns, as batch capabilities see them.
 pub use crate::vector::{Batch, Sel, TimeKind, Vector};
+/// HMAC-SHA-256 (`nucleus-crypto`'s), for a module to sign a request.
+pub use nucleus_crypto::hmac_sha256;
 /// SHA-256 (`nucleus-crypto`'s), for a module to check what it fetched.
 pub use nucleus_crypto::sha256;
 
@@ -99,6 +101,13 @@ pub mod vectors {
 /// checks them.
 pub mod sparse {
     pub use crate::sparse::{Sparse, data_type};
+}
+
+/// Where backups are kept, as modules add places ([`crate::backup`],
+/// PLAN.md §M14.18 O3b): a repository's files, and the scheme of URLs a
+/// module's repositories have (`s3://…`).
+pub mod backups {
+    pub use crate::backup::{Opener, Restored, Target, Until, register_target, restore_to};
 }
 
 /// Secrets as modules see them ([`crate::secrets`]): a keyring for the

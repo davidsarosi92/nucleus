@@ -179,7 +179,8 @@ a repository — the first a full backup, each next one only what changed
 the subject's key (the server's `<dir>.subject-keys` file; keep it apart
 from the backups), which `FORGET SUBJECT` destroys; `nucleus restore
 <repo> <newdir> [--at <commit|000003-incr|'time'>] [--subject-keys
-FILE]` restores the chain to that point, rebuilds indexes and
+FILE]` restores (a repository may be `s3://bucket/prefix`, with the AWS
+SDKs' variables) the chain to that point, rebuilds indexes and
 statistics and leaves forgotten subjects out.  Many tenants in one table: a policy
 (`CREATE POLICY t ON docs USING (tenant = current_setting('app.tenant'))`)
 keeps every search — vectors, `@@`, `score()`, `rrf` — to the tenant's

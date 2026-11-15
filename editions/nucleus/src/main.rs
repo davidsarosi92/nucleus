@@ -133,7 +133,10 @@ usage:
                                     again from the rows; the rows of subjects
                                     whose keys FORGET SUBJECT destroyed left
                                     out (keys from <file>, default
-                                    <dir>.subject-keys)
+                                    <dir>.subject-keys); <repository> may be
+                                    s3://bucket/prefix (AWS_ACCESS_KEY_ID,
+                                    AWS_SECRET_ACCESS_KEY, AWS_REGION,
+                                    AWS_ENDPOINT_URL for MinIO and others)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";
@@ -141,6 +144,8 @@ Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     sql::registry();
+    // Repositories of backups in object storage (BACKUP TO 's3://…').
+    nucleus_s3::register();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).

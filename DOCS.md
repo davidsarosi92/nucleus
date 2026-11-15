@@ -48,6 +48,7 @@
 | `modules/console` | `nucleus-console` | the web console: a front end serving a page to browse tables, run SQL, see plans drawn and the linter's findings (§9) | §M14.17 |
 | `modules/prometheus` | `nucleus-prometheus` | Prometheus: the metrics as `GET /metrics` (text format, OpenMetrics) and the health checks `/health/live`, `/health/ready` (§8.38) | §M14.18 |
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
+| `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -5128,8 +5129,8 @@ end use; statement statistics keep normalized texts, constants as
 ### 8.30 Backups and subjects' keys (`backup`, `subject_keys`, §M14.24 R6)
 
 **`BACKUP [FULL] TO 'repo'`** (an administrator's; not in a
-transaction block, `25001`; an absolute path on the server, else
-`22023`) writes the database as one snapshot sees it, while others go on
+transaction block, `25001`; an absolute path on the server or a URL of a
+module's object store, else `22023`) writes the database as one snapshot sees it, while others go on
 writing, into a repository of backups: a new or empty directory, or one
 `BACKUP` wrote (anything else in it — a backup of the format before
 repositories, a stray file — `22023`).  Each backup is a directory of
@@ -5168,6 +5169,21 @@ backups are full.  Branches named `nc-backup-…` are the backups'; they
 are listed with the others, and one kept for a backup of a branch other
 than the main one is that branch's child — `DROP BRANCH` of it waits
 for `DROP BRANCH nc-backup-…` (its next backup is then a full one).
+
+**Where a repository is** (`backup::Target`, §M14.18 O3b): files named
+by paths within it (`000001-full/part-000000`), each written whole and
+seen only whole — `list(dir)`, `get`, `put`, `delete`.  Built in: a
+directory of the database's file system (each file written as `.tmp`,
+synced, renamed, the directory synced).  A module registers a URL
+scheme (`register_target`, `ext::backups`): `modules/s3` (`nucleus-s3`)
+keeps a repository at `s3://bucket/prefix` — AWS S3, MinIO, R2, B2 —,
+each request signed with Signature Version 4 (`sign`, checked against
+the examples of AWS's documentation), configured by the AWS SDKs'
+variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL[_S3]`: another
+store, addressed by path), one `PUT` an object (no multipart: a part is
+about 16 MiB), retried three times on a network error or HTTP 500/503.
+A scheme no module serves: `0A000`.
 
 It is the store's entries less what is derived from them: every
 secondary index's (a B-tree's, HNSW's, a text or sparse index's —
@@ -5236,12 +5252,13 @@ holding its own).  The old file's blocks may remain on the disk until
 overwritten; a key management service is a module's to add.
 
 **Restore** (`backup::restore_to(kv, registry, repo, until)`;
-`nucleus restore <repository> <dir> [--at <commit|backup|time>]
+`nucleus restore <repository | s3://…> <dir> [--at <commit|backup|time>]
 [--subject-keys FILE]`, keys by default `<dir>.subject-keys`) makes a
 new database (one holding data: `55000`) of the repository's last backup
 — or, by `--at`, the last of commit `n` or before, the one in directory
 `000003-incr`, or the last made by a time (`'2026-11-15 14:05:00+01'`;
-UTC without a zone) —: that backup's full one and the incremental ones
+UTC without a zone) —, from a directory or a module's store: that
+backup's full one and the incremental ones
 after it, each following the one before (one missing or unfinished:
 `22000`).  A directory holding a manifest of its own (a backup of the
 format before repositories, `nucleus backup 1`) is restored by itself.
@@ -5264,7 +5281,7 @@ fine as the backups are frequent — incremental ones cost what changed,
 so they can be taken often.  Not the WAL archived: the log holds every
 entry in the clear, and a subject's rows in an archived log could not
 be forgotten (§M14.24), while a backup's are sealed.  Not yet
-(§M14.18): object storage, compression and encryption of the backups,
+(§M14.18): compression and encryption of the backups,
 their retention, scheduled backups, scheduled restore tests.  Tests:
 `tests/backup.rs` (a restore is the database as the backup saw it, its
 indexes used; a backup holds no subject's value in the clear; a restore
@@ -5276,7 +5293,10 @@ tests/branch.rs` (the ranges two branches differ in hold every
 difference, a base written since too), `kv tests/contract.rs`
 (`changed_since` holds every change: deletes of runs, a transaction
 running across the branch point, spilled ones), the CLI's
-`backups_restored_to_a_point`.
+`backups_restored_to_a_point`; `modules/s3` (the signature examples;
+a stand-in store checking every signature, listing in pages, a full and
+an incremental backup restored from it) and `scripts/s3-test.sh`, CI's
+**backups in object storage (S3)**, against rclone's real S3 server.
 
 ### 8.31 JSON (`json`, §M14.15)
 
@@ -7053,6 +7073,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — §M14.18 O3b, backups in object storage:**
+  `backup::Target` (a repository's files; a directory built in,
+  `register_target` for a module's URL scheme), `modules/s3`
+  (`s3://bucket/prefix`, Signature Version 4, the AWS SDKs'
+  variables); `scripts/s3-test.sh` against rclone's S3 server in CI
+  (§8.30).
 - **2026-11-15 — §M14.18 O3a, incremental backups:** `BACKUP [FULL] TO
   'repo'` into a repository (`000001-full`, `000002-incr`, …), what
   changed found by comparing the kept branch's tree with a new one's

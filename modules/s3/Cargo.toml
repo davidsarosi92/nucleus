@@ -1,0 +1,23 @@
+[package]
+name = "nucleus-s3"
+description = "Backups of nucleus in S3-compatible object storage (AWS S3, MinIO, R2, …), signed with AWS Signature Version 4"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+nucleus-http = { version = "0.1.0", path = "../http" }
+nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }

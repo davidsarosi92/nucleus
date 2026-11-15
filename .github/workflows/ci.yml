@@ -42,6 +42,32 @@ jobs:
       - run: scripts/check-boundaries.py
       - run: scripts/detach-test.sh
 
+  # Backups in object storage (PLAN.md §M14.18 O3b): BACKUP TO 's3://…'
+  # and nucleus restore against a real S3 server, rclone's (MinIO no
+  # longer publishes binaries).
+  s3:
+    name: backups in object storage (S3)
+    runs-on: ubuntu-latest
+    env:
+      RCLONE_VERSION: 1.69.1
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: s3
+      - name: rclone
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          z=rclone-v$RCLONE_VERSION-linux-amd64.zip
+          curl -fsSLO "https://github.com/rclone/rclone/releases/download/v$RCLONE_VERSION/$z"
+          curl -fsSL "https://github.com/rclone/rclone/releases/download/v$RCLONE_VERSION/SHA256SUMS" | grep "  $z\$" | sha256sum -c -
+          unzip -q -j "$z" "*/rclone" -d .
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+      - run: cargo build -p nucleus-cli
+      - run: scripts/s3-test.sh target/debug/nucleus
+
   # The monitoring shipped with nucleus (PLAN.md §M14.18 O2): the alert
   # rules' tests in promtool, a Prometheus scraping a server with the rules
   # loaded, an OpenTelemetry Collector receiving its metrics over OTLP.

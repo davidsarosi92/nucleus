@@ -169,8 +169,7 @@ fn a_restore_is_the_database_as_the_backup_saw_it() {
     assert_eq!(code(&mut s, "BACKUP TO '/db'"), "22023");
 
     let restored = open(&p, "/restored");
-    let r =
-        nucleus_sql::backup::restore(&restored, s.registry(), Path::new("/backups/one")).unwrap();
+    let r = nucleus_sql::backup::restore(&restored, s.registry(), "/backups/one").unwrap();
     assert_eq!((r.omitted, r.blanked, r.nulled), (0, 0, 0), "{r:?}");
     assert!(r.indexes >= 5 && r.opened > 10, "{r:?}");
     let again = Arc::clone(&restored);
@@ -194,7 +193,7 @@ fn a_restore_is_the_database_as_the_backup_saw_it() {
     );
     // A restore goes into a new database only.
     assert_eq!(
-        nucleus_sql::backup::restore(&again, t.registry(), Path::new("/backups/one"))
+        nucleus_sql::backup::restore(&again, t.registry(), "/backups/one")
             .unwrap_err()
             .code
             .to_string(),
@@ -253,8 +252,7 @@ fn a_restore_after_forget_leaves_the_subject_out() {
     texts(&mut s, "BACKUP TO '/backups/after'");
 
     let restored = open(&p, "/restored");
-    let r = nucleus_sql::backup::restore(&restored, s.registry(), Path::new("/backups/before"))
-        .unwrap();
+    let r = nucleus_sql::backup::restore(&restored, s.registry(), "/backups/before").unwrap();
     // Two notes, two messages, an attachment, a document and its chunks,
     // their embedding vectors…
     assert!(r.omitted >= 7, "{r:?}");
@@ -278,7 +276,7 @@ fn a_restore_after_forget_leaves_the_subject_out() {
     );
     // A restore of the later backup has her new note, and only that.
     let later = open(&p, "/later");
-    nucleus_sql::backup::restore(&later, s.registry(), Path::new("/backups/after")).unwrap();
+    nucleus_sql::backup::restore(&later, s.registry(), "/backups/after").unwrap();
     let mut u = Session::new(later);
     assert_eq!(
         texts(&mut u, "SELECT content FROM notes WHERE subject = 'alice'"),
@@ -287,7 +285,7 @@ fn a_restore_after_forget_leaves_the_subject_out() {
     // With none of the keys, a backup opens to what is no one's.
     subject_keys::set_subject_keys(Some(Arc::new(MemoryKeys::new(|b| b.fill(1)))));
     let bare = open(&p, "/bare");
-    nucleus_sql::backup::restore(&bare, s.registry(), Path::new("/backups/after")).unwrap();
+    nucleus_sql::backup::restore(&bare, s.registry(), "/backups/after").unwrap();
     let mut v = Session::new(bare);
     assert_eq!(
         texts(
@@ -392,7 +390,7 @@ fn incremental_backups_restore_to_each_point() {
         let r = nucleus_sql::backup::restore_to(
             &restored,
             s.registry(),
-            Path::new("/repo"),
+            "/repo",
             &nucleus_sql::backup::Until::Name(name.to_string()),
         )
         .unwrap();
@@ -410,7 +408,7 @@ fn incremental_backups_restore_to_each_point() {
     let r = nucleus_sql::backup::restore_to(
         &restored,
         s.registry(),
-        Path::new("/repo"),
+        "/repo",
         &nucleus_sql::backup::Until::Commit(n(&third, "commit") - 1),
     )
     .unwrap();
@@ -433,7 +431,7 @@ fn incremental_backups_restore_to_each_point() {
     let r = nucleus_sql::backup::restore_to(
         &restored,
         s.registry(),
-        Path::new("/repo"),
+        "/repo",
         &nucleus_sql::backup::Until::Name("000003-incr".into()),
     )
     .unwrap();
@@ -493,7 +491,7 @@ fn an_unfinished_backup_is_skipped() {
         "{names:?}"
     );
     let restored = open(&p, "/restored");
-    let r = nucleus_sql::backup::restore(&restored, s.registry(), Path::new("/repo")).unwrap();
+    let r = nucleus_sql::backup::restore(&restored, s.registry(), "/repo").unwrap();
     assert_eq!(r.backups, 3, "{r:?}");
     let mut t = Session::new(restored);
     assert_eq!(

@@ -39,7 +39,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "restore: {dir} is not empty: a backup is restored into a new database"
         ));
     }
-    let backup = std::fs::canonicalize(backup).map_err(|e| format!("{backup}: {e}"))?;
+    // A URL is a module's repository (s3://…); a path is made absolute.
+    let backup = if backup.contains("://") {
+        backup.clone()
+    } else {
+        std::fs::canonicalize(backup)
+            .map_err(|e| format!("{backup}: {e}"))?
+            .to_string_lossy()
+            .into_owned()
+    };
     // A database made here and not restored is removed again.
     let made = !std::path::Path::new(dir).exists();
     let r = restore_into(dir, &backup, keys, &until);
@@ -51,7 +59,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
 fn restore_into(
     dir: &str,
-    backup: &std::path::Path,
+    backup: &str,
     keys: Option<String>,
     until: &nucleus_sql::backup::Until,
 ) -> Result<(), String> {
