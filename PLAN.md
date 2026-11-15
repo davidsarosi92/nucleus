@@ -237,7 +237,7 @@ are marked ✅.
 | D13 | System catalog naming (§M14.5) | ✅ **nucleus's own `nc_catalog`** (2026-10-17), in nucleus's terms (table ids, key prefixes, statistics); `pg_catalog` / `information_schema` only as a compatibility layer on top, because PostgreSQL clients hard-code those names — nucleus is PostgreSQL-compatible, not PostgreSQL | expose only `pg_catalog` (simpler, but makes PostgreSQL's names nucleus's identity) |
 | D14 | Client protocol (§M14.7) | ✅ **nucleus's own protocol, `ncp`** (2026-10-17): little-endian frames, nucleus's typed value encoding on the wire, port 20035; nucleus's own drivers (Rust, C, C++, Python, JS/TS, Java).  The PostgreSQL protocol becomes an optional module (`--pg-compat`, off by default), frozen: kept working for psql and existing tools, not extended for tool-specific catalog queries | the PostgreSQL protocol as the only client protocol (every PostgreSQL tool works, but nucleus stays a PostgreSQL look-alike); dropping it entirely (no psql, no PostgreSQL tools) |
 | D15 | Versioning | ✅ **Each format versioned on its own, one release version** (2026-11-13, before the first embedded release, §M14.23): the server, CLI, Rust crates and the embedded library share one semantic version (`Cargo.toml`; `nce_version()`); each **format** carries its own version, checked on open — the store's pager header (`FORMAT_VERSION`, oldest read `OLDEST_FORMAT_VERSION`; the WAL is the store's and opens under it), each catalog record kind (its `VERSION` byte), the row encoding (inside the store's version) and the client protocol (`ncp`'s Hello version, negotiated); a build reads every older format and refuses a newer one with a message naming both; drivers are versioned per language and name the protocol version they speak; a release note lists every format change.  Publishing (crates.io, PyPI, npm, Maven Central) follows the first tagged release | a single version for everything, formats included (a format change would force a release of every driver) |
-| D16 | Bulk loads without the WAL (§M14.20 W4) | ✅ **Yes, switchable** (2026-11-02): writes into a range a transaction declared *fresh* (a new table's or index's keys, which no one else sees before it commits) skip the WAL, and its commit makes them durable by a checkpoint before the commit record; they are written as final versions, not intents a vacuum rewrites (PostgreSQL's `wal_level = minimal` and `COPY FREEZE`, CockroachDB's `AddSSTable`).  A setting turns it off; it is off by force when anything needs the whole WAL — replicas (§M17.5), point-in-time restore (§M14.18), §F3 | every write logged (the safe, slower default of a replicated system) |
+| D16 | Bulk loads without the WAL (§M14.20 W4) | ✅ **Yes, switchable** (2026-11-02): writes into a range a transaction declared *fresh* (a new table's or index's keys, which no one else sees before it commits) skip the WAL, and its commit makes them durable by a checkpoint before the commit record; they are written as final versions, not intents a vacuum rewrites (PostgreSQL's `wal_level = minimal` and `COPY FREEZE`, CockroachDB's `AddSSTable`).  A setting turns it off; it is off by force when anything needs the whole WAL — replicas (§M17.5), §F3 (point-in-time restore does not: §M14.18 O3a restores to backups, not an archived log) | every write logged (the safe, slower default of a replicated system) |
 | D17 | Sync policy (§M14.20 W1) | ✅ **`sync = ordered` by default, `full` as a setting** (2026-11-02): `ordered` asks the OS for ordered writes — on macOS `F_BARRIERFSYNC` — so the database is never corrupt and a crash of the process or the OS loses nothing, but a power loss may lose the last commits; `full` flushes the drive's cache at each commit (`F_FULLFSYNC`), so a commit survives power loss.  Where the OS has no cheaper ordering (Linux's `fdatasync`), both are the same.  PostgreSQL's and SQLite's defaults on macOS are the weaker of the two | `full` always (today's behaviour: every commit and checkpoint pays a drive-cache flush) |
 | D18 | Format changes for speed (§M14.20 W7) | ✅ **Now** (2026-11-02), each with its version bumped and the older format still read (principle 6): column offsets in the row format, column chunks as extents, a batch's WAL record laid out as the tree applies it | later, behind a migration |
 
@@ -286,7 +286,7 @@ are marked ✅.
 | | M14.15 | JSON type and functions | ✅ (2026-11-14) study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
-| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O2 |
+| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O3a |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9154,10 +9154,9 @@ Steps (planned 2026-11-14):
   be faster but hold index pages and unsealed values: an incremental
   form must keep R6's sealing (entries changed since a commit, not
   pages).
-- **Incremental backups**: only the pages changed since the previous
-  backup (the store tracks which pages a checkpoint rewrote), chained to
-  a full backup; chains merged into a new full backup in the background,
-  so a restore never replays a long chain.
+- ✅ **Incremental backups** (O3a): what changed since the previous
+  backup — found by comparing two branches' trees, not by tracking pages
+  —, chained to a full backup; `BACKUP FULL` starts a new chain.
 - **Backup targets are modules** (principle 12): a local directory and
   S3-compatible object storage built in, others (GCS, Azure Blob)
   added the same way.  Backups are compressed, checksummed and encrypted;
@@ -9279,9 +9278,62 @@ Steps (planned 2026-11-14):
     the plan's nodes as child spans — they need the per-node timing of
     `EXPLAIN ANALYZE` on every sampled statement; a later step when it
     can be had cheaply.
-  - **Next steps:** O3 backups
-    (incremental, targets as modules, WAL archiving, point-in-time
-    restore, retention); O4 scheduled restore tests; O5 online `ALTER
+  - **O3a ✅ (2026-11-15) — incremental backups, point-in-time restore
+    from them.**  `BACKUP TO 'repo'` writes into a repository: the first
+    backup full (`000001-full`), each next one what changed since the one
+    before (`000002-incr`: entries written, keys deleted — a subject's
+    row's delete sealed under its keys as the backup before saw them);
+    `BACKUP FULL TO` starts a new chain; `nucleus restore <repo> <dir>
+    --at <commit | backup | time>` restores a chain to that point (DOCS
+    §8.30).  *How what changed is found:* each backup reads a branch made
+    for it (§M14.13: a checkpoint, then a copy in constant time) and keeps
+    it; the next one walks its own branch's tree, skipping each subtree
+    whose root was born by the kept branch's origin (a copy-on-write tree
+    never points to a younger page — `release_younger`'s invariant), then
+    the kept tree, skipping what it reaches at the same page between the
+    same separators (`BTree::diff_ranges`) — exact for any two trees,
+    whatever either wrote since, and costing what changed; only the
+    leaves left are read on both sides, by snapshot, so MVCC decides what
+    differs (`Engine::changed_since`, `Kv::changed_since`).  Where the
+    two differ in what decides visibility beyond a key's versions —
+    spilled writes, their status, unlogged ranges — it gives no ranges
+    and all is compared (the backup is still the difference).  Prior art:
+    ZFS's and btrfs's `send` (two snapshots' trees compared, shared
+    subtrees skipped by birth time — the same test); CockroachDB's
+    incremental backups (protected timestamps keep what the next backup
+    reads; time-bound iterators skip SSTs older than the last backup —
+    nucleus's kept branch and birth test are the two halves);
+    PostgreSQL 17's WAL summaries (pages changed between two LSNs, then
+    pages copied — not taken: pages hold index entries and unsealed
+    values, so a backup would lose R6's sealing).  *Not taken:* the plan's
+    "pages a checkpoint rewrote, tracked" — the branch's birth test needs
+    no tracking structure and survives restarts by itself; WAL archiving
+    for point-in-time restore — the log holds every entry in the clear,
+    and an archived log could not forget a subject (§M14.24), so the
+    times a restore reaches are the backups', taken as often as wanted
+    (they cost what changed); D16's unlogged bulk loads stay on.  Chains
+    merged into a new full backup in the background: `BACKUP FULL` on a
+    schedule does that (with O3c).  *Erasure:* a kept branch shares the
+    pages `FORGET SUBJECT` erases, so `FORGET` drops every kept branch
+    before its scrub — the next backups are full — and the search after
+    the scrub still finds nothing.  Measured (`docs/benchmarks.md`,
+    Backups; 1M rows, 243 MiB): full 1.13 s / 139 MiB; nothing changed
+    0.06 s; 1 % of rows adjacent 0.06 s / 0.5 MiB; 1 % scattered (nearly
+    every leaf) 0.51 s / 0.5 MiB; a chain of six restored in 2.43 s, the
+    same as the database.  Known cost: learning a child's birth reads the
+    child page (no birth in the parent's pointer, §M14.13's ZFS note),
+    so scattered changes read most leaves on both sides — still the
+    difference written.  Tests: the storage walk on random writes,
+    deletes of runs and a base written since; `changed_since` holding
+    every change across a transaction running over the branch point and
+    spilled ones; incremental backups restored to each point (after a
+    reopening too), `FORGET` dropping the kept branch, an unfinished
+    backup skipped; the CLI's `--at`.
+  - **Next steps:** O3b backup targets as modules (a local directory, S3
+    over `nucleus-http` with SigV4, MinIO in CI); O3c compression,
+    encryption of the parts, retention (keep N chains), scheduled
+    backups (`nucleus server --backup-to … --backup-every …`), backup
+    metrics and alerts; O4 scheduled restore tests; O5 online `ALTER
     COLUMN … TYPE`.
 - **Health checks**: liveness and readiness endpoints for orchestrators
   (`/health/live`, `/health/ready` — ready only once recovery is done and

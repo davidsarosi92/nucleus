@@ -29,7 +29,7 @@ mod writes;
 
 pub use engine::{
     BACKGROUND_CHUNK, Chunk, Engine, EngineOptions, Isolation, Scan, Timestamp, Transaction,
-    TxnOptions,
+    TxnOptions, UserRange,
 };
 pub use error::{Error, Result};
 pub use nucleus_storage::{BranchInfo, MAIN_NAME};

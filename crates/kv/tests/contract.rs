@@ -296,3 +296,127 @@ fn branches_through_the_trait() {
     assert_eq!(get(dev2.as_ref(), b"k").as_deref(), Some(&b"main"[..]));
     assert_ne!(dev2.instance(), instances[1]);
 }
+
+/// Every key's newest value on a branch, with the keys that hold one.
+fn snapshot(kv: &dyn Kv) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
+    let t = kv.begin(TxnOptions::read_only()).unwrap();
+    t.scan(Bound::Unbounded, Bound::Unbounded)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// PLAN.md §M14.18 O3: the ranges `changed_since` gives hold every key
+/// whose newest value differs between the two branches — after small
+/// commits, deletes of runs, a transaction running while a branch is
+/// made — and no answer (compare everything) where a spilled
+/// transaction's writes differ.
+#[test]
+fn changed_since_holds_every_change() {
+    let mut answered = 0;
+    for seed in 0..12u64 {
+        let p = Arc::new(SimPlatform::new(40 + seed));
+        let db: Arc<dyn Kv> = Arc::new(
+            Database::open_on(
+                p,
+                Path::new("/db"),
+                Options {
+                    txn_memory_bytes: 64 << 10,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let key = |i: u64| format!("t\x00{i:06}").into_bytes();
+        transact(db.as_ref(), TxnOptions::default(), |t| {
+            for i in 0..3000 {
+                t.put(&key(i), &[b'v'; 120])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let a = db.create_branch("a").unwrap();
+        for round in 0..6 {
+            transact(db.as_ref(), TxnOptions::default(), |t| {
+                for _ in 0..next() % 30 {
+                    let i = next() % 3200;
+                    if next() % 4 == 0 {
+                        t.delete(&key(i))?;
+                    } else {
+                        t.put(&key(i), format!("r{round}").as_bytes())?;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        if seed % 3 == 1 {
+            transact(db.as_ref(), TxnOptions::default(), |t| {
+                let start = next() % 2500;
+                for i in start..start + 400 {
+                    t.delete(&key(i))?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        // Spilled: more than its memory.
+        if seed % 3 == 2 {
+            transact(db.as_ref(), TxnOptions::default(), |t| {
+                for i in 0..1500 {
+                    t.put(&key(i * 2), &[b's'; 200])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        // Running while the branch is made: in neither.
+        let mut running = db.begin(TxnOptions::default()).unwrap();
+        running.put(&key(5), b"running").unwrap();
+        let b = db.create_branch("b").unwrap();
+        running.commit().unwrap();
+        let (before, after) = (snapshot(a.as_ref()), snapshot(b.as_ref()));
+        assert!(before.len() >= 2900);
+        let Some(ranges) = b.changed_since("a").unwrap() else {
+            continue;
+        };
+        answered += 1;
+        let within = |k: &[u8]| {
+            ranges.iter().any(|r| {
+                std::ops::RangeBounds::contains(
+                    &(
+                        r.0.as_ref().map(Vec::as_slice),
+                        r.1.as_ref().map(Vec::as_slice),
+                    ),
+                    &k,
+                )
+            })
+        };
+        let keys: std::collections::BTreeSet<&Vec<u8>> =
+            before.keys().chain(after.keys()).collect();
+        let mut differ = 0;
+        for k in keys {
+            if before.get(k) != after.get(k) {
+                differ += 1;
+                assert!(
+                    within(k),
+                    "seed {seed}: {k:?} outside {} ranges",
+                    ranges.len()
+                );
+            }
+        }
+        assert!(differ > 0, "seed {seed}");
+        assert!(after.get(&key(5)).map(Vec::as_slice) != Some(b"running"));
+        drop((a, b));
+        db.drop_branch("b").unwrap();
+        db.drop_branch("a").unwrap();
+    }
+    assert!(answered >= 8, "{answered} of 12 answered");
+}

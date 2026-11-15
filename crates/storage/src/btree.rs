@@ -42,6 +42,34 @@ use crate::page::{PAYLOAD_SIZE, Page, PageId};
 /// spent a third of its time so).
 pub const COMPRESS_MIN: usize = 1024;
 
+/// A key range `[lo, hi)`; `None` is unbounded.
+pub type KeyRange = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// `ranges` sorted, and those that overlap or touch made one.
+pub fn merge_ranges(mut ranges: Vec<KeyRange>) -> Vec<KeyRange> {
+    ranges.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out: Vec<KeyRange> = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges {
+        if let Some(last) = out.last_mut() {
+            // It starts within (or right at the end of) the last one.
+            let within = match (&last.1, &lo) {
+                (None, _) => true,
+                (Some(_), None) => true,
+                (Some(end), Some(start)) => start <= end,
+            };
+            if within {
+                last.1 = match (last.1.take(), hi) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    _ => None,
+                };
+                continue;
+            }
+        }
+        out.push((lo, hi));
+    }
+    out
+}
+
 /// A B+tree rooted at a page.
 #[derive(Debug)]
 pub struct BTree {
@@ -1186,6 +1214,73 @@ impl BTree {
             self.pool.free_in(id, self.branch)?;
         }
         Ok(())
+    }
+
+    /// Where this tree and `base` may hold different entries (PLAN.md
+    /// §M14.18 O3, an incremental backup's): key ranges `[lo, hi)`
+    /// (`None`: unbounded), ascending and apart; outside them both reach
+    /// the same pages at the same bounds, so hold the same entries.
+    ///
+    /// This tree's subtrees whose root was born by `origin` (base's
+    /// branch point, when both trees were one) are not walked — a
+    /// copy-on-write tree never points to a younger page — but taken as
+    /// shared only where base reaches the same page between the same
+    /// separators: base's walk checks each, so the answer holds for any
+    /// two trees of the pool, and costs what changed (and the pages read
+    /// to learn their births: a changed leaf's siblings).  ZFS's and
+    /// btrfs's send compare two snapshots' trees the same way.
+    pub fn diff_ranges(&self, base: &BTree, origin: u64) -> Result<Vec<KeyRange>> {
+        let mut shared: std::collections::HashMap<u64, KeyRange> = Default::default();
+        let mut ranges: Vec<KeyRange> = Vec::new();
+        let children = |n: Internal, lo: Option<Vec<u8>>, hi: Option<Vec<u8>>| {
+            let last = n.keys.len();
+            n.children
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let clo = if i == 0 {
+                        lo.clone()
+                    } else {
+                        Some(n.keys[i - 1].clone())
+                    };
+                    let chi = if i == last {
+                        hi.clone()
+                    } else {
+                        Some(n.keys[i].clone())
+                    };
+                    (c, clo, chi)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut stack = vec![(self.root, None, None)];
+        while let Some((id, lo, hi)) = stack.pop() {
+            if self.pool.birth(id)? <= origin {
+                shared.insert(id.0, (lo, hi));
+                continue;
+            }
+            match self.load(id)? {
+                Node::Leaf(_) => ranges.push((lo, hi)),
+                Node::Internal(n) => stack.extend(children(n, lo, hi)),
+            }
+        }
+        let mut stack = vec![(base.root, None, None)];
+        while let Some((id, lo, hi)) = stack.pop() {
+            match shared.get(&id.0) {
+                Some(b) if b.0 == lo && b.1 == hi => continue,
+                // Shared, between other separators: both places differ.
+                Some(b) => {
+                    ranges.push(b.clone());
+                    ranges.push((lo, hi));
+                    continue;
+                }
+                None => {}
+            }
+            match base.load(id)? {
+                Node::Leaf(_) => ranges.push((lo, hi)),
+                Node::Internal(n) => stack.extend(children(n, lo, hi)),
+            }
+        }
+        Ok(merge_ranges(ranges))
     }
 
     // ----------------------------------------------------------------- check

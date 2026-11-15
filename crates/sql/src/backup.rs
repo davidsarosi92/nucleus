@@ -1,7 +1,8 @@
-//! Backups (PLAN.md §M14.24 R6, the slice of §M14.18 it needs):
-//! `BACKUP TO 'dir'` writes the database as one snapshot saw it, while
-//! others go on writing; `restore` (`nucleus restore`) makes a new
-//! database of it.
+//! Backups (PLAN.md §M14.24 R6, §M14.18 O3): `BACKUP TO 'repo'` writes
+//! the database as one snapshot saw it, while others go on writing, into
+//! a repository — the first backup all of it, each next one what changed
+//! since the one before; `restore` (`nucleus restore`) makes a new
+//! database of a chain, up to a chosen backup.
 //!
 //! A backup is the store's entries, less what is derived from them:
 //! secondary indexes (a B-tree's, HNSW's, a text index's — their pages
@@ -21,10 +22,11 @@
 //! subject's key, a restore leaves those entries out and blanks those
 //! details: the backups taken before forget too.
 //!
-//! The files: parts of about 16 MiB (`part-000000`, …), a sequence of
-//! entries each; a `manifest`, written last and renamed into place, names
-//! the format, the snapshot, the counts and each part's SHA-256 — no
-//! manifest, no backup.
+//! The files: a directory a backup in the repository (`000001-full`,
+//! `000002-incr`, …), its parts of about 16 MiB (`part-000000`, …), a
+//! sequence of entries each; a `manifest`, written last and renamed into
+//! place, names the format, the backup it follows, the snapshot, the
+//! counts and each part's SHA-256 — no manifest, no backup.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
@@ -43,7 +45,10 @@ use crate::subject_keys::{self, Id, Key, KeyId, SubjectKeys};
 use crate::types::{DataType, Value};
 
 /// The manifest's first line.
-pub const FORMAT: &str = "nucleus backup 1";
+pub const FORMAT: &str = "nucleus backup 2";
+/// That of a backup made before repositories (one directory, all of the
+/// database, no deletes): read still.
+pub const FORMAT_1: &str = "nucleus backup 1";
 /// A part is closed once it holds this many bytes.
 const PART_BYTES: usize = 16 << 20;
 const MANIFEST: &str = "manifest";
@@ -56,6 +61,10 @@ const PLAIN: u8 = 0;
 const SEALED: u8 = 1;
 /// An audit record, its detail sealed.
 const SEALED_DETAIL: u8 = 2;
+/// A key deleted (an incremental backup's).
+const DELETE: u8 = 3;
+/// A key deleted, sealed (a row of subjects).
+const SEALED_DELETE: u8 = 4;
 
 const STATS: [u8; 2] = [0x00, 0x04];
 const QUEUE: [u8; 2] = [0x00, 0x17];
@@ -76,29 +85,42 @@ pub struct Backup {
     pub omitted: u64,
     /// The parts' bytes.
     pub bytes: u64,
+    /// Of the entries, keys deleted since the backup before.
+    pub deleted: u64,
+    /// `full` or `incremental`.
+    pub kind: &'static str,
+    /// Its directory in the repository.
+    pub name: String,
 }
 
 /// The columns `BACKUP` returns.
-pub const RESULT: [(&str, DataType); 5] = [
+pub const RESULT: [(&str, DataType); 8] = [
     ("commit", DataType::BigInt),
     ("entries", DataType::BigInt),
     ("sealed", DataType::BigInt),
     ("omitted", DataType::BigInt),
     ("bytes", DataType::BigInt),
+    ("deleted", DataType::BigInt),
+    ("kind", DataType::Text),
+    ("backup", DataType::Text),
 ];
 
 impl Backup {
     /// As `BACKUP`'s row.
     pub fn row(&self) -> Vec<Value> {
-        [
+        let mut row: Vec<Value> = [
             self.commit,
             self.entries,
             self.sealed,
             self.omitted,
             self.bytes,
+            self.deleted,
         ]
         .map(|n| Value::Int(n as i64))
-        .to_vec()
+        .to_vec();
+        row.push(Value::Text(self.kind.into()));
+        row.push(Value::Text(self.name.as_str().into()));
+        row
     }
 }
 
@@ -535,38 +557,407 @@ fn put_kids(buf: &mut Vec<u8>, kids: &[KeyId]) {
     }
 }
 
-/// `BACKUP TO 'dir'`: the database as one snapshot saw it, into `dir`
-/// (a new or empty directory, an absolute path on the server).
-pub fn backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Backup> {
+/// The backups of a repository: their directories, `000001-full`,
+/// `000002-incr`, … — a number, and whether it holds all or what changed
+/// since the one before.
+fn backup_name(number: u64, incremental: bool) -> String {
+    format!("{number:06}-{}", if incremental { "incr" } else { "full" })
+}
+
+/// A backup's number, from its directory's name.
+fn backup_number(name: &str) -> Option<u64> {
+    let (n, kind) = name.split_once('-')?;
+    (n.len() >= 6 && n.bytes().all(|b| b.is_ascii_digit()) && matches!(kind, "full" | "incr"))
+        .then(|| n.parse().ok())
+        .flatten()
+}
+
+/// The backups in repository `dir` (none if it is not there), by number.
+fn listing(fs: &dyn FileSystem, dir: &Path) -> Result<Vec<(u64, String)>> {
+    if !fs
+        .exists(dir)
+        .map_err(|e| io("could not look at", dir, e))?
+    {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for name in fs.list_dir(dir).map_err(|e| io("could not list", dir, e))? {
+        let name = name.to_string_lossy().into_owned();
+        if name == MANIFEST {
+            return Err(Error::invalid_parameter(format!(
+                "{} holds one backup (as made before repositories of backups): \
+                 back up to a new directory",
+                dir.display()
+            )));
+        }
+        match backup_number(&name) {
+            Some(n) => out.push((n, name)),
+            None if name.starts_with('.') => {}
+            None => {
+                return Err(Error::invalid_parameter(format!(
+                    "{} is not a repository of backups (it holds {name}): \
+                     back up to a new or empty directory, or a repository",
+                    dir.display()
+                )));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn read_file(fs: &dyn FileSystem, path: &Path) -> Result<Vec<u8>> {
+    let f = fs
+        .open(path, OpenMode::ReadOnly)
+        .map_err(|e| io("could not open", path, e))?;
+    let len = f.size().map_err(|e| io("could not read", path, e))?;
+    let mut b = vec![0u8; len as usize];
+    f.read_exact_at(&mut b, 0)
+        .map_err(|e| io("could not read", path, e))?;
+    Ok(b)
+}
+
+/// A backup's manifest, if it has one (one without did not finish).
+fn read_manifest(fs: &dyn FileSystem, dir: &Path) -> Result<Option<Manifest>> {
+    let path = dir.join(MANIFEST);
+    if !fs
+        .exists(&path)
+        .map_err(|e| io("could not look at", &path, e))?
+    {
+        return Ok(None);
+    }
+    manifest(&String::from_utf8_lossy(&read_file(fs, &path)?)).map(Some)
+}
+
+/// The branch a backup keeps for the next one to compare with: of the
+/// repository (its path hashed) and the backup's number.
+fn backup_branch(repo: &str, number: u64) -> String {
+    format!("{}{number:06}", backup_branch_prefix(repo))
+}
+
+/// The names of the branches backups keep start so.
+pub const BRANCH_PREFIX: &str = "nc-backup-";
+
+fn backup_branch_prefix(repo: &str) -> String {
+    format!(
+        "{BRANCH_PREFIX}{}-",
+        crate::audit::hex(&sha256(repo.as_bytes())[..6])
+    )
+}
+
+/// Drops every branch a backup kept for the next one to compare with —
+/// `FORGET SUBJECT`'s, before its scrub: what such a branch shares with
+/// the database is what an erasure removes, and kept it would stay in
+/// the files.  The repositories' next backups are full ones.
+pub(crate) fn drop_backup_branches(kv: &Arc<dyn Kv>) -> Result<()> {
+    for b in kv.branches()? {
+        if b.name.starts_with(BRANCH_PREFIX) {
+            kv.drop_branch(&b.name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Drops the branch made for a backup unless it is kept (the backup
+/// done).
+struct Made<'a> {
+    kv: &'a Arc<dyn Kv>,
+    name: String,
+    keep: bool,
+}
+
+impl Drop for Made<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = self.kv.drop_branch(&self.name);
+        }
+    }
+}
+
+/// What a backup writes: its parts, entry by entry, each about a subject
+/// sealed.
+struct Writer<'a> {
+    parts: Parts<'a>,
+    nonces: Nonces,
+    subjects: Subjects,
+    keys: HashMap<Id, Option<(KeyId, Key)>>,
+    data_keys: HashMap<u32, Option<(Key, Vec<KeyId>)>>,
+    /// The indexes left out, by table id.
+    derived: HashMap<u32, HashSet<u32>>,
+    out: Backup,
+}
+
+/// Whether `k` is an entry of an index of `derived`.
+fn is_derived(derived: &HashMap<u32, HashSet<u32>>, k: &[u8]) -> bool {
+    k.first() == Some(&DATA)
+        && k.len() >= catalog::INDEX_PREFIX_LEN
+        && derived
+            .get(&u32::from_be_bytes(k[1..5].try_into().expect("4")))
+            .is_some_and(|ix| ix.contains(&u32::from_be_bytes(k[5..9].try_into().expect("4"))))
+}
+
+impl Writer<'_> {
+    /// A set's key and its keys' ids (`None`: one of them destroyed).
+    fn data_key(&mut self, set: u32) -> Option<(Key, Vec<KeyId>)> {
+        if let Some(k) = self.data_keys.get(&set) {
+            return k.clone();
+        }
+        let ks: Option<Vec<(KeyId, Key)>> = self.subjects.sets[set as usize]
+            .iter()
+            .map(|id| self.keys.get(id).copied().flatten())
+            .collect();
+        let k = ks.map(|ks| {
+            let (kids, keys): (Vec<KeyId>, Vec<Key>) = ks.into_iter().unzip();
+            (subject_keys::data_key(&keys), kids)
+        });
+        self.data_keys.insert(set, k.clone());
+        k
+    }
+
+    /// Writes entry `k`, `v` — sealed if it is about a subject.
+    fn put(&mut self, k: &[u8], v: &[u8]) -> Result<()> {
+        if k.starts_with(&STATS) || is_derived(&self.derived, k) {
+            return Ok(());
+        }
+        // An entry about a row of subjects: sealed.
+        if let Some((table, pk, is_row)) = row_of(k)
+            && let Some(set) = self.subjects.of(table, pk)
+        {
+            let Some((key, kids)) = self.data_key(set) else {
+                self.out.omitted += 1;
+                return Ok(());
+            };
+            let mut plain = Vec::with_capacity(k.len() + v.len() + 8);
+            plain.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            plain.extend_from_slice(k);
+            plain.extend_from_slice(v);
+            let row_table = if is_row { table } else { u32::MAX };
+            let nonce = self.nonces.next();
+            let sealed = aead::seal(
+                &key,
+                &nonce,
+                &aad(SEALED, &[&row_table.to_le_bytes()], &kids),
+                &plain,
+            );
+            let buf = &mut self.parts.buf;
+            buf.push(SEALED);
+            buf.extend_from_slice(&row_table.to_le_bytes());
+            put_kids(buf, &kids);
+            buf.extend_from_slice(&nonce);
+            self.parts.bytes(&sealed);
+            self.out.entries += 1;
+            self.out.sealed += 1;
+            return self.parts.end_entry();
+        }
+        // An audit record naming a subject: its detail sealed.
+        if k.starts_with(&AUDIT)
+            && !self.subjects.texts.is_empty()
+            && let Some((blank, detail)) = crate::audit::split_detail(v)?
+        {
+            // Its literals: a subject named, or a text of a subject's rows.
+            let mut ids: Vec<Id> = Vec::new();
+            for l in literals(&detail) {
+                if let Some(id) = self.subjects.texts.get(&l) {
+                    ids.push(*id);
+                }
+                if l.len() >= MIN_TEXT
+                    && let Some(&set) = self.subjects.heads.get(&head(&l))
+                {
+                    ids.extend_from_slice(&self.subjects.sets[set as usize]);
+                }
+            }
+            if !ids.is_empty() {
+                let set = self.subjects.number(ids);
+                match self.data_key(set) {
+                    Some((key, kids)) => {
+                        let nonce = self.nonces.next();
+                        let sealed = aead::seal(
+                            &key,
+                            &nonce,
+                            &aad(SEALED_DETAIL, &[k, &blank], &kids),
+                            detail.as_bytes(),
+                        );
+                        self.parts.buf.push(SEALED_DETAIL);
+                        self.parts.bytes(k);
+                        self.parts.bytes(&blank);
+                        put_kids(&mut self.parts.buf, &kids);
+                        self.parts.buf.extend_from_slice(&nonce);
+                        self.parts.bytes(&sealed);
+                        self.out.sealed += 1;
+                    }
+                    // Forgotten meanwhile: blank.
+                    None => {
+                        self.parts.buf.push(PLAIN);
+                        self.parts.bytes(k);
+                        self.parts.bytes(&crate::audit::join_detail(&blank, None)?);
+                    }
+                }
+                self.out.entries += 1;
+                return self.parts.end_entry();
+            }
+        }
+        self.parts.buf.push(PLAIN);
+        self.parts.bytes(k);
+        self.parts.bytes(v);
+        self.out.entries += 1;
+        self.parts.end_entry()
+    }
+
+    /// Writes that `k` is gone — its key sealed under `sealing` (the keys
+    /// of the subjects it was about, as the backup before saw them; `None`
+    /// in it: one destroyed since, the entry left out).
+    fn delete(&mut self, k: &[u8], sealing: Option<Option<(Key, Vec<KeyId>)>>) -> Result<()> {
+        match sealing {
+            None => {
+                self.parts.buf.push(DELETE);
+                self.parts.bytes(k);
+            }
+            Some(None) => {
+                self.out.omitted += 1;
+                return Ok(());
+            }
+            Some(Some((key, kids))) => {
+                let nonce = self.nonces.next();
+                let sealed = aead::seal(&key, &nonce, &aad(SEALED_DELETE, &[], &kids), k);
+                self.parts.buf.push(SEALED_DELETE);
+                put_kids(&mut self.parts.buf, &kids);
+                self.parts.buf.extend_from_slice(&nonce);
+                self.parts.bytes(&sealed);
+                self.out.sealed += 1;
+            }
+        }
+        self.out.deleted += 1;
+        self.parts.end_entry()
+    }
+}
+
+/// The subjects of the backup before, for the deletes of an incremental
+/// one: the rows about subjects as its snapshot saw them, and their keys.
+struct Before<'a> {
+    txn: &'a dyn KvTxn,
+    commit: u64,
+    tables: Vec<Table>,
+    pepper: Option<Key>,
+    subjects: Option<Subjects>,
+    keys: HashMap<u32, Option<(Key, Vec<KeyId>)>>,
+}
+
+impl Before<'_> {
+    /// How a delete of `k` is written: in the clear (`None`), or sealed
+    /// under its subjects' keys (`Some(None)`: one destroyed).
+    fn sealing(&mut self, k: &[u8]) -> Result<Option<Option<(Key, Vec<KeyId>)>>> {
+        let Some((table, pk, _)) = row_of(k) else {
+            return Ok(None);
+        };
+        let Some(store) = subject_keys::subject_keys() else {
+            return Ok(None);
+        };
+        if self.subjects.is_none() {
+            if !self.tables.iter().any(|t| !t.subject.is_empty()) {
+                return Ok(None);
+            }
+            self.subjects = Some(subjects(self.txn, &self.tables, self.pepper.as_ref())?);
+        }
+        let subjects = self.subjects.as_ref().expect("made");
+        let Some(set) = subjects.of(table, pk) else {
+            return Ok(None);
+        };
+        if let Some(k) = self.keys.get(&set) {
+            return Ok(Some(k.clone()));
+        }
+        let ids = &subjects.sets[set as usize];
+        let got: Option<Vec<(KeyId, Key)>> = store
+            .keys(ids, self.commit)
+            .map_err(Error::io)?
+            .into_iter()
+            .collect();
+        let k = got.map(|ks| {
+            let (kids, keys): (Vec<KeyId>, Vec<Key>) = ks.into_iter().unzip();
+            (subject_keys::data_key(&keys), kids)
+        });
+        self.keys.insert(set, k.clone());
+        Ok(Some(k))
+    }
+}
+
+/// The commit a snapshot reads.
+fn snapshot_commit(txn: &dyn KvTxn) -> Result<u64> {
+    txn.read_ts()
+        .to_string()
+        .parse()
+        .map_err(|_| Error::internal("a snapshot's commit"))
+}
+
+fn as_ref(b: &Bound<Vec<u8>>) -> Bound<&[u8]> {
+    match b {
+        Bound::Included(k) => Bound::Included(k),
+        Bound::Excluded(k) => Bound::Excluded(k),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+/// `BACKUP [FULL] TO 'repo'`: the database as one snapshot saw it, into
+/// repository `repo` (a new or empty directory, or one `BACKUP` wrote; an
+/// absolute path on the server) — all of it, or what changed since the
+/// repository's last backup, as a backup of its own.
+///
+/// What changed is found as ZFS's `send` finds it: the backup reads a
+/// branch made for it (PLAN.md §M14.13: a copy in constant time), and
+/// keeps it until the next backup, which compares its own branch's tree
+/// with it ([`Kv::changed_since`]) — the subtrees they share skipped
+/// whole — and the values of the keys in what differs.  The kept branch
+/// holds on to the pages it shares, as a snapshot does; `FULL`, or the
+/// branch dropped, starts a new chain.
+pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     let fs = kv
         .files()
         .ok_or_else(|| Error::feature("this database has no files to back up beside"))?;
-    let dir = PathBuf::from(to);
+    let repo = PathBuf::from(to);
     // From the root: on Windows a path without a drive (`\backups`) is
     // the current drive's.
-    if !dir.has_root() {
+    if !repo.has_root() {
         return Err(Error::invalid_parameter(format!(
             "BACKUP TO needs an absolute path, not '{to}'"
         )));
     }
-    if fs
-        .exists(&dir)
-        .map_err(|e| io("could not look at", &dir, e))?
-        && !fs
-            .list_dir(&dir)
-            .map_err(|e| io("could not list", &dir, e))?
-            .is_empty()
-    {
-        return Err(Error::invalid_parameter(format!(
-            "{to} is not empty: a backup goes to a new or empty directory"
-        )));
+    let listed = listing(fs, &repo)?;
+    let number = listed.last().map_or(1, |(n, _)| n + 1);
+    // The last backup finished, and what it kept to compare with.
+    let mut last = None;
+    for (_, name) in listed.iter().rev() {
+        if let Some(m) = read_manifest(fs, &repo.join(name))? {
+            last = Some((name.clone(), m));
+            break;
+        }
     }
-    let txn = kv.begin(TxnOptions::read_only())?;
-    let commit: u64 = txn
-        .read_ts()
-        .to_string()
-        .parse()
-        .map_err(|_| Error::internal("a snapshot's commit"))?;
+    let source = kv.branch_name();
+    let branches: HashSet<String> = kv.branches()?.into_iter().map(|b| b.name).collect();
+    let mut base = None;
+    if !full
+        && let Some((name, m)) = &last
+        && let Some(branch) = &m.branch
+        && m.source.as_deref() == Some(source.as_str())
+        && branches.contains(branch)
+    {
+        let b = kv.branch(branch)?;
+        let txn = b.begin(TxnOptions::read_only())?;
+        // Unchanged since that backup read it.
+        if snapshot_commit(&*txn)? == m.commit {
+            base = Some((name.clone(), m.commit, branch.clone(), b, txn));
+        }
+    }
+    let incremental = base.is_some();
+    let name = backup_name(number, incremental);
+    let dir = repo.join(&name);
+    // The branch read, kept for the next backup.
+    let made = Made {
+        kv,
+        name: backup_branch(to, number),
+        keep: false,
+    };
+    let snap = kv.create_branch(&made.name)?;
+    let txn = snap.begin(TxnOptions::read_only())?;
+    let commit = snapshot_commit(&*txn)?;
     let tables = catalog::tables(&*txn)?;
     let store = subject_keys::subject_keys();
     let pepper = match &store {
@@ -575,7 +966,7 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Backup> {
         }
         _ => None,
     };
-    let mut subjects = subjects(&*txn, &tables, pepper.as_ref())?;
+    let subjects = subjects(&*txn, &tables, pepper.as_ref())?;
     // Every subject's key, made now if it has none.
     let mut keys: HashMap<Id, Option<(KeyId, Key)>> = HashMap::new();
     if let Some(store) = &store {
@@ -592,152 +983,121 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Backup> {
             keys.extend(ids.into_iter().zip(got));
         }
     }
-    // A set's key and its keys' ids (`None`: one of them destroyed).
-    let mut data_keys: HashMap<u32, Option<(Key, Vec<KeyId>)>> = HashMap::new();
-    let mut data_key = |subjects: &Subjects, set: u32| -> Option<(Key, Vec<KeyId>)> {
-        data_keys
-            .entry(set)
-            .or_insert_with(|| {
-                let ks: Option<Vec<(KeyId, Key)>> = subjects.sets[set as usize]
-                    .iter()
-                    .map(|id| keys.get(id).copied().flatten())
-                    .collect();
-                ks.map(|ks| {
-                    let (kids, keys): (Vec<KeyId>, Vec<Key>) = ks.into_iter().unzip();
-                    (subject_keys::data_key(&keys), kids)
-                })
-            })
-            .clone()
-    };
-    // The indexes left out, by table id.
     let derived: HashMap<u32, HashSet<u32>> = tables
         .iter()
         .map(|t| (t.id, t.indexes.iter().map(|i| i.id).collect()))
         .collect();
     fs.create_dir_all(&dir)
         .map_err(|e| io("could not create", &dir, e))?;
-    let mut parts = Parts {
-        fs,
-        dir: dir.clone(),
-        buf: Vec::with_capacity(PART_BYTES + (1 << 16)),
-        done: Vec::new(),
-    };
     let mut nonces = Nonces {
         base: [0; aead::NONCE_LEN],
         n: 0,
     };
     kv.random_bytes(&mut nonces.base);
-    let mut out = Backup {
-        commit,
-        ..Backup::default()
+    let mut w = Writer {
+        parts: Parts {
+            fs,
+            dir: dir.clone(),
+            buf: Vec::with_capacity(PART_BYTES + (1 << 16)),
+            done: Vec::new(),
+        },
+        nonces,
+        subjects,
+        keys,
+        data_keys: HashMap::new(),
+        derived,
+        out: Backup {
+            commit,
+            kind: if incremental { "incremental" } else { "full" },
+            name: name.clone(),
+            ..Backup::default()
+        },
     };
     let mut analyzed = BTreeSet::new();
-    for e in txn.scan(Bound::Unbounded, Bound::Unbounded)? {
-        let (k, v) = e?;
-        if k.starts_with(&STATS) {
-            if k.len() >= 6 {
-                analyzed.insert(u32::from_be_bytes(k[2..6].try_into().expect("4")));
+    for e in txn.scan(Bound::Included(&STATS), Bound::Excluded(&[0x00, 0x05]))? {
+        let (k, _) = e?;
+        if k.len() >= 6 {
+            analyzed.insert(u32::from_be_bytes(k[2..6].try_into().expect("4")));
+        }
+    }
+    let mut base_line = String::new();
+    match &base {
+        None => {
+            for e in txn.scan(Bound::Unbounded, Bound::Unbounded)? {
+                let (k, v) = e?;
+                w.put(&k, &v)?;
             }
-            continue;
         }
-        if k.first() == Some(&DATA)
-            && k.len() >= catalog::INDEX_PREFIX_LEN
-            && derived
-                .get(&u32::from_be_bytes(k[1..5].try_into().expect("4")))
-                .is_some_and(|ix| ix.contains(&u32::from_be_bytes(k[5..9].try_into().expect("4"))))
-        {
-            continue;
-        }
-        // An entry about a row of subjects: sealed.
-        if let Some((table, pk, is_row)) = row_of(&k)
-            && let Some(set) = subjects.of(table, pk)
-        {
-            let Some((key, kids)) = data_key(&subjects, set) else {
-                out.omitted += 1;
-                continue;
+        Some((base_name, base_commit, branch, _, base_txn)) => {
+            base_line = format!("base {base_name}\n");
+            let mut before = Before {
+                txn: &**base_txn,
+                commit: *base_commit,
+                tables: catalog::tables(&**base_txn)?,
+                pepper,
+                subjects: None,
+                keys: HashMap::new(),
             };
-            let mut plain = Vec::with_capacity(k.len() + v.len() + 8);
-            plain.extend_from_slice(&(k.len() as u32).to_le_bytes());
-            plain.extend_from_slice(&k);
-            plain.extend_from_slice(&v);
-            let row_table = if is_row { table } else { u32::MAX };
-            let nonce = nonces.next();
-            let sealed = aead::seal(
-                &key,
-                &nonce,
-                &aad(SEALED, &[&row_table.to_le_bytes()], &kids),
-                &plain,
-            );
-            parts.buf.push(SEALED);
-            parts.buf.extend_from_slice(&row_table.to_le_bytes());
-            put_kids(&mut parts.buf, &kids);
-            parts.buf.extend_from_slice(&nonce);
-            parts.bytes(&sealed);
-            out.entries += 1;
-            out.sealed += 1;
-            parts.end_entry()?;
-            continue;
-        }
-        // An audit record naming a subject: its detail sealed.
-        if k.starts_with(&AUDIT)
-            && !subjects.texts.is_empty()
-            && let Some((blank, detail)) = crate::audit::split_detail(&v)?
-        {
-            // Its literals: a subject named, or a text of a subject's rows.
-            let mut ids: Vec<Id> = Vec::new();
-            for l in literals(&detail) {
-                if let Some(id) = subjects.texts.get(&l) {
-                    ids.push(*id);
-                }
-                if l.len() >= MIN_TEXT
-                    && let Some(&set) = subjects.heads.get(&head(&l))
-                {
-                    ids.extend_from_slice(&subjects.sets[set as usize]);
-                }
-            }
-            if !ids.is_empty() {
-                let set = subjects.number(ids);
-                match data_key(&subjects, set) {
-                    Some((key, kids)) => {
-                        let nonce = nonces.next();
-                        let sealed = aead::seal(
-                            &key,
-                            &nonce,
-                            &aad(SEALED_DETAIL, &[&k, &blank], &kids),
-                            detail.as_bytes(),
-                        );
-                        parts.buf.push(SEALED_DETAIL);
-                        parts.bytes(&k);
-                        parts.bytes(&blank);
-                        put_kids(&mut parts.buf, &kids);
-                        parts.buf.extend_from_slice(&nonce);
-                        parts.bytes(&sealed);
-                        out.sealed += 1;
-                    }
-                    // Forgotten meanwhile: blank.
-                    None => {
-                        parts.buf.push(PLAIN);
-                        parts.bytes(&k);
-                        parts.bytes(&crate::audit::join_detail(&blank, None)?);
+            let derived_before: HashMap<u32, HashSet<u32>> = before
+                .tables
+                .iter()
+                .map(|t| (t.id, t.indexes.iter().map(|i| i.id).collect()))
+                .collect();
+            let ranges = snap
+                .changed_since(branch)?
+                .unwrap_or_else(|| vec![(Bound::Unbounded, Bound::Unbounded)]);
+            for (start, end) in &ranges {
+                let mut a = txn.scan(as_ref(start), as_ref(end))?;
+                let mut b = base_txn.scan(as_ref(start), as_ref(end))?;
+                let (mut x, mut y) = (a.next().transpose()?, b.next().transpose()?);
+                loop {
+                    let order = match (&x, &y) {
+                        (None, None) => break,
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (Some((ka, _)), Some((kb, _))) => ka.cmp(kb),
+                    };
+                    match order {
+                        std::cmp::Ordering::Less => {
+                            let (k, v) = x.take().expect("one");
+                            w.put(&k, &v)?;
+                            x = a.next().transpose()?;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            let (k, _) = y.take().expect("one");
+                            if !k.starts_with(&STATS)
+                                && !is_derived(&w.derived, &k)
+                                && !is_derived(&derived_before, &k)
+                            {
+                                let sealing = before.sealing(&k)?;
+                                w.delete(&k, sealing)?;
+                            }
+                            y = b.next().transpose()?;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            let ((k, v), (_, old)) =
+                                (x.take().expect("one"), y.take().expect("one"));
+                            if v != old {
+                                w.put(&k, &v)?;
+                            }
+                            x = a.next().transpose()?;
+                            y = b.next().transpose()?;
+                        }
                     }
                 }
-                out.entries += 1;
-                parts.end_entry()?;
-                continue;
             }
         }
-        parts.buf.push(PLAIN);
-        parts.bytes(&k);
-        parts.bytes(&v);
-        out.entries += 1;
-        parts.end_entry()?;
     }
     drop(txn);
-    parts.flush()?;
-    out.bytes = parts.done.iter().map(|p| p.1).sum();
+    w.parts.flush()?;
+    let mut out = w.out;
+    out.bytes = w.parts.done.iter().map(|p| p.1).sum();
     // The manifest, last.
     let mut m = format!(
-        "{FORMAT}\ncommit {commit}\ntime {}\nentries {}\nsealed {}\nomitted {}\n",
+        "{FORMAT}\nkind {}\n{base_line}branch {}\nsource {source}\ncommit {commit}\ntime {}\n\
+         entries {}\nsealed {}\nomitted {}\ndeleted {}\n",
+        out.kind,
+        made.name,
         kv.wall_clock()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros())
@@ -745,13 +1105,14 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Backup> {
         out.entries,
         out.sealed,
         out.omitted,
+        out.deleted,
     );
     m.push_str("analyzed");
     for t in &analyzed {
         m.push_str(&format!(" {t}"));
     }
     m.push('\n');
-    for (name, len, hash) in &parts.done {
+    for (name, len, hash) in &w.parts.done {
         m.push_str(&format!("part {name} {len} {}\n", crate::audit::hex(hash)));
     }
     let tmp = dir.join("manifest.tmp");
@@ -766,18 +1127,34 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Backup> {
     fs.rename(&tmp, &path)
         .and_then(|()| fs.sync_dir(&dir))
         .map_err(|e| io("could not write", &path, e))?;
+    // Done: this backup's branch kept, the repository's older ones
+    // (the last backup's, any a failure left) dropped.
+    let mut made = made;
+    made.keep = true;
+    drop(base);
+    drop(snap);
+    let prefix = backup_branch_prefix(to);
+    for b in branches {
+        if b.starts_with(&prefix) && b != made.name {
+            let _ = kv.drop_branch(&b);
+        }
+    }
     Ok(out)
 }
 
 /// What a restore did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Restored {
-    /// The backup's snapshot.
+    /// The last backup's snapshot.
     pub commit: u64,
+    /// The backups read: a full one, and the incremental ones after it.
+    pub backups: u64,
     /// The entries written.
     pub entries: u64,
     /// Of them opened (sealed in the backup, their subjects' keys there).
     pub opened: u64,
+    /// The entries deleted (an incremental backup's).
+    pub deleted: u64,
     /// Entries left out: a subject's key destroyed.
     pub omitted: u64,
     /// Audit records whose detail was blanked: a subject's key destroyed.
@@ -792,6 +1169,15 @@ pub struct Restored {
 /// A manifest read.
 struct Manifest {
     commit: u64,
+    /// When it was made, in microseconds since the Unix epoch.
+    time: u64,
+    incremental: bool,
+    /// The backup an incremental one follows: its directory's name.
+    base: Option<String>,
+    /// The branch it kept for the next one.
+    branch: Option<String>,
+    /// The branch it backed up.
+    source: Option<String>,
     analyzed: Vec<u32>,
     parts: Vec<(String, u64, String)>,
 }
@@ -799,29 +1185,42 @@ struct Manifest {
 fn manifest(text: &str) -> Result<Manifest> {
     let bad = |why: &str| Error::invalid_parameter(format!("not a backup's manifest: {why}"));
     let mut lines = text.lines();
-    if lines.next() != Some(FORMAT) {
+    if !matches!(lines.next(), Some(FORMAT | FORMAT_1)) {
         return Err(bad(&format!("no \"{FORMAT}\"")));
     }
     let mut m = Manifest {
         commit: 0,
+        time: 0,
+        incremental: false,
+        base: None,
+        branch: None,
+        source: None,
         analyzed: Vec::new(),
         parts: Vec::new(),
+    };
+    let name = |s: &str| -> Result<String> {
+        if s.contains(['/', '\\']) || s.starts_with('.') {
+            return Err(bad(s));
+        }
+        Ok(s.to_string())
     };
     for line in lines {
         let f: Vec<&str> = line.split_whitespace().collect();
         match f.as_slice() {
             ["commit", n] => m.commit = n.parse().map_err(|_| bad(line))?,
+            ["time", n] => m.time = n.parse().map_err(|_| bad(line))?,
+            ["kind", k] => m.incremental = *k == "incremental",
+            ["base", b] => m.base = Some(name(b)?),
+            ["branch", b] => m.branch = Some((*b).to_string()),
+            ["source", b] => m.source = Some((*b).to_string()),
             ["analyzed", ids @ ..] => {
                 for id in ids {
                     m.analyzed.push(id.parse().map_err(|_| bad(line))?);
                 }
             }
-            ["part", name, len, hash] => {
-                if name.contains(['/', '\\']) || name.starts_with('.') {
-                    return Err(bad(line));
-                }
+            ["part", part, len, hash] => {
                 m.parts.push((
-                    (*name).to_string(),
+                    name(part)?,
                     len.parse().map_err(|_| bad(line))?,
                     (*hash).to_string(),
                 ));
@@ -829,7 +1228,88 @@ fn manifest(text: &str) -> Result<Manifest> {
             _ => {}
         }
     }
+    if m.incremental && m.base.is_none() {
+        return Err(bad("an incremental backup without its base"));
+    }
     Ok(m)
+}
+
+/// Which backup of a repository a restore makes the database of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Until {
+    /// The last.
+    Latest,
+    /// The last whose snapshot is commit `n` or before.
+    Commit(u64),
+    /// The last made by then: microseconds since the Unix epoch.
+    Time(u64),
+    /// The one in this directory of the repository.
+    Name(String),
+}
+
+/// The backups a restore reads, in order — a full one, and the
+/// incremental ones after it up to the one `until` names — with their
+/// directories.
+fn chain(fs: &dyn FileSystem, from: &Path, until: &Until) -> Result<Vec<(PathBuf, Manifest)>> {
+    let (mut dir, mut m) = match read_manifest(fs, from)? {
+        // A backup's own directory.
+        Some(m) => (from.to_path_buf(), m),
+        None => {
+            let mut found = None;
+            for (_, name) in listing(fs, from)?.into_iter().rev() {
+                let dir = from.join(&name);
+                let Some(m) = read_manifest(fs, &dir)? else {
+                    continue;
+                };
+                let fits = match until {
+                    Until::Latest => true,
+                    Until::Commit(c) => m.commit <= *c,
+                    Until::Time(t) => m.time <= *t,
+                    Until::Name(n) => *n == name,
+                };
+                if fits {
+                    found = Some((dir, m));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                Error::invalid_parameter(format!(
+                    "{} holds no backup {}",
+                    from.display(),
+                    match until {
+                        Until::Latest => "finished".to_string(),
+                        Until::Commit(c) => format!("of commit {c} or before"),
+                        Until::Time(_) => "made by then".to_string(),
+                        Until::Name(n) => format!("named {n}"),
+                    }
+                ))
+            })?
+        }
+    };
+    let mut out = Vec::new();
+    while let Some(base) = m.base.clone().filter(|_| m.incremental) {
+        let parent = dir.parent().unwrap_or(Path::new("/")).join(&base);
+        let next = read_manifest(fs, &parent)?.ok_or_else(|| {
+            Error::data_exception(format!(
+                "{} follows {base}, which is missing or unfinished",
+                dir.display()
+            ))
+        })?;
+        // (The same commit: nothing written between.)
+        if next.commit > m.commit {
+            return Err(Error::data_exception(format!(
+                "{} follows {base}, a later backup",
+                dir.display()
+            )));
+        }
+        out.push((
+            std::mem::replace(&mut dir, parent),
+            std::mem::replace(&mut m, next),
+        ));
+    }
+    out.push((dir, m));
+    out.reverse();
+    Ok(out)
 }
 
 /// Reads a part's entries.
@@ -905,28 +1385,30 @@ fn tampered() -> Error {
     )
 }
 
-/// Makes a new database of the backup in `from`: `kv` holds nothing yet
-/// (none of its tables made).  The entries written, the indexes rebuilt
-/// from the rows and the tables that had statistics analyzed again; an
-/// entry whose subject's key is destroyed is left out, an audit record's
-/// detail blanked, a key referencing a row left out set to `NULL` or its
-/// default as declared.
+/// Makes a new database of the last backup in repository `from` (or of
+/// the backup in directory `from`): [`restore_to`] the latest.
 pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &Path) -> Result<Restored> {
+    restore_to(kv, reg, from, &Until::Latest)
+}
+
+/// Makes a new database of the backup of repository `from` that `until`
+/// names (or of the backup in directory `from`): `kv` holds nothing yet
+/// (none of its tables made).  The full backup's entries written, then
+/// each incremental one's after it — puts and deletes — up to that one;
+/// the indexes rebuilt from the rows and the tables that had statistics
+/// analyzed again; an entry whose subject's key is destroyed is left
+/// out, an audit record's detail blanked, a key referencing a row left
+/// out set to `NULL` or its default as declared.
+pub fn restore_to(
+    kv: &Arc<dyn Kv>,
+    reg: &Registry,
+    from: &Path,
+    until: &Until,
+) -> Result<Restored> {
     let fs = kv
         .files()
         .ok_or_else(|| Error::feature("this database has no files to restore from"))?;
-    let read = |path: &Path| -> Result<Vec<u8>> {
-        let f = fs
-            .open(path, OpenMode::ReadOnly)
-            .map_err(|e| io("could not open", path, e))?;
-        let len = f.size().map_err(|e| io("could not read", path, e))?;
-        let mut b = vec![0u8; len as usize];
-        f.read_exact_at(&mut b, 0)
-            .map_err(|e| io("could not read", path, e))?;
-        Ok(b)
-    };
-    let text = read(&from.join(MANIFEST))?;
-    let m = manifest(&String::from_utf8_lossy(&text))?;
+    let chain = chain(fs, from, until)?;
     {
         let txn = kv.begin(TxnOptions::read_only())?;
         if let Some(e) = txn
@@ -941,17 +1423,22 @@ pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &Path) -> Result<Restored
     }
     let store = subject_keys::subject_keys();
     let mut cache = HashMap::new();
+    let (_, m) = chain.last().expect("one");
     let mut out = Restored {
         commit: m.commit,
+        backups: chain.len() as u64,
         ..Restored::default()
     };
     // The tables whose rows were left out, by id.
     let mut lost: HashSet<u32> = HashSet::new();
     let mut txn = kv.begin(TxnOptions::default())?;
     let mut batch = 0usize;
-    for (name, len, hash) in &m.parts {
-        let path = from.join(name);
-        let b = read(&path)?;
+    let parts = chain
+        .iter()
+        .flat_map(|(dir, m)| m.parts.iter().map(move |p| (dir, p)));
+    for (dir, (name, len, hash)) in parts {
+        let path = dir.join(name);
+        let b = read_file(fs, &path)?;
         if b.len() as u64 != *len || crate::audit::hex(&sha256(&b)) != *hash {
             return Err(Error::data_exception(format!(
                 "{} is not the part the manifest names (its length or SHA-256 differ)",
@@ -960,7 +1447,42 @@ pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &Path) -> Result<Restored
         }
         let mut r = Reader { b: &b, at: 0 };
         while r.at < b.len() {
-            let (k, v): (Vec<u8>, Vec<u8>) = match r.u8()? {
+            let kind = r.u8()?;
+            // A delete (an incremental backup's).
+            let gone = match kind {
+                DELETE => Some(r.bytes()?.to_vec()),
+                SEALED_DELETE => {
+                    let kids = r.kids()?;
+                    let nonce = r.nonce()?;
+                    let sealed = r.bytes()?;
+                    let a = aad(SEALED_DELETE, &[], &kids);
+                    match restore_key(store.as_ref(), &mut cache, kids)? {
+                        Some(key) => {
+                            out.opened += 1;
+                            Some(aead::open(&key, &nonce, &a, sealed).ok_or_else(tampered)?)
+                        }
+                        // Its subject forgotten: the entry it deletes left
+                        // out too.
+                        None => {
+                            out.omitted += 1;
+                            continue;
+                        }
+                    }
+                }
+                _ => None,
+            };
+            if let Some(k) = gone {
+                batch += k.len();
+                txn.delete(&k)?;
+                out.deleted += 1;
+                if batch >= RESTORE_BATCH {
+                    txn.commit()?;
+                    txn = kv.begin(TxnOptions::default())?;
+                    batch = 0;
+                }
+                continue;
+            }
+            let (k, v): (Vec<u8>, Vec<u8>) = match kind {
                 PLAIN => (r.bytes()?.to_vec(), r.bytes()?.to_vec()),
                 SEALED => {
                     let table = r.u32()?;
@@ -1023,7 +1545,7 @@ pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &Path) -> Result<Restored
     let system = Arc::new(crate::access::Who::system());
     let now = crate::datetime::from_system(kv.wall_clock());
     crate::access::with_who(&system, || {
-        crate::datetime::with_now(now, kv, || rebuild(kv, reg, &m, &lost, &mut out))
+        crate::datetime::with_now(now, kv, || rebuild(kv, reg, m, &lost, &mut out))
     })?;
     Ok(out)
 }

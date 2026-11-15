@@ -14,6 +14,9 @@
 //! [`Database`] is the local implementation, over `nucleus-txn`.
 
 use std::ops::Bound;
+
+/// A range of keys: from, to (both may be unbounded).
+pub type KeyRange = (Bound<Vec<u8>>, Bound<Vec<u8>>);
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -406,6 +409,16 @@ pub trait Kv: Send + Sync {
     /// now; its old handles fail.  The default: not supported.
     fn reset_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
         Err(no_branches(name))
+    }
+
+    /// The keys whose newest values may differ between this branch and
+    /// branch `base` (PLAN.md §M14.18 O3, an incremental backup's): ranges
+    /// of them, ascending and apart, found from what the two branches do
+    /// not share — what changed since base was made, and little more.
+    /// `None` when it cannot tell (compare all then); the default.
+    fn changed_since(&self, base: &str) -> Result<Option<Vec<KeyRange>>> {
+        let _ = base;
+        Ok(None)
     }
 
     /// Whether [`vacuum`](Kv::vacuum) has intents to make versions (reads
@@ -1127,6 +1140,11 @@ impl Kv for Database {
 
     fn reset_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
         Ok(Arc::new(self.on_branch(self.engine.reset_branch(name)?)))
+    }
+
+    fn changed_since(&self, base: &str) -> Result<Option<Vec<KeyRange>>> {
+        let base = self.engine.branch(base)?;
+        Ok(self.engine.changed_since(&base)?)
     }
 
     fn begin(&self, opts: TxnOptions) -> Result<Box<dyn KvTxn>> {

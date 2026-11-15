@@ -172,13 +172,15 @@ security hides any from you) — then scrubs the files (old versions,
 index pages, free pages, the log, audit details) and searches them for
 the rows' values: it returns `erasure, rows, scrubbed, found` (`found =
 0` is the proof none is left); `nc_catalog.erasures` lists erasures
-without the subject's value.  Backups: `BACKUP TO '/abs/dir'` (an
-administrator, not in a block) writes a snapshot while writes go on —
-each subject's rows sealed under the subject's key (the server's
-`<dir>.subject-keys` file; keep it apart from the backups), which
-`FORGET SUBJECT` destroys; `nucleus restore <backup> <newdir>
-[--subject-keys FILE]` rebuilds indexes and statistics and leaves
-forgotten subjects out.  Many tenants in one table: a policy
+without the subject's value.  Backups: `BACKUP TO '/abs/repo'` (an
+administrator, not in a block) writes a snapshot while writes go on into
+a repository — the first a full backup, each next one only what changed
+(`BACKUP FULL TO` starts a new chain) — each subject's rows sealed under
+the subject's key (the server's `<dir>.subject-keys` file; keep it apart
+from the backups), which `FORGET SUBJECT` destroys; `nucleus restore
+<repo> <newdir> [--at <commit|000003-incr|'time'>] [--subject-keys
+FILE]` restores the chain to that point, rebuilds indexes and
+statistics and leaves forgotten subjects out.  Many tenants in one table: a policy
 (`CREATE POLICY t ON docs USING (tenant = current_setting('app.tenant'))`)
 keeps every search — vectors, `@@`, `score()`, `rrf` — to the tenant's
 rows; partition the table by the tenant (`PARTITION BY LIST (tenant)`)

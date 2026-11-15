@@ -97,6 +97,71 @@ fn sql_shell_and_command() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// PLAN.md §M14.18 O3: a repository of backups — a full one, then what
+/// changed — and `nucleus restore --at` to any of them.
+#[test]
+fn backups_restored_to_a_point() {
+    let dir = temp_dir("backups");
+    let (db, repo) = (dir.join("db"), dir.join("repo"));
+    let (d, r) = (db.to_str().unwrap(), repo.to_str().unwrap());
+    let sql = |q: &str| {
+        let (ok, out) = nucleus(&["sql", d, "-c", q], "");
+        assert!(ok, "{q}: {out}");
+        out
+    };
+    sql("CREATE TABLE t (id INT PRIMARY KEY, v TEXT); \
+         INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 2000) g");
+    let first = sql(&format!("BACKUP TO '{r}'"));
+    assert!(
+        first.contains("| full ") && first.contains("000001-full"),
+        "{first}"
+    );
+    sql("UPDATE t SET v = 'changed' WHERE id <= 10; DELETE FROM t WHERE id > 1990");
+    let second = sql(&format!("BACKUP TO '{r}'"));
+    assert!(
+        second.contains("| incremental ") && second.contains("000002-incr"),
+        "{second}"
+    );
+    let count = |at: &str| {
+        let out = dir.join(format!("restored-{at}"));
+        let o = out.to_str().unwrap();
+        let mut args = vec!["restore", r, o];
+        if !at.is_empty() {
+            args.extend(["--at", at]);
+        }
+        let (ok, text) = nucleus(&args, "");
+        assert!(ok, "{text}");
+        let (ok, text) = nucleus(
+            &[
+                "sql",
+                o,
+                "-c",
+                "SELECT count(*) || ' ' || sum(CASE WHEN v = 'changed' THEN 1 ELSE 0 END) AS n FROM t",
+            ],
+            "",
+        );
+        assert!(ok, "{text}");
+        (text.lines().nth(2).unwrap_or("").trim().to_string(), text)
+    };
+    let (latest, text) = count("");
+    assert_eq!(latest, "1990 10", "{text}");
+    assert_eq!(count("000001-full").0, "2000 0");
+    // By time: the last made by then — none before the first.
+    assert_eq!(count("2999-01-01 00:00:00+00").0, "1990 10");
+    let x = dir.join("x");
+    let x = x.to_str().unwrap();
+    let (ok, out) = nucleus(&["restore", r, x, "--at", "2000-01-01 00:00:00+00"], "");
+    assert!(!ok && out.contains("no backup made by then"), "{out}");
+    // Not restored: not made either.
+    assert!(!dir.join("x").exists());
+    let (ok, out) = nucleus(&["restore", r, x, "--at", "yesterday-ish"], "");
+    assert!(
+        !ok && out.contains("not a commit, a backup or a time"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `:memory:` (PLAN.md §M14.17 E2): a database in the process, no
 /// directory made; gone when it ends.
 #[test]

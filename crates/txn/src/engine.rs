@@ -16,6 +16,20 @@ use crate::mvcc::{
     intent_ts, side_prefix, status_key, time_key, unlogged_key,
 };
 use crate::recent::Recent;
+
+/// A range of user keys ([`Engine::changed_since`]).
+pub type UserRange = (Bound<Vec<u8>>, Bound<Vec<u8>>);
+
+/// Whether a range starting at `start` overlaps or touches one ending at
+/// `end` (both inclusive or unbounded).
+fn touches(end: &Bound<Vec<u8>>, start: &Bound<Vec<u8>>) -> bool {
+    match (end, start) {
+        (Bound::Included(e), Bound::Included(s)) => s <= e,
+        (Bound::Excluded(e), Bound::Included(s) | Bound::Excluded(s)) => s < e,
+        (Bound::Included(e), Bound::Excluded(s)) => s < e,
+        _ => true,
+    }
+}
 use crate::writes::WriteSet;
 
 /// A commit timestamp.  Logical for now (PLAN.md principle 3): a counter that
@@ -685,6 +699,76 @@ impl Engine {
     pub fn drop_branch(&self, name: &str) -> Result<()> {
         self.inner.store.drop_branch(name)?;
         Ok(())
+    }
+
+    /// The user keys whose newest values may differ between this branch
+    /// and branch `base` (PLAN.md §M14.18 O3, an incremental backup's):
+    /// ranges of them, ascending and apart, from the store's tree walk
+    /// ([`Store::diff_ranges`]) — what changed since base's branch point
+    /// and little more.  `None` when it cannot tell from there: base is
+    /// the main branch, or the two differ in what decides visibility
+    /// beyond a key's own versions — spilled writes, their transactions'
+    /// status, a running transaction's unlogged ranges (compare all then).
+    pub fn changed_since(&self, base: &Engine) -> Result<Option<Vec<UserRange>>> {
+        let Some(ranges) = self.inner.store.diff_ranges(&base.inner.store)? else {
+            return Ok(None);
+        };
+        let (tree, base_tree) = (self.inner.store.read()?, base.inner.store.read()?);
+        let decides =
+            |k: &[u8]| k.starts_with(&SIDE) || k.starts_with(&STATUS) || k.starts_with(&UNLOGGED);
+        let mut out: Vec<UserRange> = Vec::new();
+        for (lo, hi) in ranges {
+            // The reserved keys within: the same in both, or no answer.
+            if lo.as_deref().is_none_or(|lo| lo < &RESERVED_END[..]) {
+                let start = lo.as_deref().map_or(Bound::Unbounded, Bound::Included);
+                let end = match hi.as_deref() {
+                    Some(hi) if hi < &RESERVED_END[..] => Bound::Excluded(hi),
+                    _ => Bound::Excluded(&RESERVED_END[..]),
+                };
+                let mut a = tree.range(start, end)?;
+                let mut b = base_tree.range(start, end)?;
+                loop {
+                    let x = a
+                        .by_ref()
+                        .find(|e| e.as_ref().map_or(true, |(k, _)| decides(k)));
+                    let y = b
+                        .by_ref()
+                        .find(|e| e.as_ref().map_or(true, |(k, _)| decides(k)));
+                    match (x.transpose()?, y.transpose()?) {
+                        (None, None) => break,
+                        (Some(x), Some(y)) if x == y => {}
+                        _ => return Ok(None),
+                    }
+                }
+            }
+            if hi.as_deref().is_some_and(|hi| hi <= &RESERVED_END[..]) {
+                continue;
+            }
+            // In user keys: from the user key of the lower separator to
+            // that of the upper one, both whole (a separator falls between
+            // a key's versions).
+            let user = |k: &[u8]| decode_key(k).map(|(u, _)| u);
+            let start = match lo.as_deref() {
+                Some(lo) if lo >= &RESERVED_END[..] => {
+                    user(lo).map_or(Bound::Unbounded, Bound::Included)
+                }
+                _ => Bound::Unbounded,
+            };
+            let end = hi
+                .as_deref()
+                .and_then(user)
+                .map_or(Bound::Unbounded, Bound::Included);
+            match out.last_mut() {
+                // Touching the last: one.
+                Some((_, last_end)) if touches(last_end, &start) => {
+                    if !matches!(last_end, Bound::Unbounded) {
+                        *last_end = end;
+                    }
+                }
+                _ => out.push((start, end)),
+            }
+        }
+        Ok(Some(out))
     }
 
     /// Makes branch `name` (one without branches of its own) its parent as

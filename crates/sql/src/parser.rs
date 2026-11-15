@@ -1097,9 +1097,10 @@ impl<'a> Parser<'a> {
             }
             "backup" => {
                 self.pos += 1;
+                let full = self.eat_kw("full");
                 self.expect_kw("to")?;
                 let to = self.string()?;
-                Ok(Statement::Backup { to })
+                Ok(Statement::Backup { to, full })
             }
             "vacuum" => {
                 self.pos += 1;

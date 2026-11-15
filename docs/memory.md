@@ -107,15 +107,17 @@ keeps the record, without the subject's value.
 ## Backups that forget too
 
 ```sql
-BACKUP TO '/backups/2026-11-14';
+BACKUP TO '/backups/assistant';   -- the first: all of it; the next ones: what changed
 ```
 
 ```sh
-nucleus restore /backups/2026-11-14 ./restored --subject-keys ./assistant.subject-keys
+nucleus restore /backups/assistant ./restored --subject-keys ./assistant.subject-keys
+nucleus restore /backups/assistant ./yesterday --at '2026-11-14 18:00:00+01'
 ```
 
 A backup is taken online, without index pages (a restore rebuilds
-them).  Each row of a subject is sealed under that subject's own key,
+them); a repository's first is a full one, each next one holds only
+what changed since the one before, so they can be taken often.  Each row of a subject is sealed under that subject's own key,
 kept in `<dir>.subject-keys` — keep that file, and back it up, apart
 from the backups.  `FORGET SUBJECT` destroys the key, so every backup
 taken before then restores without the subject.

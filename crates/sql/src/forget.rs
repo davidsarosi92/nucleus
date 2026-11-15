@@ -621,6 +621,8 @@ pub(crate) fn finish(
     if p.audit {
         ranges.push(crate::audit::records_range());
     }
+    // The branches incremental backups keep share the erased pages.
+    crate::backup::drop_backup_branches(kv)?;
     let done = kv.scrub(&ranges, WAIT)?;
     let scrubbed = done.is_some_and(|d| d.complete);
     let found = if scrubbed {

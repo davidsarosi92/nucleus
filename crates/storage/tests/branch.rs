@@ -510,3 +510,115 @@ fn tags_are_kept_with_the_branch() {
     p.sim_fs().crash();
     assert_eq!(open(&p).unwrap().branch("a").unwrap().tag(), 0);
 }
+
+/// Whether `key` is within one of `ranges`.
+fn within(ranges: &[nucleus_storage::btree::KeyRange], key: &[u8]) -> bool {
+    ranges.iter().any(|(lo, hi)| {
+        lo.as_deref().is_none_or(|lo| key >= lo) && hi.as_deref().is_none_or(|hi| key < hi)
+    })
+}
+
+/// The keys whose entries differ between two models.
+fn differing(a: &Model, b: &Model) -> Vec<Vec<u8>> {
+    let keys: std::collections::BTreeSet<&Vec<u8>> = a.keys().chain(b.keys()).collect();
+    keys.into_iter()
+        .filter(|k| a.get(*k) != b.get(*k))
+        .cloned()
+        .collect()
+}
+
+/// PLAN.md §M14.18 O3: the ranges two branches' trees may differ in hold
+/// every key they differ at — whatever was written, deleted or emptied
+/// between — and little else; a branch made from another's state is no
+/// different anywhere.
+#[test]
+fn the_ranges_two_branches_differ_in() {
+    for seed in 0..8u64 {
+        let p = sim(100 + seed);
+        let rng = SplitMix64::new(seed);
+        let main = open(&p).unwrap();
+        let mut m = Model::new();
+        fill(&main, &mut m, "k", 2000, 1);
+        main.checkpoint().unwrap();
+        let mut base_name = "b0".to_string();
+        let mut base = main.create_branch(&base_name).unwrap();
+        let mut base_m = m.clone();
+        // Nothing written: no difference.
+        let same = main.create_branch("same").unwrap();
+        assert_eq!(
+            same.diff_ranges(&base).unwrap(),
+            Some(vec![]),
+            "seed {seed}"
+        );
+        main.drop_branch("same").unwrap();
+        for round in 1..6 {
+            // Scattered writes, a deleted run (leaves emptied), a few new keys.
+            let mut ops = Vec::new();
+            for _ in 0..rng.next_u64() % 40 {
+                let k = format!("k{:04}", rng.next_u64() % 2000).into_bytes();
+                ops.push((k, Some(vec![round as u8; 150])));
+            }
+            if seed % 2 == 1 {
+                let start = rng.next_u64() % 1800;
+                for i in start..start + 150 {
+                    ops.push((format!("k{i:04}").into_bytes(), None));
+                }
+            }
+            ops.push((format!("n{round}").into_bytes(), Some(vec![9; 10])));
+            ops.sort_by(|a, b| a.0.cmp(&b.0));
+            ops.dedup_by(|a, b| a.0 == b.0);
+            for (k, v) in &ops {
+                match v {
+                    Some(v) => m.insert(k.clone(), v.clone()),
+                    None => m.remove(k),
+                };
+            }
+            main.commit(&Batch { meta: 0, ops }).unwrap();
+            // The base written too (its own pages, between other
+            // separators): still every difference found.
+            if round == 3 {
+                put(&base, &mut base_m, "k0700", b"on the base");
+                let gone: Vec<_> = (900..1100)
+                    .map(|i| format!("k{i:04}").into_bytes())
+                    .collect();
+                for k in &gone {
+                    base_m.remove(k);
+                }
+                base.commit(&Batch {
+                    meta: 0,
+                    ops: gone.into_iter().map(|k| (k, None)).collect(),
+                })
+                .unwrap();
+            }
+            if round % 2 == 0 {
+                main.checkpoint().unwrap();
+            }
+            let name = format!("b{round}");
+            let next = main.create_branch(&name).unwrap();
+            let ranges = next.diff_ranges(&base).unwrap().unwrap();
+            assert_eq!(contents(&next), m);
+            let diff = differing(&base_m, &m);
+            assert!(!diff.is_empty());
+            for k in &diff {
+                assert!(
+                    within(&ranges, k),
+                    "seed {seed} round {round}: {} outside {ranges:?}",
+                    String::from_utf8_lossy(k)
+                );
+            }
+            // Few leaves' worth: far from the whole tree.
+            let covered = m.keys().filter(|k| within(&ranges, k)).count();
+            assert!(
+                covered < m.len() / 2,
+                "seed {seed}: {covered} of {}",
+                m.len()
+            );
+            // The base's ranges against the main branch: none (main has none).
+            assert_eq!(base.diff_ranges(&main).unwrap(), None);
+            drop(base);
+            main.drop_branch(&base_name).unwrap();
+            (base, base_m, base_name) = (next, m.clone(), name);
+        }
+        main.check_pages().unwrap();
+    }
+}

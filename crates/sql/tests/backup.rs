@@ -105,10 +105,15 @@ fn files(p: &Arc<SimPlatform>, dir: &str) -> Vec<u8> {
     let mut all = Vec::new();
     for name in fs.list_dir(Path::new(dir)).unwrap() {
         let path = Path::new(dir).join(name);
-        let f = fs.open(&path, OpenMode::ReadOnly).unwrap();
-        let mut b = vec![0u8; f.size().unwrap() as usize];
-        f.read_exact_at(&mut b, 0).unwrap();
-        all.extend(b);
+        match fs.open(&path, OpenMode::ReadOnly) {
+            Ok(f) => {
+                let mut b = vec![0u8; f.size().unwrap() as usize];
+                f.read_exact_at(&mut b, 0).unwrap();
+                all.extend(b);
+            }
+            // A directory: a backup of the repository.
+            Err(_) => all.extend(files(p, path.to_str().unwrap())),
+        }
     }
     all
 }
@@ -152,15 +157,16 @@ fn a_restore_is_the_database_as_the_backup_saw_it() {
     // Writes after the backup are not in it.
     s.execute("INSERT INTO cities VALUES ('Győr', 130000)")
         .unwrap();
+    assert_eq!(f[6..], ["full", "000001-full"], "{got:?}");
     // Refused: in a block, by a role not an administrator, a relative
-    // path, a directory not empty.
+    // path, a directory holding something else.
     assert_eq!(code(&mut s, "BEGIN; BACKUP TO '/backups/two'"), "25001");
     s.execute("ROLLBACK").unwrap();
     s.execute("CREATE USER app; SET ROLE app").unwrap();
     assert_eq!(code(&mut s, "BACKUP TO '/backups/two'"), "42501");
     s.execute("RESET ROLE").unwrap();
     assert_eq!(code(&mut s, "BACKUP TO 'backups/two'"), "22023");
-    assert_eq!(code(&mut s, "BACKUP TO '/backups/one'"), "22023");
+    assert_eq!(code(&mut s, "BACKUP TO '/db'"), "22023");
 
     let restored = open(&p, "/restored");
     let r =
@@ -290,5 +296,208 @@ fn a_restore_after_forget_leaves_the_subject_out() {
              (SELECT count(*) FROM cities), (SELECT count(*) FROM flags WHERE message IS NULL)"
         ),
         ["0 0 2 2"]
+    );
+}
+
+/// A backup's row: its fields by name.
+fn backed_up(s: &mut Session, sql: &str) -> std::collections::HashMap<&'static str, String> {
+    let got = texts(s, sql);
+    let f: Vec<String> = got[0].split(' ').map(str::to_string).collect();
+    [
+        "commit", "entries", "sealed", "omitted", "bytes", "deleted", "kind", "backup",
+    ]
+    .into_iter()
+    .zip(f)
+    .collect()
+}
+
+/// PLAN.md §M14.18 O3: a repository's backups after the first hold what
+/// changed since the one before — writes, and deletes (a subject's row's
+/// sealed) — and a restore to any of them is the database as it was then.
+#[test]
+fn incremental_backups_restore_to_each_point() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(4));
+    let kv = open(&p, "/db");
+    // Keys not holding on to the database: it is opened again below.
+    let rng = Arc::clone(&p);
+    subject_keys::set_subject_keys(Some(Arc::new(MemoryKeys::new(move |b| {
+        rng.rng().fill_unpredictable(b)
+    }))));
+    let mut s = Session::new(Arc::clone(&kv));
+    schema(&mut s);
+    s.execute("INSERT INTO cities SELECT 'town ' || g, g FROM generate_series(1, 3000) g")
+        .unwrap();
+    let mut points = Vec::new();
+    let full = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(
+        (full["kind"].as_str(), full["backup"].as_str()),
+        ("full", "000001-full")
+    );
+    points.push(("000001-full", answers(&mut s)));
+
+    // A few writes, a subject's row and others deleted.
+    s.execute(
+        "INSERT INTO cities VALUES ('Győr', 130000); \
+         UPDATE cities SET people = people + 1 WHERE name = 'Szeged'; \
+         DELETE FROM cities WHERE name LIKE 'town 1%'; \
+         DELETE FROM accounts WHERE id = 8; \
+         REMEMBER 'swims in the lake' FOR 'carol' IN notes",
+    )
+    .unwrap();
+    let incr = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(
+        (incr["kind"].as_str(), incr["backup"].as_str()),
+        ("incremental", "000002-incr")
+    );
+    let n = |m: &std::collections::HashMap<&str, String>, f: &str| m[f].parse::<u64>().unwrap();
+    // What changed, not all: 1111 cities and an account deleted.
+    assert!(n(&incr, "deleted") >= 1112, "{incr:?}");
+    assert!(
+        n(&incr, "entries") < n(&full, "entries") / 2,
+        "{incr:?} {full:?}"
+    );
+    assert!(n(&incr, "sealed") >= 2, "{incr:?}");
+    points.push(("000002-incr", answers(&mut s)));
+    // Its files: no subject's value in the clear.
+    let all = files(&p, "/repo/000002-incr");
+    assert!(!holds(&all, "swims in the lake"));
+    assert!(holds(&all, "Győr"));
+
+    // Again, after a reopening (the branch kept is found again).
+    drop(s);
+    let kv = {
+        drop(kv);
+        open(&p, "/db")
+    };
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute("UPDATE messages SET body = 'moved' WHERE id = 3; DELETE FROM docs WHERE id = 31")
+        .unwrap();
+    let third = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(third["kind"], "incremental", "{third:?}");
+    points.push(("000003-incr", answers(&mut s)));
+    // Only the last backup's branch is kept.
+    let kept: Vec<String> = kv
+        .branches()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .filter(|b| b.starts_with(nucleus_sql::backup::BRANCH_PREFIX))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+
+    // A restore to each point is the database as it was then.
+    for (i, (name, want)) in points.iter().enumerate() {
+        let restored = open(&p, &format!("/restored{i}"));
+        let r = nucleus_sql::backup::restore_to(
+            &restored,
+            s.registry(),
+            Path::new("/repo"),
+            &nucleus_sql::backup::Until::Name(name.to_string()),
+        )
+        .unwrap();
+        assert_eq!(r.backups, i as u64 + 1, "{r:?}");
+        let mut t = Session::new(restored);
+        assert_eq!(&answers(&mut t), want, "{name}");
+        assert_eq!(
+            texts(&mut t, "SELECT intact FROM nc_catalog.audit_chain"),
+            ["t"],
+            "{name}"
+        );
+    }
+    // By commit: the second.
+    let restored = open(&p, "/by_commit");
+    let r = nucleus_sql::backup::restore_to(
+        &restored,
+        s.registry(),
+        Path::new("/repo"),
+        &nucleus_sql::backup::Until::Commit(n(&third, "commit") - 1),
+    )
+    .unwrap();
+    assert_eq!(r.commit, n(&incr, "commit"));
+
+    // FORGET drops the branch kept: the next backup is a full one, and
+    // the erasure finds nothing of the subject left in the files.
+    let forgot = texts(&mut s, "FORGET SUBJECT 'carol'");
+    assert!(forgot[0].ends_with(" t 0"), "{forgot:?}");
+    let after = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(
+        (after["kind"].as_str(), after["backup"].as_str()),
+        ("full", "000004-full")
+    );
+    // FULL starts a new chain whatever is kept.
+    let forced = backed_up(&mut s, "BACKUP FULL TO '/repo'");
+    assert_eq!(forced["kind"], "full");
+    // A restore of the chain before the erasure leaves her out.
+    let restored = open(&p, "/before_forget");
+    let r = nucleus_sql::backup::restore_to(
+        &restored,
+        s.registry(),
+        Path::new("/repo"),
+        &nucleus_sql::backup::Until::Name("000003-incr".into()),
+    )
+    .unwrap();
+    assert!(r.omitted > 0, "{r:?}");
+    let mut t = Session::new(restored);
+    assert_eq!(
+        texts(&mut t, "SELECT count(*) FROM notes WHERE subject = 'carol'"),
+        ["0"]
+    );
+}
+
+/// A backup that did not finish — a crash before its manifest: its
+/// directory without one, its branch made — is skipped: the next one
+/// follows the last finished, its number not reused, the stray branch
+/// dropped, and the chain restores.
+#[test]
+fn an_unfinished_backup_is_skipped() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(5));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute("CREATE TABLE t (id int PRIMARY KEY, v text); INSERT INTO t VALUES (1, 'one')")
+        .unwrap();
+    backed_up(&mut s, "BACKUP TO '/repo'");
+    s.execute("INSERT INTO t VALUES (2, 'two')").unwrap();
+    backed_up(&mut s, "BACKUP TO '/repo'");
+    // What a crash leaves of the third: a part, no manifest; its branch.
+    let kept = kv
+        .branches()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .find(|b| b.starts_with(nucleus_sql::backup::BRANCH_PREFIX))
+        .unwrap();
+    let stray = format!("{}000003", &kept[..kept.len() - 6]);
+    kv.create_branch(&stray).unwrap();
+    let fs = p.fs();
+    fs.create_dir_all(Path::new("/repo/000003-incr")).unwrap();
+    fs.open(
+        Path::new("/repo/000003-incr/part-000000"),
+        OpenMode::CreateNew,
+    )
+    .unwrap()
+    .write_all_at(b"half", 0)
+    .unwrap();
+    s.execute("INSERT INTO t VALUES (3, 'three'); DELETE FROM t WHERE id = 1")
+        .unwrap();
+    let next = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(
+        (next["kind"].as_str(), next["backup"].as_str()),
+        ("incremental", "000004-incr")
+    );
+    let names: Vec<String> = kv.branches().unwrap().into_iter().map(|b| b.name).collect();
+    assert!(
+        !names.contains(&stray) && !names.contains(&kept),
+        "{names:?}"
+    );
+    let restored = open(&p, "/restored");
+    let r = nucleus_sql::backup::restore(&restored, s.registry(), Path::new("/repo")).unwrap();
+    assert_eq!(r.backups, 3, "{r:?}");
+    let mut t = Session::new(restored);
+    assert_eq!(
+        texts(&mut t, "SELECT id, v FROM t ORDER BY id"),
+        ["2 two", "3 three"]
     );
 }

@@ -993,9 +993,36 @@ subjects, the HMAC of its subject, ChaCha20-Poly1305; key ids, nonce,
 tag).  After `FORGET SUBJECT 'user7'` the restore of the same backup
 left that subject's 100 rows out (99,900 notes).
 
+Incremental backups (PLAN.md §M14.18 O3), release, real files, an M2
+Pro: a table of 1,000,000 rows of about 110 bytes with a B-tree index
+(243 MiB of data file), backed up into one repository, one change after
+another; each backup's time with the `nucleus sql` process's start.
+
+| backup into the repository | time | backup |
+|---|---:|---:|
+| the first: full | 1.13 s | 139.1 MiB |
+| nothing changed | 0.06 s | 0.0 MiB |
+| 10,000 rows updated, adjacent (1 %) | 0.06 s | 0.5 MiB |
+| 10,000 rows updated, every 100th (1 %: nearly every leaf) | 0.51 s | 0.5 MiB |
+| 100 rows updated, every 10,000th | 0.09 s | 0.0 MiB |
+| 10,000 rows deleted, adjacent | 0.13 s | 0.2 MiB |
+| `BACKUP FULL` | 1.16 s | |
+| `nucleus restore`: the chain of six (1,020,106 entries written, 10,000 deleted) | 2.43 s | |
+| `nucleus restore`: the full one after it (990,006 entries) | 2.18 s | |
+
+A backup costs what changed, not the database: the tree walk skips the
+subtrees both branches share, and only the leaves left are compared —
+when changes touch nearly every leaf, that is nearly the whole table
+read on both sides (0.51 s, still half the full backup's time and
+1/280 of its bytes).  The branch kept between backups holds on to what
+the updates overwrite until the next backup drops it: the data file
+grew from 243 to 323 MiB over the six, those pages free again since and
+kept in the file for reuse.  The restored chain read the same as the
+database (`count(*)`, `sum(length(v))`).
+
 ```sh
-nucleus sql db -c "BACKUP TO '/abs/backups/mon'"
-nucleus restore /abs/backups/mon restored --subject-keys db.subject-keys
+nucleus sql db -c "BACKUP TO '/abs/backups/db'"      # full, then what changed
+nucleus restore /abs/backups/db restored --at 000003-incr --subject-keys db.subject-keys
 ```
 
 ## JSON

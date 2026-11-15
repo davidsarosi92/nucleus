@@ -121,13 +121,19 @@ usage:
                                     the branch as their database); --at: as it
                                     was then, within the history the server
                                     keeps (its --history, given again)
-  nucleus restore <backup> <dir> [--subject-keys <file>]
-                                    a new database in <dir> from a backup
-                                    (BACKUP TO '<backup>'): its indexes and
-                                    statistics made again from the rows; the
-                                    rows of subjects whose keys FORGET SUBJECT
-                                    destroyed left out (keys from <file>,
-                                    default <dir>.subject-keys)
+  nucleus restore <repository> <dir> [--at <commit|backup|time>]
+                 [--subject-keys <file>]
+                                    a new database in <dir> from the backups
+                                    BACKUP TO '<repository>' wrote: the last,
+                                    or the last by --at (a commit, a backup's
+                                    directory such as 000003-incr, or a time
+                                    such as '2026-11-15 14:05:00+01') — its
+                                    full backup and the incremental ones
+                                    after it; indexes and statistics made
+                                    again from the rows; the rows of subjects
+                                    whose keys FORGET SUBJECT destroyed left
+                                    out (keys from <file>, default
+                                    <dir>.subject-keys)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

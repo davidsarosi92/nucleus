@@ -900,7 +900,7 @@ impl Session {
             Statement::Forget { .. } if self.block.is_some() => Err(Error::active_txn(
                 "FORGET SUBJECT cannot run inside a transaction block",
             )),
-            Statement::Backup { to } => {
+            Statement::Backup { to, full } => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
                         "BACKUP cannot run inside a transaction block",
@@ -909,7 +909,7 @@ impl Session {
                 if !self.who.superuser {
                     return Err(crate::access::denied("BACKUP needs a superuser"));
                 }
-                let b = crate::backup::backup(&self.kv, to)?;
+                let b = crate::backup::backup(&self.kv, to, *full)?;
                 Ok(Output::Rows {
                     columns: crate::backup::RESULT
                         .iter()

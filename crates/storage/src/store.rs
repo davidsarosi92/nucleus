@@ -862,6 +862,17 @@ impl Store {
         self.begin_running(running, Op::Drop { id })?.0.finish()
     }
 
+    /// Where this branch's tree and branch `base`'s may differ (PLAN.md
+    /// §M14.18 O3): [`BTree::diff_ranges`] from base's branch point —
+    /// `None` for the main branch as base (it has none).
+    pub fn diff_ranges(&self, base: &Store) -> Result<Option<Vec<crate::btree::KeyRange>>> {
+        let Some(origin) = base.b.info.origin else {
+            return Ok(None);
+        };
+        let (tree, base_tree) = (self.read()?, base.read()?);
+        Ok(Some(tree.diff_ranges(&base_tree, origin)?))
+    }
+
     /// Makes branch `name` (one without branches of its own) its parent
     /// as it is now: dropped and made again, in one checkpoint.  The new
     /// handle; the old ones fail.

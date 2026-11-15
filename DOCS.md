@@ -682,6 +682,12 @@ know); its handles fail with `Error::Branch` from then on.
 `reset_branch(name)` drops and makes it again from its parent in one
 checkpoint (a new id, the old handles fail).  A branch costs what it
 changed plus what its parent freed since that it still reads.
+`diff_ranges(base)` (§M14.18 O3, an incremental backup's) gives the key
+ranges this branch's tree and `base`'s may differ in: this tree walked,
+a subtree whose root was born by base's origin skipped, then base's,
+a subtree skipped only where this tree reaches the same page between
+the same separators — exact for any two trees of the file, whatever
+either wrote since, and costing what changed (`BTree::diff_ranges`).
 `check_pages()` checks every tree and that every page is in exactly one
 place — in use (a tree, the directory, a dead list, allocated) or free
 (free, pending, holding the free list).  Branch names: 1–63 ASCII
@@ -1234,7 +1240,7 @@ nucleus kv <dir>              # shell: the same commands, plus begin/commit/roll
 nucleus sql [<dir> | :memory:] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--password <pw>] [-c <sql>]
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
-nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
+nucleus restore <repository> <dir> [--at <commit|backup|time>] [--subject-keys <file>]   # §8.30
 nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
@@ -5121,26 +5127,68 @@ end use; statement statistics keep normalized texts, constants as
 
 ### 8.30 Backups and subjects' keys (`backup`, `subject_keys`, §M14.24 R6)
 
-**`BACKUP TO 'dir'`** (an administrator's; not in a transaction block,
-`25001`; an absolute path on the server, else `22023`; a new or empty
-directory, else `22023`) writes the database as one read-only
-transaction's snapshot sees it, while others go on writing, and returns
-`commit` (the snapshot: `AS OF COMMIT` it reads the same), `entries`,
-`sealed`, `omitted` and `bytes`.  It is the store's entries less what is
-derived from them: every secondary index's (a B-tree's, HNSW's, a text
-or sparse index's — `table.indexes`' ids under the table's prefix) and
-`ANALYZE`'s samples (`00 04`); the catalog, roles, grants, policies,
-models and their files, secrets (sealed already, §8.24), the audit log,
-the erasure records, the embedding queue and the column store's
-segments travel as they are.  Files (through the database's file system,
-`Kv::files`): parts `part-000000`, … of about 16 MiB, each a sequence of
-entries — `0` key, value; `1` a sealed one: the row's table id (or none),
-its keys' ids, a nonce, the sealed key and value; `2` an audit record:
-key, the record with its detail blank, keys' ids, nonce, the sealed
-detail — and a `manifest` written last (`manifest.tmp`, synced, renamed,
-the directory synced): `nucleus backup 1`, the commit, the time, the
-counts, the tables that had statistics, and each part's length and
-SHA-256.  No manifest, no backup.
+**`BACKUP [FULL] TO 'repo'`** (an administrator's; not in a
+transaction block, `25001`; an absolute path on the server, else
+`22023`) writes the database as one snapshot sees it, while others go on
+writing, into a repository of backups: a new or empty directory, or one
+`BACKUP` wrote (anything else in it — a backup of the format before
+repositories, a stray file — `22023`).  Each backup is a directory of
+the repository, `000001-full`, `000002-incr`, … numbered in order: a
+**full** one holds all of the database, an **incremental** one what
+changed since the backup before it — the entries written or changed and
+the keys deleted.  `BACKUP TO` makes an incremental one when it can (the
+repository's last backup finished, of the same branch, its kept branch
+still there and unchanged), else a full one; `FULL` always a full one,
+starting a new chain.  It returns `commit` (the snapshot: `AS OF
+COMMIT` it reads the same), `entries`, `sealed`, `omitted`, `bytes`,
+`deleted`, `kind` (`full`, `incremental`) and `backup` (its directory).
+
+The snapshot is a branch (§8.26, `Kv::create_branch`: a checkpoint, then
+a copy in constant time) named `nc-backup-<repository hash>-<number>`,
+read and then kept: the next backup of the repository makes its own,
+compares the two (`Kv::changed_since`), and drops the old one.  The
+comparison walks the new branch's B-tree and skips each subtree whose
+root page was born by the old branch's origin (a copy-on-write tree
+never points to a younger page), then walks the old tree and skips the
+subtrees it reaches at the same page between the same separators; the
+leaves left give key ranges, and only there are the two snapshots read
+side by side — a value differing written, a key gone written as a
+delete (`BTree::diff_ranges`, `Engine::changed_since`; ZFS's `send` and
+btrfs's compare two snapshots' trees the same way).  It is exact for
+any two trees of the file and costs what changed plus the pages read to
+learn their births (a changed leaf's siblings).  Where the two differ in
+what decides visibility beyond a key's versions — a spilled
+transaction's writes or status, a running transaction's unlogged ranges
+(§5.2) — it gives no ranges, and every key is compared (the backup is
+still only what changed).  A kept branch holds on to the pages it
+shares, as a snapshot does: the data file keeps what was overwritten
+since the last backup.  `FORGET SUBJECT` drops every kept branch before
+its scrub (what they share is what the erasure removes): the next
+backups are full.  Branches named `nc-backup-…` are the backups'; they
+are listed with the others, and one kept for a backup of a branch other
+than the main one is that branch's child — `DROP BRANCH` of it waits
+for `DROP BRANCH nc-backup-…` (its next backup is then a full one).
+
+It is the store's entries less what is derived from them: every
+secondary index's (a B-tree's, HNSW's, a text or sparse index's —
+`table.indexes`' ids under the table's prefix) and `ANALYZE`'s samples
+(`00 04`); the catalog, roles, grants, policies, models and their files,
+secrets (sealed already, §8.24), the audit log, the erasure records, the
+embedding queue and the column store's segments travel as they are.
+Files (through the database's file system, `Kv::files`): parts
+`part-000000`, … of about 16 MiB, each a sequence of entries — `0` key,
+value; `1` a sealed one: the row's table id (or none), its keys' ids, a
+nonce, the sealed key and value; `2` an audit record: key, the record
+with its detail blank, keys' ids, nonce, the sealed detail; `3` a key
+deleted; `4` a key of a row of subjects deleted, sealed under the keys
+of its subjects as the backup before saw them (a subject forgotten
+since: left out, its rows' entries are too) — and a `manifest` written
+last (`manifest.tmp`, synced, renamed, the directory synced): `nucleus
+backup 2`, the kind, the backup an incremental one follows (`base`),
+the branch kept, the branch backed up, the commit, the time, the counts,
+the tables that had statistics, and each part's length and SHA-256.  No
+manifest, no backup (a directory without one is skipped, its number not
+reused).
 
 **What is sealed.**  An entry about a subject (§8.29): a row of a table
 with subject columns (a partition's are its parent's) whose subject
@@ -5187,26 +5235,48 @@ It must be kept, and backed up, apart from the data and its backups.
 holding its own).  The old file's blocks may remain on the disk until
 overwritten; a key management service is a module's to add.
 
-**Restore** (`backup::restore(kv, registry, dir)`; `nucleus restore
-<backup> <dir> [--subject-keys FILE]`, by default `<dir>.subject-keys`)
-makes a new database (one holding data: `55000`): the manifest read,
-each part checked against its length and SHA-256 (`22000`), the entries
-written in transactions of about 4 MiB — a sealed one opened with its
-keys (one that does not open: `22000`, the backup changed or another
-database's keys), left out when one of them is destroyed (`omitted`),
-an audit detail then blanked with erasure `u64::MAX` (`KEY_DESTROYED`;
-the chain still holds, §9) —; then every index rebuilt from the rows
+**Restore** (`backup::restore_to(kv, registry, repo, until)`;
+`nucleus restore <repository> <dir> [--at <commit|backup|time>]
+[--subject-keys FILE]`, keys by default `<dir>.subject-keys`) makes a
+new database (one holding data: `55000`) of the repository's last backup
+— or, by `--at`, the last of commit `n` or before, the one in directory
+`000003-incr`, or the last made by a time (`'2026-11-15 14:05:00+01'`;
+UTC without a zone) —: that backup's full one and the incremental ones
+after it, each following the one before (one missing or unfinished:
+`22000`).  A directory holding a manifest of its own (a backup of the
+format before repositories, `nucleus backup 1`) is restored by itself.
+Each part is checked against its length and SHA-256 (`22000`); the
+entries are written in transactions of about 4 MiB, backup after backup
+— a sealed one opened with its keys (one that does not open: `22000`,
+the backup changed or another database's keys), left out when one of
+them is destroyed (`omitted`), an audit detail then blanked with
+erasure `u64::MAX` (`KEY_DESTROYED`; the chain still holds, §9), a
+delete applied (`deleted`) —; then every index rebuilt from the rows
 (`dml::backfill_index`), the keys of tables referencing rows left out
-by `SET NULL` / `SET DEFAULT` set so (`nulled`), and the tables that had
-statistics analyzed again.  It returns `Restored` (`commit`, `entries`,
-`opened`, `omitted`, `blanked`, `indexes`, `nulled`).
+by `SET NULL` / `SET DEFAULT` set so (`nulled`), and the tables the last
+backup had statistics of analyzed again.  It returns `Restored`
+(`commit`, `backups`, `entries`, `opened`, `deleted`, `omitted`,
+`blanked`, `indexes`, `nulled`).  A restore that fails removes the
+directory `nucleus restore` made.
 
-Not yet (§M14.18): incremental backups, object storage, a backup's
-history (point-in-time restore), scheduled restore tests.  Tests:
+The time a restore reaches is a backup's: point-in-time restore is as
+fine as the backups are frequent — incremental ones cost what changed,
+so they can be taken often.  Not the WAL archived: the log holds every
+entry in the clear, and a subject's rows in an archived log could not
+be forgotten (§M14.24), while a backup's are sealed.  Not yet
+(§M14.18): object storage, compression and encryption of the backups,
+their retention, scheduled backups, scheduled restore tests.  Tests:
 `tests/backup.rs` (a restore is the database as the backup saw it, its
 indexes used; a backup holds no subject's value in the clear; a restore
 after `FORGET` leaves the subject out, the audit chain intact, a later
-backup's new rows of the subject restored).
+backup's new rows of the subject restored; incremental backups — after
+the database is opened again too — restored to each point, a subject's
+row's delete sealed, `FORGET` dropping the kept branch), `storage
+tests/branch.rs` (the ranges two branches differ in hold every
+difference, a base written since too), `kv tests/contract.rs`
+(`changed_since` holds every change: deletes of runs, a transaction
+running across the branch point, spilled ones), the CLI's
+`backups_restored_to_a_point`.
 
 ### 8.31 JSON (`json`, §M14.15)
 
@@ -6983,6 +7053,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — §M14.18 O3a, incremental backups:** `BACKUP [FULL] TO
+  'repo'` into a repository (`000001-full`, `000002-incr`, …), what
+  changed found by comparing the kept branch's tree with a new one's
+  (`BTree::diff_ranges`, `Kv::changed_since`), deletes in the backup
+  (sealed for subjects' rows), manifest `nucleus backup 2`; `nucleus
+  restore --at <commit|backup|time>` restores a chain; `FORGET`
+  drops the kept branches (§8.30).
 - **2026-11-15 — §M14.18 O2b, traces:** a span per statement over OTLP
   (`nucleus_platform::trace`, the `otlp` module's `/v1/traces`), the
   client's trace by `SET traceparent` or a sqlcommenter comment, the
