@@ -5,10 +5,9 @@
 //! logs in, not the server's `--user` / `--password`.
 
 use std::io::BufRead;
-use std::path::Path;
 use std::sync::Arc;
 
-use nucleus_kv::{Database, Kv, Options, TxnOptions};
+use nucleus_kv::{Kv, Options, TxnOptions};
 use nucleus_sql::Session;
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -35,7 +34,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             line.trim_end_matches(['\r', '\n']).to_string()
         }
     };
-    let db = Database::open(Path::new(dir), Options::default()).map_err(|e| e.to_string())?;
+    let db = crate::keys::open_database(
+        dir,
+        &crate::keys::KeyOptions::default().settings(dir),
+        Options::default(),
+    )?;
     let kv: Arc<dyn Kv> = Arc::new(db);
     // None given: 20 letters and digits from the system's randomness
     // (116 bits).

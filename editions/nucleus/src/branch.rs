@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use nucleus_kv::{Database, Kv, Options};
+use nucleus_kv::{Kv, Options};
 
 const USAGE: &str = "usage: nucleus branch <dir> create <name> [--from <branch>] \
                      [--at <time> --history <duration>] | list | drop <name> | reset <name>";
@@ -43,14 +43,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     (nucleus server --history), so only a time it kept is taken"
             .into());
     }
-    let db = Database::open(
+    let db = crate::keys::open_database(
         dir,
+        &crate::keys::KeyOptions::default().settings(dir),
         Options {
             history_time: history.unwrap_or_default(),
             ..Options::default()
         },
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let kv: Arc<dyn Kv> = Arc::new(db.clone());
     let sql = |e: nucleus_sql::Error| e.message;
     match (command.as_str(), positional.as_slice()) {

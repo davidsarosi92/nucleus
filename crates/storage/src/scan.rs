@@ -11,12 +11,20 @@
 //! encoded past recognition (bit-packed numbers, a layer's own
 //! compression) are not found: what a layer encodes, it must remove by
 //! construction; the search checks the bytes a value keeps as it is.
+//!
+//! In an encrypted store (PLAN.md §M14.30 K2e) the bytes as they are say
+//! nothing: [`find_with`] its key opens every data page that opens — free
+//! ones too — and searches it as above, and every WAL record, in each
+//! segment and spare, from the first on as far as they open.  Scratch
+//! files are sealed under keys of their own, gone with the queries that
+//! made them, and are left out.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use nucleus_platform::{File, FileSystem, OpenMode};
 
+use crate::cipher::PageCipher;
 use crate::error::Result;
 use crate::node::{LEAF, ValRef, View, decode_overflow};
 use crate::page::{PAGE_SIZE, Page, PageId};
@@ -141,6 +149,17 @@ impl<'a> Needles<'a> {
 /// [`MIN_NEEDLE`] bytes or more) is — once per file offset, or per data
 /// file page.  The lock file is skipped.
 pub fn find(fs: &dyn FileSystem, dir: &Path, needles: &[Vec<u8>]) -> Result<Vec<Found>> {
+    find_with(fs, dir, needles, None)
+}
+
+/// [`find`] in a store encrypted under `cipher`: its pages and WAL
+/// records opened and searched.
+pub fn find_with(
+    fs: &dyn FileSystem,
+    dir: &Path,
+    needles: &[Vec<u8>],
+    cipher: Option<&PageCipher>,
+) -> Result<Vec<Found>> {
     let n = Needles::new(needles);
     let mut out = BTreeSet::new();
     let mut files = Vec::new();
@@ -151,6 +170,29 @@ pub fn find(fs: &dyn FileSystem, dir: &Path, needles: &[Vec<u8>]) -> Result<Vec<
         }
         let file = fs.open(&path, OpenMode::ReadOnly)?;
         let data = path.parent() == Some(dir) && path.file_name().is_some_and(|f| f == "data");
+        let name = path.file_name().map(|f| f.to_string_lossy().into_owned());
+        let log = name
+            .as_deref()
+            .is_some_and(|f| f.ends_with(".wal") || f.ends_with(".spare"));
+        let scratch = path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|f| f == "scratch");
+        if let Some(c) = cipher {
+            if log {
+                search_records(file.as_ref(), c, &n, |at, needle| {
+                    out.insert(Found {
+                        file: path.clone(),
+                        offset: at,
+                        needle,
+                    });
+                })?;
+                continue;
+            }
+            if scratch {
+                continue;
+            }
+        }
         search_file(file.as_ref(), &n, |at, needle| {
             let offset = if data { at - at % PAGE_SIZE as u64 } else { at };
             out.insert(Found {
@@ -160,7 +202,7 @@ pub fn find(fs: &dyn FileSystem, dir: &Path, needles: &[Vec<u8>]) -> Result<Vec<
             });
         })?;
         if data {
-            search_pages(file.as_ref(), &n, |page, needle| {
+            search_pages(file.as_ref(), &n, cipher, |page, needle| {
                 out.insert(Found {
                     file: path.clone(),
                     offset: page * PAGE_SIZE as u64,
@@ -204,23 +246,75 @@ fn search_file(file: &dyn File, n: &Needles, mut hit: impl FnMut(u64, usize)) ->
     Ok(())
 }
 
-fn read_page(file: &dyn File, id: u64, size: u64) -> Result<Option<Page>> {
+fn read_page(
+    file: &dyn File,
+    id: u64,
+    size: u64,
+    cipher: Option<&PageCipher>,
+) -> Result<Option<Page>> {
     if (id + 1) * PAGE_SIZE as u64 > size {
         return Ok(None);
     }
     let mut buf = vec![0u8; PAGE_SIZE];
     file.read_exact_at(&mut buf, id * PAGE_SIZE as u64)?;
-    Ok(Some(Page::from_bytes(&buf)))
+    Ok(Some(match cipher {
+        // The headers are in the clear; a page that does not open (never
+        // written, damaged) holds nothing to search.
+        Some(c) if id >= 2 => c
+            .open(PageId(id), &buf)
+            .unwrap_or_else(|_| Page::new(crate::page::PageType::UNUSED)),
+        _ => Page::from_bytes(&buf),
+    }))
+}
+
+/// An encrypted WAL file's records (PLAN.md §M14.30 K2e), opened from
+/// the first on — each says its own LSN, so a recycled file's older ones
+/// open too — as far as they open; `hit(offset, needle)`.
+fn search_records(
+    file: &dyn File,
+    cipher: &PageCipher,
+    n: &Needles,
+    mut hit: impl FnMut(u64, usize),
+) -> Result<()> {
+    const HEADER: usize = 28;
+    let size = file.size()? as usize;
+    let mut bytes = vec![0u8; size];
+    file.read_exact_at(&mut bytes, 0)?;
+    let mut off = 0;
+    while off + HEADER <= size {
+        let plen = u32::from_le_bytes(bytes[off..off + 4].try_into().expect("4")) as usize;
+        let lsn = u64::from_le_bytes(bytes[off + 20..off + 28].try_into().expect("8"));
+        let tag: [u8; 16] = bytes[off + 4..off + 20].try_into().expect("16");
+        let end = off + HEADER + plen;
+        if end > size {
+            break;
+        }
+        let payload = &mut bytes[off + HEADER..end];
+        if !cipher.open_record(lsn, payload, &tag) {
+            break;
+        }
+        n.search(payload, usize::MAX, |at, needle| {
+            hit((off + HEADER + at) as u64, needle)
+        });
+        off = end;
+    }
+    Ok(())
 }
 
 /// An overflow chain's bytes, as far as it reads (a free page's chain may
 /// be broken).
-fn chain(file: &dyn File, first: PageId, len: u64, size: u64) -> Result<Vec<u8>> {
+fn chain(
+    file: &dyn File,
+    first: PageId,
+    len: u64,
+    size: u64,
+    cipher: Option<&PageCipher>,
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut next = first;
     let mut seen = BTreeSet::new();
     while next.0 != 0 && (out.len() as u64) < len && seen.insert(next.0) {
-        let Some(page) = read_page(file, next.0, size)? else {
+        let Some(page) = read_page(file, next.0, size, cipher)? else {
             break;
         };
         let Ok((after, data)) = decode_overflow(&page) else {
@@ -235,14 +329,23 @@ fn chain(file: &dyn File, first: PageId, len: u64, size: u64) -> Result<Vec<u8>>
 
 /// The data file's leaves, decoded: keys whole, values decompressed and
 /// read from their overflow chains.  `hit(page, needle)`.
-fn search_pages(file: &dyn File, n: &Needles, mut hit: impl FnMut(u64, usize)) -> Result<()> {
+fn search_pages(
+    file: &dyn File,
+    n: &Needles,
+    cipher: Option<&PageCipher>,
+    mut hit: impl FnMut(u64, usize),
+) -> Result<()> {
     let size = file.size()?;
     let mut key = Vec::new();
     let mut value = Vec::new();
     for id in 0..size / PAGE_SIZE as u64 {
-        let Some(page) = read_page(file, id, size)? else {
+        let Some(page) = read_page(file, id, size, cipher)? else {
             break;
         };
+        // Sealed, the file's bytes said nothing: the page's, opened.
+        if cipher.is_some() {
+            n.search(page.payload(), usize::MAX, |_, needle| hit(id, needle));
+        }
         // (An overflow page alone is found by the raw search; its chain's
         // whole value through its leaf.)
         if page.page_type() != LEAF {
@@ -267,7 +370,7 @@ fn search_pages(file: &dyn File, n: &Needles, mut hit: impl FnMut(u64, usize)) -
                     }
                 }
                 ValRef::Overflow { first, len, raw } => {
-                    let stored = chain(file, first, len, size)?;
+                    let stored = chain(file, first, len, size, cipher)?;
                     match raw {
                         None => value = stored,
                         Some(raw) => {

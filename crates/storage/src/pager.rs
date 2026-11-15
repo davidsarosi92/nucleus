@@ -1184,6 +1184,93 @@ fn read_best_header(file: &dyn File, cipher: Option<&PageCipher>) -> Result<Head
     }
 }
 
+/// The cipher of the database file at `path` — [`CIPHER_NONE`] in the
+/// clear —, `None` when there is no file (PLAN.md §M14.30 K2e).  Its
+/// headers only are read: no key needed.
+pub fn file_cipher(fs: &dyn FileSystem, path: &Path) -> Result<Option<u32>> {
+    if !fs.exists(path)? {
+        return Ok(None);
+    }
+    let file = fs.open(path, OpenMode::ReadOnly)?;
+    Ok(Some(read_best_header(file.as_ref(), None)?.cipher))
+}
+
+/// Encrypts the database file at `path`, in the clear and closed, under
+/// `cipher` (PLAN.md §M14.30 K2e): every page sealed into
+/// `<path>.encrypting`, both header copies written for it, the copy
+/// synced and renamed over the file — a crash before leaves the file in
+/// the clear as it was (and the copy, removed when this runs again).
+/// Pages never written stay zeros.  The pages sealed.
+pub fn encrypt_file(fs: &dyn FileSystem, path: &Path, cipher: &PageCipher) -> Result<u64> {
+    let file = fs.open(path, OpenMode::ReadOnly)?;
+    let hdr = read_best_header(file.as_ref(), None)?;
+    if hdr.cipher != CIPHER_NONE {
+        return Err(Error::Key(format!(
+            "{} is encrypted already",
+            path.display()
+        )));
+    }
+    if file.size()? < hdr.page_count * PAGE_SIZE as u64 {
+        return Err(Error::Corrupt {
+            page: PageId(hdr.page_count - 1),
+            reason: "file shorter than its header says",
+        });
+    }
+    read_freelist(file.as_ref(), &hdr, None)?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".encrypting");
+    let tmp = PathBuf::from(tmp);
+    match fs.remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let out = fs.open(&tmp, OpenMode::CreateNew)?;
+    const RUN: u64 = 256;
+    let mut plain = vec![0u8; RUN as usize * PAGE_SIZE];
+    let mut sealed = vec![0u8; RUN as usize * PAGE_SIZE];
+    let mut id = FIRST_DATA_PAGE.0;
+    let mut count = 0;
+    while id < hdr.page_count {
+        let n = (hdr.page_count - id).min(RUN) as usize;
+        file.read_exact_at(&mut plain[..n * PAGE_SIZE], id * PAGE_SIZE as u64)?;
+        for k in 0..n {
+            let bytes = &plain[k * PAGE_SIZE..(k + 1) * PAGE_SIZE];
+            let to = &mut sealed[k * PAGE_SIZE..(k + 1) * PAGE_SIZE];
+            if bytes.iter().all(|&b| b == 0) {
+                to.fill(0);
+                continue;
+            }
+            let pid = PageId(id + k as u64);
+            let page = Page::from_bytes(bytes);
+            page.verify(pid)
+                .map_err(|reason| Error::Corrupt { page: pid, reason })?;
+            cipher
+                .seal(pid, &page, to)
+                .map_err(|reason| Error::Corrupt { page: pid, reason })?;
+            count += 1;
+        }
+        out.write_all_at(&sealed[..n * PAGE_SIZE], id * PAGE_SIZE as u64)?;
+        id += n as u64;
+    }
+    let mut h = hdr.clone();
+    h.cipher = cipher.code();
+    h.key_check = cipher.check_value();
+    // Both copies: the older one first, the same state under the
+    // sequence number before.
+    let mut older = h.clone();
+    older.seq = h.seq - 1;
+    write_header(out.as_ref(), &older, Some(cipher))?;
+    write_header(out.as_ref(), &h, Some(cipher))?;
+    out.sync()?;
+    drop(out);
+    drop(file);
+    fs.rename(&tmp, path)?;
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    fs.sync_dir(dir.unwrap_or(Path::new(".")))?;
+    Ok(count)
+}
+
 /// Whether an encrypted header copy's tag is not what `cipher` gives
 /// (under the key it was written with: one under another key is refused
 /// by its key check instead).

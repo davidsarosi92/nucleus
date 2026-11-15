@@ -145,3 +145,71 @@ fn values_written_through_sql_are_in_no_file_of_an_encrypted_database() {
         assert_ne!(matched, vec![vec![Value::Int(0)]], "the text index answers");
     }
 }
+
+/// What encryption costs through SQL (PLAN.md §M14.30 K2e), on the real
+/// file system: 300,000 rows loaded and checkpointed, then an aggregate
+/// over them all through a cold 8 MiB page cache, and an ORDER BY past
+/// `work_mem` (scratch files) — in the clear, then encrypted.
+///
+/// `cargo test --release -p nucleus-sql --test encrypted -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement: run it in release"]
+fn what_encryption_costs_through_sql() {
+    use std::time::Instant;
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("encrypted_sql");
+    for encrypted in [false, true] {
+        let dir = root.join(if encrypted { "encrypted" } else { "clear" });
+        let _ = std::fs::remove_dir_all(&dir);
+        let opts = || Options {
+            cache_bytes: 8 << 20,
+            encryption_key: encrypted.then(|| PageCipher::new([2; 32])),
+            ..Options::default()
+        };
+        let t = Instant::now();
+        {
+            let db = Database::open(&dir, opts()).unwrap();
+            let kv: Arc<dyn Kv> = Arc::new(db.clone());
+            let mut s = Session::new(kv);
+            s.execute(
+                "CREATE TABLE t (id INT PRIMARY KEY, g INT, body TEXT); \
+                 INSERT INTO t SELECT i, i % 100, 'row number ' || i || ' of the measured load' \
+                   FROM generate_series(1, 300000) i",
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+        }
+        let load = t.elapsed();
+        let db = Database::open(&dir, opts()).unwrap();
+        let kv: Arc<dyn Kv> = Arc::new(db.clone());
+        let mut s = Session::new(kv);
+        let best = |s: &mut Session, sql: &str| {
+            (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    rows(s, sql);
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        let scan = best(&mut s, "SELECT g, count(*), max(body) FROM t GROUP BY g");
+        s.execute("SET work_mem = '1MB'").unwrap();
+        let sort = best(
+            &mut s,
+            "SELECT body FROM t ORDER BY body DESC LIMIT 10 OFFSET 250000",
+        );
+        println!(
+            "{:12} load {:7.0} ms   scan {:6.0} ms   sort past work_mem {:6.0} ms",
+            if encrypted {
+                "encrypted"
+            } else {
+                "in the clear"
+            },
+            load.as_secs_f64() * 1e3,
+            scan,
+            sort
+        );
+        drop(s);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

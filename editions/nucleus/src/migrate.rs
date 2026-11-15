@@ -503,7 +503,7 @@ fn dry_run(b: &mut Backend, work: impl FnOnce(&mut Backend) -> Result<()>) -> Re
 
 /// A database in memory, and its store.
 fn memory() -> Result<(Backend, Arc<dyn nucleus_kv::Kv>)> {
-    let db = open_local(MEMORY)?;
+    let db = open_local(MEMORY, &crate::keys::KeyOptions::default())?;
     let kv: Arc<dyn nucleus_kv::Kv> = Arc::new(db.clone());
     let session = nucleus_sql::Session::with_registry(Arc::clone(&kv), registry());
     Ok((

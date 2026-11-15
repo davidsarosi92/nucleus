@@ -264,6 +264,8 @@ nucleus server ./mydb --backup-to /backups/db --backup-every 1d --backup-keep 4 
   --backup-key backup.key               # daily backups (weekly full), encrypted, 4 weeks kept
                                         # (--restore-test-every 1w: restores and checks the last)
 nucleus restore /backups/db ./restored --backup-key backup.key --at '2026-11-15 14:00:00+01'
+nucleus server ./mydb --root-key root.key   # encrypted at rest: pages, log, scratch (a new database;
+                                        # an existing one: nucleus keys ./mydb encrypt)
 nucleus status                          # a running server's health, for people
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down

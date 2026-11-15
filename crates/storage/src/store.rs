@@ -814,6 +814,73 @@ impl Store {
             .collect()
     }
 
+    /// Encrypts the store in `dir`, in the clear and not open, under
+    /// `key` (PLAN.md §M14.30 K2e): opened in the clear and recovered,
+    /// scrubbed (every tree checkpointed, the logs moved on and what they
+    /// dropped zeroed, the free pages zeroed) and checked to have no
+    /// record past its checkpoint in any branch's log; then, under its
+    /// lock, the data file's pages sealed into a copy renamed over it
+    /// ([`pager::encrypt_file`](crate::pager::encrypt_file)) and the logs'
+    /// segments and spares — nothing in them the checkpoints need —
+    /// removed, so each starts again, sealed, where its checkpoint is.
+    /// A crash anywhere leaves the store in the clear (to be encrypted
+    /// again) or encrypted.  The file in the clear is replaced, not
+    /// overwritten: its old blocks are the file system's.  The pages
+    /// sealed.
+    pub fn encrypt(
+        platform: Arc<dyn Platform>,
+        dir: &Path,
+        opts: &StoreOptions,
+        key: &crate::PageCipher,
+    ) -> Result<u64> {
+        let fs = platform.fs();
+        let data = dir.join("data");
+        if crate::pager::file_cipher(fs, &data)? != Some(crate::cipher::CIPHER_NONE) {
+            return Err(Error::Key(format!(
+                "{}: no database in the clear to encrypt",
+                dir.display()
+            )));
+        }
+        let clear = StoreOptions {
+            page_key: None,
+            ..opts.clone()
+        };
+        let mut wal_dirs = Vec::new();
+        {
+            let (store, _) = Self::open(Arc::clone(&platform), dir, &clear)?;
+            store.scrub()?;
+            for info in store.branches() {
+                let b = store.branch(&info.name)?;
+                if b.wal_since_checkpoint() != 0 {
+                    return Err(Error::Branch(format!(
+                        "branch {}: its log goes on past its checkpoint",
+                        info.name
+                    )));
+                }
+                wal_dirs.push(branch_wal(dir, info.id));
+            }
+            store.close()?;
+        }
+        let _lock = fs.lock(&dir.join("LOCK")).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                Error::Locked(dir.display().to_string())
+            } else {
+                Error::Io(e)
+            }
+        })?;
+        let pages = crate::pager::encrypt_file(fs, &data, key)?;
+        for w in wal_dirs {
+            for name in fs.list_dir(&w)? {
+                let n = name.to_string_lossy();
+                if n.ends_with(".wal") || n.ends_with(".spare") {
+                    fs.remove_file(&w.join(&name))?;
+                }
+            }
+            fs.sync_dir(&w)?;
+        }
+        Ok(pages)
+    }
+
     /// A handle to branch `name` ([`MAIN_NAME`] the main one).
     pub fn branch(&self, name: &str) -> Result<Store> {
         self.shared.check()?;

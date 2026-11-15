@@ -100,6 +100,11 @@ pub struct Settings {
     /// root was given explicitly (not the database-managed one, which a
     /// lost disk takes with it), or the keyring has a backup key already.
     pub encrypt_backups: Option<bool>,
+    /// Whether a new database is created encrypted (PLAN.md §M14.30
+    /// K2e); `None`: when the root was given explicitly, as backups.  An
+    /// existing database is as it was made, or as `nucleus keys <dir>
+    /// encrypt` made it.
+    pub encrypt_data: Option<bool>,
 }
 
 impl Settings {
@@ -109,7 +114,15 @@ impl Settings {
             root: Root::Managed(beside(dir, "root-key")),
             old_files: OldFiles::Remove,
             encrypt_backups: None,
+            encrypt_data: None,
         }
+    }
+
+    /// Whether a new database is created encrypted: the owner's setting,
+    /// by default yes when the root was given explicitly.
+    pub fn encrypt_new_data(&self) -> bool {
+        self.encrypt_data
+            .unwrap_or(!matches!(self.root, Root::Managed(_)))
     }
 }
 
@@ -308,9 +321,39 @@ pub struct Keyring {
     path: PathBuf,
     settings: Settings,
     /// For new keys' bytes and the time (the platform's).
-    kv: Arc<dyn Kv>,
+    kv: Arc<dyn Source>,
     env: Env,
     state: Mutex<State>,
+}
+
+/// Where a keyring takes new keys' bytes and the time from: its
+/// database, or — before the database is open, for the key it is opened
+/// with (PLAN.md §M14.30 K2e) — the platform.
+trait Source: Send + Sync {
+    fn random_bytes(&self, buf: &mut [u8]);
+    fn wall_clock(&self) -> std::time::SystemTime;
+}
+
+struct KvSource(Arc<dyn Kv>);
+
+impl Source for KvSource {
+    fn random_bytes(&self, buf: &mut [u8]) {
+        self.0.random_bytes(buf);
+    }
+    fn wall_clock(&self) -> std::time::SystemTime {
+        self.0.wall_clock()
+    }
+}
+
+struct PlatformSource(Arc<dyn nucleus_platform::Platform>);
+
+impl Source for PlatformSource {
+    fn random_bytes(&self, buf: &mut [u8]) {
+        self.0.rng().fill_unpredictable(buf);
+    }
+    fn wall_clock(&self) -> std::time::SystemTime {
+        self.0.clock().wall()
+    }
 }
 
 impl Keyring {
@@ -319,8 +362,27 @@ impl Keyring {
         Self::at(beside(dir, "keyring"), settings, kv)
     }
 
+    /// The keyring of data directory `dir` before its database is open —
+    /// for the data key `data` it is opened with (PLAN.md §M14.30 K2e) —,
+    /// new keys' bytes and the time from `platform`.
+    pub fn before_open(
+        dir: &str,
+        settings: Settings,
+        platform: Arc<dyn nucleus_platform::Platform>,
+    ) -> Self {
+        Self::with_source(
+            beside(dir, "keyring"),
+            settings,
+            Arc::new(PlatformSource(platform)),
+        )
+    }
+
     /// The keyring in file `path`.
     pub fn at(path: PathBuf, settings: Settings, kv: Arc<dyn Kv>) -> Self {
+        Self::with_source(path, settings, Arc::new(KvSource(kv)))
+    }
+
+    fn with_source(path: PathBuf, settings: Settings, kv: Arc<dyn Source>) -> Self {
         Self {
             path,
             settings,
@@ -625,7 +687,8 @@ impl Keyring {
         }
         drop(st);
         // Read back: what a restart would find.
-        let mut again = Keyring::at(self.path.clone(), self.settings.clone(), self.kv.clone());
+        let mut again =
+            Keyring::with_source(self.path.clone(), self.settings.clone(), self.kv.clone());
         // The root as found: a passphrase or variable read the same way.
         again
             .state
@@ -1091,6 +1154,7 @@ mod tests {
             root: Root::Passphrase(var.clone()),
             old_files: OldFiles::Remove,
             encrypt_backups: None,
+            encrypt_data: None,
         };
         let k = Keyring::new(db, s.clone(), kv()).with_env(env);
         assert!(

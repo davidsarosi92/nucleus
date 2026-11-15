@@ -1431,7 +1431,19 @@ fn the_root_key_restores_an_encrypted_backup() {
         ],
         "",
     );
-    assert!(ok && out.contains("50") && out.contains(" 3"), "{out}");
+    // The root, the backup and secrets keys taken in, and the data key
+    // the database restored into is encrypted under (made with the root
+    // given: §M14.30 K2e).
+    assert!(ok && out.contains("50") && out.contains(" 4"), "{out}");
+    assert_eq!(
+        std::fs::read_dir(new)
+            .unwrap()
+            .filter_map(|e| std::fs::read(e.unwrap().path()).ok())
+            .filter(|b| b.windows(7).any(|w| w == b"Tihany "))
+            .count(),
+        0,
+        "a value of the restored database in the clear"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1577,4 +1589,78 @@ fn keys_rotate() {
     let (ok, out) = nucleus(&["keys", db, "list", "--root-key", user], "");
     assert!(ok && out.contains("root") && out.contains("user"), "{out}");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The files under `dir` holding `needle`.
+fn files_holding(dir: &std::path::Path, needle: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.extend(files_holding(&p, needle));
+        } else if std::fs::read(&p)
+            .unwrap()
+            .windows(needle.len())
+            .any(|w| w == needle)
+        {
+            out.push(p.display().to_string());
+        }
+    }
+    out
+}
+
+/// `nucleus keys <dir> encrypt` (PLAN.md §M14.30 K2e): a database in the
+/// clear encrypted in place under a new data key `data`; afterwards no
+/// file of it holds a value written, it opens through the keyring, not
+/// without it, and is not encrypted twice.  `--encrypt-data yes` makes a
+/// new database encrypted from the start.
+#[test]
+fn keys_encrypt() {
+    let dir = temp_dir("encrypt");
+    std::fs::create_dir_all(&dir).unwrap();
+    let planted = "planted-cli-3e9a7c51";
+    let db = dir.join("db");
+    let dbs = db.to_str().unwrap();
+    let (ok, out) = nucleus(
+        &["sql", dbs],
+        &format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);\n\
+             INSERT INTO t SELECT i, '{planted} ' || i FROM generate_series(1, 500) i;\n"
+        ),
+    );
+    assert!(ok, "{out}");
+    assert!(!files_holding(&db, planted.as_bytes()).is_empty());
+
+    let (ok, out) = nucleus(&["keys", dbs, "encrypt"], "");
+    assert!(ok && out.contains("encrypted"), "{out}");
+    assert_eq!(files_holding(&db, planted.as_bytes()), Vec::<String>::new());
+    let ring = std::fs::read_to_string(dir.join("db.keyring")).unwrap();
+    assert!(ring.contains("\ndek data "), "{ring}");
+    let (ok, out) = nucleus(&["sql", dbs, "-c", "SELECT count(*) FROM t"], "");
+    assert!(ok && out.contains("500"), "{out}");
+    let (ok, out) = nucleus(&["keys", dbs, "encrypt"], "");
+    assert!(!ok && out.contains("encrypted already"), "{out}");
+    // Without the keyring the pages do not open.
+    let aside = dir.join("aside.keyring");
+    std::fs::rename(dir.join("db.keyring"), &aside).unwrap();
+    let (ok, out) = nucleus(&["sql", dbs, "-c", "SELECT count(*) FROM t"], "");
+    assert!(!ok && out.contains("key"), "{out}");
+    std::fs::rename(&aside, dir.join("db.keyring")).unwrap();
+    let (ok, out) = nucleus(&["sql", dbs, "-c", "SELECT v FROM t WHERE id = 7"], "");
+    assert!(ok && out.contains(&format!("{planted} 7")), "{out}");
+
+    let db2 = dir.join("db2");
+    let dbs2 = db2.to_str().unwrap();
+    let (ok, out) = nucleus(
+        &["sql", dbs2, "--encrypt-data", "yes"],
+        &format!("CREATE TABLE t (v TEXT);\nINSERT INTO t VALUES ('{planted}');\n"),
+    );
+    assert!(ok, "{out}");
+    assert_eq!(
+        files_holding(&db2, planted.as_bytes()),
+        Vec::<String>::new()
+    );
+    let (ok, out) = nucleus(&["sql", dbs2, "-c", "SELECT v FROM t"], "");
+    assert!(ok && out.contains(planted), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use nucleus_kv::{Database, Kv, Options};
+use nucleus_kv::{Kv, Options};
 use nucleus_server::keyring::Keyring;
 use nucleus_server::subject_keyfile::SubjectKeyFile;
 
@@ -100,10 +100,10 @@ fn test_restore(
     let scratch = std::env::temp_dir().join(format!("nucleus-restore-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let r = (|| {
-        let db = Database::open(&scratch, Options::default()).map_err(|e| e.to_string())?;
+        let d = scratch.to_string_lossy();
+        let db = crate::keys::open_database(&d, &key_options.settings(&d), Options::default())?;
         let kv: Arc<dyn Kv> = Arc::new(db);
         // The root, for a backup whose keys it wrapped (§M14.30 K1).
-        let d = scratch.to_string_lossy();
         let ring = set_custody(&d, &kv, key_options)?;
         if let Some(path) = keys {
             let carried =
@@ -187,7 +187,7 @@ fn restore_into(
     until: &nucleus_sql::backup::Until,
     key_options: &crate::keys::KeyOptions,
 ) -> Result<(), String> {
-    let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
+    let db = crate::keys::open_database(dir, &key_options.settings(dir), Options::default())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
     let path = keys.map_or_else(|| SubjectKeyFile::beside(dir), Into::into);
     if !path.exists() {

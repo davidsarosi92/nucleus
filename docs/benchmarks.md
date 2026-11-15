@@ -1109,8 +1109,21 @@ The differences are the cipher's: ~47 MB of WAL records and ~6,600
 pages sealed, the pages opened again by the scan, at ~660 MB/s —
 ChaCha20 in portable Rust is the limit.  The target is under 10 %.
 
+Through SQL (K2e; real files, release, best of three for the queries):
+300,000 rows (`id`, `g`, a 40-byte text) inserted and checkpointed, an
+aggregate over them all through an 8 MiB page cache, and an `ORDER BY`
+past a 1 MB `work_mem` (its runs in scratch files, sealed when the
+database is).
+
+| | in the clear | encrypted |
+|---|---:|---:|
+| load (`INSERT … SELECT`, checkpoint) | 365 ms | 420 ms (+14 %) |
+| `GROUP BY` over all rows | 11 ms | 17 ms (×1.6) |
+| `ORDER BY` past `work_mem` | 105 ms | 240 ms (×2.3) |
+
 ```sh
 cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture --test-threads=1
+cargo test --release -p nucleus-sql --test encrypted -- --ignored --nocapture
 cargo test --release -p nucleus-crypto speed -- --ignored --nocapture
 ```
 

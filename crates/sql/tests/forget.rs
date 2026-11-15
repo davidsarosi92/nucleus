@@ -6,16 +6,25 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use nucleus_kv::{Database, Kv, Options};
+use nucleus_kv::{Database, Kv, Options, PageCipher};
 use nucleus_platform::sim::SimPlatform;
 use nucleus_sql::{Output, Session, Value};
 
 fn db() -> Arc<dyn Kv> {
+    db_with(None)
+}
+
+/// A database, encrypted under `key` if one is given (PLAN.md §M14.30
+/// K2e: the search for erased bytes then opens what it reads).
+fn db_with(key: Option<PageCipher>) -> Arc<dyn Kv> {
     Arc::new(
         Database::open_on(
             Arc::new(SimPlatform::new(7)),
             Path::new("/db"),
-            Options::default(),
+            Options {
+                encryption_key: key,
+                ..Options::default()
+            },
         )
         .unwrap(),
     )
@@ -210,7 +219,17 @@ fn needle(s: &str) -> Vec<Vec<u8>> {
 
 #[test]
 fn the_scrub_leaves_none_of_the_values_in_any_file() {
-    let kv = db();
+    scrub_leaves_none(db());
+}
+
+/// The same in an encrypted database: the search opens its pages and
+/// log records — it finds what is there before, and nothing after.
+#[test]
+fn the_scrub_leaves_none_of_the_values_in_an_encrypted_database() {
+    scrub_leaves_none(db_with(Some(PageCipher::new([6; 32]))));
+}
+
+fn scrub_leaves_none(kv: Arc<dyn Kv>) {
     let mut s = Session::new(kv.clone());
     s.execute(
         "CREATE MODEL h USING hashing WITH (dimensions = 16); \

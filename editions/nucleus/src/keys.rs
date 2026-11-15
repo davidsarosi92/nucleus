@@ -1,7 +1,9 @@
 //! The key hierarchy's options and `nucleus keys` (PLAN.md §M14.30 K1):
 //! where the root key is, what becomes of the key files of before, and
-//! whether backups are encrypted without being asked — the same options
-//! for `nucleus server`, `nucleus sql <dir>` and `nucleus keys`.
+//! whether backups and new databases are encrypted without being asked —
+//! the same options for `nucleus server`, `nucleus sql <dir>` and
+//! `nucleus keys`; and the database opened under its data key `data`
+//! when it is encrypted (K2e).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +14,8 @@ use nucleus_server::subject_keyfile::SubjectKeyFile;
 
 /// The options' usage, for the commands' help.
 pub const OPTIONS: &str = "[--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>]
-                     [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]";
+                     [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
+                     [--encrypt-data yes|no]";
 
 /// The key options given.
 #[derive(Default)]
@@ -20,6 +23,7 @@ pub struct KeyOptions {
     root: Option<Root>,
     old_files: Option<OldFiles>,
     encrypt_backups: Option<bool>,
+    encrypt_data: Option<bool>,
 }
 
 impl KeyOptions {
@@ -56,12 +60,17 @@ impl KeyOptions {
                 });
                 return Ok(true);
             }
-            "--encrypt-backups" => {
-                self.encrypt_backups = Some(match value("yes or no")?.as_str() {
+            "--encrypt-backups" | "--encrypt-data" => {
+                let yes = match value("yes or no")?.as_str() {
                     "yes" => true,
                     "no" => false,
-                    v => return Err(format!("--encrypt-backups {v}: yes or no")),
-                });
+                    v => return Err(format!("{a} {v}: yes or no")),
+                };
+                if a == "--encrypt-data" {
+                    self.encrypt_data = Some(yes);
+                } else {
+                    self.encrypt_backups = Some(yes);
+                }
                 return Ok(true);
             }
             _ => return Ok(false),
@@ -88,8 +97,44 @@ impl KeyOptions {
             s.old_files = o;
         }
         s.encrypt_backups = self.encrypt_backups;
+        s.encrypt_data = self.encrypt_data;
         s
     }
+}
+
+/// Opens the database in directory `dir` with `opts` (PLAN.md §M14.30
+/// K2e): under the keyring's data key `data` when it has one — an
+/// encryption cut short (`nucleus keys <dir> encrypt`) finished first —,
+/// and a new database made encrypted, under a new data key `data`, when
+/// `settings` say ([`Settings::encrypt_new_data`]).  An existing database
+/// in the clear stays so until `nucleus keys <dir> encrypt`.
+pub fn open_database(
+    dir: &str,
+    settings: &Settings,
+    mut opts: nucleus_kv::Options,
+) -> Result<nucleus_kv::Database, String> {
+    let platform: Arc<dyn nucleus_platform::Platform> =
+        Arc::new(nucleus_platform::real::RealPlatform::new().map_err(|e| format!("{dir}: {e}"))?);
+    let ring = Keyring::before_open(dir, settings.clone(), platform);
+    let encrypted = nucleus_kv::is_encrypted(dir).map_err(|e| format!("{dir}: {e}"))?;
+    let key = if ring.has("data")? {
+        ring.dek("data", false)?
+    } else if encrypted.is_none() && settings.encrypt_new_data() {
+        let key = ring.dek("data", true)?;
+        nucleus_platform::log!("nucleus: {dir} is made encrypted (its data key `data`)");
+        key
+    } else {
+        None
+    };
+    if let Some(k) = key {
+        let cipher = nucleus_kv::PageCipher::new(*k.bytes());
+        if encrypted == Some(false) {
+            nucleus_platform::log!("nucleus: {dir}: an encryption begun before is finished");
+            nucleus_kv::encrypt(dir, &opts, &cipher).map_err(|e| format!("{dir}: {e}"))?;
+        }
+        opts.encryption_key = Some(cipher);
+    }
+    nucleus_kv::Database::open(dir, opts).map_err(|e| format!("{dir}: {e}"))
 }
 
 /// Installs the key hierarchy of data directory `dir` for this process:
@@ -209,12 +254,39 @@ pub fn subject_keys(
 }
 
 /// The usage of `nucleus keys`.
-pub const USAGE: &str = "usage: nucleus keys <dir> list|import [options]
+pub const USAGE: &str = "usage: nucleus keys <dir> list|import|encrypt [options]
        nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
                   | --to-root-passphrase-env <var> | --to-managed-root  [options]
        nucleus keys <dir> rotate secrets|subjects|backup  [options]";
 
-/// `nucleus keys <dir> list | import | rotate-root | rotate [options]`.
+/// `nucleus keys <dir> encrypt` (PLAN.md §M14.30 K2e): the database in
+/// the clear, the server stopped, encrypted in place under a new data key
+/// `data` — made and in the keyring first, so a crash after leaves a
+/// database the next start finishes encrypting.
+fn encrypt(dir: &str, settings: Settings) -> Result<(), String> {
+    match nucleus_kv::is_encrypted(dir).map_err(|e| format!("{dir}: {e}"))? {
+        None => return Err(format!("{dir}: no database there")),
+        Some(true) => return Err(format!("{dir} is encrypted already")),
+        Some(false) => {}
+    }
+    let platform: Arc<dyn nucleus_platform::Platform> =
+        Arc::new(nucleus_platform::real::RealPlatform::new().map_err(|e| format!("{dir}: {e}"))?);
+    let ring = Keyring::before_open(dir, settings, platform);
+    let key = ring
+        .dek("data", true)?
+        .ok_or_else(|| format!("{dir}: no data key could be made"))?;
+    let cipher = nucleus_kv::PageCipher::new(*key.bytes());
+    let pages = nucleus_kv::encrypt(dir, &nucleus_kv::Options::default(), &cipher)
+        .map_err(|e| format!("{dir}: {e}"))?;
+    println!(
+        "{dir}: encrypted — {pages} pages sealed under the data key `data`, its logs started \
+         again; the file in the clear is replaced (its old blocks are the file system's)"
+    );
+    Ok(())
+}
+
+/// `nucleus keys <dir> list | import | encrypt | rotate-root | rotate
+/// [options]`.
 pub fn run(args: &[String]) -> Result<(), String> {
     let usage = format!("{USAGE}\noptions: {OPTIONS}");
     let mut opts = KeyOptions::default();
@@ -256,11 +328,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if (what == "rotate-root") != to.is_some() {
         return Err(usage);
     }
-    // The database opened: its lock keeps a server from running beside.
-    let db = nucleus_kv::Database::open(dir, nucleus_kv::Options::default())
-        .map_err(|e| format!("{dir}: {e}"))?;
-    let kv: Arc<dyn Kv> = Arc::new(db);
     let mut settings = opts.settings(dir);
+    if what == "encrypt" {
+        return encrypt(dir, settings);
+    }
+    // The database opened: its lock keeps a server from running beside.
+    let db = open_database(dir, &settings, nucleus_kv::Options::default())?;
+    let kv: Arc<dyn Kv> = Arc::new(db);
     match what.as_str() {
         "list" => {
             let ring = Keyring::new(dir, settings, kv);

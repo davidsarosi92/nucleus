@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2a–K2d ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9936,7 +9936,39 @@ column table, JSON, a vector table with HNSW — checkpointed and
 logged-only — found in a database in the clear, in no file encrypted,
 a spilling sort meanwhile; reopened, all there).  Not a file of the
 database's and so not here: the keyring and key files (K1), backups
-(sealed under the backup key, K1c), exports a user asks for.  **K2d** the other files: spill and
+(sealed under the backup key, K1c), exports a user asks for.
+**K2e ✅** the edition (2026-11-15): every command opening a local
+directory goes through `keys::open_database` — the keyring's data key
+`data` read before the database opens (`Keyring::before_open`, the
+platform's randomness and clock instead of the database's), the
+database opened under it when the keyring has one.  New databases:
+encrypted with `--encrypt-data yes`, by default when the root is given
+explicitly (as backups); the database-managed root's default stays in
+the clear — a key beside the data guards a copied directory without its
+key file, not a stolen disk, and the cost (below) is not yet what a
+default may cost.  `nucleus keys <dir> encrypt` (server stopped): the
+data key made and in the keyring first, then `Store::encrypt` — opened
+in the clear, recovered, scrubbed, each branch's log checked empty past
+its checkpoint, the pages sealed into `data.encrypting` renamed over
+`data`, the logs' segments and spares removed; a keyring with `data`
+and a file in the clear is an encryption cut short, finished at the
+next open.  The file in the clear is replaced, not overwritten: its old
+blocks are the file system's.  The erasure search (§M14.24) opens what
+it reads (`scan::find_with`: pages, free ones too, and WAL records).
+Tests: `a_store_encrypted_and_a_crash_at_every_point` (main and a
+branch, some writes only logged: after a crash at any I/O point the
+store opens in the clear or encrypted, never neither, all there; run
+again, finished), the CLI's `keys_encrypt` (no file holds a value
+written, it opens through the keyring and not without it, not encrypted
+twice; `--encrypt-data yes`), FORGET's scrub test on an encrypted
+database (`the_scrub_leaves_none_of_the_values_in_an_encrypted_database`:
+found before through the opened pages, none after, his still found).
+*Measured through SQL* (`docs/benchmarks.md`): load +14 %, an aggregate
+over every row ×1.6, an `ORDER BY` past `work_mem` ×2.3 (scratch sealed
+in 4 KiB blocks, twice).  With K2 done, the speed comes next, before K3:
+the CPU's AES (AES-GCM-SIV, RFC 8452) behind a runtime check, the
+read-ahead's pages opened on several cores, and larger scratch blocks;
+the target stays under 10 %.  **K2d** the other files: spill and
 scratch, column segments, index files, the embedding queue.  **K2e**
 the edition: the keyring's data key `data`, an existing database
 encrypted by rewriting its pages (`nucleus keys <dir> encrypt`, the

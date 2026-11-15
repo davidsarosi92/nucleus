@@ -888,9 +888,10 @@ pub struct Database {
     /// Where scratch files go (`<dir>/scratch`), and how many were made.
     scratch_dir: PathBuf,
     scratch_made: Arc<AtomicU64>,
-    /// Scratch files sealed (the database is encrypted: PLAN.md §M14.30
-    /// K2d).
-    seal_scratch: bool,
+    /// The key its pages and logs are sealed under (PLAN.md §M14.30
+    /// K2b–K2c): its scratch files are sealed too (K2d), and the search
+    /// for erased bytes opens what it reads (K2e).
+    page_key: Option<PageCipher>,
     /// [`Kv::instance`]: one per open and branch (its clones share it).
     instance: u64,
     /// The instances of the branches' handles, by branch id: the same
@@ -1003,6 +1004,39 @@ impl std::fmt::Debug for Database {
     }
 }
 
+/// The store's options from `opts`.
+fn store_options(opts: &Options) -> StoreOptions {
+    StoreOptions {
+        cache_pages: (opts.cache_bytes / nucleus_storage::PAGE_SIZE).max(16),
+        wal_segment_size: opts.wal_segment_bytes,
+        page_key: opts.encryption_key.clone(),
+    }
+}
+
+/// Whether the database in directory `dir` is encrypted — its data file's
+/// header says, no key needed —, `None` when there is none there (PLAN.md
+/// §M14.30 K2e).
+pub fn is_encrypted(dir: impl AsRef<Path>) -> Result<Option<bool>> {
+    let platform = RealPlatform::new().map_err(|e| Error::Storage(Box::new(e)))?;
+    let data = dir.as_ref().join("data");
+    nucleus_storage::pager::file_cipher(platform.fs(), &data)
+        .map(|c| c.map(|c| c != nucleus_storage::cipher::CIPHER_NONE))
+        .map_err(|e| Error::Storage(Box::new(e)))
+}
+
+/// Encrypts the database in directory `dir` — in the clear, not open
+/// anywhere — under `key` (PLAN.md §M14.30 K2e;
+/// [`Store::encrypt`](nucleus_storage::Store::encrypt)): recovered and
+/// scrubbed in the clear, its pages sealed into a copy renamed over its
+/// data file, its logs started again sealed.  A crash leaves it in the
+/// clear or encrypted; run again, it finishes.  The pages sealed.
+pub fn encrypt(dir: impl AsRef<Path>, opts: &Options, key: &PageCipher) -> Result<u64> {
+    let platform: Arc<dyn Platform> =
+        Arc::new(RealPlatform::with_sync(opts.sync).map_err(|e| Error::Storage(Box::new(e)))?);
+    nucleus_storage::Store::encrypt(platform, dir.as_ref(), &store_options(opts), key)
+        .map_err(|e| Error::Storage(Box::new(e)))
+}
+
 impl Database {
     /// Opens (or creates) the database in directory `path`.
     pub fn open(path: impl AsRef<Path>, opts: Options) -> Result<Self> {
@@ -1023,16 +1057,12 @@ impl Database {
     /// Opens (or creates) the database in `path` on `platform` (the
     /// simulation, in tests).
     pub fn open_on(platform: Arc<dyn Platform>, path: &Path, opts: Options) -> Result<Self> {
-        let seal_scratch = opts.encryption_key.is_some();
+        let page_key = opts.encryption_key.clone();
         let engine = nucleus_txn::Engine::open(
             platform.clone(),
             path,
             nucleus_txn::EngineOptions {
-                store: StoreOptions {
-                    cache_pages: (opts.cache_bytes / nucleus_storage::PAGE_SIZE).max(16),
-                    wal_segment_size: opts.wal_segment_bytes,
-                    page_key: opts.encryption_key.clone(),
-                },
+                store: store_options(&opts),
                 checkpoint_wal_bytes: opts.checkpoint_wal_bytes,
                 history: opts.history,
                 history_time: u64::try_from(opts.history_time.as_micros()).unwrap_or(u64::MAX),
@@ -1062,7 +1092,7 @@ impl Database {
             dir: path.to_path_buf(),
             scratch_dir,
             scratch_made: Arc::new(AtomicU64::new(0)),
-            seal_scratch,
+            page_key,
             instance,
             instances: Arc::new(std::sync::Mutex::new(
                 [(nucleus_storage::MAIN, instance)].into(),
@@ -1291,8 +1321,13 @@ impl Kv for Database {
     }
 
     fn find_bytes(&self, needles: &[Vec<u8>]) -> Result<Option<u64>> {
-        let found = nucleus_storage::scan::find(self.platform.fs(), &self.dir, needles)
-            .map_err(|e| Error::Storage(Box::new(e)))?;
+        let found = nucleus_storage::scan::find_with(
+            self.platform.fs(),
+            &self.dir,
+            needles,
+            self.page_key.as_ref(),
+        )
+        .map_err(|e| Error::Storage(Box::new(e)))?;
         Ok(Some(found.len() as u64))
     }
 
@@ -1314,7 +1349,7 @@ impl Kv for Database {
             path,
             platform: Arc::clone(&self.platform),
         });
-        if !self.seal_scratch {
+        if self.page_key.is_none() {
             return Ok(file);
         }
         let mut key = [0u8; 32];

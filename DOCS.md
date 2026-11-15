@@ -1272,7 +1272,7 @@ nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   #
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
 nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b> | --queries <file|dir> …] [--import <module>] [--package <name>] [--class <name>]   # §8.37
 nucleus status [<dir>] [connection options]   # a server's health for people, §8.38
-nucleus keys <dir> list | import | rotate-root --to-… | rotate <secrets|subjects|backup> [root key options]   # the key hierarchy, §9
+nucleus keys <dir> list | import | encrypt | rotate-root --to-… | rotate <secrets|subjects|backup> [root key options]   # the key hierarchy, §9
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -6569,6 +6569,36 @@ with its length, associated data — so a block moved, cut short or
 changed does not open; a range read or written touches its blocks in
 one read or write of the file, a write covering part of a block reads
 it first.
+
+*The edition* (K2e).  A database is encrypted under the keyring's data
+key `data`: every command that opens a local directory (`server`, `sql`,
+`kv`, `branch`, `init`, `restore`, `keys`) goes through
+`keys::open_database`, which reads the key from the keyring before the
+database opens (`Keyring::before_open`: new keys' bytes and the time
+from the platform, not the database) and opens with it when the keyring
+has one.  A new database is made encrypted — a new data key `data`
+first — when `--encrypt-data yes`, or by default when the root is given
+explicitly (`--root-key …`, as backups); with the database-managed root
+the default is in the clear (a key beside the data guards against a
+copied directory without its key file, not a stolen disk).  `nucleus
+keys <dir> encrypt`, the server stopped, encrypts a database in the
+clear in place: the data key made and in the keyring first, then
+`Store::encrypt` — the store opened in the clear and recovered,
+scrubbed (every tree checkpointed, the logs moved on and what they
+dropped zeroed, free pages zeroed), each branch's log checked to hold
+nothing past its checkpoint, then under its lock every page sealed into
+`data.encrypting`, renamed over `data`, and the logs' segments and
+spares removed (each starts again, sealed, at its checkpoint).  A crash
+leaves it in the clear or encrypted; a keyring with `data` and a file in
+the clear is an encryption cut short, finished at the next open.  The
+file in the clear is replaced, not overwritten: its old blocks are the
+file system's — encrypt a database when it is made for none to exist.
+The search for erased bytes (§8.30, `scan::find_with`) opens what it
+reads in an encrypted database: every data page that opens, free ones
+too, decoded as in the clear, and every WAL record from each segment's
+and spare's first on; scratch files, under keys gone with their
+queries, are left out.  Measured: `docs/benchmarks.md`, *Sealing a
+page*.
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
 FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |

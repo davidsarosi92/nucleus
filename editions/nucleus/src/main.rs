@@ -72,6 +72,7 @@ usage:
                      [--history <duration>] [--backup-key <file>]
                      [--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>]
                      [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
+                     [--encrypt-data yes|no]
                      [--backup-to <repository> --backup-every <duration>
                       [--backup-full-every <n>] [--backup-keep <n>]
                       [--restore-test-every <duration> [--restore-test-dir <dir>]]]
@@ -123,7 +124,11 @@ usage:
                                     nucleus keys import; --encrypt-backups:
                                     backups encrypted unasked (default yes
                                     with a root given, no with the default
-                                    one); --secrets-key the old file
+                                    one); --encrypt-data: a new database
+                                    made encrypted, its pages, logs and
+                                    scratch files (the same default; an
+                                    existing one: nucleus keys <dir>
+                                    encrypt); --secrets-key the old file
                                     of the secrets' key, taken in from
                                     (default <dir>.secrets-key); --subject-keys the file
                                     of the keys each subject's rows are sealed
@@ -159,6 +164,11 @@ usage:
                                     a key; also nc_catalog.keys); import takes
                                     the old key files in (with the server
                                     stopped)
+  nucleus keys <dir> encrypt [the root key's options of nucleus server]
+                                    a database in the clear encrypted in
+                                    place under a new data key (the server
+                                    stopped; its pages, logs and scratch
+                                    files from then on)
   nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
                  | --to-root-passphrase-env <var> | --to-managed-root
                  [the root key's options of nucleus server]

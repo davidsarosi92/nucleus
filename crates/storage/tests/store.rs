@@ -571,6 +571,97 @@ fn a_planted_value_is_in_no_file_of_an_encrypted_store() {
     ENCRYPTED.set(false);
 }
 
+/// A store in the clear — its main tree and a branch, the last writes
+/// only logged — built for [`a_store_encrypted_and_a_crash_at_every_point`];
+/// its contents, main and branch.
+fn clear_store_for_encryption(p: &Arc<SimPlatform>) -> (Model, Model) {
+    ENCRYPTED.set(false);
+    let (store, _) = open(p).unwrap();
+    let planted = b"encrypt-me-planted-9d2c41e0";
+    let put = |s: &Store, i: u64| {
+        let mut v = planted.to_vec();
+        v.extend_from_slice(&i.to_le_bytes());
+        s.commit(&Batch {
+            meta: i,
+            ops: vec![(format!("k{i:03}").into_bytes(), Some(v))],
+        })
+        .unwrap();
+    };
+    for i in 1..=30 {
+        put(&store, i);
+        if i == 20 {
+            store.checkpoint().unwrap();
+        }
+    }
+    let branch = store.create_branch("b").unwrap();
+    for i in 31..=36 {
+        put(&branch, i);
+    }
+    put(&store, 37);
+    (contents(&store), contents(&branch))
+}
+
+/// A store encrypted in place (PLAN.md §M14.30 K2e), with a crash at
+/// every I/O point of it: what opens afterwards is the store in the clear
+/// or encrypted — never neither — with everything in it, main and branch;
+/// encrypting again finishes it.  Encrypted, the planted value is in no
+/// file, and the store does not open without its key.
+#[test]
+fn a_store_encrypted_and_a_crash_at_every_point() {
+    // The key `opts` gives an encrypted store.
+    let key = PageCipher::new([7; 32]);
+    let planted = b"encrypt-me-planted-9d2c41e0";
+    let dir = Path::new(DIR);
+    let check = |p: &Arc<SimPlatform>, want: &(Model, Model), ctx: &str| {
+        let cipher = nucleus_storage::pager::file_cipher(p.fs(), &dir.join("data")).unwrap();
+        ENCRYPTED.set(cipher != Some(0));
+        let (store, _) = open(p).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+        assert!(contents(&store) == want.0, "{ctx}: main");
+        assert!(
+            contents(&store.branch("b").unwrap()) == want.1,
+            "{ctx}: branch"
+        );
+        store.pool().pager().check().unwrap();
+        cipher != Some(0)
+    };
+
+    let dry = sim(21);
+    let want = clear_store_for_encryption(&dry);
+    assert!(!files_holding(&dry, dir, planted).is_empty());
+    let before = dry.sim_fs().op_count();
+    let platform: Arc<dyn Platform> = Arc::clone(&dry) as Arc<dyn Platform>;
+    let pages = Store::encrypt(Arc::clone(&platform), dir, &opts(), &key).unwrap();
+    assert!(pages > 4, "{pages} pages");
+    let total = dry.sim_fs().op_count() - before;
+    assert!(check(&dry, &want, "after"));
+    assert!(
+        files_holding(&dry, dir, planted).is_empty(),
+        "{:?}",
+        files_holding(&dry, dir, planted)
+    );
+    ENCRYPTED.set(false);
+    assert!(open(&dry).is_err(), "opened without its key");
+    assert!(matches!(
+        Store::encrypt(platform, dir, &opts(), &key),
+        Err(Error::Key(_))
+    ));
+
+    for n in 1..=total {
+        let p = sim(21);
+        clear_store_for_encryption(&p);
+        p.sim_fs().crash_after_ops(n);
+        let platform: Arc<dyn Platform> = Arc::clone(&p) as Arc<dyn Platform>;
+        assert!(Store::encrypt(Arc::clone(&platform), dir, &opts(), &key).is_err());
+        let ctx = format!("crash at op {n} of {total}");
+        if !check(&p, &want, &ctx) {
+            Store::encrypt(platform, dir, &opts(), &key)
+                .unwrap_or_else(|e| panic!("{ctx}: again: {e}"));
+            assert!(check(&p, &want, &ctx), "{ctx}: encrypted again");
+        }
+    }
+    ENCRYPTED.set(false);
+}
+
 #[test]
 fn crash_at_every_io_point_of_overlapping_checkpoints() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {

@@ -56,7 +56,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let Some(dir) = args.first() else {
         return Err("kv: missing <dir>".into());
     };
-    let db = crate::sql::open_local(dir)?;
+    let db = crate::sql::open_local(dir, &crate::keys::KeyOptions::default())?;
     let result = match args.get(1) {
         None => shell(&db),
         Some(_) => {

@@ -6,7 +6,7 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use nucleus_kv::{Database, Kv, Options};
+use nucleus_kv::{Kv, Options};
 use nucleus_server::{
     Config, DEFAULT_PASSWORD, DEFAULT_USER, FrontEnds, Password, Trust, serve_front_end,
 };
@@ -396,7 +396,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         )
         .map_err(|e| format!("otlp: {e}"))?;
     }
-    let db = Database::open(dir, opts).map_err(|e| e.to_string())?;
+    // Under its data key when it is encrypted (PLAN.md §M14.30 K2e).
+    let db = crate::keys::open_database(dir, &key_options.settings(dir), opts)?;
     let kv: Arc<dyn Kv> = Arc::new(db);
     // The key hierarchy (PLAN.md §M14.30 K1): the keyring, the secrets'
     // key in it.

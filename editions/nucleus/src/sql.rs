@@ -15,15 +15,17 @@ use nucleus_sql::{Output, Session, TxnStatus};
 
 type Result<T> = std::result::Result<T, String>;
 
-/// A local database: its directory, or `:memory:` — one in this
-/// process, gone when it ends (as the embedded editions take the name).
-pub fn open_local(dir: &str) -> Result<Database> {
+/// A local database: its directory — under its data key when it is
+/// encrypted (`keys`' settings; PLAN.md §M14.30 K2e) — or `:memory:`,
+/// one in this process, gone when it ends (as the embedded editions take
+/// the name).
+pub fn open_local(dir: &str, keys: &crate::keys::KeyOptions) -> Result<Database> {
     if dir == MEMORY {
         Database::open_in_memory(nucleus_kv::Options::in_memory())
+            .map_err(|e| format!("{dir}: {e}"))
     } else {
-        Database::open(dir, nucleus_kv::Options::default())
+        crate::keys::open_database(dir, &keys.settings(dir), nucleus_kv::Options::default())
     }
-    .map_err(|e| format!("{dir}: {e}"))
 }
 
 /// The name of a database in memory.
@@ -906,7 +908,7 @@ impl Target {
         }
         Ok(match self.dir {
             Some(dir) => {
-                let db = open_local(&dir)?;
+                let db = open_local(&dir, &self.keys)?;
                 let kv: Arc<dyn nucleus_kv::Kv> = Arc::new(db.clone());
                 // Secrets sealed as the server seals them: its key file
                 // (none for a database in memory: no secrets kept).
