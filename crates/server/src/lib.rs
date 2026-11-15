@@ -498,6 +498,7 @@ pub fn serve_front_end(
     kv: Arc<dyn Kv>,
     config: Config,
 ) -> io::Result<()> {
+    nucleus_sql::metrics::register();
     let config = Arc::new(config);
     let ids = Arc::new(AtomicU32::new(1));
     for stream in listener.incoming() {

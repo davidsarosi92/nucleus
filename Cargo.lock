@@ -409,8 +409,10 @@ dependencies = [
  "nucleus-local-models",
  "nucleus-mcp",
  "nucleus-oidc",
+ "nucleus-otlp",
  "nucleus-pg-compat",
  "nucleus-platform",
+ "nucleus-prometheus",
  "nucleus-server",
  "nucleus-sql",
  "nucleus-tls",
@@ -567,6 +569,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-otlp"
+version = "0.1.0"
+dependencies = [
+ "nucleus-http",
+ "nucleus-platform",
+ "serde_json",
+]
+
+[[package]]
 name = "nucleus-pg-compat"
 version = "0.1.0"
 dependencies = [
@@ -585,6 +596,14 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "proptest",
+]
+
+[[package]]
+name = "nucleus-prometheus"
+version = "0.1.0"
+dependencies = [
+ "nucleus-platform",
+ "nucleus-server",
 ]
 
 [[package]]

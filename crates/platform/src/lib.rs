@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime};
 
 pub mod harness;
 pub mod memory;
+pub mod metrics;
 pub mod real;
 mod rng;
 pub mod sim;

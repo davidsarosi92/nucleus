@@ -58,6 +58,7 @@ pub fn register(kv: &Arc<dyn Kv>, mut info: Info) -> Entry {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     info.id = id;
     let database = database(kv);
+    crate::metrics::SESSIONS_OPENED.inc(&info.context.front_end);
     if let Ok(mut all) = SESSIONS.lock() {
         all.entry(database).or_default().insert(id, info);
     }
@@ -119,4 +120,16 @@ pub fn visible() -> Vec<Info> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// How many sessions are open, by front end — every database's in the
+/// process (the metrics, PLAN.md §M14.18).
+pub fn by_front_end() -> BTreeMap<String, usize> {
+    let mut n = BTreeMap::new();
+    if let Ok(all) = SESSIONS.lock() {
+        for i in all.values().flat_map(|t| t.values()) {
+            *n.entry(i.context.front_end.clone()).or_default() += 1;
+        }
+    }
+    n
 }

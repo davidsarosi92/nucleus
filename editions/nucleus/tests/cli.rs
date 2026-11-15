@@ -630,6 +630,166 @@ fn ncsql_local_and_over_the_network() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// One HTTP GET to `addr`: the status line and the body.
+fn http_get(addr: &str, path: &str, accept: Option<&str>) -> (String, String) {
+    use std::io::Read;
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    let accept = accept.map_or(String::new(), |a| format!("Accept: {a}\r\n"));
+    write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n{accept}\r\n").unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    (head.lines().next().unwrap().to_string(), body.to_string())
+}
+
+/// A sample's value in Prometheus's text format.
+fn sample(text: &str, series: &str) -> f64 {
+    text.lines()
+        .find_map(|l| l.strip_prefix(series)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("no {series} in\n{text}"))
+        .parse()
+        .unwrap()
+}
+
+/// `nucleus server --metrics` (PLAN.md §M14.18): Prometheus's `GET
+/// /metrics` moving with a workload, the same numbers in
+/// `nc_catalog.metrics`, and the health checks.
+#[test]
+fn metrics_and_health_checks() {
+    use std::io::BufRead;
+
+    let dir = temp_dir("metrics");
+    let d = dir.to_str().unwrap();
+    /// The server killed even when an assertion fails.
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args([
+                "server",
+                d,
+                "--listen",
+                "127.0.0.1:0",
+                "--metrics",
+                "127.0.0.1:0",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufReader::new(server.0.stderr.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let addrs: Vec<&str> = first
+        .split_whitespace()
+        .filter(|w| w.starts_with("127.0.0.1:"))
+        .collect();
+    let (addr, metrics) = (addrs[0].to_string(), addrs[1].to_string());
+    assert!(
+        first.contains(&format!("{metrics} (metrics and health checks)")),
+        "{first}"
+    );
+    assert_eq!(
+        http_get(&metrics, "/health/live", None).0,
+        "HTTP/1.1 200 OK"
+    );
+    assert_eq!(
+        http_get(&metrics, "/health/ready", None),
+        ("HTTP/1.1 200 OK".to_string(), "ready\n".to_string())
+    );
+    let (status, before) = http_get(&metrics, "/metrics", None);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(sample(&before, "nucleus_ready"), 1.0);
+    let writes = sample(&before, "nucleus_statements_total{kind=\"write\"}");
+    let commits = sample(&before, "nucleus_commits_total");
+    // A workload: the numbers move.
+    let (ok, out) = ncsql(
+        &["-h", &addr],
+        "CREATE TABLE t (id INT PRIMARY KEY);\nINSERT INTO t SELECT * FROM generate_series(1, 100);\nSELECT count(*) FROM t;\n",
+    );
+    assert!(ok, "{out}");
+    let (_, after) = http_get(&metrics, "/metrics", None);
+    assert!(
+        sample(&after, "nucleus_statements_total{kind=\"write\"}") >= writes + 2.0,
+        "{after}"
+    );
+    assert!(
+        sample(&after, "nucleus_commits_total") >= commits + 2.0,
+        "{after}"
+    );
+    assert!(
+        sample(&after, "nucleus_rows_returned_total") >= 101.0,
+        "{after}"
+    );
+    assert!(sample(&after, "nucleus_wal_bytes_total") > 0.0, "{after}");
+    assert!(
+        sample(&after, "nucleus_sessions_opened_total{front_end=\"ncp\"}") >= 1.0,
+        "{after}"
+    );
+    assert!(
+        sample(
+            &after,
+            "nucleus_statement_duration_seconds_bucket{kind=\"read\",le=\"+Inf\"}"
+        ) >= 1.0
+    );
+    assert!(
+        after.contains("# TYPE nucleus_statement_duration_seconds histogram"),
+        "{after}"
+    );
+    // OpenMetrics when asked.
+    let (_, om) = http_get(
+        &metrics,
+        "/metrics",
+        Some("application/openmetrics-text; version=1.0.0"),
+    );
+    assert!(
+        om.contains("# TYPE nucleus_commits counter") && om.ends_with("# EOF\n"),
+        "{om}"
+    );
+    // nc_catalog.metrics reads the same registry.
+    let (ok, out) = ncsql(
+        &[
+            "-h",
+            &addr,
+            "-c",
+            "SELECT value FROM nc_catalog.metrics WHERE name = 'nucleus_commits_total'",
+        ],
+        "",
+    );
+    let in_sql: f64 = out
+        .lines()
+        .nth(2)
+        .and_then(|l| l.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        ok && in_sql >= sample(&after, "nucleus_commits_total"),
+        "{out}"
+    );
+    assert_eq!(
+        http_get(&metrics, "/nope", None).0,
+        "HTTP/1.1 404 Not Found"
+    );
+    // `nucleus status`: the same numbers, for people.
+    let (ok, out) = nucleus(&["status", "-h", &addr], "");
+    assert!(
+        ok && out.contains(": ready\n") && out.contains("statements "),
+        "{out}"
+    );
+    assert!(
+        out.contains("page cache") && out.contains("% hits"),
+        "{out}"
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `nucleus mcp` end to end (PLAN.md §M14.10): an MCP client lists,
 /// describes and queries a database over standard input and output.
 #[test]

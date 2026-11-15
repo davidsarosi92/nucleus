@@ -2014,8 +2014,18 @@ impl std::fmt::Debug for Transaction {
     }
 }
 
+/// A serialization conflict on `key`, counted.
+fn counted_conflict(key: Vec<u8>) -> Error {
+    crate::metrics::CONFLICTS.inc();
+    Error::Conflict { key }
+}
+
 impl Drop for Transaction {
     fn drop(&mut self) {
+        if !self.done {
+            // Neither committed nor rolled back: dropped.
+            crate::metrics::ROLLBACKS.inc();
+        }
         // Fresh ranges written without the WAL: deleted (on a failure here,
         // by the next opening, which finds their marks).
         let unlogged: Vec<_> = self
@@ -2190,7 +2200,7 @@ impl Transaction {
             return Ok(false);
         }
         if conflict && !self.is_fresh(key) {
-            return Err(Error::Conflict { key: key.to_vec() });
+            return Err(counted_conflict(key.to_vec()));
         }
         self.record(key, Some(value))?;
         Ok(true)
@@ -2357,7 +2367,7 @@ impl Transaction {
             && !self.writes.contains_key(key)
             && self.engine.write_conflicts(key, self.start, self.spilled)?
         {
-            return Err(Error::Conflict { key: key.to_vec() });
+            return Err(counted_conflict(key.to_vec()));
         }
         self.record(key, value)
     }
@@ -2404,10 +2414,10 @@ impl Transaction {
         let conflict = engine.commit_conflict(&mut keys, self.start, Some(id))?;
         drop(keys);
         if let Some(key) = conflict {
-            return Err(Error::Conflict { key });
+            return Err(counted_conflict(key));
         }
         if let Some(key) = engine.unlogged_conflict(&self.writes, &self.unlogged_starts()) {
-            return Err(Error::Conflict { key });
+            return Err(counted_conflict(key));
         }
         self.gap = None; // its intents enter the tree
         lock(&self.empty).clear();
@@ -2563,7 +2573,16 @@ impl Transaction {
 
     /// Commits; returns the commit timestamp (the snapshot for a transaction
     /// that wrote nothing).  On [`Error::Conflict`] nothing was written.
-    pub fn commit(mut self) -> Result<Timestamp> {
+    pub fn commit(self) -> Result<Timestamp> {
+        let r = self.commit_counted();
+        match r {
+            Ok(_) => crate::metrics::COMMITS.inc(),
+            Err(_) => crate::metrics::ROLLBACKS.inc(),
+        }
+        r
+    }
+
+    fn commit_counted(mut self) -> Result<Timestamp> {
         self.done = true;
         let unlogged = self.fresh.iter().any(|f| f.mode == FreshMode::Unlogged);
         if self.writes.is_empty() && self.spilled.is_none() && !unlogged {
@@ -2589,10 +2608,10 @@ impl Transaction {
             let conflict = engine.commit_conflict(&mut keys, self.start, spilled)?;
             drop(keys);
             if let Some(key) = conflict {
-                return Err(Error::Conflict { key });
+                return Err(counted_conflict(key));
             }
             if let Some(key) = engine.unlogged_conflict(&self.writes, &self.unlogged_starts()) {
-                return Err(Error::Conflict { key });
+                return Err(counted_conflict(key));
             }
             // Serializable transactions record every read; others only
             // their validated ones.
@@ -2719,7 +2738,7 @@ impl Transaction {
         let since = recent.since(self.start);
         for k in &reads.keys {
             if since.wrote(k) || since.spanned(k) {
-                return Err(Error::Conflict { key: k.clone() });
+                return Err(counted_conflict(k.clone()));
             }
         }
         for (s, e) in &reads.ranges {
@@ -2739,7 +2758,7 @@ impl Transaction {
                 .iter()
                 .find(|(lo, hi)| below_end(lo) && above_start(hi))
             {
-                return Err(Error::Conflict { key: lo.to_vec() });
+                return Err(counted_conflict(lo.to_vec()));
             }
         }
         for (s, e) in &reads.ranges {
@@ -2748,7 +2767,7 @@ impl Transaction {
             }
             let bounds = (s.as_ref().map(Vec::as_slice), e.as_ref().map(Vec::as_slice));
             if let Some(key) = since.wrote_in(bounds) {
-                return Err(Error::Conflict { key });
+                return Err(counted_conflict(key));
             }
         }
         Ok(())
@@ -2757,6 +2776,7 @@ impl Transaction {
     /// Discards the transaction's writes.
     pub fn rollback(mut self) {
         self.done = true;
+        crate::metrics::ROLLBACKS.inc();
     }
 }
 

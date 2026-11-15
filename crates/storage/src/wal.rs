@@ -334,6 +334,7 @@ impl Wal {
             seg.len = to;
         }
         seg.file.write_all_at(&rec, at)?;
+        crate::metrics::WAL_BYTES.add(len);
         s.end = lsn + len;
         Ok(s.end)
     }
@@ -366,6 +367,7 @@ impl Wal {
             self.lock().poisoned = true;
             return Err(e.into());
         }
+        crate::metrics::WAL_SYNCS.inc();
         *durable = end;
         Ok(())
     }

@@ -337,6 +337,7 @@ pub fn audit_refused_login(
     code: &str,
     detail: &str,
 ) -> Result<()> {
+    crate::metrics::LOGINS_REFUSED.inc(&context.front_end);
     let mut s = Session::new(kv.clone());
     let mut who = crate::access::Who::system();
     who.session_user = user.to_string();
@@ -403,6 +404,7 @@ impl Session {
 
     /// A new session with the functions and views of `registry`.
     pub fn with_registry(kv: Arc<dyn Kv>, registry: Arc<Registry>) -> Self {
+        crate::metrics::register();
         crate::catalog_cache::watch(&*kv);
         Self {
             kv,
@@ -1193,6 +1195,24 @@ impl Session {
             });
             self.audit_apart(record)?;
         }
+        let elapsed = self.kv.elapsed().saturating_sub(start).saturating_sub(
+            std::time::Duration::from_micros(crate::budget::waited() as u64),
+        );
+        let rows_read = crate::budget::scanned().saturating_sub(read);
+        let models = crate::budget::model_cost().since(&models);
+        let rows_returned = match &r {
+            Ok(_) if counted.started => counted.rows,
+            Ok(out) => crate::statements::rows_of(out),
+            Err(_) => 0,
+        };
+        crate::metrics::statement(
+            read_only(stmt),
+            r.is_ok(),
+            elapsed,
+            rows_read,
+            rows_returned,
+            &models,
+        );
         // In the statistics when its text is known (every front end
         // notes it, and `execute`).
         let Some(text) = text.as_deref() else {
@@ -1214,16 +1234,10 @@ impl Session {
                 text,
                 normalized: &normalized,
                 user: &crate::access::current().user,
-                elapsed: self.kv.elapsed().saturating_sub(start).saturating_sub(
-                    std::time::Duration::from_micros(crate::budget::waited() as u64),
-                ),
-                rows_read: crate::budget::scanned().saturating_sub(read),
-                models: crate::budget::model_cost().since(&models),
-                rows_returned: match &r {
-                    Ok(_) if counted.started => counted.rows,
-                    Ok(out) => crate::statements::rows_of(out),
-                    Err(_) => 0,
-                },
+                elapsed,
+                rows_read,
+                models,
+                rows_returned,
                 ok: r.is_ok(),
                 at: crate::datetime::from_system(self.kv.wall_clock()),
             },

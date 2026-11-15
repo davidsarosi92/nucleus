@@ -10,6 +10,7 @@ mod migrate;
 mod restore;
 mod server;
 mod sql;
+mod status;
 
 use std::process::ExitCode;
 
@@ -41,6 +42,11 @@ usage:
                                     a type per table for the language's driver,
                                     with its SELECT and a function reading a row;
                                     or a typed function per named query
+  nucleus status [<dir>] [connection options of nucleus sql]
+                                    a server's health for people: ready or not,
+                                    sessions, transactions, statements and their
+                                    latencies, the page cache, the files' sizes,
+                                    refused logins (from nc_catalog.metrics)
   nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
               [--memory] [--max-rows <n>] [--timeout <ms>]
                                     a Model Context Protocol server on stdin and
@@ -49,7 +55,7 @@ usage:
                                     --allow-writes); --memory: remember, recall,
                                     forget
   nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]] [--console [<addr:port>]]
-                     [--front-end <name> [<addr:port>]]
+                     [--front-end <name> [<addr:port>]] [--metrics [<addr:port>]] [--otlp <url>]
                      [--user <name>] [--password <pw> (or NUCLEUS_PASSWORD)] [--no-auth] [--log-queries]
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
                      [--oidc-issuer <url> --oidc-audience <name> [--oidc-jwks <file>]
@@ -67,7 +73,15 @@ usage:
                                     front end `pg`) also PostgreSQL's (default
                                     127.0.0.1:5432), with --console a web console
                                     (default 127.0.0.1:20036; beyond loopback
-                                    over TLS only); clients log in as
+                                    over TLS only), with --metrics Prometheus's
+                                    GET /metrics and the health checks
+                                    /health/live and /health/ready (default
+                                    127.0.0.1:20037; beyond loopback over TLS
+                                    unless --insecure), with --otlp the metrics
+                                    pushed to an OpenTelemetry collector
+                                    (OTLP/HTTP; or OTEL_EXPORTER_OTLP_ENDPOINT,
+                                    _HEADERS, OTEL_METRIC_EXPORT_INTERVAL);
+                                    clients log in as
                                     nucleus / nucleus unless changed; with a
                                     certificate, TLS for clients that ask; with
                                     a client CA, a client certificate naming
@@ -142,6 +156,7 @@ fn main() -> ExitCode {
         Some("dump") => dump::run(&args[1..]),
         Some("migrate") => migrate::run(&args[1..]),
         Some("codegen") => codegen::run(&args[1..]),
+        Some("status") => status::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

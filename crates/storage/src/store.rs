@@ -1501,6 +1501,7 @@ impl Checkpoint<'_> {
             for b in &dropped {
                 remove_wal_files(s.platform.fs(), &branch_wal(&s.dir, b.info.id))?;
             }
+            crate::metrics::CHECKPOINTS.inc();
             Ok(())
         })();
         result.inspect_err(|_| s.poison())

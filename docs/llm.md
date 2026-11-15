@@ -16,6 +16,9 @@ what to use instead.  For people the full reference is DOCS.md §8.
 - **Shell:** `ncsql <dir>`, `ncsql :memory:` (a database in the process,
   gone at its end — for trying SQL) or `ncsql -h 127.0.0.1:20035` (user
   and password `nucleus` by default); `-c "<sql>"` runs one command.
+- **Operations:** `SELECT * FROM nc_catalog.metrics` (the server's metrics:
+  statements, latencies, commits, cache, sizes — what Prometheus scrapes
+  from `nucleus server --metrics`), `nucleus status` for a summary.
 - **Drivers:** Rust, Python, JavaScript, Java, C, C++, Swift over nucleus's protocol
   `ncp` (port 20035); PostgreSQL clients through the pg-compat front end
   (`nucleus server --pg-compat`, port 5432).  Large results: a cursor

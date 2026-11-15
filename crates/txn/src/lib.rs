@@ -22,6 +22,7 @@
 
 mod engine;
 mod error;
+pub mod metrics;
 pub mod mvcc;
 mod recent;
 mod writes;

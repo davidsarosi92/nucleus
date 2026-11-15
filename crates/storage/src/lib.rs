@@ -9,6 +9,7 @@ pub mod buffer;
 pub mod crc32c;
 mod error;
 pub mod lz;
+pub mod metrics;
 pub mod node;
 pub mod page;
 pub mod pager;

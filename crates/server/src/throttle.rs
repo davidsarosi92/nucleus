@@ -58,6 +58,7 @@ impl Throttle {
         let users = self.by_user.lock().ok()?;
         let until = users.get(user)?.locked_until?;
         (until > at).then(|| {
+            nucleus_sql::metrics::LOGINS_LOCKED.inc();
             format!("role \"{user}\" is locked after too many failed logins; try again later")
         })
     }

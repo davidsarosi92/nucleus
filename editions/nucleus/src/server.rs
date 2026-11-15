@@ -44,6 +44,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut history_time = std::time::Duration::ZERO;
     let mut secrets_key = None::<String>;
     let mut subject_keys = None::<String>;
+    let mut metrics = None::<String>;
+    let mut otlp = None::<String>;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -55,6 +57,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--listen" => listen = Some(rest.next().ok_or("--listen needs an address")?.clone()),
             "--pg-compat" => extra.push(("pg".into(), addr(&mut rest))),
             "--console" => extra.push(("console".into(), addr(&mut rest))),
+            "--otlp" => otlp = Some(rest.next().ok_or("--otlp needs an endpoint")?.clone()),
+            "--metrics" => {
+                metrics =
+                    Some(addr(&mut rest).unwrap_or_else(|| nucleus_prometheus::DEFAULT_ADDR.into()))
+            }
             "--front-end" => {
                 let name = rest.next().ok_or("--front-end needs a name")?.clone();
                 extra.push((name, addr(&mut rest)));
@@ -252,6 +259,42 @@ pub fn run(args: &[String]) -> Result<(), String> {
         history_time,
         ..defaults
     };
+    // The metrics and health checks (PLAN.md §M14.18) before the
+    // database: a probe sees a long recovery as alive, not ready.  Every
+    // layer's instruments there from the first scrape.
+    nucleus_sql::metrics::register();
+    let metrics_addr = match metrics {
+        Some(addr) => {
+            let l = TcpListener::bind(&addr)
+                .map_err(|e| format!("cannot listen on {addr} (metrics): {e}"))?;
+            let a = l.local_addr().map_err(|e| e.to_string())?;
+            if !a.ip().is_loopback() && config.tls.is_none() && !insecure {
+                return Err(format!(
+                    "server: refusing to serve metrics on {a} over plain HTTP: give --tls-cert and --tls-key, listen on loopback, or say --insecure"
+                ));
+            }
+            let exporter = nucleus_prometheus::Prometheus::new(l, config.tls.clone());
+            nucleus_platform::metrics::Exporter::start(
+                Box::new(exporter),
+                nucleus_platform::metrics::global(),
+            )
+            .map_err(|e| format!("metrics: {e}"))?;
+            Some(a)
+        }
+        None => None,
+    };
+    // OpenTelemetry: pushed to a collector (--otlp or the SDKs' variables).
+    let otlp = nucleus_otlp::Otlp::from_env(otlp)?;
+    let otlp_shown = otlp
+        .as_ref()
+        .map(|o| format!("{} every {}s", o.endpoint, o.interval.as_secs_f64()));
+    if let Some(o) = otlp {
+        nucleus_platform::metrics::Exporter::start(
+            Box::new(o),
+            nucleus_platform::metrics::global(),
+        )
+        .map_err(|e| format!("otlp: {e}"))?;
+    }
     let db = Database::open(dir, opts).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
     let key_path =
@@ -325,7 +368,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             ));
         }
     }
-    let shown: Vec<String> = listeners
+    let mut shown: Vec<String> = listeners
         .iter()
         .map(|(f, l)| {
             let what = match f.name() {
@@ -339,6 +382,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         })
         .collect::<Result<_, _>>()?;
+    if let Some(a) = metrics_addr {
+        shown.push(format!("{a} (metrics and health checks)"));
+    }
     nucleus_platform::log!(
         "nucleus {} listening on {} (database {dir}; index cache {} MB; {}{})",
         env!("CARGO_PKG_VERSION"),
@@ -385,6 +431,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             _ => None,
         })
         .collect();
+    if let Some(o) = otlp_shown {
+        nucleus_platform::log!("metrics: OTLP to {o}");
+    }
     if !hints.is_empty() {
         nucleus_platform::log!("connect: {}", hints.join("  or  "));
     }
@@ -397,6 +446,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry));
     let mut listeners = listeners.into_iter();
     let (first, first_listener) = listeners.next().expect("ncp");
+    // Recovered, open, listening: ready (`/health/ready`, `nucleus_ready`).
+    nucleus_platform::metrics::set_ready(true);
     for (front, l) in listeners {
         let (kv, config) = (Arc::clone(&kv), config.clone());
         std::thread::spawn(move || {

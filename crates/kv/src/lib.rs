@@ -867,9 +867,98 @@ pub struct Database {
     /// The instances of the branches' handles, by branch id: the same
     /// branch is the same instance, whoever opens it.
     instances: Arc<std::sync::Mutex<std::collections::BTreeMap<u32, u64>>>,
+    /// Its metrics' collector, read while a handle is open (PLAN.md
+    /// §M14.18).
+    _metrics: Arc<nucleus_platform::metrics::Collector>,
 }
 
 static OPENED: AtomicU64 = AtomicU64::new(0);
+
+/// Adds the storage and transaction layers' instruments to the process's
+/// metrics registry (PLAN.md §M14.18); opening a database does too.
+pub fn register_metrics() {
+    nucleus_txn::metrics::register();
+}
+
+/// The lower layers' instruments registered, and a collector of what
+/// `engine`'s store already counts — read at each snapshot, not counted
+/// twice (PLAN.md §M14.18).
+fn collect_metrics(engine: nucleus_txn::Engine) -> nucleus_platform::metrics::Collector {
+    nucleus_txn::metrics::register();
+    nucleus_platform::metrics::global().collector(move |s| {
+        let store = engine.store();
+        let pool = store.pool();
+        let st = pool.stats();
+        s.counter(
+            "nucleus_cache_hits_total",
+            "Page reads the page cache answered.",
+            &[],
+            st.hits,
+        );
+        s.counter(
+            "nucleus_cache_misses_total",
+            "Page reads that went to the data file.",
+            &[],
+            st.misses,
+        );
+        s.counter(
+            "nucleus_cache_evictions_total",
+            "Cache frames reused for another page.",
+            &[],
+            st.evictions,
+        );
+        s.counter(
+            "nucleus_cache_writebacks_total",
+            "Dirty pages written back to the data file.",
+            &[],
+            st.writebacks,
+        );
+        s.gauge(
+            "nucleus_cache_pages",
+            "Pages the page cache can hold.",
+            &[],
+            pool.capacity() as f64,
+        );
+        s.gauge(
+            "nucleus_cache_pages_used",
+            "Cache frames holding a page.",
+            &[],
+            pool.frames_made() as f64,
+        );
+        let pager = pool.pager();
+        let (pages, free) = (pager.page_count(), pager.free_count());
+        s.gauge(
+            "nucleus_data_file_bytes",
+            "The data file's size (every branch's pages).",
+            &[],
+            (pages * nucleus_storage::PAGE_SIZE as u64) as f64,
+        );
+        s.gauge(
+            "nucleus_data_file_free_bytes",
+            "Free pages in the data file, reused before it grows.",
+            &[],
+            (free * nucleus_storage::PAGE_SIZE as u64) as f64,
+        );
+        s.gauge(
+            "nucleus_wal_since_checkpoint_bytes",
+            "The write-ahead log written since the last checkpoint (main branch).",
+            &[],
+            store.wal_since_checkpoint() as f64,
+        );
+        s.gauge(
+            "nucleus_transactions_running",
+            "Transactions running now.",
+            &[],
+            engine.running() as f64,
+        );
+        s.gauge(
+            "nucleus_branches",
+            "The database's branches, main included.",
+            &[],
+            engine.branches().len() as f64,
+        );
+    })
+}
 
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -929,6 +1018,7 @@ impl Database {
             }
         }
         let instance = OPENED.fetch_add(1, Ordering::Relaxed) + 1;
+        let metrics = Arc::new(collect_metrics(engine.clone()));
         Ok(Self {
             engine,
             platform,
@@ -939,6 +1029,7 @@ impl Database {
             instances: Arc::new(std::sync::Mutex::new(
                 [(nucleus_storage::MAIN, instance)].into(),
             )),
+            _metrics: metrics,
         })
     }
 

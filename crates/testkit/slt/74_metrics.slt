@@ -1,0 +1,39 @@
+# nc_catalog.metrics (PLAN.md §M14.18): the process's metrics, as the
+# exporters (Prometheus, OpenTelemetry) see them.  Other tests run in
+# the same process, so only what must hold is checked.  nucleus's own
+# catalog: every record is nucleus-only.
+
+statement ok
+CREATE TABLE m (a INT)
+
+statement ok
+INSERT INTO m VALUES (1), (2), (3)
+
+# nucleus-only
+query TTB
+SELECT name, kind, value >= 1 FROM nc_catalog.metrics WHERE name IN ('nucleus_statements_total', 'nucleus_commits_total', 'nucleus_wal_bytes_total') ORDER BY name, labels
+----
+nucleus_commits_total counter true
+nucleus_statements_total counter true
+nucleus_statements_total counter true
+nucleus_wal_bytes_total counter true
+
+# nucleus-only: a histogram as Prometheus has it, its buckets cumulative.
+query TB
+SELECT labels, value >= 1 FROM nc_catalog.metrics WHERE name = 'nucleus_statement_duration_seconds_bucket' AND labels LIKE 'kind="write",le="+Inf"'
+----
+kind="write",le="+Inf" true
+
+# nucleus-only: gauges a collector reads from the store.
+query TB
+SELECT name, value > 0 FROM nc_catalog.metrics WHERE name IN ('nucleus_data_file_bytes', 'nucleus_cache_pages', 'nucleus_branches') ORDER BY name
+----
+nucleus_branches true
+nucleus_cache_pages true
+nucleus_data_file_bytes true
+
+# nucleus-only: every series has its help.
+query I
+SELECT count(*) FROM nc_catalog.metrics WHERE help = '' OR help IS NULL
+----
+0

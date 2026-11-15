@@ -26,6 +26,7 @@
 //! | `nc_catalog.types` | type (of the session's registry), with its abilities |
 //! | `nc_catalog.migrations` | migration applied (`RECORD MIGRATION`, `nucleus migrate`) |
 //! | `nc_catalog.definitions` | schema object, as the statement that makes it ([`crate::definitions`]) |
+//! | `nc_catalog.metrics` | metric series of the process (PLAN.md §M14.18), as the exporters see them |
 
 use std::sync::Arc;
 
@@ -209,6 +210,16 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("name", T),
             ("table_name", T),
             ("definition", T),
+        ],
+    ),
+    (
+        "metrics",
+        &[
+            ("name", T),
+            ("kind", T),
+            ("labels", T),
+            ("value", F),
+            ("help", T),
         ],
     ),
     (
@@ -881,6 +892,21 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 }
             }
         }
+        "metrics" => {
+            // The process's metrics, as the exporters see them (PLAN.md
+            // §M14.18); histograms as Prometheus has them: `_bucket` by
+            // `le`, `_sum`, `_count`.
+            for (name, row) in metric_rows(&nucleus_platform::metrics::global().snapshot()) {
+                let (kind, labels, value, help) = row;
+                out.push(vec![
+                    text(name),
+                    text(kind.to_string()),
+                    text(labels),
+                    Value::Float(value),
+                    text(help),
+                ]);
+            }
+        }
         "sessions" => {
             for s in crate::sessions::visible() {
                 out.push(vec![
@@ -1482,4 +1508,68 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
         _ => return Err(Error::internal(format!("no nc_catalog table {name}"))),
     }
     Ok(out)
+}
+
+/// A snapshot's series as `nc_catalog.metrics` rows: `(name, (kind,
+/// labels, value, help))`, labels as Prometheus writes them
+/// (`kind="read"`).
+fn metric_rows(
+    snap: &nucleus_platform::metrics::Snapshot,
+) -> Vec<(String, (&'static str, String, f64, String))> {
+    use nucleus_platform::metrics::Value as M;
+    let labels = |l: &[(String, String)], extra: Option<(&str, String)>| {
+        l.iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .chain(extra)
+            .map(|(k, v)| format!("{k}=\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut out = Vec::new();
+    for (name, f) in &snap.families {
+        let kind = f.kind.name();
+        for s in &f.samples {
+            match &s.value {
+                M::Counter(v) => out.push((
+                    name.clone(),
+                    (kind, labels(&s.labels, None), *v as f64, f.help.clone()),
+                )),
+                M::Gauge(v) => out.push((
+                    name.clone(),
+                    (kind, labels(&s.labels, None), *v, f.help.clone()),
+                )),
+                M::Histogram {
+                    buckets,
+                    sum,
+                    count,
+                } => {
+                    for (le, n) in buckets {
+                        let le = if le.is_infinite() {
+                            "+Inf".to_string()
+                        } else {
+                            le.to_string()
+                        };
+                        out.push((
+                            format!("{name}_bucket"),
+                            (
+                                kind,
+                                labels(&s.labels, Some(("le", le))),
+                                *n as f64,
+                                f.help.clone(),
+                            ),
+                        ));
+                    }
+                    out.push((
+                        format!("{name}_sum"),
+                        (kind, labels(&s.labels, None), *sum, f.help.clone()),
+                    ));
+                    out.push((
+                        format!("{name}_count"),
+                        (kind, labels(&s.labels, None), *count as f64, f.help.clone()),
+                    ));
+                }
+            }
+        }
+    }
+    out
 }

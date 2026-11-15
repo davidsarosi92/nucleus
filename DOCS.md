@@ -46,6 +46,8 @@
 | `modules/local-models` | `nucleus-local-models` | the `local` model provider: models run inside nucleus — WordPiece and Unigram tokenizers, BERT and XLM-RoBERTa encoders on `ext::kernels`, files from Hugging Face or a directory kept in the database (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `modules/console` | `nucleus-console` | the web console: a front end serving a page to browse tables, run SQL, see plans drawn and the linter's findings (§9) | §M14.17 |
+| `modules/prometheus` | `nucleus-prometheus` | Prometheus: the metrics as `GET /metrics` (text format, OpenMetrics) and the health checks `/health/live`, `/health/ready` (§8.38) | §M14.18 |
+| `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -1236,6 +1238,7 @@ nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <dur
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
 nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b> | --queries <file|dir> …] [--import <module>] [--package <name>] [--class <name>]   # §8.37
+nucleus status [<dir>] [connection options]   # a server's health for people, §8.38
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -5830,11 +5833,82 @@ schema of every type and from queries over it strictly (`tsc --strict`,
 `javac -Werror`, `clippy -D warnings`), reads its rows with it, and runs
 the sample project.
 
+### 8.38 Metrics, exporters and health checks (§M14.18)
+
+**One registry, many ways out.**  `nucleus_platform::metrics` holds the
+process's instruments: counters, gauges and histograms (fixed
+logarithmic buckets — powers of 4 µs, 1 µs to 16.8 s, then `+Inf`), each
+a static in the layer that records into it, kept in atomics, so
+recording is a relaxed atomic add (no lock, no allocation), and a
+`CounterFamily` for a label whose values come at run time (a front
+end's name).  What a layer already counts is not counted twice: a
+*collector* reads it when a snapshot is taken (the page cache's
+counters, the pages in use, the open sessions).  `Registry::snapshot`
+reads everything; two databases open in one process add up (a server
+has one).  An `Exporter` — a module — is given the registry: a *pull*
+one serves snapshots when asked, a *push* one sends them on its own
+schedule.
+
+| metric | kind | what |
+|---|---|---|
+| `nucleus_statements_total{kind}` | counter | statements run: `read` (queries) or `write` |
+| `nucleus_statement_errors_total` | counter | statements that failed |
+| `nucleus_statement_duration_seconds{kind}` | histogram | their time (waits for a budget left out) |
+| `nucleus_rows_read_total`, `nucleus_rows_returned_total` | counter | rows read; returned or changed |
+| `nucleus_commits_total`, `nucleus_rollbacks_total` | counter | transactions committed; ended otherwise (rolled back, dropped, a failed commit) |
+| `nucleus_conflicts_total` | counter | serialization conflicts (`40001`) |
+| `nucleus_transactions_running` | gauge | transactions running |
+| `nucleus_wal_bytes_total`, `nucleus_wal_syncs_total` | counter | bytes appended to the WAL; syncs that made it durable (a group commit is one) |
+| `nucleus_wal_since_checkpoint_bytes` | gauge | the main branch's WAL since its last checkpoint |
+| `nucleus_checkpoints_total` | counter | checkpoints finished |
+| `nucleus_cache_{hits,misses,evictions,writebacks}_total` | counter | the page cache's |
+| `nucleus_cache_pages`, `nucleus_cache_pages_used` | gauge | frames it has; frames holding a page |
+| `nucleus_data_file_bytes`, `nucleus_data_file_free_bytes` | gauge | the data file (every branch's pages); its free pages |
+| `nucleus_branches` | gauge | branches, main included |
+| `nucleus_sessions{front_end}` | gauge | sessions open |
+| `nucleus_sessions_opened_total{front_end}` | counter | logins admitted |
+| `nucleus_logins_refused_total{front_end}`, `nucleus_logins_locked_total` | counter | logins refused; refused because the role was locked |
+| `nucleus_model_{calls,errors,tokens,cached}_total` | counter | embedding models' calls (§8.23) |
+| `nucleus_build_info{version}`, `nucleus_ready` | gauge | always 1; 1 once the server is ready |
+
+**`nc_catalog.metrics`** (`name`, `kind`, `labels`, `value`, `help`)
+reads the same snapshot — a histogram as Prometheus has it, `_bucket`
+by `le`, `_sum`, `_count`; labels as `kind="read"` — so a client, the
+console and an AI model see what Prometheus sees.  `nucleus status`
+reads it over a connection and sums it up for people: ready or not,
+sessions, transactions, statements with p50 and p99 (estimated from the
+buckets as `histogram_quantile` does), the page cache's hit ratio, the
+files' sizes, refused logins.
+
+**Prometheus** (`modules/prometheus`): `nucleus server --metrics
+[addr]` (default `127.0.0.1:20037`) serves `GET /metrics` in the text
+exposition format 0.0.4, or OpenMetrics 1.0 when the scraper's `Accept`
+asks; `GET /health/live` (200 while the process answers) and `GET
+/health/ready` (200 once recovery is done, the store open and the
+listeners up; 503 before).  Its listener starts before the database
+opens, so an orchestrator sees a long recovery as alive and not ready.
+Over TLS when the server has a certificate; beyond loopback over plain
+HTTP only with `--insecure`.
+
+**OpenTelemetry** (`modules/otlp`): `--otlp <endpoint>` or the SDKs'
+`OTEL_EXPORTER_OTLP_ENDPOINT` (with `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_METRIC_EXPORT_INTERVAL` in ms, 60 s by default) pushes a snapshot
+to `<endpoint>/v1/metrics` every interval, OTLP/HTTP in JSON:
+cumulative temporality from the process's start, a counter a monotonic
+`sum`, a histogram with explicit bounds (each bucket's own count), the
+resource `service.name = nucleus`.  A failure is logged once and again
+when sending works; TLS to anything but loopback.
+
+Recording costs nothing measurable: the kv benchmark and `bench/run.py`
+against the commit before, within the runs' spread
+(`docs/benchmarks.md`, Metrics).
+
 ## 9. Server (`nucleus-server`)
 
 ```
 nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--console [<addr:port>]] [--front-end <name> [<addr:port>]]
+                     [--metrics [<addr:port>]] [--otlp <endpoint>]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>]
@@ -5843,6 +5917,10 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
 
 `--subject-keys` names the file of subjects' keys (§8.30; default
 `<dir>.subject-keys`).
+
+`--metrics` serves Prometheus's `GET /metrics` and the health checks
+`/health/live`, `/health/ready` (default `127.0.0.1:20037`), `--otlp`
+pushes the metrics to an OpenTelemetry collector (§8.38).
 
 `--history` keeps every snapshot of that long ago readable — `7d`,
 `12h`, `90min`, `'30 minutes'` (the units of `statement_timeout`) — for
@@ -6850,6 +6928,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — §M14.18 O1, metrics:** the registry and the
+  `Exporter` interface (`nucleus_platform::metrics`), the layers'
+  instruments, `nc_catalog.metrics`, `nucleus status`, the modules
+  `prometheus` (`--metrics`: `/metrics`, `/health/live`,
+  `/health/ready`) and `otlp` (`--otlp`) (§8.38).
 - **2026-11-15 — §M14.16 M6, code from SQL files:** `DESCRIBE
   <statement>` (§8.5), the binder's knowledge of what is never `NULL`;
   `nucleus codegen … --queries` (§8.37); the sample project

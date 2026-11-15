@@ -68,6 +68,7 @@ pub mod laws;
 pub mod lexer;
 pub mod lint;
 pub mod memory;
+pub mod metrics;
 pub mod migrations;
 pub mod models;
 pub mod moments;

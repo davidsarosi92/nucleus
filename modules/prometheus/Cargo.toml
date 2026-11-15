@@ -1,0 +1,20 @@
+[package]
+name = "nucleus-prometheus"
+description = "Prometheus for nucleus: the metrics served as GET /metrics (text exposition and OpenMetrics), with liveness and readiness checks"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+nucleus-platform = { version = "0.1.0", path = "../../crates/platform" }
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

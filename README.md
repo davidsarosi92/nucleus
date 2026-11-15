@@ -249,6 +249,8 @@ nucleus server ./mydb                   # nucleus protocol on 127.0.0.1:20035
 ncsql -c '\d t'                         # the shell, connected (user and password: nucleus)
 nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
 nucleus server ./mydb --console         # a web console on http://127.0.0.1:20036/
+nucleus server ./mydb --metrics         # Prometheus on :20037/metrics, /health/ready
+nucleus status                          # a running server's health, for people
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down
 nucleus migrate up ./mydb               # the pending ones, each in one transaction
