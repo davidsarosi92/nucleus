@@ -290,6 +290,7 @@ are marked ✅.
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns, a confidential-computing mode | ⬜ planned (2026-11-15) |
 | | M14.31 | Public benchmarks, reliably measured: a method every published number follows (environment recorded, repeated runs, spread and intervals, fair baselines, one script to reproduce), runs on dedicated cloud machines with regressions caught, results on the public leaderboards | ⬜ planned (2026-11-15) |
+| | M14.32 | Releases and distribution: versioning of the server, modules and drivers with a compatibility matrix; drivers in their own repositories (or published from this one); packages on npm, PyPI, Maven Central, crates.io and the other registries; the image on Docker Hub; native installers (MSI, macOS `.pkg`) built in CI | ⬜ planned (2026-11-15), last before the first production release |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -9705,7 +9706,8 @@ of measuring: §M14.28's verdict is a benchmark's), §M14.28 L1–L5,
 §M14.15's open performance items, then §F2.  What waits on others comes before the
 first production release, not before §F2: §M14.29 S3 (OSS-Fuzz admits
 projects in wide use) and S4 (an auditor, funding), K6 (the hardware),
-§M14.31's runs in the cloud and its leaderboards.  Asked for:
+§M14.31's runs in the cloud and its leaderboards, and last §M14.32
+(releases and distribution).  Asked for:
 data hidden from whoever should not read it — with the keys held by the
 database, by its user, or by an external KMS — and, for serving AI
 models' users (memories of a model's users kept by a provider), data
@@ -9748,6 +9750,13 @@ three models:
   unwrap.
 The three existing files become DEKs wrapped by the one root (read in
 their old form, rewritten wrapped): one key to keep instead of three.
+Decided with the owner (2026-11-15), each a setting with this default:
+the old key files, once their bytes are in the keyring wrapped (durably
+written, and unwrapped back to the same bytes), are removed — or kept
+with a warning at every start, or moved only by `nucleus keys import`;
+with a root set, every backup is encrypted, its DEK wrapped in the
+manifest, so a restore needs only the root (`--backup-key` stays for
+the backups made before) — or encrypted only when asked, as now.
 Rotation: a new root rewraps the DEKs (seconds); a new DEK re-encrypts
 in the background (K2's pages as they are rewritten, a backup chain at
 its next full one).  `nc_catalog.keys` lists ids, kinds, providers and
@@ -9912,6 +9921,69 @@ and on a leaderboard — carries its environment, its runs, its spread
 and the script that made it; a second fresh instance reproduces each
 within its interval; the scheduled cloud runs catch a regression
 planted in a test build; and the entries are merged upstream.
+
+### §M14.32 — Releases and distribution ⬜
+
+Planned 2026-11-15, at the owner's request: the last steps before the
+first production release, after the rest of the external block
+(§M14.29 S3/S4, §M14.30 K6, §M14.31 P2/P3); not gating §F2.
+
+**Where it stands.**  One semantic version for the server, the CLI, the
+Rust crates and the embedded library, each format versioned on its own
+(D15); `release.yml` builds the archives with their `SHA256SUMS`, the
+`.deb` and `.rpm`, a container image on GitHub's registry (amd64,
+arm64), a Homebrew formula and winget manifests, and the install
+scripts (§M14.17 E1).  Prometheus scrapes the server's own `/metrics`
+(no exporter needed), and the alert rules and the Grafana dashboard are
+in `monitoring/` (§M14.18 O1–O2).  *Not there:* any package on a
+language's registry, the image on Docker Hub, native installers,
+drivers versioned apart from the server, and a statement of which
+module and driver versions work with which server.
+
+- **D1 — versions and the compatibility matrix.**  The server's version
+  and, apart from it, each module's (`modules/*`, the extension API
+  version it was built against, §M14.19) and each driver's (per
+  language, naming the protocol versions it speaks, D15); one matrix —
+  server × module × driver × protocol and format versions — generated
+  from the manifests (not written by hand), checked in CI by running
+  each driver's tests against the oldest and the newest server it
+  claims, and published in DOCS and with each release.  Semantic
+  versioning's rules for each, a changelog per component.
+- **D2 — drivers in their own repositories.**  Each language's driver
+  in a repository of its own (what each registry's tooling and each
+  language's users expect), mirrored from this one so its tests keep
+  running against the server they belong to — or published from here
+  if mirroring costs more than it gives (decided at the step; both
+  keep the drivers MIT, §licence).
+- **D3 — the registries.**  npm (one package per platform for the
+  embedded edition's native library), PyPI (wheels per platform),
+  Maven Central (the Java driver, the Android AAR), crates.io (the
+  client crates), Swift Package Manager (a tagged repository with the
+  XCFramework as a binary asset), NuGet and Go modules when those
+  drivers exist; each published by the release workflow from the
+  tagged build, signed where the registry supports it (npm provenance,
+  Sigstore for PyPI, GPG for Maven Central).
+- **D4 — the image on Docker Hub.**  The same multi-architecture image
+  `release.yml` already pushes to GitHub's registry, pushed to Docker
+  Hub too (an official-style `nucleus` repository: tags per version,
+  `latest`, the README with `docker run` lines), its SBOM and
+  provenance attached.
+- **D5 — native installers built in CI.**  Windows: an MSI (WiX), with
+  the service registered optionally and the PATH set; macOS: a signed
+  and notarized `.pkg` (and the Homebrew formula as now); Linux: the
+  `.deb` and `.rpm` (as now) and their repositories (apt, dnf) so
+  updates arrive with the system's; each installer installed and
+  uninstalled on its own platform in CI, as E1's packages are.
+  Installers for the monitoring pieces too: the Grafana dashboard
+  published to grafana.com and the alert rules packaged (a Helm chart
+  or `kube-prometheus` mixin) for Prometheus users.
+
+**Done when:** a release tag publishes every package, image and
+installer from CI without a manual step but the maintainer's signing
+keys; each installs and runs its first query on its platform in CI; the
+compatibility matrix is generated, tested and published with the
+release; and the drivers live where their languages' users look for
+them.
 
 ---
 
