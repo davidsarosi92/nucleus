@@ -288,6 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O4 |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns, a confidential-computing mode | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -9418,6 +9419,53 @@ Steps (planned 2026-11-14):
     byte, `nucleus restore --test`.  This meets the milestone's "the
     scheduled restore test catches a deliberately corrupted backup".
   - **Next steps:** O5 online `ALTER COLUMN … TYPE`.
+  - **O5 design (sketched 2026-11-15, not built).**  Today's
+    `alter_column_type` (`session.rs`) converts every row in one
+    transaction.  What the code offers: table rows are read through one
+    place (`large::read_some`) and written through `TableStorage`
+    (`storage.rs`, `large::write` / `insert` / `encode_inline`); rows are
+    positional (`alter.rs`: no dropped-column holes), so a column cannot
+    simply be swapped for a hidden one without rewriting rows.  The
+    shape considered — CockroachDB's online type change (a hidden
+    computed column backfilled, then swapped; the F1 schema-change
+    states) with a side keyspace instead of a hidden column:
+    1. *Converting* (a short transaction): the table's catalog records
+       the conversion (column, new type and modifiers, the `USING` text,
+       new index ids for the indexes on the column); from then writers
+       (`dml::Writer`) also put the converted value under a side prefix
+       keyed by the primary key, and the shadow indexes' entries — a
+       conversion error fails the writer's statement, as a check would;
+       a shadow unique index refuses duplicates as `CREATE UNIQUE INDEX
+       CONCURRENTLY` does.
+    2. *Backfill* in chunks of the primary key, each its own
+       serializable transaction (a concurrent write conflicts and the
+       chunk retries): side entries and shadow index entries for rows
+       without them; checks evaluated on the converted rows.  A failure
+       stops it: the side prefix and shadow indexes dropped, the
+       catalog's record removed — the table as before.
+    3. *Cutover* (a short transaction): the column's type is the new
+       one, the shadow indexes take the old ones' names, the old ones'
+       entries left for step 4.
+    4. *Rewrite* in chunks: each row's value replaced by its side entry
+       and the side entry deleted; until done, `read_some` takes a
+       row's value from the side entry when there is one; then the old
+       indexes' entries deleted in chunks (`check::check` tolerating
+       them meanwhile) and the record cleared.
+    Statement form: `ALTER TABLE … ALTER COLUMN … TYPE … CONCURRENTLY`
+    (not in a transaction block; it returns when done, others writing
+    throughout; inside a block the transactional form as now) — a
+    session dying midway leaves the record, which the maintenance
+    thread resumes or rolls back.  First cut refuses (falls back to the
+    transactional form with a message): primary-key columns (every key
+    changes: a shadow table, gh-ost's or pg_repack's way, would be
+    needed), foreign keys, generated columns and expression or method
+    indexes over the column, chunk and embedding columns, tables stored
+    as columns, partitioned tables; a `USING` that is not immutable.
+    Prior art to record when built: CockroachDB's online schema changes
+    and F1's paper (states, two versions at a time), gh-ost and
+    pt-online-schema-change (shadow table, cut-over), pg_repack,
+    PostgreSQL's `CREATE INDEX CONCURRENTLY`, MySQL's `ALGORITHM=INPLACE,
+    LOCK=NONE`.
 - **Health checks**: liveness and readiness endpoints for orchestrators
   (`/health/live`, `/health/ready` — ready only once recovery is done and
   the store is open), and `nucleus status` for people.
@@ -9593,6 +9641,141 @@ reporting is on; every listed input has a fuzz target that runs in CI
 and nucleus is in OSS-Fuzz; an audit's report and its fixes are
 published; and Elle finds no anomaly the documented isolation level
 forbids in nucleus's own histories.
+
+### §M14.30 — Encryption and key custody ⬜
+
+Planned 2026-11-15, after §M14.18 O5 (the order agreed: §M14.18 O5,
+then §M14.29 S5 and S3, then this; §M14.28 when needed).  Asked for:
+data hidden from whoever should not read it — with the keys held by the
+database, by its user, or by an external KMS — and, for serving AI
+models' users (memories of a model's users kept by a provider), data
+its operator cannot read: zero-knowledge where it can be, and as close
+to it as the features allow where it cannot.
+
+**Where it stands.**  Three keys, each a file outside the data
+directory: `--secrets-key` (secrets, §8.24), `--subject-keys` (each
+subject's rows in backups, destroyed by `FORGET`, §8.30), `--backup-key`
+(backups' parts and manifests, §M14.18 O3c).  ChaCha20-Poly1305,
+HMAC-SHA-256, SHA-256 and PBKDF2 in `nucleus-crypto`, written from the
+RFCs.  *Not there:* the data file, the WAL, spill and scratch files,
+column segments are in the clear on disk; no KMS; nothing the operator
+of a server cannot read.
+
+**Principles that bound it.**  The core stays dependency-free
+(principle 12): the key hierarchy and the ciphers are the core's, every
+KMS is a module (the AWS one reuses `modules/s3`'s Signature Version 4
+over `nucleus-http`).  Keys are never in the data directory or its
+backups.  A key's loss loses what it guards — said where a key is made,
+never hidden by an escrow the user did not ask for.
+
+**K1 — one key hierarchy (envelope encryption).**  A root key (KEK)
+wraps data keys (DEKs): the database's, the WAL's, the backups', the
+secrets', the subjects' pepper, a tenant's.  A `KeyProvider` trait in
+the core — `wrap(dek) -> blob`, `unwrap(blob) -> dek`, `id()`,
+`describe()` — with the root's custody the only difference between the
+three models:
+- *database-managed*: the root a file beside the data (as the three
+  files now; mode 0600, made at first use) — guards a stolen disk or
+  backup, not a compromised host;
+- *user-managed* (BYOK): a file, an environment variable or a
+  passphrase (PBKDF2 now; Argon2id written when needed) the user gives
+  at start — the database holds only wrapped keys;
+- *external KMS*: AWS KMS, Google Cloud KMS, Azure Key Vault, HashiCorp
+  Vault's Transit engine, a PKCS#11 HSM — modules; the root never
+  leaves the KMS, the DEKs are unwrapped at start and kept in memory
+  only (locked, zeroed when dropped); revoking the root at the KMS
+  crypto-shreds the whole database, and the KMS's own log audits every
+  unwrap.
+The three existing files become DEKs wrapped by the one root (read in
+their old form, rewritten wrapped): one key to keep instead of three.
+Rotation: a new root rewraps the DEKs (seconds); a new DEK re-encrypts
+in the background (K2's pages as they are rewritten, a backup chain at
+its next full one).  `nc_catalog.keys` lists ids, kinds, providers and
+ages — never a key.
+
+**K2 — encryption at rest.**  Every page of the data file sealed by an
+AEAD under the database's DEK: the nonce from the page's id and its
+birth (copy-on-write: a page is never rewritten in place, so a
+(page, birth) pair is never sealed twice), the page id as associated
+data (a page moved elsewhere does not open); the tag replaces the
+page's checksum — integrity and confidentiality in one pass.  The WAL's
+records sealed per record (LSN as nonce), spill and scratch files under
+a per-process key, column segments, index files and the embedding
+queue the same.  The cipher: ChaCha20-Poly1305 now; AES-256-GCM with
+the CPU's instructions (ARMv8 Crypto Extensions, AES-NI + PCLMULQDQ),
+written here behind a runtime check, since it is several times faster
+where the hardware has it — chosen per database, recorded in its
+header.  Measured against the unencrypted store on the benchmarks
+(`docs/benchmarks.md`): the target is under 10 % on bulk loads and
+scans.  Prior art: PostgreSQL's TDE proposals (Cybertec's
+`pg_tde`, Percona's, the per-relation keys of the community patch),
+SQL Server's and Oracle's TDE, MySQL InnoDB's tablespace keys wrapped
+by a keyring plugin, SQLCipher's per-page AEAD with the page number in
+the nonce, CockroachDB's encryption at rest (store keys rotated, data
+keys per file), RocksDB's `EncryptedEnv`.
+
+**K3 — KMS modules.**  `modules/aws-kms` first (SigV4 is written),
+then Google Cloud KMS, Azure Key Vault, Vault Transit, PKCS#11; each
+tested against the provider's local emulator or a real test account in
+CI where one is free (LocalStack's KMS, Vault in dev mode,
+SoftHSM2).
+
+**K4 — keys per tenant and per user, released for a session.**  The
+subject keys of §M14.24 extended from backups to live data: a tenant's
+or a user's rows sealed under their own DEK, so `FORGET` and a tenant's
+departure are a key destroyed (crypto-shredding, NIST SP 800-88), live
+data included.  A user's DEK may be wrapped by a key only the user
+holds — derived from a passkey (WebAuthn's PRF extension) or a device
+key — and unwrapped only while the user's session presents it: at rest
+the operator cannot read that user's data ("zero access at rest");
+while the session runs the server reads it in memory to search and
+rank.  Indexes over such rows are the open problem: per-tenant
+partitions (a partition's indexes under its tenant's key) are the first
+answer, measured before more.  Prior art: Proton's and 1Password's
+user-held keys, Apple's Advanced Data Protection, Signal's PIN-derived
+keys, the crypto-shredding already taken in R6.
+
+**K5 — client-side encrypted columns (zero-knowledge where it fits).**
+A column the drivers encrypt and decrypt: the server stores ciphertext
+and never holds the key.  Equality through a blind index (a keyed HMAC
+of the value beside it — the frequency of values leaks, documented);
+nothing else is queryable, by design.  For the drivers of every
+language (§M10), one format, tested across them.  Prior art: SQL
+Server's Always Encrypted (deterministic and randomized encryption,
+column master keys in a KMS), MongoDB's Queryable Encryption
+(structured encryption for equality and ranges), CipherStash (encrypted
+search indexes), CryptDB's onion layers (the study of what each layer
+leaks), order-revealing encryption (not taken: its leakage is too
+large for what it buys).  Embeddings are not hidden by this: a vector
+gives away much of its text (inversion attacks, vec2text) — a column
+whose vector the server computes is not zero-knowledge, and is said so.
+
+**K6 — a confidential-computing mode.**  For full features with an
+operator who cannot look: the server runs inside an attested trusted
+execution environment (AMD SEV-SNP, Intel TDX, AWS Nitro Enclaves); the
+KMS releases the root only to the measured binary (the attestation
+document checked by the KMS's key policy), so the operator, the host
+and the cloud see only ciphertext — at rest (K2), in transit (TLS
+terminated inside), in use (the enclave's encrypted memory).  The
+binary reproducible, its measurement published per release, so a
+client can check what it talks to.  Prior art: Apple's Private Cloud
+Compute (attested nodes, published measurements), Azure SQL's Always
+Encrypted with secure enclaves, Signal's SGX contact discovery, AWS
+KMS's Nitro attestation conditions.  This, with K4 and K5, is the
+answer for keeping memories of an AI model's users that its provider
+cannot read.
+
+**Done when:** each of the three custody models runs the test suite
+and the crash tests with every file encrypted (no plaintext of a
+planted value found on disk, in the WAL, in spill files or backups —
+`nucleus_kv::scan` searching them); a root rotated and a DEK
+re-encrypted online; a KMS revocation makes the database unreadable;
+`modules/aws-kms` passes against LocalStack in CI; the overhead is
+measured and recorded; a tenant's key destroyed leaves none of its
+live rows readable; a client-side encrypted column round-trips through
+every driver with the server never seeing the plaintext; and the
+confidential mode's key release is refused to a binary whose
+measurement differs.
 
 ---
 
