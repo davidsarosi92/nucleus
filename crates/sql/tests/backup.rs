@@ -104,11 +104,20 @@ fn files(p: &Arc<SimPlatform>, dir: &str) -> Vec<u8> {
     let fs = p.fs();
     let mut all = Vec::new();
     for name in fs.list_dir(Path::new(dir)).unwrap() {
-        let path = Path::new(dir).join(name);
+        let path = Path::new(dir).join(&name);
         match fs.open(&path, OpenMode::ReadOnly) {
             Ok(f) => {
                 let mut b = vec![0u8; f.size().unwrap() as usize];
                 f.read_exact_at(&mut b, 0).unwrap();
+                // A part: compressed (what is in the clear is looked
+                // for in what it holds).
+                if name.to_str().unwrap().starts_with("part-") {
+                    let n = u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
+                    let mut out = Vec::new();
+                    nucleus_kv::lz::decompress(&b[4..], n, &mut out).unwrap();
+                    all.extend_from_slice(&b);
+                    b = out;
+                }
                 all.extend(b);
             }
             // A directory: a backup of the repository.
@@ -157,7 +166,7 @@ fn a_restore_is_the_database_as_the_backup_saw_it() {
     // Writes after the backup are not in it.
     s.execute("INSERT INTO cities VALUES ('Győr', 130000)")
         .unwrap();
-    assert_eq!(f[6..], ["full", "000001-full"], "{got:?}");
+    assert_eq!(f[6..], ["full", "000001-full", "0"], "{got:?}");
     // Refused: in a block, by a role not an administrator, a relative
     // path, a directory holding something else.
     assert_eq!(code(&mut s, "BEGIN; BACKUP TO '/backups/two'"), "25001");
@@ -302,7 +311,7 @@ fn backed_up(s: &mut Session, sql: &str) -> std::collections::HashMap<&'static s
     let got = texts(s, sql);
     let f: Vec<String> = got[0].split(' ').map(str::to_string).collect();
     [
-        "commit", "entries", "sealed", "omitted", "bytes", "deleted", "kind", "backup",
+        "commit", "entries", "sealed", "omitted", "bytes", "deleted", "kind", "backup", "removed",
     ]
     .into_iter()
     .zip(f)
@@ -498,4 +507,172 @@ fn an_unfinished_backup_is_skipped() {
         texts(&mut t, "SELECT id, v FROM t ORDER BY id"),
         ["2 two", "3 three"]
     );
+}
+
+/// Reads a file of the simulated platform.
+fn read(p: &Arc<SimPlatform>, path: &str) -> Vec<u8> {
+    let f = p.fs().open(Path::new(path), OpenMode::ReadOnly).unwrap();
+    let mut b = vec![0u8; f.size().unwrap() as usize];
+    f.read_exact_at(&mut b, 0).unwrap();
+    b
+}
+
+/// Writes a file of the simulated platform anew.
+fn write(p: &Arc<SimPlatform>, path: &str, b: &[u8]) {
+    let fs = p.fs();
+    let _ = fs.remove_file(Path::new(path));
+    fs.open(Path::new(path), OpenMode::CreateNew)
+        .unwrap()
+        .write_all_at(b, 0)
+        .unwrap();
+}
+
+/// PLAN.md §M14.18 O3c: with a key, a backup's parts are encrypted and
+/// its manifest authenticated — nothing of the database in its files; a
+/// restore needs the key, refuses another, an altered manifest, and a
+/// backup made without the key; a new key starts a new chain.
+#[test]
+fn an_encrypted_backup_needs_its_key() {
+    use nucleus_sql::backup::{BackupKey, Until, restore_to, set_backup_key};
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    struct Unset;
+    impl Drop for Unset {
+        fn drop(&mut self) {
+            set_backup_key(None);
+        }
+    }
+    let _unset = Unset;
+    let p = Arc::new(SimPlatform::new(6));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute(
+        "CREATE TABLE t (id int PRIMARY KEY, v text); \
+         INSERT INTO t SELECT g, 'the town of Szeged ' || g FROM generate_series(1, 500) g",
+    )
+    .unwrap();
+    // Unencrypted first; a key then starts a new chain.
+    backed_up(&mut s, "BACKUP TO '/repo'");
+    let k1 = BackupKey::parse(&"1f".repeat(32)).unwrap();
+    assert!(BackupKey::parse("12ab").is_err());
+    set_backup_key(Some(k1.clone()));
+    let b = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(
+        (b["kind"].as_str(), b["backup"].as_str()),
+        ("full", "000002-full")
+    );
+    s.execute("INSERT INTO t VALUES (1000, 'Győr by the river')")
+        .unwrap();
+    let b = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(b["kind"], "incremental");
+    for dir in ["/repo/000002-full", "/repo/000003-incr"] {
+        let raw = read(&p, &format!("{dir}/part-000000"));
+        assert!(!holds(&raw, "Szeged") && !holds(&raw, "Győr"), "{dir}");
+        let m = String::from_utf8(read(&p, &format!("{dir}/manifest"))).unwrap();
+        assert!(
+            m.contains(&format!("encryption chacha20-poly1305 {}\n", k1.id())),
+            "{m}"
+        );
+        assert!(m.contains("\nmac "), "{m}");
+    }
+    let want = texts(&mut s, "SELECT count(*), max(v) FROM t");
+    let registry = s.registry().clone();
+    let restore = |dir: &str, until: Until| {
+        let r = open(&p, dir);
+        restore_to(&r, &registry, "/repo", &until).map(|_| r)
+    };
+    // With the key: the database.
+    let r = restore("/r1", Until::Latest).unwrap();
+    assert_eq!(
+        texts(&mut Session::new(r), "SELECT count(*), max(v) FROM t"),
+        want
+    );
+    // With the key, the unencrypted backup is refused; without, it restores.
+    let e = restore("/r2", Until::Name("000001-full".into()))
+        .err()
+        .unwrap();
+    assert!(e.message.contains("not encrypted"), "{e:?}");
+    set_backup_key(None);
+    restore("/r3", Until::Name("000001-full".into())).unwrap();
+    let e = restore("/r4", Until::Latest).err().unwrap();
+    assert!(e.message.contains(&format!("key {}", k1.id())), "{e:?}");
+    // Another key.
+    let k2 = BackupKey::parse(&"2e".repeat(32)).unwrap();
+    set_backup_key(Some(k2.clone()));
+    let e = restore("/r5", Until::Latest).err().unwrap();
+    assert!(e.message.contains("not this one"), "{e:?}");
+    // A backup with it: a new chain (the last was made with the other).
+    let b = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(
+        (b["kind"].as_str(), b["backup"].as_str()),
+        ("full", "000004-full")
+    );
+    // An altered manifest (its commit), with the right key.
+    set_backup_key(Some(k1));
+    let path = "/repo/000003-incr/manifest";
+    let m = String::from_utf8(read(&p, path)).unwrap();
+    let altered = m.replacen("\ncommit ", "\ncommit 1", 1);
+    write(&p, path, altered.as_bytes());
+    let e = restore("/r6", Until::Name("000003-incr".into()))
+        .err()
+        .unwrap();
+    assert!(e.message.contains("MAC"), "{e:?}");
+    write(&p, path, m.as_bytes());
+    restore("/r7", Until::Name("000003-incr".into())).unwrap();
+}
+
+/// PLAN.md §M14.18 O3c: `KEEP n` keeps the last n full backups and those
+/// after them, the older chains removed whole; each backup counted in the
+/// metrics.
+#[test]
+fn keep_removes_the_older_chains() {
+    use nucleus_sql::metrics::{BACKUP_FAILURES, BACKUPS};
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(7));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute("CREATE TABLE t (id int PRIMARY KEY)").unwrap();
+    let made = BACKUPS.get();
+    for (i, sql) in [
+        "BACKUP TO '/repo'",
+        "BACKUP TO '/repo'",
+        "BACKUP FULL TO '/repo'",
+        "BACKUP TO '/repo' KEEP 2",
+        "BACKUP FULL TO '/repo' KEEP 2",
+    ]
+    .iter()
+    .enumerate()
+    {
+        s.execute(&format!("INSERT INTO t VALUES ({i})")).unwrap();
+        let b = backed_up(&mut s, sql);
+        let removed = if i == 4 { "2" } else { "0" };
+        assert_eq!(b["removed"], removed, "{sql}: {b:?}");
+    }
+    assert_eq!(BACKUPS.get(), made + 5);
+    let left: Vec<String> = p
+        .fs()
+        .list_dir(Path::new("/repo"))
+        .unwrap()
+        .into_iter()
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["000003-full", "000004-incr", "000005-full"]);
+    let restored = open(&p, "/restored");
+    nucleus_sql::backup::restore_to(
+        &restored,
+        s.registry(),
+        "/repo",
+        &nucleus_sql::backup::Until::Name("000004-incr".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        texts(&mut Session::new(restored), "SELECT count(*) FROM t"),
+        ["4"]
+    );
+    // A failure counted.
+    let failed = BACKUP_FAILURES.get();
+    assert_eq!(code(&mut s, "BACKUP TO 'relative'"), "22023");
+    assert_eq!(BACKUP_FAILURES.get(), failed + 1);
+    assert_eq!(code(&mut s, "BACKUP TO '/repo' KEEP 0"), "42601");
 }

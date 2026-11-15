@@ -67,7 +67,9 @@ usage:
                      [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>] [--subject-keys <file>]
-                     [--history <duration>]
+                     [--history <duration>] [--backup-key <file>]
+                     [--backup-to <repository> --backup-every <duration>
+                      [--backup-full-every <n>] [--backup-keep <n>]]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -111,7 +113,16 @@ usage:
                                     SUBJECT (default <dir>.subject-keys); --history keeps every
                                     snapshot of that long ago readable (7d,
                                     12h, '30 minutes'; AS OF TIMESTAMP;
-                                    default none)
+                                    default none); --backup-to backs up
+                                    each --backup-every (1d, 6h) to a
+                                    repository (BACKUP TO's), each
+                                    --backup-full-every-th backup (default
+                                    7) a full one, the others incremental,
+                                    the last --backup-keep full ones kept
+                                    with those after them; --backup-key the
+                                    file of the key (64 hex digits: openssl
+                                    rand -hex 32; or NUCLEUS_BACKUP_KEY_FILE)
+                                    backups are encrypted with
   nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>]
                  | list | drop <name> | reset <name>
                                     a local database's branches: a copy made in
@@ -122,7 +133,7 @@ usage:
                                     was then, within the history the server
                                     keeps (its --history, given again)
   nucleus restore <repository> <dir> [--at <commit|backup|time>]
-                 [--subject-keys <file>]
+                 [--subject-keys <file>] [--backup-key <file>]
                                     a new database in <dir> from the backups
                                     BACKUP TO '<repository>' wrote: the last,
                                     or the last by --at (a commit, a backup's
@@ -136,7 +147,9 @@ usage:
                                     <dir>.subject-keys); <repository> may be
                                     s3://bucket/prefix (AWS_ACCESS_KEY_ID,
                                     AWS_SECRET_ACCESS_KEY, AWS_REGION,
-                                    AWS_ENDPOINT_URL for MinIO and others)
+                                    AWS_ENDPOINT_URL for MinIO and others);
+                                    encrypted backups need --backup-key (or
+                                    NUCLEUS_BACKUP_KEY_FILE)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

@@ -802,6 +802,57 @@
           "legendFormat": "tokens/s"
         }
       ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Backups",
+      "description": "Time since the last backup, and how long backups take (BACKUP TO, nucleus server --backup-every); NucleusBackupOverdue and NucleusBackupFailing alert on them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max(nucleus_backup_last_success_timestamp_seconds{job=\"$job\", instance=~\"$instance\"} > 0)",
+          "legendFormat": "since the last"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(nucleus_backup_duration_seconds_sum{job=\"$job\", instance=~\"$instance\"}[$__rate_interval])) / sum(rate(nucleus_backup_duration_seconds_count{job=\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "duration"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(increase(nucleus_backup_failures_total{job=\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "failures"
+        }
+      ]
     }
   ]
 }

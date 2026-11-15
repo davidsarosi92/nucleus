@@ -716,6 +716,116 @@ fn sample(text: &str, series: &str) -> f64 {
         .unwrap()
 }
 
+/// `nucleus server --backup-to … --backup-every …` (PLAN.md §M14.18
+/// O3c): backups on a schedule — every second one full, the last full
+/// one kept with those after it, encrypted with `--backup-key` — counted
+/// in the metrics; `nucleus restore` needs the key.
+#[test]
+fn scheduled_encrypted_backups() {
+    use std::io::BufRead;
+
+    let dir = temp_dir("scheduled");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (db, repo, key) = (dir.join("db"), dir.join("repo"), dir.join("backup.key"));
+    std::fs::write(&key, format!("{}\n", "ab".repeat(32))).unwrap();
+    let (d, r, k) = (
+        db.to_str().unwrap(),
+        repo.to_str().unwrap(),
+        key.to_str().unwrap(),
+    );
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args([
+                "server",
+                d,
+                "--listen",
+                "127.0.0.1:0",
+                "--metrics",
+                "127.0.0.1:0",
+                "--backup-to",
+                r,
+                "--backup-every",
+                "1s",
+                "--backup-full-every",
+                "2",
+                "--backup-keep",
+                "1",
+                "--backup-key",
+                k,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufReader::new(server.0.stderr.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let addrs: Vec<&str> = first
+        .split_whitespace()
+        .filter(|w| w.starts_with("127.0.0.1:"))
+        .collect();
+    let (addr, metrics) = (addrs[0].to_string(), addrs[1].to_string());
+    let (ok, out) = ncsql(
+        &["-h", &addr],
+        "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);\nINSERT INTO t SELECT g, 'a secret value' FROM generate_series(1, 100) g;\n",
+    );
+    assert!(ok, "{out}");
+    let made = || {
+        sample(
+            &http_get(&metrics, "/metrics", None).1,
+            "nucleus_backups_total",
+        )
+    };
+    let after_insert = made();
+    let mut waited = 0;
+    while made() < (after_insert + 2.0).max(4.0) {
+        assert!(waited < 600, "{}", http_get(&metrics, "/metrics", None).1);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        waited += 1;
+    }
+    let (_, m) = http_get(&metrics, "/metrics", None);
+    assert_eq!(sample(&m, "nucleus_backup_interval_seconds"), 1.0, "{m}");
+    assert_eq!(sample(&m, "nucleus_backup_failing"), 0.0, "{m}");
+    assert_eq!(sample(&m, "nucleus_backup_failures_total"), 0.0, "{m}");
+    assert!(
+        sample(&m, "nucleus_backup_last_success_timestamp_seconds") > 1.7e9,
+        "{m}"
+    );
+    drop(server);
+    // The older chains removed: the first full backup is gone.
+    let left: Vec<String> = std::fs::read_dir(&repo)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!left.iter().any(|n| n == "000001-full"), "{left:?}");
+    assert!(left.len() <= 3, "{left:?}");
+    // Nothing of the rows in the clear.
+    for b in &left {
+        for f in std::fs::read_dir(repo.join(b)).unwrap() {
+            let bytes = std::fs::read(f.unwrap().path()).unwrap();
+            assert!(!bytes.windows(14).any(|w| w == b"a secret value"));
+        }
+    }
+    let out = dir.join("restored");
+    let o = out.to_str().unwrap();
+    let (ok, text) = nucleus(&["restore", r, o], "");
+    assert!(!ok && text.contains("encrypted"), "{text}");
+    let (ok, text) = nucleus(&["restore", r, o, "--backup-key", k], "");
+    assert!(ok, "{text}");
+    let (ok, text) = nucleus(&["sql", o, "-c", "SELECT count(*) FROM t"], "");
+    assert!(ok && text.contains("100"), "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `nucleus server --metrics` (PLAN.md §M14.18): Prometheus's `GET
 /// /metrics` moving with a workload, the same numbers in
 /// `nc_catalog.metrics`, and the health checks.

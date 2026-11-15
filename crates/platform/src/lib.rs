@@ -157,6 +157,15 @@ pub trait FileSystem: Send + Sync {
     /// Creates the directory `path` and any missing ancestors.
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
 
+    /// Removes the empty directory `path`.  Durable after `sync_dir` of
+    /// its parent.
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{}: this file system removes no directory", path.display()),
+        ))
+    }
+
     /// The names of the entries in the directory `path`, sorted.
     fn list_dir(&self, path: &Path) -> io::Result<Vec<OsString>>;
 

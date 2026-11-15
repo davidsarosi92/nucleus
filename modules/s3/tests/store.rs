@@ -258,12 +258,15 @@ fn backups_kept_in_the_store_restore() {
     )
     .unwrap();
     let first = rows(&mut s, "BACKUP TO 's3://bkt/db'");
-    assert!(first[0].ends_with("full 000001-full"), "{first:?}");
+    assert!(first[0].ends_with("full 000001-full 0"), "{first:?}");
     let want_first = rows(&mut s, "SELECT count(*), sum(id) FROM t");
     s.execute("DELETE FROM t WHERE id > 4000; UPDATE t SET v = 'x' WHERE id < 10")
         .unwrap();
     let second = rows(&mut s, "BACKUP TO 's3://bkt/db'");
-    assert!(second[0].ends_with("incremental 000002-incr"), "{second:?}");
+    assert!(
+        second[0].ends_with("incremental 000002-incr 0"),
+        "{second:?}"
+    );
     let want = rows(
         &mut s,
         "SELECT count(*), sum(id), sum(CASE WHEN v = 'x' THEN 1 ELSE 0 END) FROM t",

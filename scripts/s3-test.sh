@@ -2,7 +2,8 @@
 # Backups in object storage against a real S3 server (PLAN.md §M14.18
 # O3b): rclone's `serve s3` (it checks Signature Version 4 as S3 does),
 # a full backup and an incremental one written there by `BACKUP TO
-# 's3://…'`, restored from there by `nucleus restore`, to each point.
+# 's3://…'`, restored from there by `nucleus restore`, to each point;
+# then encrypted backups (O3c), the older removed by KEEP.
 #
 #   scripts/s3-test.sh <nucleus binary>
 #
@@ -60,4 +61,21 @@ test "$(count "$work/r2")" = "$first" || fail "the first restored holds $(count 
 if AWS_SECRET_ACCESS_KEY=wrong "$nucleus" restore s3://bkt/db "$work/r3" >>"$work/restore.log" 2>&1; then
   fail "a wrong secret was taken"
 fi
-echo "the s3 test passed: $first then $last, restored from the store"
+
+echo "== encrypted, kept: a backup key, KEEP 1"
+openssl rand -hex 32 >"$work/backup.key"
+export NUCLEUS_BACKUP_KEY_FILE="$work/backup.key"
+sql "BACKUP TO 's3://bkt/enc'"
+sql "BACKUP FULL TO 's3://bkt/enc' KEEP 1"
+unset NUCLEUS_BACKUP_KEY_FILE
+grep -q "secret\|v1999" -r "$work/store/bkt/enc" && fail "rows in the clear in the store"
+# (Backups whose objects are left; a directory emptied may stay.)
+(cd "$work/store/bkt/enc" && find . -type f | sed 's|^\./||; s|/.*||' | sort -u) >"$work/objects.log"
+test "$(cat "$work/objects.log")" = "000002-full" || fail "KEEP 1 left $(cat "$work/objects.log")"
+if "$nucleus" restore s3://bkt/enc "$work/r4" >>"$work/restore.log" 2>&1; then
+  fail "an encrypted backup restored without its key"
+fi
+"$nucleus" restore s3://bkt/enc "$work/r5" --backup-key "$work/backup.key" >>"$work/restore.log" 2>&1 ||
+  fail "the encrypted restore failed"
+test "$(count "$work/r5")" = "$last" || fail "the encrypted restore holds $(count "$work/r5"), not $last"
+echo "the s3 test passed: $first then $last, restored from the store, encrypted too"

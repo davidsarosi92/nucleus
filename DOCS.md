@@ -1241,7 +1241,7 @@ nucleus kv <dir>              # shell: the same commands, plus begin/commit/roll
 nucleus sql [<dir> | :memory:] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--password <pw>] [-c <sql>]
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
-nucleus restore <repository> <dir> [--at <commit|backup|time>] [--subject-keys <file>]   # §8.30
+nucleus restore <repository> <dir> [--at <commit|backup|time>] [--subject-keys <file>] [--backup-key <file>]   # §8.30
 nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
@@ -5128,7 +5128,7 @@ end use; statement statistics keep normalized texts, constants as
 
 ### 8.30 Backups and subjects' keys (`backup`, `subject_keys`, §M14.24 R6)
 
-**`BACKUP [FULL] TO 'repo'`** (an administrator's; not in a
+**`BACKUP [FULL] TO 'repo' [KEEP n]`** (an administrator's; not in a
 transaction block, `25001`; an absolute path on the server or a URL of a
 module's object store, else `22023`) writes the database as one snapshot sees it, while others go on
 writing, into a repository of backups: a new or empty directory, or one
@@ -5141,8 +5141,10 @@ the keys deleted.  `BACKUP TO` makes an incremental one when it can (the
 repository's last backup finished, of the same branch, its kept branch
 still there and unchanged), else a full one; `FULL` always a full one,
 starting a new chain.  It returns `commit` (the snapshot: `AS OF
-COMMIT` it reads the same), `entries`, `sealed`, `omitted`, `bytes`,
-`deleted`, `kind` (`full`, `incremental`) and `backup` (its directory).
+COMMIT` it reads the same), `entries`, `sealed`, `omitted`, `bytes`
+(the parts', compressed), `deleted`, `kind` (`full`, `incremental`),
+`backup` (its directory) and `removed` (the older backups `KEEP`
+removed).
 
 The snapshot is a branch (§8.26, `Kv::create_branch`: a checkpoint, then
 a copy in constant time) named `nc-backup-<repository hash>-<number>`,
@@ -5202,9 +5204,56 @@ since: left out, its rows' entries are too) — and a `manifest` written
 last (`manifest.tmp`, synced, renamed, the directory synced): `nucleus
 backup 2`, the kind, the backup an incremental one follows (`base`),
 the branch kept, the branch backed up, the commit, the time, the counts,
-the tables that had statistics, and each part's length and SHA-256.  No
-manifest, no backup (a directory without one is skipped, its number not
-reused).
+the tables that had statistics, `compression lz4-block`, and each
+part's length and SHA-256 as stored.  No manifest, no backup (a
+directory without one is skipped, its number not reused).
+
+**Compression and encryption** (§M14.18 O3c).  A part is stored as its
+entries' length (`u32`) and them compressed in LZ4's block format (the
+storage's own compressor, `nucleus_kv::lz`, §M14.20 V5): about a third
+of the bytes on rows of text, and faster to write and read than the
+bytes it saves (docs/benchmarks.md).  With a **backup key** — 32
+bytes, `nucleus server --backup-key FILE` (or `NUCLEUS_BACKUP_KEY_FILE`;
+`nucleus sql <dir>` and `nucleus restore` read the same), the file
+holding 64 hexadecimal digits (`openssl rand -hex 32`),
+`backup::set_backup_key` in an application — each part is then sealed
+by ChaCha20-Poly1305 under it, its nonce (a random base a backup,
+counted up) first and its path in the repository (`000002-incr/
+part-000000`) authenticated with it, and the manifest names the key by
+its id (`encryption chacha20-poly1305 <id>`: SHA-256 of `nucleus backup
+key` and the key, its first 8 bytes) and ends with `mac`, HMAC-SHA-256
+under the key of all before it: the parts' hashes are in it, so the
+whole backup is authenticated.  Nothing of the database is then in the
+repository in the clear, whatever store keeps it.  A restore with no
+key refuses an encrypted backup, with another key refuses it by id, and
+with a key refuses an unencrypted one — whoever can write to the
+repository could otherwise slip one in (`22023`); a manifest altered,
+its MAC not matching: `22000`; a part that does not decrypt or
+decompress: `22000`.  A backup continues a chain only made with the
+same key (or both without): a new key starts a new chain.  The key must
+be kept apart from the repository — lost, its backups are; the
+subjects' sealing (below) is independent of it.
+
+**Retention and schedule** (§M14.18 O3c).  `KEEP n` (`backup::prune`)
+removes, once the backup is made, the repository's backups older than
+its last `n` full ones — whole chains, oldest first, each backup's
+manifest before its parts (a removal cut short leaves no half backup:
+it is skipped as unfinished), a directory left empty removed
+(`FileSystem::remove_dir`).  `nucleus server --backup-to <repository>
+--backup-every <duration> [--backup-full-every <n>] [--backup-keep
+<n>]` (`nucleus_server::backups::start`) backs up on a thread of its
+own: at the start if the repository's last backup is older than the
+interval, then each interval after the last; every `n`-th backup a full
+one (default 7: with `1d`, a weekly full one and daily incremental
+ones), a failed one tried again within five minutes, each logged.  Every
+backup — `BACKUP` or scheduled — is counted in the metrics:
+`nucleus_backups_total`, `nucleus_backup_failures_total`,
+`nucleus_backup_failing` (1 while the last failed),
+`nucleus_backup_last_success_timestamp_seconds` (the schedule reads the
+repository's last at its start), `nucleus_backup_last_bytes`,
+`nucleus_backup_duration_seconds`, and the schedule's
+`nucleus_backup_interval_seconds` — the alerts `NucleusBackupOverdue`
+and `NucleusBackupFailing` (§8.39) watch them.
 
 **What is sealed.**  An entry about a subject (§8.29): a row of a table
 with subject columns (a partition's are its parent's) whose subject
@@ -5253,7 +5302,8 @@ overwritten; a key management service is a module's to add.
 
 **Restore** (`backup::restore_to(kv, registry, repo, until)`;
 `nucleus restore <repository | s3://…> <dir> [--at <commit|backup|time>]
-[--subject-keys FILE]`, keys by default `<dir>.subject-keys`) makes a
+[--subject-keys FILE] [--backup-key FILE]`, keys by default
+`<dir>.subject-keys`) makes a
 new database (one holding data: `55000`) of the repository's last backup
 — or, by `--at`, the last of commit `n` or before, the one in directory
 `000003-incr`, or the last made by a time (`'2026-11-15 14:05:00+01'`;
@@ -5262,7 +5312,9 @@ backup's full one and the incremental ones
 after it, each following the one before (one missing or unfinished:
 `22000`).  A directory holding a manifest of its own (a backup of the
 format before repositories, `nucleus backup 1`) is restored by itself.
-Each part is checked against its length and SHA-256 (`22000`); the
+Each manifest is checked against the backup key (above); each part
+against its length and SHA-256 (`22000`), then decrypted and
+decompressed; the
 entries are written in transactions of about 4 MiB, backup after backup
 — a sealed one opened with its keys (one that does not open: `22000`,
 the backup changed or another database's keys), left out when one of
@@ -5281,19 +5333,24 @@ fine as the backups are frequent — incremental ones cost what changed,
 so they can be taken often.  Not the WAL archived: the log holds every
 entry in the clear, and a subject's rows in an archived log could not
 be forgotten (§M14.24), while a backup's are sealed.  Not yet
-(§M14.18): compression and encryption of the backups,
-their retention, scheduled backups, scheduled restore tests.  Tests:
+(§M14.18 O4): scheduled restore tests.  Tests:
 `tests/backup.rs` (a restore is the database as the backup saw it, its
 indexes used; a backup holds no subject's value in the clear; a restore
 after `FORGET` leaves the subject out, the audit chain intact, a later
 backup's new rows of the subject restored; incremental backups — after
 the database is opened again too — restored to each point, a subject's
-row's delete sealed, `FORGET` dropping the kept branch), `storage
+row's delete sealed, `FORGET` dropping the kept branch; an encrypted
+backup needing its key, refusing another, an altered manifest and an
+unencrypted backup, a new key starting a new chain; `KEEP` removing the
+older chains, the metrics counting backups and failures), `storage
 tests/branch.rs` (the ranges two branches differ in hold every
 difference, a base written since too), `kv tests/contract.rs`
 (`changed_since` holds every change: deletes of runs, a transaction
 running across the branch point, spilled ones), the CLI's
-`backups_restored_to_a_point`; `modules/s3` (the signature examples;
+`backups_restored_to_a_point` and `scheduled_encrypted_backups` (a
+server backing up each second, a full one every second backup, one
+chain kept, nothing of the rows in the clear, the metrics, `nucleus
+restore` with and without the key); `modules/s3` (the signature examples;
 a stand-in store checking every signature, listing in pages, a full and
 an incremental backup restored from it) and `scripts/s3-test.sh`, CI's
 **backups in object storage (S3)**, against rclone's real S3 server.
@@ -6020,7 +6077,7 @@ against the commit before, within the runs' spread
 rules, for a scrape job named `nucleus`; `monitoring/grafana/nucleus.json`
 a dashboard of the same metrics (readiness, sessions, statements and
 their p50/p99, transactions, rows, the page cache, the WAL, the data
-file, logins, models).  `monitoring/prometheus/nucleus.rules.test.yml`
+file, logins, models, backups).  `monitoring/prometheus/nucleus.rules.test.yml`
 provokes each alert with series made for it in `promtool test rules`
 (quiet before its time, firing after, and none on healthy numbers), and
 `monitoring/test.sh` checks the rest against the real tools: every
@@ -6044,9 +6101,11 @@ metrics: nucleus does not measure the disk.
 | `NucleusRoleLocked` | a role was locked after failed logins | As above; the lock ends by itself (`login_lock_time`). |
 | `NucleusStatementErrors` | over 5% of statements fail (and > 0.1/s) for 10 min | Read the errors' codes in the clients' logs; `nc_catalog.statements` counts `errors` per statement. |
 | `NucleusSlowStatements` | p99 over a second for 15 min | `nc_catalog.statements` by `mean_ms`, then `EXPLAIN ANALYZE` and `nc_catalog.index_advice`. |
+| `NucleusBackupOverdue` (critical) | a schedule's last backup older than two intervals, for 10 min | The server's log says why each backup failed (`backup to … failed`); `NucleusBackupFailing` usually fired first.  Is the repository reachable and writable (disk full, credentials expired, a bucket's policy)?  A backup by hand (`BACKUP TO`) shows the error at once. |
+| `NucleusBackupFailing` | the last backup failed, for 15 min | As above; the schedule tries again within five minutes.  An encrypted repository needs the same key (a new one starts a new chain, never fails); `22023` from a key mismatch is a restore's, not a backup's. |
 
-Backups' and restore tests' alerts come with them (O3, O4), replication
-lag's with §M17.5.
+Restore tests' alerts come with them (O4), replication lag's with
+§M17.5.
 
 ## 9. Server (`nucleus-server`)
 
@@ -6058,10 +6117,17 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>]
                      [--subject-keys <file>] [--history <duration>]
+                     [--backup-key <file>] [--backup-to <repository>
+                      --backup-every <duration> [--backup-full-every <n>]
+                      [--backup-keep <n>]]
 ```
 
 `--subject-keys` names the file of subjects' keys (§8.30; default
-`<dir>.subject-keys`).
+`<dir>.subject-keys`).  `--backup-key` the file of the key backups are
+encrypted with (or `NUCLEUS_BACKUP_KEY_FILE`); `--backup-to` and
+`--backup-every` back up on a schedule, every `--backup-full-every`-th
+backup (default 7) a full one, the last `--backup-keep` full ones kept
+(§8.30).
 
 `--metrics` serves Prometheus's `GET /metrics` and the health checks
 `/health/live`, `/health/ready` (default `127.0.0.1:20037`), `--otlp`
@@ -7072,6 +7138,15 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-15 — §M14.18 O3c, backups compressed, encrypted, kept and
+  scheduled:** parts in LZ4's block format; with a backup key
+  (`--backup-key`, `NUCLEUS_BACKUP_KEY_FILE`) sealed by
+  ChaCha20-Poly1305 and the manifest authenticated by HMAC; `BACKUP …
+  KEEP n` (`backup::prune`), `nucleus server --backup-to …
+  --backup-every …` (`nucleus_server::backups`); the `nucleus_backup_*`
+  metrics, the alerts `NucleusBackupOverdue` and `NucleusBackupFailing`,
+  a dashboard panel; `FileSystem::remove_dir` (§8.30, §8.39).
 
 - **2026-11-15 — §M14.18 O3b, backups in object storage:**
   `backup::Target` (a repository's files; a directory built in,

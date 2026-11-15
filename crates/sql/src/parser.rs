@@ -1100,7 +1100,18 @@ impl<'a> Parser<'a> {
                 let full = self.eat_kw("full");
                 self.expect_kw("to")?;
                 let to = self.string()?;
-                Ok(Statement::Backup { to, full })
+                let keep = if self.eat_kw("keep") {
+                    match self.next() {
+                        Some(Token::Number(n)) => match n.parse::<u64>() {
+                            Ok(n) if n > 0 => Some(n),
+                            _ => return Err(Error::syntax("KEEP takes a whole number above 0")),
+                        },
+                        _ => return Err(Error::syntax("KEEP takes a whole number above 0")),
+                    }
+                } else {
+                    None
+                };
+                Ok(Statement::Backup { to, full, keep })
             }
             "vacuum" => {
                 self.pos += 1;

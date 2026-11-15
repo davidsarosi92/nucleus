@@ -286,7 +286,7 @@ are marked ✅.
 | | M14.15 | JSON type and functions | ✅ (2026-11-14) study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
-| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O3b |
+| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O3c |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9351,10 +9351,45 @@ Steps (planned 2026-11-14):
     answers 410).  Not taken: multipart uploads (a part is about 16 MiB,
     a `PUT` takes 5 GiB); GCS and Azure Blob (added the same way, when
     wanted).
-  - **Next steps:** O3c compression,
-    encryption of the parts, retention (keep N chains), scheduled
-    backups (`nucleus server --backup-to … --backup-every …`), backup
-    metrics and alerts; O4 scheduled restore tests; O5 online `ALTER
+  - **O3c ✅ (2026-11-15) — backups compressed, encrypted, kept and
+    scheduled.**  Each part stored as its length and its entries in
+    LZ4's block format (the storage's own `lz`, §M14.20 V5, re-exported
+    by `nucleus-kv`); with a backup key (`--backup-key FILE`,
+    `NUCLEUS_BACKUP_KEY_FILE`: 64 hex digits) sealed by ChaCha20-Poly1305
+    (nonce first, the part's path as associated data) and the manifest
+    ending in an HMAC-SHA-256 of itself — the parts' hashes are in it, so
+    the whole backup is authenticated; the manifest names the key by an
+    id.  A restore with a key refuses a backup made without one (a
+    repository's writer could otherwise add one); a new key starts a new
+    chain.  `BACKUP … KEEP n` / `backup::prune`: whole chains removed,
+    oldest first, manifest before parts (`FileSystem::remove_dir` added
+    for the emptied directory).  `nucleus server --backup-to <repo>
+    --backup-every <d> [--backup-full-every n] [--backup-keep n]`
+    (`nucleus_server::backups`): a thread, due at the repository's last
+    backup plus the interval, every n-th (default 7) full, a failure
+    tried again within five minutes.  Metrics `nucleus_backup*` from
+    `backup::backup` itself (a `BACKUP` by hand counts too); alerts
+    `NucleusBackupOverdue` (older than two intervals, critical) and
+    `NucleusBackupFailing`, provoked in promtool tests; a dashboard
+    panel.  Prior art: pgBackRest (`repo-cipher-type`, a full every
+    so often with incrementals between, `repo-retention-full` counting
+    full backups — the model taken), restic and Borg (a repository key
+    authenticating everything; restic's key id beside the data), WAL-G
+    and Barman (LZ4 for speed: compression that pays for itself).
+    Measured (docs/benchmarks.md, Backups; 1M rows of text, 174 MiB
+    file): 111 MiB of entries stored as 34 MiB; a full backup 0.73 s
+    instead of 0.93–1.06 s and its restore 1.65 s instead of 2.14–2.34 s
+    (fewer bytes written and synced than the compression costs);
+    encryption adds 0.08 s to the backup and 0.1 s to the restore.  Not
+    taken: zstd (better ratios, a dependency or a compressor to write —
+    LZ4 is in the tree and faster than the disk); a key per backup
+    wrapped by a master key (one key a repository is what pgBackRest and
+    restic do; rotation is a new chain); the server making the key file
+    (a key lost is every backup lost: it is made on purpose, kept apart).
+    Tests: an encrypted backup needing its key, refusing another, an
+    unencrypted one and an altered manifest, a new key starting a chain;
+    `KEEP`; the metrics; the CLI's scheduled encrypted backups restored.
+  - **Next steps:** O4 scheduled restore tests; O5 online `ALTER
     COLUMN … TYPE`.
 - **Health checks**: liveness and readiness endpoints for orchestrators
   (`/health/live`, `/health/ready` — ready only once recovery is done and

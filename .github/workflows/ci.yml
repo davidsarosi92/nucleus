@@ -49,7 +49,7 @@ jobs:
     name: backups in object storage (S3)
     runs-on: ubuntu-latest
     env:
-      RCLONE_VERSION: 1.69.1
+      RCLONE_RELEASE: 1.69.1
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain (from rust-toolchain.toml)
@@ -60,9 +60,9 @@ jobs:
       - name: rclone
         run: |
           mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
-          z=rclone-v$RCLONE_VERSION-linux-amd64.zip
-          curl -fsSLO "https://github.com/rclone/rclone/releases/download/v$RCLONE_VERSION/$z"
-          curl -fsSL "https://github.com/rclone/rclone/releases/download/v$RCLONE_VERSION/SHA256SUMS" | grep "  $z\$" | sha256sum -c -
+          z=rclone-v$RCLONE_RELEASE-linux-amd64.zip
+          curl -fsSLO "https://github.com/rclone/rclone/releases/download/v$RCLONE_RELEASE/$z"
+          curl -fsSL "https://github.com/rclone/rclone/releases/download/v$RCLONE_RELEASE/SHA256SUMS" | grep "  $z\$" | sha256sum -c -
           unzip -q -j "$z" "*/rclone" -d .
           echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
       - run: cargo build -p nucleus-cli

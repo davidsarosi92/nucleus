@@ -91,10 +91,12 @@ pub struct Backup {
     pub kind: &'static str,
     /// Its directory in the repository.
     pub name: String,
+    /// Older backups removed (`KEEP`).
+    pub removed: u64,
 }
 
 /// The columns `BACKUP` returns.
-pub const RESULT: [(&str, DataType); 8] = [
+pub const RESULT: [(&str, DataType); 9] = [
     ("commit", DataType::BigInt),
     ("entries", DataType::BigInt),
     ("sealed", DataType::BigInt),
@@ -103,6 +105,7 @@ pub const RESULT: [(&str, DataType); 8] = [
     ("deleted", DataType::BigInt),
     ("kind", DataType::Text),
     ("backup", DataType::Text),
+    ("removed", DataType::BigInt),
 ];
 
 impl Backup {
@@ -120,6 +123,7 @@ impl Backup {
         .to_vec();
         row.push(Value::Text(self.kind.into()));
         row.push(Value::Text(self.name.as_str().into()));
+        row.push(Value::Int(self.removed as i64));
         row
     }
 }
@@ -479,18 +483,38 @@ struct Parts<'a> {
     /// The backup's directory in the repository.
     dir: String,
     buf: Vec<u8>,
+    /// The repository's key: the parts encrypted with it.
+    key: Option<BackupKey>,
+    /// The parts' nonces (a random base, as [`Nonces`]).
+    nonces: Nonces,
     done: Vec<(String, u64, [u8; 32])>,
 }
 
 impl Parts<'_> {
+    /// A part, stored: its entries' length (`u32`, little endian) and them
+    /// compressed (LZ4's block format, as the storage's values); with a
+    /// key, that encrypted (ChaCha20-Poly1305, its nonce first, the part's
+    /// path in the repository authenticated with it).
     fn flush(&mut self) -> Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
         let name = format!("part-{:06}", self.done.len());
-        put(self.target, &format!("{}/{name}", self.dir), &self.buf)?;
-        self.done
-            .push((name, self.buf.len() as u64, sha256(&self.buf)));
+        let path = format!("{}/{name}", self.dir);
+        let mut z = Vec::with_capacity(self.buf.len() / 2 + 64);
+        z.extend_from_slice(&(self.buf.len() as u32).to_le_bytes());
+        nucleus_kv::lz::compress(&self.buf, &mut z);
+        let stored = match &self.key {
+            None => z,
+            Some(key) => {
+                let nonce = self.nonces.next();
+                let mut s = nonce.to_vec();
+                s.extend_from_slice(&aead::seal(&key.key, &nonce, path.as_bytes(), &z));
+                s
+            }
+        };
+        put(self.target, &path, &stored)?;
+        self.done.push((name, stored.len() as u64, sha256(&stored)));
         self.buf.clear();
         Ok(())
     }
@@ -506,6 +530,70 @@ impl Parts<'_> {
         }
         Ok(())
     }
+}
+
+/// A repository's key (PLAN.md §M14.18 O3c): a backup's parts are
+/// encrypted with it and its manifest authenticated.  Restoring needs it;
+/// with one, a backup not made with it is refused (whoever can write to
+/// the repository could otherwise add one).
+#[derive(Clone)]
+pub struct BackupKey {
+    key: [u8; 32],
+    id: String,
+}
+
+impl BackupKey {
+    /// A key of 32 bytes.
+    pub fn new(key: [u8; 32]) -> Self {
+        let mut tagged = b"nucleus backup key".to_vec();
+        tagged.extend_from_slice(&key);
+        let id = crate::audit::hex(&sha256(&tagged)[..8]);
+        Self { key, id }
+    }
+
+    /// A key written as 64 hexadecimal digits (`openssl rand -hex 32`),
+    /// whitespace around them ignored.
+    pub fn parse(text: &str) -> std::result::Result<Self, String> {
+        let t = text.trim();
+        if t.len() != 64 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("a backup key is 64 hexadecimal digits (openssl rand -hex 32)".into());
+        }
+        let mut key = [0; 32];
+        for (i, k) in key.iter_mut().enumerate() {
+            *k = u8::from_str_radix(&t[2 * i..2 * i + 2], 16).expect("hex");
+        }
+        Ok(Self::new(key))
+    }
+
+    /// The key in file `path` ([`BackupKey::parse`]'s form).
+    pub fn from_file(path: &std::path::Path) -> std::result::Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Its id, written in the manifests: which key, not the key.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl std::fmt::Debug for BackupKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BackupKey({})", self.id)
+    }
+}
+
+static BACKUP_KEY: std::sync::RwLock<Option<BackupKey>> = std::sync::RwLock::new(None);
+
+/// Sets the key backups are made and restored with (the process's: the
+/// server's `--backup-key`), or none.
+pub fn set_backup_key(key: Option<BackupKey>) {
+    *BACKUP_KEY.write().unwrap_or_else(|e| e.into_inner()) = key;
+}
+
+/// The key set, if any.
+pub fn backup_key() -> Option<BackupKey> {
+    BACKUP_KEY.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Nonces: a random base a backup, counted up (a key seals entries of
@@ -649,10 +737,18 @@ impl Target for DirTarget<'_> {
         self.fs.sync_dir(&dir)
     }
 
+    /// A backup's directory left empty goes too.
     fn delete(&self, name: &str) -> std::io::Result<()> {
         let p = self.path(name);
-        if self.fs.exists(&p)? {
-            self.fs.remove_file(&p)?;
+        if !self.fs.exists(&p)? {
+            return Ok(());
+        }
+        self.fs.remove_file(&p)?;
+        let dir = p.parent().unwrap_or(&self.root).to_path_buf();
+        self.fs.sync_dir(&dir)?;
+        if dir != self.root && self.fs.list_dir(&dir)?.is_empty() {
+            self.fs.remove_dir(&dir)?;
+            self.fs.sync_dir(dir.parent().unwrap_or(&self.root))?;
         }
         Ok(())
     }
@@ -1025,7 +1121,104 @@ fn as_ref(b: &Bound<Vec<u8>>) -> Bound<&[u8]> {
 /// whole — and the values of the keys in what differs.  The kept branch
 /// holds on to the pages it shares, as a snapshot does; `FULL`, or the
 /// branch dropped, starts a new chain.
-pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
+///
+/// With `keep`, the repository's backups but the last `keep` full ones
+/// and those after them are removed once this one is done ([`prune`]).
+/// Each backup, done or failed, is counted in the metrics
+/// (`nucleus_backup_*`; the alerts read them).
+pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool, keep: Option<u64>) -> Result<Backup> {
+    let started = std::time::Instant::now();
+    let r = backup_once(kv, to, full).and_then(|mut b| {
+        if let Some(keep) = keep {
+            b.removed = prune(kv, to, keep)?.len() as u64;
+        }
+        Ok(b)
+    });
+    let now = kv
+        .wall_clock()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    crate::metrics::backup_done(r.as_ref().ok().map(|b| b.bytes), started.elapsed(), now);
+    r
+}
+
+/// Retention (PLAN.md §M14.18 O3c): repository `to`'s backups older
+/// than its last `keep` full ones removed — whole chains, oldest first,
+/// each backup's manifest before its parts (a directory without one is no
+/// backup: a removal cut short leaves none half there).  The names of
+/// the backups removed.
+pub fn prune(kv: &Arc<dyn Kv>, to: &str, keep: u64) -> Result<Vec<String>> {
+    if keep == 0 {
+        return Err(Error::invalid_parameter("KEEP is at least 1"));
+    }
+    let target = open_target(kv, to)?;
+    let t = &*target;
+    let listed = listing(t)?;
+    let mut fulls = Vec::new();
+    for (n, name) in &listed {
+        if name.ends_with("-full") && read_manifest(t, name)?.is_some() {
+            fulls.push(*n);
+        }
+    }
+    let Some(first_kept) = fulls.len().checked_sub(keep as usize).map(|i| fulls[i]) else {
+        return Ok(Vec::new());
+    };
+    let mut removed = Vec::new();
+    for (n, name) in listed {
+        if n >= first_kept {
+            break;
+        }
+        let gone = |f: &str| {
+            let path = format!("{name}/{f}");
+            t.delete(&path)
+                .map_err(|e| target_error(t, "remove", &path, e))
+        };
+        gone(MANIFEST)?;
+        for f in t
+            .list(&name)
+            .map_err(|e| target_error(t, "list", &name, e))?
+        {
+            gone(&f)?;
+        }
+        removed.push(name);
+    }
+    Ok(removed)
+}
+
+/// A repository's last finished backup, for a schedule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Last {
+    /// Its directory.
+    pub name: String,
+    /// When it was made, in microseconds since the Unix epoch.
+    pub time: u64,
+    /// The incremental backups since the last full one, it included.
+    pub since_full: u64,
+}
+
+/// Repository `to`'s last finished backup, if any.
+pub fn last_backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Option<Last>> {
+    let target = open_target(kv, to)?;
+    let t = &*target;
+    let mut last: Option<Last> = None;
+    for (_, name) in listing(t)?.into_iter().rev() {
+        let Some(m) = read_manifest(t, &name)? else {
+            continue;
+        };
+        let l = last.get_or_insert_with(|| Last {
+            name: name.clone(),
+            time: m.time,
+            since_full: 0,
+        });
+        if !m.incremental {
+            break;
+        }
+        l.since_full += 1;
+    }
+    Ok(last)
+}
+
+fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     let target = open_target(kv, to)?;
     let target = &*target;
     let listed = listing(target)?;
@@ -1038,6 +1231,8 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
             break;
         }
     }
+    // Encrypted with the key set, or neither: a chain is read with one key.
+    let key = backup_key();
     let source = kv.branch_name();
     let branches: HashSet<String> = kv.branches()?.into_iter().map(|b| b.name).collect();
     let mut base = None;
@@ -1045,6 +1240,7 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
         && let Some((name, m)) = &last
         && let Some(branch) = &m.branch
         && m.source.as_deref() == Some(source.as_str())
+        && m.key_id.as_deref() == key.as_ref().map(BackupKey::id)
         && branches.contains(branch)
     {
         let b = kv.branch(branch)?;
@@ -1099,11 +1295,18 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
         n: 0,
     };
     kv.random_bytes(&mut nonces.base);
+    let mut part_nonces = Nonces {
+        base: [0; aead::NONCE_LEN],
+        n: 0,
+    };
+    kv.random_bytes(&mut part_nonces.base);
     let mut w = Writer {
         parts: Parts {
             target,
             dir: name.clone(),
             buf: Vec::with_capacity(PART_BYTES + (1 << 16)),
+            key: key.clone(),
+            nonces: part_nonces,
             done: Vec::new(),
         },
         nonces,
@@ -1212,6 +1415,10 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
         out.omitted,
         out.deleted,
     );
+    m.push_str("compression lz4-block\n");
+    if let Some(key) = &key {
+        m.push_str(&format!("encryption chacha20-poly1305 {}\n", key.id));
+    }
     m.push_str("analyzed");
     for t in &analyzed {
         m.push_str(&format!(" {t}"));
@@ -1219,6 +1426,12 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     m.push('\n');
     for (name, len, hash) in &w.parts.done {
         m.push_str(&format!("part {name} {len} {}\n", crate::audit::hex(hash)));
+    }
+    // Authenticated with the key: the manifest names the parts (their
+    // hashes), so all of the backup is.
+    if let Some(key) = &key {
+        let mac = nucleus_crypto::hmac_sha256(&key.key, m.as_bytes());
+        m.push_str(&format!("mac {}\n", crate::audit::hex(&mac)));
     }
     put(target, &format!("{name}/{MANIFEST}"), m.as_bytes())?;
     // Done: this backup's branch kept, the repository's older ones
@@ -1274,6 +1487,81 @@ struct Manifest {
     source: Option<String>,
     analyzed: Vec<u32>,
     parts: Vec<(String, u64, String)>,
+    /// Its parts compressed (LZ4's block format).
+    compressed: bool,
+    /// Its parts encrypted: the key's id.
+    key_id: Option<String>,
+    /// What its MAC covers, and the MAC (hexadecimal).
+    mac: Option<(String, String)>,
+}
+
+impl Manifest {
+    /// Checked against the key set: one encrypted needs that key, and its
+    /// MAC must match; with a key, one not encrypted is refused.
+    fn check(&self, dir: &str, key: Option<&BackupKey>) -> Result<()> {
+        match (key, &self.key_id) {
+            (None, None) => Ok(()),
+            (None, Some(id)) => Err(Error::invalid_parameter(format!(
+                "{dir} is encrypted (key {id}): restoring it needs its key (--backup-key)"
+            ))),
+            (Some(_), None) => Err(Error::invalid_parameter(format!(
+                "{dir} is not encrypted, and a backup key is set: a backup made without \
+                 it is not restored with it"
+            ))),
+            (Some(k), Some(id)) if *id != k.id => Err(Error::invalid_parameter(format!(
+                "{dir} is encrypted with key {id}, not this one ({})",
+                k.id
+            ))),
+            (Some(k), Some(_)) => {
+                let ok = self.mac.as_ref().is_some_and(|(signed, mac)| {
+                    let want =
+                        crate::audit::hex(&nucleus_crypto::hmac_sha256(&k.key, signed.as_bytes()));
+                    nucleus_crypto::constant_time_eq(want.as_bytes(), mac.as_bytes())
+                });
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Error::data_exception(format!(
+                        "{dir}'s manifest does not match its MAC: it was altered"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// A part as stored, checked against the manifest and opened: decrypted
+    /// and decompressed.
+    fn open_part(&self, path: &str, b: Vec<u8>, key: Option<&BackupKey>) -> Result<Vec<u8>> {
+        let damaged = || {
+            Error::data_exception(format!(
+                "{path} is damaged: it does not decrypt or decompress"
+            ))
+        };
+        let z = match (&self.key_id, key) {
+            (None, _) => b,
+            (Some(_), Some(k)) => {
+                if b.len() < aead::NONCE_LEN {
+                    return Err(damaged());
+                }
+                let (nonce, sealed) = b.split_at(aead::NONCE_LEN);
+                let nonce: [u8; aead::NONCE_LEN] = nonce.try_into().expect("nonce");
+                aead::open(&k.key, &nonce, path.as_bytes(), sealed).ok_or_else(damaged)?
+            }
+            (Some(id), None) => {
+                return Err(Error::invalid_parameter(format!("{path}: needs key {id}")));
+            }
+        };
+        if !self.compressed {
+            return Ok(z);
+        }
+        let n = z
+            .get(..4)
+            .map(|n| u32::from_le_bytes(n.try_into().expect("4")) as usize)
+            .ok_or_else(damaged)?;
+        let mut out = Vec::with_capacity(n);
+        nucleus_kv::lz::decompress(&z[4..], n, &mut out).ok_or_else(damaged)?;
+        Ok(out)
+    }
 }
 
 fn manifest(text: &str) -> Result<Manifest> {
@@ -1291,7 +1579,14 @@ fn manifest(text: &str) -> Result<Manifest> {
         source: None,
         analyzed: Vec::new(),
         parts: Vec::new(),
+        compressed: false,
+        key_id: None,
+        mac: None,
     };
+    if let Some(i) = text.rfind("\nmac ") {
+        let mac = text[i + 5..].trim();
+        m.mac = Some((text[..=i].to_string(), mac.to_string()));
+    }
     let name = |s: &str| -> Result<String> {
         if s.contains(['/', '\\']) || s.starts_with('.') {
             return Err(bad(s));
@@ -1307,6 +1602,10 @@ fn manifest(text: &str) -> Result<Manifest> {
             ["base", b] => m.base = Some(name(b)?),
             ["branch", b] => m.branch = Some((*b).to_string()),
             ["source", b] => m.source = Some((*b).to_string()),
+            ["compression", "lz4-block"] => m.compressed = true,
+            ["compression", c] => return Err(bad(&format!("compression {c} is not known"))),
+            ["encryption", "chacha20-poly1305", id] => m.key_id = Some((*id).to_string()),
+            ["encryption", ..] => return Err(bad(line)),
             ["analyzed", ids @ ..] => {
                 for id in ids {
                     m.analyzed.push(id.parse().map_err(|_| bad(line))?);
@@ -1545,10 +1844,14 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
     let mut lost: HashSet<u32> = HashSet::new();
     let mut txn = kv.begin(TxnOptions::default())?;
     let mut batch = 0usize;
+    let key = backup_key();
+    for (dir, m) in &chain {
+        m.check(dir, key.as_ref())?;
+    }
     let parts = chain
         .iter()
-        .flat_map(|(dir, m)| m.parts.iter().map(move |p| (dir, p)));
-    for (dir, (name, len, hash)) in parts {
+        .flat_map(|(dir, m)| m.parts.iter().map(move |p| (dir, m, p)));
+    for (dir, m, (name, len, hash)) in parts {
         let path = format!("{dir}/{name}");
         let b = get(target, &path)?.ok_or_else(|| {
             Error::data_exception(format!("{path} is missing from {}", target.describe()))
@@ -1559,6 +1862,7 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
                 path
             )));
         }
+        let b = m.open_part(&path, b, key.as_ref())?;
         let mut r = Reader { b: &b, at: 0 };
         while r.at < b.len() {
             let kind = r.u8()?;

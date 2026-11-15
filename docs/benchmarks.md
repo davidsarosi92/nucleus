@@ -996,7 +996,8 @@ left that subject's 100 rows out (99,900 notes).
 Incremental backups (PLAN.md §M14.18 O3), release, real files, an M2
 Pro: a table of 1,000,000 rows of about 110 bytes with a B-tree index
 (243 MiB of data file), backed up into one repository, one change after
-another; each backup's time with the `nucleus sql` process's start.
+another; each backup's time with the `nucleus sql` process's start
+(measured before compression, below: the bytes are the entries').
 
 | backup into the repository | time | backup |
 |---|---:|---:|
@@ -1009,6 +1010,20 @@ another; each backup's time with the `nucleus sql` process's start.
 | `BACKUP FULL` | 1.16 s | |
 | `nucleus restore`: the chain of six (1,020,106 entries written, 10,000 deleted) | 2.43 s | |
 | `nucleus restore`: the full one after it (990,006 entries) | 2.18 s | |
+
+Compression and encryption (PLAN.md §M14.18 O3c), release, real
+files, an M2 Pro: 1,000,000 rows of text of about 90 bytes with a
+B-tree index (174 MiB of data file), `BACKUP FULL` and its restore,
+before compression and after; each with the process's start.
+
+| | backup | restore | stored |
+|---|---:|---:|---:|
+| parts uncompressed (before O3c) | 0.93–1.06 s | 2.14–2.34 s | 111 MiB |
+| compressed (LZ4 block) | 0.73 s | 1.65 s | 34 MiB |
+| compressed and encrypted (ChaCha20-Poly1305) | 0.81 s | 1.73–1.77 s | 34 MiB |
+
+Compression pays for itself: a third of the bytes written, synced and
+read costs less than compressing them.
 
 A backup costs what changed, not the database: the tree walk skips the
 subtrees both branches share, and only the leaves left are compared —

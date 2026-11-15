@@ -255,6 +255,57 @@ tests:
             exp_annotations:
               summary: 'the slowest 1% of statements on db:20037 take over a second'
               runbook: 'DOCS.md §8.39 NucleusSlowStatements'
+  - name: NucleusBackupOverdue
+    interval: 1m
+    input_series:
+      - series: 'nucleus_backup_interval_seconds{job="nucleus",instance="db:20037"}'
+        values: '3600x200'
+      - series: 'nucleus_backup_last_success_timestamp_seconds{job="nucleus",instance="db:20037"}'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 119m
+        alertname: NucleusBackupOverdue
+        exp_alerts: []
+      - eval_time: 135m
+        alertname: NucleusBackupOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: "the last backup of db:20037 is older than two of its schedule's intervals"
+              runbook: 'DOCS.md §8.39 NucleusBackupOverdue'
+  - name: NucleusBackupOverdue without a schedule
+    interval: 1m
+    input_series:
+      - series: 'nucleus_backup_interval_seconds{job="nucleus",instance="db:20037"}'
+        values: '0x200'
+      - series: 'nucleus_backup_last_success_timestamp_seconds{job="nucleus",instance="db:20037"}'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 190m
+        alertname: NucleusBackupOverdue
+        exp_alerts: []
+  - name: NucleusBackupFailing
+    interval: 1m
+    input_series:
+      - series: 'nucleus_backup_failing{job="nucleus",instance="db:20037"}'
+        values: '0 0 1x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NucleusBackupFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NucleusBackupFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: 'backups of db:20037 fail'
+              runbook: 'DOCS.md §8.39 NucleusBackupFailing'
   - name: healthy
     interval: 1m
     input_series:
@@ -286,6 +337,12 @@ tests:
         values: '0+600x60'
       - series: 'nucleus_statement_duration_seconds_bucket{job="nucleus",instance="db:20037",le="+Inf"}'
         values: '0+600x60'
+      - series: 'nucleus_backup_interval_seconds{job="nucleus",instance="db:20037"}'
+        values: '3600x60'
+      - series: 'nucleus_backup_last_success_timestamp_seconds{job="nucleus",instance="db:20037"}'
+        values: '0+60x60'
+      - series: 'nucleus_backup_failing{job="nucleus",instance="db:20037"}'
+        values: '0x60'
       - series: 'node_filesystem_avail_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
         values: '500x60'
       - series: 'node_filesystem_size_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
@@ -326,4 +383,10 @@ tests:
         exp_alerts: []
       - eval_time: 55m
         alertname: NucleusSlowStatements
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusBackupOverdue
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusBackupFailing
         exp_alerts: []

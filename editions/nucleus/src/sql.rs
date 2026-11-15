@@ -913,6 +913,9 @@ impl Target {
                             kv.clone(),
                         ),
                     )));
+                    // The backups' key, as the server's
+                    // (NUCLEUS_BACKUP_KEY_FILE).
+                    nucleus_server::backups::load_key(None)?;
                     // Subjects' keys too (BACKUP TO, FORGET SUBJECT).
                     nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
                         nucleus_server::subject_keyfile::SubjectKeyFile::new(

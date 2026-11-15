@@ -175,11 +175,15 @@ the rows' values: it returns `erasure, rows, scrubbed, found` (`found =
 without the subject's value.  Backups: `BACKUP TO '/abs/repo'` (an
 administrator, not in a block) writes a snapshot while writes go on into
 a repository — the first a full backup, each next one only what changed
-(`BACKUP FULL TO` starts a new chain) — each subject's rows sealed under
+(`BACKUP FULL TO` starts a new chain; `KEEP n` removes all but the last
+n full backups and those after them), compressed, encrypted when the
+server has `--backup-key FILE` (64 hex digits; `openssl rand -hex 32`;
+restore needs it too), on a schedule with `nucleus server --backup-to
+<repo> --backup-every 1d [--backup-keep n]` — each subject's rows sealed under
 the subject's key (the server's `<dir>.subject-keys` file; keep it apart
 from the backups), which `FORGET SUBJECT` destroys; `nucleus restore
 <repo> <newdir> [--at <commit|000003-incr|'time'>] [--subject-keys
-FILE]` restores (a repository may be `s3://bucket/prefix`, with the AWS
+FILE] [--backup-key FILE]` restores (a repository may be `s3://bucket/prefix`, with the AWS
 SDKs' variables) the chain to that point, rebuilds indexes and
 statistics and leaves forgotten subjects out.  Many tenants in one table: a policy
 (`CREATE POLICY t ON docs USING (tenant = current_setting('app.tenant'))`)

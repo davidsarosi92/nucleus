@@ -552,14 +552,18 @@ pub enum Statement {
     /// no snapshot sees removed, committed intents made versions) — of all
     /// of it, whatever tables are named.
     Vacuum,
-    /// `BACKUP [FULL] TO 'repo'` (PLAN.md §M14.24 R6, §M14.18 O3): the
-    /// database as one snapshot saw it, into a repository of backups on
-    /// the server — what changed since its last backup, or all of it.
+    /// `BACKUP [FULL] TO 'repo' [KEEP n]` (PLAN.md §M14.24 R6, §M14.18
+    /// O3): the database as one snapshot saw it, into a repository of
+    /// backups on the server — what changed since its last backup, or all
+    /// of it; with `KEEP`, the repository's last `n` full backups kept
+    /// (with the incremental ones after them), the older removed.
     Backup {
-        /// The repository: an absolute path.
+        /// The repository: an absolute path, or a module's URL.
         to: String,
         /// `FULL`: all of it, a new chain.
         full: bool,
+        /// `KEEP n`: the full backups kept.
+        keep: Option<u64>,
     },
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),

@@ -46,6 +46,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut subject_keys = None::<String>;
     let mut metrics = None::<String>;
     let mut otlp = None::<String>;
+    let mut backup_key = None::<String>;
+    let mut backup_to = None::<String>;
+    let mut backup_every = None::<std::time::Duration>;
+    let mut backup_full_every = 7u64;
+    let mut backup_keep = None::<u64>;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -104,6 +109,37 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
             "--subject-keys" => {
                 subject_keys = Some(rest.next().ok_or("--subject-keys needs a file")?.clone())
+            }
+            "--backup-key" => {
+                backup_key = Some(rest.next().ok_or("--backup-key needs a file")?.clone())
+            }
+            "--backup-to" => {
+                backup_to = Some(rest.next().ok_or("--backup-to needs a repository")?.clone())
+            }
+            "--backup-every" => {
+                let v = rest.next().ok_or("--backup-every needs a duration")?;
+                let us = nucleus_sql::dbsettings::duration(v).map_err(|e| e.message)?;
+                if us < 1_000_000 {
+                    return Err(format!("--backup-every {v}: at least a second"));
+                }
+                backup_every = Some(std::time::Duration::from_micros(us as u64));
+            }
+            "--backup-full-every" => {
+                let n = rest.next().ok_or("--backup-full-every needs a number")?;
+                backup_full_every = n
+                    .parse()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("--backup-full-every {n}: a number above 0"))?;
+            }
+            "--backup-keep" => {
+                let n = rest.next().ok_or("--backup-keep needs a number")?;
+                backup_keep = Some(
+                    n.parse()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("--backup-keep {n}: a number above 0"))?,
+                );
             }
             "--insecure" => insecure = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
@@ -168,6 +204,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
             other => return Err(format!("server: unknown option {other}")),
         }
     }
+    let schedule = match (backup_to, backup_every) {
+        (Some(to), Some(every)) => {
+            // A path made absolute (BACKUP TO's: on the server).
+            let to = if to.contains("://") {
+                to
+            } else {
+                std::path::absolute(&to)
+                    .map_err(|e| format!("--backup-to {to}: {e}"))?
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            Some(nucleus_server::backups::Schedule {
+                to,
+                every,
+                full_every: backup_full_every,
+                keep: backup_keep,
+            })
+        }
+        (None, None) if backup_keep.is_none() => None,
+        _ => return Err("server: --backup-to and --backup-every go together".into()),
+    };
+    let backup_key_id = nucleus_server::backups::load_key(backup_key.as_deref())?;
     let weak_password = password.as_deref() == Some(DEFAULT_PASSWORD);
     let no_auth = password.is_none();
     let shown_user = user.clone();
@@ -442,6 +500,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
         nucleus_server::Stop::new(),
         Arc::clone(&config.registry),
     );
+    if let Some(s) = schedule {
+        nucleus_platform::log!(
+            "backups: to {} every {}s, a full one every {}{}{}",
+            s.to,
+            s.every.as_secs(),
+            s.full_every,
+            s.keep
+                .map_or(String::new(), |k| format!(", the last {k} full ones kept")),
+            backup_key_id
+                .as_ref()
+                .map_or(String::new(), |id| format!(", encrypted (key {id})"))
+        );
+        nucleus_server::backups::start(Arc::clone(&kv), s, nucleus_server::Stop::new());
+    }
     // The embedding columns' jobs (§M14.22 E4b), off the sessions.
     nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry));
     let mut listeners = listeners.into_iter();

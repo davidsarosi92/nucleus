@@ -464,6 +464,20 @@ impl FileSystem for SlotFs {
         Ok(())
     }
 
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        let p = normalize(path)?;
+        let mut s = self.state();
+        if !s.dirs.contains(&p) {
+            return Err(err(io::ErrorKind::NotFound, path, "no such directory"));
+        }
+        let inside = |k: &PathBuf| k.parent() == Some(p.as_path());
+        if s.files.keys().any(inside) || s.dirs.iter().any(inside) {
+            return Err(err(io::ErrorKind::DirectoryNotEmpty, path, "not empty"));
+        }
+        s.dirs.remove(&p);
+        Ok(())
+    }
+
     fn list_dir(&self, path: &Path) -> io::Result<Vec<OsString>> {
         let p = normalize(path)?;
         let s = self.state();

@@ -113,6 +113,9 @@ BACKUP TO '/backups/assistant';   -- the first: all of it; the next ones: what c
 ```sh
 nucleus restore /backups/assistant ./restored --subject-keys ./assistant.subject-keys
 nucleus restore /backups/assistant ./yesterday --at '2026-11-14 18:00:00+01'
+# or on a schedule, encrypted: the server backs up every day itself
+nucleus server ./assistant --backup-to /backups/assistant --backup-every 1d \
+  --backup-keep 4 --backup-key ./backup.key        # openssl rand -hex 32 > backup.key
 ```
 
 A backup is taken online, without index pages (a restore rebuilds
@@ -120,7 +123,9 @@ them); a repository's first is a full one, each next one holds only
 what changed since the one before, so they can be taken often.  Each row of a subject is sealed under that subject's own key,
 kept in `<dir>.subject-keys` — keep that file, and back it up, apart
 from the backups.  `FORGET SUBJECT` destroys the key, so every backup
-taken before then restores without the subject.
+taken before then restores without the subject.  With a backup key the
+whole backup is encrypted too (the store keeping it sees nothing of the
+memories); restoring then needs `--backup-key` as well.
 
 ## From Python and JavaScript
 

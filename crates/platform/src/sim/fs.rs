@@ -532,6 +532,24 @@ impl FileSystem for SimFs {
         Ok(())
     }
 
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        let p = normalize(path)?;
+        let mut s = self.lock();
+        s.tick()?;
+        match s.current.get(&p) {
+            Some(Entry::Dir) if !is_root(&p) => {
+                if s.current.keys().any(|k| !is_root(k) && parent_of(k) == p) {
+                    return Err(err(io::ErrorKind::DirectoryNotEmpty, path, "not empty"));
+                }
+                s.current.remove(&p);
+                Ok(())
+            }
+            Some(Entry::File(_)) => Err(err(io::ErrorKind::NotADirectory, path, "is a file")),
+            _ if is_root(&p) => Err(err(io::ErrorKind::PermissionDenied, path, "the root")),
+            _ => Err(err(io::ErrorKind::NotFound, path, "no such directory")),
+        }
+    }
+
     fn list_dir(&self, path: &Path) -> io::Result<Vec<OsString>> {
         let p = normalize(path)?;
         let mut s = self.lock();

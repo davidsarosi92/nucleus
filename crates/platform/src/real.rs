@@ -209,6 +209,10 @@ impl FileSystem for RealFs {
         fs::create_dir_all(path)
     }
 
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        fs::remove_dir(path)
+    }
+
     fn list_dir(&self, path: &Path) -> io::Result<Vec<OsString>> {
         let mut names = fs::read_dir(path)?
             .map(|e| e.map(|e| e.file_name()))

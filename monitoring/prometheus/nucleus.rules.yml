@@ -122,3 +122,23 @@ groups:
         annotations:
           summary: "the slowest 1% of statements on {{ $labels.instance }} take over a second"
           runbook: "DOCS.md §8.39 NucleusSlowStatements"
+
+      - alert: NucleusBackupOverdue
+        expr: |
+          time() - nucleus_backup_last_success_timestamp_seconds > 2 * nucleus_backup_interval_seconds
+          and nucleus_backup_interval_seconds > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the last backup of {{ $labels.instance }} is older than two of its schedule's intervals"
+          runbook: "DOCS.md §8.39 NucleusBackupOverdue"
+
+      - alert: NucleusBackupFailing
+        expr: nucleus_backup_failing == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "backups of {{ $labels.instance }} fail"
+          runbook: "DOCS.md §8.39 NucleusBackupFailing"

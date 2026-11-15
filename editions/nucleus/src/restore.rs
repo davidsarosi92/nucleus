@@ -11,12 +11,16 @@ use nucleus_server::subject_keyfile::SubjectKeyFile;
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut positional = Vec::new();
     let mut keys = None::<String>;
+    let mut backup_key = None::<String>;
     let mut until = nucleus_sql::backup::Until::Latest;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         match a.as_str() {
             "--subject-keys" => {
                 keys = Some(rest.next().ok_or("--subject-keys needs a file")?.clone());
+            }
+            "--backup-key" => {
+                backup_key = Some(rest.next().ok_or("--backup-key needs a file")?.clone());
             }
             "--at" => {
                 until = at(rest
@@ -30,20 +34,25 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let [backup, dir] = positional.as_slice() else {
         return Err(
             "usage: nucleus restore <repository> <dir> [--at <commit|backup|time>] \
-             [--subject-keys <file>]"
+             [--subject-keys <file>] [--backup-key <file>]"
                 .into(),
         );
     };
+    nucleus_server::backups::load_key(backup_key.as_deref())?;
     if std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some()) {
         return Err(format!(
             "restore: {dir} is not empty: a backup is restored into a new database"
         ));
     }
-    // A URL is a module's repository (s3://…); a path is made absolute.
+    // A URL is a module's repository (s3://…); a path is made absolute
+    // (not canonicalized: on Windows that is a `\\?\` path).
     let backup = if backup.contains("://") {
         backup.clone()
     } else {
-        std::fs::canonicalize(backup)
+        if !std::path::Path::new(backup).exists() {
+            return Err(format!("restore: no repository at {backup}"));
+        }
+        std::path::absolute(backup)
             .map_err(|e| format!("{backup}: {e}"))?
             .to_string_lossy()
             .into_owned()

@@ -185,8 +185,9 @@ scrubs every file of their bytes (old versions, index pages, free pages,
 the log) and searches the files to prove none is left, recording the
 erasure without the subject's data — and reaches its backups too:
 `BACKUP TO '/backups/db'` or `'s3://bucket/db'` (online, without index
-pages; after the first, only what changed; `nucleus restore --at` rebuilds the database
-as it was at any of them) seals each row of a subject under that subject's
+pages; after the first, only what changed; compressed, and encrypted
+with `--backup-key`; on a schedule with `nucleus server --backup-every`;
+`nucleus restore --at` rebuilds the database as it was at any of them) seals each row of a subject under that subject's
 own key, kept apart (`<dir>.subject-keys`), which `FORGET` destroys, so
 a restore of an older backup leaves the subject out —, and `nucleus mcp
 --memory` gives an agent remember, recall, forget and cite
@@ -251,6 +252,9 @@ ncsql -c '\d t'                         # the shell, connected (user and passwor
 nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
 nucleus server ./mydb --console         # a web console on http://127.0.0.1:20036/
 nucleus server ./mydb --metrics         # Prometheus on :20037/metrics, /health/ready
+nucleus server ./mydb --backup-to /backups/db --backup-every 1d --backup-keep 4 \
+  --backup-key backup.key               # daily backups (weekly full), encrypted, 4 weeks kept
+nucleus restore /backups/db ./restored --backup-key backup.key --at '2026-11-15 14:00:00+01'
 nucleus status                          # a running server's health, for people
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down

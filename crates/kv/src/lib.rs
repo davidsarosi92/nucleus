@@ -27,6 +27,8 @@ use nucleus_platform::real::RealPlatform;
 use nucleus_storage::StoreOptions;
 
 pub use nucleus_platform::SyncPolicy;
+/// LZ4-block compression (a backup's parts are compressed with it).
+pub use nucleus_storage::lz;
 /// Finding bytes in a database's files ([`Kv::find_bytes`]'s search, for tools
 /// and tests that want where).
 pub use nucleus_storage::scan;

@@ -5,7 +5,9 @@
 
 use std::sync::OnceLock;
 
-use nucleus_platform::metrics::{Collector, Counter, CounterFamily, Histogram, Kind, global};
+use nucleus_platform::metrics::{
+    Collector, Counter, CounterFamily, Gauge, Histogram, Kind, global,
+};
 
 /// Statements that read only.
 pub static READS: Counter = Counter::labeled(
@@ -84,6 +86,58 @@ pub static LOGINS_LOCKED: Counter = Counter::new(
     "Logins refused because the role is locked after too many failures.",
 );
 
+/// Backups made (`BACKUP`, or the server's schedule).
+pub static BACKUPS: Counter = Counter::new(
+    "nucleus_backups_total",
+    "Backups made (BACKUP, or the server's --backup-every).",
+);
+/// Backups that failed.
+pub static BACKUP_FAILURES: Counter =
+    Counter::new("nucleus_backup_failures_total", "Backups that failed.");
+/// 1 while the last backup failed.
+pub static BACKUP_FAILING: Gauge = Gauge::new(
+    "nucleus_backup_failing",
+    "1 if the last backup failed, 0 once one is made.",
+);
+/// When the last backup was made.
+pub static BACKUP_LAST: Gauge = Gauge::new(
+    "nucleus_backup_last_success_timestamp_seconds",
+    "When the last backup was made (Unix time; the schedule's repository's last at start), 0 if none.",
+);
+/// The last backup's bytes.
+pub static BACKUP_BYTES: Gauge = Gauge::new(
+    "nucleus_backup_last_bytes",
+    "The bytes the last backup wrote (its parts, compressed).",
+);
+/// How long backups took.
+pub static BACKUP_TIME: Histogram = Histogram::new(
+    "nucleus_backup_duration_seconds",
+    "How long backups took, failed ones too.",
+);
+/// The schedule's interval.
+pub static BACKUP_INTERVAL: Gauge = Gauge::new(
+    "nucleus_backup_interval_seconds",
+    "The server's backup schedule's interval (--backup-every), 0 without one.",
+);
+
+/// A backup, recorded: its bytes if it was made, how long it took, and
+/// now (Unix seconds).
+pub(crate) fn backup_done(bytes: Option<u64>, took: std::time::Duration, now: u64) {
+    BACKUP_TIME.observe(took);
+    match bytes {
+        Some(b) => {
+            BACKUPS.inc();
+            BACKUP_FAILING.set(0);
+            BACKUP_LAST.set(now as i64);
+            BACKUP_BYTES.set(b as i64);
+        }
+        None => {
+            BACKUP_FAILURES.inc();
+            BACKUP_FAILING.set(1);
+        }
+    }
+}
+
 /// One statement's run, recorded.
 pub(crate) fn statement(
     read: bool,
@@ -135,6 +189,13 @@ pub fn register() {
             &SESSIONS_OPENED,
             &LOGINS_REFUSED,
             &LOGINS_LOCKED,
+            &BACKUPS,
+            &BACKUP_FAILURES,
+            &BACKUP_FAILING,
+            &BACKUP_LAST,
+            &BACKUP_BYTES,
+            &BACKUP_TIME,
+            &BACKUP_INTERVAL,
         ]);
         global().collector(|s| {
             s.gauge(
