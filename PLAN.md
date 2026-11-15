@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2a–K2c ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2a–K2d ✅ (2026-11-15) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9915,7 +9915,28 @@ caught it).  Tests: `a_planted_value_is_in_no_file_of_an_encrypted_store`
 the clear, in no file encrypted; ten records replayed); the store's two
 crash tests and the branch crash test run their odd seeds encrypted
 (2 of 3 there).  Measured: the load ×1.7–2 now (the WAL's ~47 MB sealed
-too), the scan ×2.6 — the case for the CPU's AES stands.  **K2d** the other files: spill and
+too), the scan ×2.6 — the case for the CPU's AES stands.  **K2d ✅**
+the other files (2026-11-15).  *Found on reading:* column segments,
+the text, sparse and HNSW indexes, the embedding queue and a
+transaction's spilled writes are all key-value data — in the pages and
+the WAL, sealed since K2b–K2c; the one file of a database outside them
+is scratch space (`<dir>/scratch`: sorts, hash joins, materialised rows
+past `work_mem`).  Sealed now when the database is encrypted
+(`nucleus_kv`'s `SealedScratch`): 4 KiB blocks, each sealed by the SIV
+under a key of the file's own (the OS's generator, never written: the
+file dies with its handle), the block number as nonce and with the
+length as associated data; a partial write reads its block first.
+Tests: `reads_back_what_memory_would` (appends, overwrites inside and
+across blocks, gaps, against scratch in memory),
+`a_changed_block_does_not_open`, the spill test's every query on an
+encrypted database (`sealed_scratch_files_give_the_same_results`), and
+`values_written_through_sql_are_in_no_file_of_an_encrypted_database`
+(`crates/sql/tests/encrypted.rs`: a row table with a text index, a
+column table, JSON, a vector table with HNSW — checkpointed and
+logged-only — found in a database in the clear, in no file encrypted,
+a spilling sort meanwhile; reopened, all there).  Not a file of the
+database's and so not here: the keyring and key files (K1), backups
+(sealed under the backup key, K1c), exports a user asks for.  **K2d** the other files: spill and
 scratch, column segments, index files, the embedding queue.  **K2e**
 the edition: the keyring's data key `data`, an existing database
 encrypted by rewriting its pages (`nucleus keys <dir> encrypt`, the

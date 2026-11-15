@@ -26,7 +26,11 @@ use nucleus_platform::Platform;
 use nucleus_platform::real::RealPlatform;
 use nucleus_storage::StoreOptions;
 
+mod sealed_scratch;
+
 pub use nucleus_platform::SyncPolicy;
+/// The key an encrypted database is sealed under ([`Options::encryption_key`]).
+pub use nucleus_storage::PageCipher;
 /// LZ4-block compression (a backup's parts are compressed with it).
 pub use nucleus_storage::lz;
 /// Finding bytes in a database's files ([`Kv::find_bytes`]'s search, for tools
@@ -823,10 +827,12 @@ pub struct Options {
     /// keys) skip the WAL, made durable by a checkpoint at the commit
     /// (PLAN.md D16; the default).  Off, every write is logged.
     pub wal_minimal: bool,
-    /// The key the data file's pages are sealed under (PLAN.md §M14.30
-    /// K2b): a new database is created encrypted, an existing one must
-    /// have been made under it.  `None` (the default): in the clear.
-    pub encryption_key: Option<nucleus_storage::PageCipher>,
+    /// The key the data file's pages (PLAN.md §M14.30 K2b) and the WAL's
+    /// records (K2c) are sealed under: a new database is created
+    /// encrypted, an existing one must have been made under it; its
+    /// scratch files are sealed too, each under a key of its own (K2d).
+    /// `None` (the default): in the clear.
+    pub encryption_key: Option<PageCipher>,
 }
 
 impl Options {
@@ -882,6 +888,9 @@ pub struct Database {
     /// Where scratch files go (`<dir>/scratch`), and how many were made.
     scratch_dir: PathBuf,
     scratch_made: Arc<AtomicU64>,
+    /// Scratch files sealed (the database is encrypted: PLAN.md §M14.30
+    /// K2d).
+    seal_scratch: bool,
     /// [`Kv::instance`]: one per open and branch (its clones share it).
     instance: u64,
     /// The instances of the branches' handles, by branch id: the same
@@ -1014,6 +1023,7 @@ impl Database {
     /// Opens (or creates) the database in `path` on `platform` (the
     /// simulation, in tests).
     pub fn open_on(platform: Arc<dyn Platform>, path: &Path, opts: Options) -> Result<Self> {
+        let seal_scratch = opts.encryption_key.is_some();
         let engine = nucleus_txn::Engine::open(
             platform.clone(),
             path,
@@ -1052,6 +1062,7 @@ impl Database {
             dir: path.to_path_buf(),
             scratch_dir,
             scratch_made: Arc::new(AtomicU64::new(0)),
+            seal_scratch,
             instance,
             instances: Arc::new(std::sync::Mutex::new(
                 [(nucleus_storage::MAIN, instance)].into(),
@@ -1298,11 +1309,20 @@ impl Kv for Database {
         let file = fs
             .open(&path, nucleus_platform::OpenMode::CreateNew)
             .map_err(|e| Error::Storage(Box::new(e)))?;
-        Ok(Box::new(FileScratch {
+        let file = Box::new(FileScratch {
             file,
             path,
             platform: Arc::clone(&self.platform),
-        }))
+        });
+        if !self.seal_scratch {
+            return Ok(file);
+        }
+        let mut key = [0u8; 32];
+        self.platform.rng().fill_unpredictable(&mut key);
+        let sealed = sealed_scratch::SealedScratch::new(file, key);
+        key.fill(0);
+        std::hint::black_box(&key);
+        Ok(Box::new(sealed))
     }
 
     /// From 2 µs, doubling up to about 1 ms, plus up to as much again at

@@ -6555,8 +6555,20 @@ the SIV tag in place of the CRC, the LSN — and the payload encrypted,
 the LSN as nonce and, with the length, associated data; a torn tail
 written again at the same LSNs is what the SIV allows.  A log in the
 clear opened as encrypted is refused (`Error::Key`), not cut off as a
-torn tail.  Spill and scratch files, column segments, index files and
-the embedding queue are not encrypted yet (K2d).
+torn tail.  Everything else of a database — column segments, text,
+sparse and HNSW indexes, the embedding queue, a transaction's spilled
+writes — lives in its key-value store, so in those pages and records.
+What is not is scratch space (K2d): a sort's runs and a hash join's
+partitions past `work_mem`, in `<dir>/scratch`.  An encrypted database
+seals its scratch files too (`nucleus_kv`'s `SealedScratch`), each under
+a key of its own made at random with the file (the OS's generator) and
+never written anywhere — after a crash such a file is unreadable, and
+opening removes it.  Its bytes are kept in 4 KiB blocks, each sealed by
+the SIV — the tag, then the block encrypted, its number as nonce and,
+with its length, associated data — so a block moved, cut short or
+changed does not open; a range read or written touches its blocks in
+one read or write of the file, a write covering part of a block reads
+it first.
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
 FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |

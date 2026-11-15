@@ -1,19 +1,27 @@
 //! Work past `work_mem` (PLAN.md §M14.11 L6): the same statements give the
 //! same results with 64 kB as with the default, while the small limit
-//! sends their sorts and materialised rows to scratch space.
+//! sends their sorts and materialised rows to scratch space — sealed,
+//! when the database is encrypted (PLAN.md §M14.30 K2d).
 
 use std::path::Path;
 use std::sync::Arc;
 
-use nucleus_kv::{Database, Kv, Options};
+use nucleus_kv::{Database, Kv, Options, PageCipher};
 use nucleus_platform::sim::SimPlatform;
 use nucleus_sql::{Output, Session, Value};
 
 fn database() -> Database {
+    open(false)
+}
+
+fn open(encrypted: bool) -> Database {
     Database::open_on(
         Arc::new(SimPlatform::new(11)),
         Path::new("/db"),
-        Options::default(),
+        Options {
+            encryption_key: encrypted.then(|| PageCipher::new([1; 32])),
+            ..Options::default()
+        },
     )
     .unwrap()
 }
@@ -40,7 +48,16 @@ fn results(db: &Database, set: &str, queries: &[&str]) -> Vec<Vec<Vec<Value>>> {
 
 #[test]
 fn sorts_and_materialised_rows_spill_and_agree() {
-    let db = database();
+    spill_and_agree(false);
+}
+
+#[test]
+fn sealed_scratch_files_give_the_same_results() {
+    spill_and_agree(true);
+}
+
+fn spill_and_agree(encrypted: bool) {
+    let db = open(encrypted);
     {
         let kv: Arc<dyn Kv> = Arc::new(db.clone());
         let mut s = Session::new(kv);
