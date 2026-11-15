@@ -3,11 +3,13 @@
 //! MD5 (RFC 1321, for `md5()` only — not for security), base64 (RFC
 //! 4648), a constant-time comparison, SCRAM-SHA-256 verifiers (RFC
 //! 5802, RFC 7677) in PostgreSQL's text form, ChaCha20-Poly1305 (RFC
-//! 8439, [`aead`]), and keys with their wrapping under a root key
-//! ([`keys`]).
+//! 8439, [`aead`]), a deterministic misuse-resistant AEAD on it
+//! ([`siv`]: RFC 8452's structure), and keys with their wrapping under a
+//! root key ([`keys`]).
 
 pub mod aead;
 pub mod keys;
+pub mod siv;
 
 /// SHA-256 (FIPS 180-4).
 pub fn sha256(data: &[u8]) -> [u8; 32] {

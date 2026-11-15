@@ -1072,6 +1072,33 @@ RETYPE_DIR=/abs/retype-bench RETYPE_ROWS=1000000 cargo test --release \
     -p nucleus-sql --test retype_bench -- --ignored --nocapture
 ```
 
+## Sealing a page
+
+PLAN.md §M14.30 K2a: what an 8 KiB page costs to seal on one core
+(release, an M2 Pro, the best of three passes over 32 MiB).  The
+checksum pages carry today against the two AEADs: RFC 8439's and the
+misuse-resistant one the encrypted file will use (`nucleus_crypto::siv`,
+RFC 8452's structure with ChaCha20).
+
+| | MB/s | µs a page |
+|---|---:|---:|
+| CRC-32C (the CPU's instruction) | 23,300 | 0.35 |
+| ChaCha20-Poly1305 seal | 680 | 12.1 |
+| `siv` seal | 685 | 11.9 |
+| `siv` seal and open | 344 | 23.8 |
+
+ChaCha20 runs four blocks side by side (1,010 MB/s; 640 a block at a
+time) and Poly1305 in 64-bit limbs (2,220 MB/s; 1,350 in 26-bit ones),
+both portable Rust the compiler vectorizes or multiplies natively.  The
+SIV costs no more than the AEAD: both pass once with ChaCha20 and once
+with Poly1305 over the page.  A page is sealed when it is written and
+opened when it is read from the file — never while it is cached.
+
+```sh
+cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture
+cargo test --release -p nucleus-crypto speed -- --ignored --nocapture
+```
+
 ## JSON
 
 PLAN.md §M14.15 J1–J4: the `json` type, its operators, SQL/JSON paths and indexes, release, an

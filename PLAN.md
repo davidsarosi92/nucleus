@@ -9859,10 +9859,23 @@ bytes), the LSN as associated data.  Prior art for the construction:
 RFC 8452 (AES-GCM-SIV), RFC 5297 (SIV), Rogaway–Shrimpton's DAE; the
 `unsafe` the hardware AES needs stays the platform layer's question.
 
-*K2 in steps:* **K2a** `nucleus_crypto::siv` — the deterministic AEAD,
+*K2 in steps:* **K2a ✅** `nucleus_crypto::siv` — the deterministic AEAD,
 tested (round trip, every bit of tag, AAD and ciphertext flipped,
 a known-answer test against a reference computed apart) and measured
-(MB/s against ChaCha20-Poly1305 and CRC-32C).  **K2b** pages: an
+(MB/s against ChaCha20-Poly1305 and CRC-32C).  The reference is
+`crates/crypto/tests/siv_reference.py` (Python integers, RFC 8439's
+own vectors checked first); it also gives Poly1305's carry and
+reduction edge cases.  Measured (`docs/benchmarks.md`, *Sealing a
+page*): 19 µs a page at first — ChaCha20 at 450–640 MB/s a block at a
+time was the cost.  Taken: four blocks side by side, each state word a
+row of four lanes the compiler vectorizes without `unsafe` (the layout
+of Goll–Gueron's and Bernstein's vectorized ChaCha20; 8 and 16 lanes
+measured slower here, register pressure on NEON) → 1,010 MB/s; Poly1305
+in poly1305-donna's 64-bit form (44/44/42-bit limbs, 128-bit products)
+→ 2,220 MB/s from 1,350.  Now 11.9 µs a page seal, the SIV as fast as
+the AEAD; CRC-32C is 0.35 µs.  Next for speed, when K2b measures it in
+the store: the CPU's AES (AES-GCM-SIV proper), which needs the
+platform layer's `unsafe`.  **K2b** pages: an
 encrypted file's header records the cipher and the DEK's id (format
 version 3 only for an encrypted file); `nucleus_kv::Options` takes the
 key; the crash tests run encrypted; a planted value searched for in

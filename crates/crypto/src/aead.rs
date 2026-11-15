@@ -26,7 +26,7 @@ fn le32(b: &[u8]) -> u32 {
 }
 
 /// The ChaCha20 block function (RFC 8439 §2.3).
-fn block(key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN]) -> [u8; 64] {
+pub(crate) fn block(key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN]) -> [u8; 64] {
     let mut init = [0u32; 16];
     init[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
     for i in 0..8 {
@@ -54,128 +54,220 @@ fn block(key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN]) -> [u8; 64]
     out
 }
 
+/// Blocks computed side by side: each state word a row of `LANES`
+/// values, one a block, so the compiler turns the rounds into vector
+/// instructions (NEON, SSE/AVX) without `unsafe` — the layout of
+/// Bernstein's and Goll–Gueron's vectorized ChaCha20.
+const LANES: usize = 4;
+
+type Row = [u32; LANES];
+
+#[inline(always)]
+fn add(a: &mut Row, b: &Row) {
+    for i in 0..LANES {
+        a[i] = a[i].wrapping_add(b[i]);
+    }
+}
+
+#[inline(always)]
+fn xor_rot(a: &mut Row, b: &Row, n: u32) {
+    for i in 0..LANES {
+        a[i] = (a[i] ^ b[i]).rotate_left(n);
+    }
+}
+
+#[inline(always)]
+fn quarter_rows(s: &mut [Row; 16], a: usize, b: usize, c: usize, d: usize) {
+    let (mut ra, mut rb, mut rc, mut rd) = (s[a], s[b], s[c], s[d]);
+    add(&mut ra, &rb);
+    xor_rot(&mut rd, &ra, 16);
+    add(&mut rc, &rd);
+    xor_rot(&mut rb, &rc, 12);
+    add(&mut ra, &rb);
+    xor_rot(&mut rd, &ra, 8);
+    add(&mut rc, &rd);
+    xor_rot(&mut rb, &rc, 7);
+    (s[a], s[b], s[c], s[d]) = (ra, rb, rc, rd);
+}
+
+/// `LANES` blocks from `counter` on, XORed into `data` (`LANES` × 64
+/// bytes).
+fn blocks_xor(
+    key: &[u8; KEY_LEN],
+    counter: u32,
+    nonce: &[u8; NONCE_LEN],
+    data: &mut [u8; 64 * LANES],
+) {
+    let mut init = [[0u32; LANES]; 16];
+    let words = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
+    for i in 0..4 {
+        init[i] = [words[i]; LANES];
+    }
+    for i in 0..8 {
+        init[4 + i] = [le32(&key[4 * i..]); LANES];
+    }
+    for (l, c) in init[12].iter_mut().enumerate() {
+        *c = counter.wrapping_add(l as u32);
+    }
+    for i in 0..3 {
+        init[13 + i] = [le32(&nonce[4 * i..]); LANES];
+    }
+    let mut s = init;
+    for _ in 0..10 {
+        quarter_rows(&mut s, 0, 4, 8, 12);
+        quarter_rows(&mut s, 1, 5, 9, 13);
+        quarter_rows(&mut s, 2, 6, 10, 14);
+        quarter_rows(&mut s, 3, 7, 11, 15);
+        quarter_rows(&mut s, 0, 5, 10, 15);
+        quarter_rows(&mut s, 1, 6, 11, 12);
+        quarter_rows(&mut s, 2, 7, 8, 13);
+        quarter_rows(&mut s, 3, 4, 9, 14);
+    }
+    for w in 0..16 {
+        add(&mut s[w], &init[w]);
+    }
+    for (l, chunk) in data.as_chunks_mut::<64>().0.iter_mut().enumerate() {
+        for w in 0..16 {
+            let k = s[w][l].to_le_bytes();
+            for j in 0..4 {
+                chunk[4 * w + j] ^= k[j];
+            }
+        }
+    }
+}
+
 /// XORs `data` with ChaCha20's key stream from block `counter` (§2.4).
-fn chacha20(key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN], data: &mut [u8]) {
-    for (i, chunk) in data.chunks_mut(64).enumerate() {
-        let ks = block(key, counter.wrapping_add(i as u32), nonce);
+pub(crate) fn chacha20(
+    key: &[u8; KEY_LEN],
+    counter: u32,
+    nonce: &[u8; NONCE_LEN],
+    data: &mut [u8],
+) {
+    let (wide, tail) = data.as_chunks_mut::<{ 64 * LANES }>();
+    for (i, chunk) in wide.iter_mut().enumerate() {
+        blocks_xor(key, counter.wrapping_add((i * LANES) as u32), nonce, chunk);
+    }
+    let first = counter.wrapping_add((wide.len() * LANES) as u32);
+    for (i, chunk) in tail.chunks_mut(64).enumerate() {
+        let ks = block(key, first.wrapping_add(i as u32), nonce);
         for (b, k) in chunk.iter_mut().zip(ks) {
             *b ^= k;
         }
     }
 }
 
-/// Poly1305 (§2.5), in five 26-bit limbs (poly1305-donna's 32-bit form).
-struct Poly1305 {
-    r: [u32; 5],
-    h: [u32; 5],
-    pad: [u32; 4],
+/// Poly1305 (§2.5), in three limbs of 44, 44 and 42 bits multiplied
+/// into 128-bit products (poly1305-donna's 64-bit form: a 64×64 multiply
+/// is one or two instructions where 64-bit integers are native).
+pub(crate) struct Poly1305 {
+    r: [u64; 3],
+    h: [u64; 3],
+    pad: [u64; 2],
+}
+
+const M44: u64 = (1 << 44) - 1;
+const M42: u64 = (1 << 42) - 1;
+
+fn le64(b: &[u8]) -> u64 {
+    u64::from_le_bytes(b[..8].try_into().expect("8 bytes"))
 }
 
 impl Poly1305 {
-    fn new(key: &[u8; 32]) -> Self {
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
+        let (t0, t1) = (le64(&key[0..]), le64(&key[8..]));
         let r = [
-            le32(&key[0..]) & 0x03ff_ffff,
-            (le32(&key[3..]) >> 2) & 0x03ff_ff03,
-            (le32(&key[6..]) >> 4) & 0x03ff_c0ff,
-            (le32(&key[9..]) >> 6) & 0x03f0_3fff,
-            (le32(&key[12..]) >> 8) & 0x000f_ffff,
+            t0 & 0xffc_0fff_ffff,
+            ((t0 >> 44) | (t1 << 20)) & 0xfff_ffc0_ffff,
+            (t1 >> 24) & 0x00f_ffff_fc0f,
         ];
-        let pad = [
-            le32(&key[16..]),
-            le32(&key[20..]),
-            le32(&key[24..]),
-            le32(&key[28..]),
-        ];
-        Poly1305 { r, h: [0; 5], pad }
+        Poly1305 {
+            r,
+            h: [0; 3],
+            pad: [le64(&key[16..]), le64(&key[24..])],
+        }
     }
 
-    /// One 16-byte block; `hibit` is 1 << 24 for a full block, 0 for the
-    /// padded last one of a raw message (here every block is full: the
-    /// AEAD pads with zeros itself).
-    fn block(&mut self, m: &[u8; 16], hibit: u32) {
-        let [r0, r1, r2, r3, r4] = self.r.map(u64::from);
-        let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
-        let mut h = self.h.map(u64::from);
-        h[0] += u64::from(le32(&m[0..]) & 0x03ff_ffff);
-        h[1] += u64::from((le32(&m[3..]) >> 2) & 0x03ff_ffff);
-        h[2] += u64::from((le32(&m[6..]) >> 4) & 0x03ff_ffff);
-        h[3] += u64::from((le32(&m[9..]) >> 6) & 0x03ff_ffff);
-        h[4] += u64::from((le32(&m[12..]) >> 8) | hibit);
-        let d0 = h[0] * r0 + h[1] * s4 + h[2] * s3 + h[3] * s2 + h[4] * s1;
-        let mut d1 = h[0] * r1 + h[1] * r0 + h[2] * s4 + h[3] * s3 + h[4] * s2;
-        let mut d2 = h[0] * r2 + h[1] * r1 + h[2] * r0 + h[3] * s4 + h[4] * s3;
-        let mut d3 = h[0] * r3 + h[1] * r2 + h[2] * r1 + h[3] * r0 + h[4] * s4;
-        let mut d4 = h[0] * r4 + h[1] * r3 + h[2] * r2 + h[3] * r1 + h[4] * r0;
-        let mut c = d0 >> 26;
-        let mut h0 = d0 & 0x03ff_ffff;
-        d1 += c;
-        c = d1 >> 26;
-        let h1 = d1 & 0x03ff_ffff;
-        d2 += c;
-        c = d2 >> 26;
-        let h2 = d2 & 0x03ff_ffff;
-        d3 += c;
-        c = d3 >> 26;
-        let h3 = d3 & 0x03ff_ffff;
-        d4 += c;
-        c = d4 >> 26;
-        let h4 = d4 & 0x03ff_ffff;
+    /// One 16-byte block: `full` for a whole 16 bytes of message (the
+    /// 2^128 bit added); not for a short last one of a raw message, padded
+    /// with its 1 byte by the caller.
+    pub(crate) fn block(&mut self, m: &[u8; 16], full: bool) {
+        let [r0, r1, r2] = self.r.map(u128::from);
+        let (s1, s2) = (r1 * 20, r2 * 20);
+        let (t0, t1) = (le64(&m[0..]), le64(&m[8..]));
+        let hibit = if full { 1 << 40 } else { 0 };
+        let h0 = u128::from(self.h[0] + (t0 & M44));
+        let h1 = u128::from(self.h[1] + (((t0 >> 44) | (t1 << 20)) & M44));
+        let h2 = u128::from(self.h[2] + (((t1 >> 24) & M42) | hibit));
+        let d0 = h0 * r0 + h1 * s2 + h2 * s1;
+        let mut d1 = h0 * r1 + h1 * r0 + h2 * s2;
+        let mut d2 = h0 * r2 + h1 * r1 + h2 * r0;
+        let mut c = (d0 >> 44) as u64;
+        let mut h0 = (d0 as u64) & M44;
+        d1 += u128::from(c);
+        c = (d1 >> 44) as u64;
+        let mut h1 = (d1 as u64) & M44;
+        d2 += u128::from(c);
+        c = (d2 >> 42) as u64;
+        let h2 = (d2 as u64) & M42;
         h0 += c * 5;
-        let c = h0 >> 26;
-        h0 &= 0x03ff_ffff;
-        let h1 = h1 + c;
-        self.h = [h0 as u32, h1 as u32, h2 as u32, h3 as u32, h4 as u32];
+        c = h0 >> 44;
+        h0 &= M44;
+        h1 += c;
+        self.h = [h0, h1, h2];
     }
 
-    fn update_padded(&mut self, data: &[u8]) {
-        for chunk in data.chunks(16) {
+    pub(crate) fn update_padded(&mut self, data: &[u8]) {
+        let (blocks, rest) = data.as_chunks::<16>();
+        for b in blocks {
+            self.block(b, true);
+        }
+        if !rest.is_empty() {
             let mut m = [0u8; 16];
-            m[..chunk.len()].copy_from_slice(chunk);
-            self.block(&m, 1 << 24);
+            m[..rest.len()].copy_from_slice(rest);
+            self.block(&m, true);
         }
     }
 
-    fn finish(self) -> [u8; TAG_LEN] {
-        let mut h = self.h;
-        // Carry fully.
-        let mut c = h[1] >> 26;
-        h[1] &= 0x03ff_ffff;
-        for i in [2, 3, 4] {
-            h[i] += c;
-            c = h[i] >> 26;
-            h[i] &= 0x03ff_ffff;
+    pub(crate) fn finish(self) -> [u8; TAG_LEN] {
+        let [mut h0, mut h1, mut h2] = self.h;
+        // Carry fully, twice round.
+        for _ in 0..2 {
+            let mut c = h1 >> 44;
+            h1 &= M44;
+            h2 += c;
+            c = h2 >> 42;
+            h2 &= M42;
+            h0 += c * 5;
+            c = h0 >> 44;
+            h0 &= M44;
+            h1 += c;
         }
-        h[0] += c * 5;
-        c = h[0] >> 26;
-        h[0] &= 0x03ff_ffff;
-        h[1] += c;
         // g = h + 5 - 2^130; take g when h ≥ p, without a branch.
-        let mut g = [0u32; 5];
-        let mut c = 5u32;
-        for i in 0..4 {
-            g[i] = h[i].wrapping_add(c);
-            c = g[i] >> 26;
-            g[i] &= 0x03ff_ffff;
-        }
-        g[4] = h[4].wrapping_add(c).wrapping_sub(1 << 26);
-        let mask = (g[4] >> 31).wrapping_sub(1); // all ones when g ≥ 0
-        for i in 0..5 {
-            h[i] = (h[i] & !mask) | (g[i] & mask);
-        }
-        // h mod 2^128, plus pad.
-        let w = [
-            h[0] | (h[1] << 26),
-            (h[1] >> 6) | (h[2] << 20),
-            (h[2] >> 12) | (h[3] << 14),
-            (h[3] >> 18) | (h[4] << 8),
-        ];
+        let mut g0 = h0 + 5;
+        let mut c = g0 >> 44;
+        g0 &= M44;
+        let mut g1 = h1 + c;
+        c = g1 >> 44;
+        g1 &= M44;
+        let g2 = (h2 + c).wrapping_sub(1 << 42);
+        let mask = (g2 >> 63).wrapping_sub(1); // all ones when g ≥ 0
+        h0 = (h0 & !mask) | (g0 & mask);
+        h1 = (h1 & !mask) | (g1 & mask);
+        h2 = (h2 & !mask) | (g2 & mask);
+        // h + pad, mod 2^128.
+        let [t0, t1] = self.pad;
+        h0 += t0 & M44;
+        c = h0 >> 44;
+        h0 &= M44;
+        h1 += (((t0 >> 44) | (t1 << 20)) & M44) + c;
+        c = h1 >> 44;
+        h1 &= M44;
+        h2 = (h2 + ((t1 >> 24) & M42) + c) & M42;
+        let lo = h0 | (h1 << 44);
+        let hi = (h1 >> 20) | (h2 << 24);
         let mut out = [0u8; TAG_LEN];
-        let mut carry = 0u64;
-        for i in 0..4 {
-            let f = u64::from(w[i]) + u64::from(self.pad[i]) + carry;
-            out[4 * i..4 * i + 4].copy_from_slice(&(f as u32).to_le_bytes());
-            carry = f >> 32;
-        }
+        out[..8].copy_from_slice(&lo.to_le_bytes());
+        out[8..].copy_from_slice(&hi.to_le_bytes());
         out
     }
 }
@@ -188,7 +280,7 @@ fn tag(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], aad: &[u8], ct: &[u8]) -> [
     let mut lens = [0u8; 16];
     lens[..8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
     lens[8..].copy_from_slice(&(ct.len() as u64).to_le_bytes());
-    p.block(&lens, 1 << 24);
+    p.block(&lens, true);
     p.finish()
 }
 
@@ -266,6 +358,209 @@ mod tests {
         );
     }
 
+    /// Raw-message Poly1305, short last block padded as §2.5 says.
+    fn poly_message(key: &[u8; 32], msg: &[u8]) -> [u8; 16] {
+        let mut p = Poly1305::new(key);
+        let (blocks, rest) = msg.as_chunks::<16>();
+        for c in blocks {
+            p.block(c, true);
+        }
+        if !rest.is_empty() {
+            let mut last = [0u8; 16];
+            last[..rest.len()].copy_from_slice(rest);
+            last[rest.len()] = 1;
+            p.block(&last, false);
+        }
+        p.finish()
+    }
+
+    /// Keys and messages that drive every carry and the final reduction,
+    /// against `crates/crypto/tests/siv_reference.py poly` (Python
+    /// integers, no limbs).
+    #[test]
+    fn poly1305_edges() {
+        for (key, len, byte, want) in POLY_EDGES {
+            let key: [u8; 32] = hex(key).try_into().unwrap();
+            let msg = vec![*byte; *len];
+            assert_eq!(
+                poly_message(&key, &msg).to_vec(),
+                hex(want),
+                "key {key:02x?} len {len}"
+            );
+        }
+    }
+
+    const POLY_EDGES: &[(&str, usize, u8, &str)] = &[
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            16,
+            255,
+            "fbffff17faffff17faffff17faffff17",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            17,
+            255,
+            "7cfe7ff768f81f2763f8bf565df85f86",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            32,
+            255,
+            "5400801f3f00204f3900c07e330060ae",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            63,
+            255,
+            "900f0bfaca5fd0a5c6a817b3d1e3a687",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            64,
+            255,
+            "900fe32bc15fa8d7bca8efe4c7e37eb1",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            160,
+            255,
+            "99514d0a5a9b209c6a3dd0a4f64d95ae",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            48,
+            0,
+            "f87c2e84ee7cc5ea0ebd6d8c2a3d2769",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            16,
+            255,
+            "fcffff17faffff17faffff17faffff17",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            17,
+            255,
+            "7dfe7ff768f81f2763f8bf565df85f86",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            32,
+            255,
+            "5500801f3f00204f3900c07e330060ae",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            63,
+            255,
+            "910f0bfaca5fd0a5c6a817b3d1e3a687",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            64,
+            255,
+            "910fe32bc15fa8d7bca8efe4c7e37eb1",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            160,
+            255,
+            "9a514d0a5a9b209c6a3dd0a4f64d95ae",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+            48,
+            0,
+            "f97c2e84ee7cc5ea0ebd6d8c2a3d2769",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            16,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            17,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            32,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            63,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            64,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            160,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+            48,
+            0,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            16,
+            255,
+            "ffffffffffffffffffffffffffffffff",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            17,
+            255,
+            "fe010000000000000000000000000000",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            32,
+            255,
+            "03000000000000000000000000000000",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            63,
+            255,
+            "01000000000000000000000000000002",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            64,
+            255,
+            "06000000000000000000000000000000",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            160,
+            255,
+            "0f000000000000000000000000000000",
+        ),
+        (
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            48,
+            0,
+            "00000000000000000000000000000000",
+        ),
+    ];
+
     #[test]
     fn poly1305() {
         // §2.5.2.
@@ -274,12 +569,12 @@ mod tests {
         let msg = b"Cryptographic Forum Research Group";
         let (blocks, rest) = msg.as_chunks::<16>();
         for c in blocks {
-            p.block(c, 1 << 24);
+            p.block(c, true);
         }
         let mut last = [0u8; 16];
         last[..rest.len()].copy_from_slice(rest);
         last[rest.len()] = 1;
-        p.block(&last, 0);
+        p.block(&last, false);
         assert_eq!(p.finish().to_vec(), hex("a8061dc1305136c6c22b8baf0c0127a9"));
     }
 
@@ -320,5 +615,50 @@ mod tests {
             assert_eq!(s.len(), n + TAG_LEN);
             assert_eq!(open(&key, &nonce, b"", &s).unwrap(), p);
         }
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+
+    /// ChaCha20 and Poly1305 apart, on 8 KiB pages (PLAN.md §M14.30 K2a).
+    /// `cargo test --release -p nucleus-crypto speed -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement: run it in release"]
+    fn halves() {
+        let key = [0x42u8; 32];
+        let mut page = vec![7u8; 8192];
+        let n = 4096;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            chacha20(&key, i, &[0; 12], &mut page);
+        }
+        let c = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        let mut x = 0u8;
+        for _ in 0..n {
+            let mut p = Poly1305::new(&key);
+            p.update_padded(&page);
+            x ^= p.finish()[0];
+        }
+        let p = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            for (j, chunk) in page.chunks_mut(64).enumerate() {
+                let ks = block(&key, i.wrapping_add(j as u32), &[0; 12]);
+                for (b, k) in chunk.iter_mut().zip(ks) {
+                    *b ^= k;
+                }
+            }
+        }
+        let one = t.elapsed().as_secs_f64();
+        let mb = 8192.0 * f64::from(n) / 1e6;
+        println!(
+            "chacha20 {:.0} MB/s ({LANES} lanes; a block at a time {:.0}), poly1305 {:.0} MB/s ({x})",
+            mb / c,
+            mb / one,
+            mb / p
+        );
     }
 }

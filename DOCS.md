@@ -6433,7 +6433,8 @@ scopes when there are schemas and branches.
 credentials the database uses on its own behalf (an embedding
 provider's API key).  `CREATE SECRET [IF NOT EXISTS] name VALUE '…'`
 seals the value with ChaCha20-Poly1305 (`nucleus_crypto::aead`, RFC
-8439) under the *keyring's* key — a random nonce, the secret's name
+8439; ChaCha20 four blocks side by side, Poly1305 in 64-bit limbs)
+under the *keyring's* key — a random nonce, the secret's name
 authenticated beside it, the key's id (8 bytes of a hash of it) kept so
 another key is refused by name, not by garbage; `… FROM ENV 'VAR'`
 names an environment variable of the server's process, read when the
@@ -6511,7 +6512,23 @@ secrets' records in one transaction, `secrets::reseal`; the subject
 keys' table rewritten) and then drops the old key; a rotation cut short
 is finished at the next start (or by the command again).  `rotate
 backup` makes a new backup key: the next backup is a full one, the
-backups before carrying their own key wrapped by the root.  `Key` overwrites its bytes with
+backups before carrying their own key wrapped by the root.
+
+*The pages' AEAD* (K2a; `nucleus_crypto::siv`, for encryption at rest).
+A page is written again under the same id and birth before its commit
+(the buffer pool evicts it twice), and after a crash a commit's number
+comes round again, so a nonce from (id, birth) would repeat — and with
+ChaCha20-Poly1305 a repeated nonce gives away the XOR of two pages.  So
+pages are sealed with a deterministic, misuse-resistant AEAD: RFC
+8452's (AES-GCM-SIV's) structure with ChaCha20 — keys for the nonce
+from ChaCha20's block function, Poly1305's polynomial under a secret
+point over the associated data and the plaintext, that hash through a
+ChaCha20 block as the 16-byte synthetic IV, which is both the tag and
+the key stream's nonce.  The same inputs give the same bytes; different
+ones never share a key stream but by a 128-bit collision.  Checked by
+an implementation written apart (`crates/crypto/tests/siv_reference.py`)
+and every bit of tag, data and associated data flipped; 11.9 µs an
+8 KiB page (`docs/benchmarks.md`, *Sealing a page*).  `Key` overwrites its bytes with
 zeros when dropped (a best effort without `unsafe`) and never prints.
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |

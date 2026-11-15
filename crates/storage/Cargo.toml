@@ -10,5 +10,8 @@ repository.workspace = true
 nucleus-kernels.workspace = true
 nucleus-platform.workspace = true
 
+[dev-dependencies]
+nucleus-crypto.workspace = true
+
 [lints]
 workspace = true
