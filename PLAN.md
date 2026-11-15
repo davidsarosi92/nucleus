@@ -10938,12 +10938,6 @@ the first production release.
   operations with §M14.29 S5 (Elle) beside it and S3's files (OSS-Fuzz)
   made ready; §M14.28's LSM when a write-heavy load asks for it.  S3's
   submission and S4's audit are the owner's to request.
-- **2026-11-15** — The order to §F2 agreed (§M14.30's first
-  paragraph); §M14.31 (public benchmarks, reliably measured) and §M14.32
-  (releases and distribution) planned; the first production release
-  after the whole plan: §M26 (in §F4) gathers what prepares it —
-  §M14.29 S3/S4, §M14.30 K6, §M14.31 P2/P3, §M14.32 — while §M14.31 P1
-  stays in §F1.
 - **2026-11-14** — Found while measuring §M14.15 J1, fixed: a table
   dropped after a bulk `CREATE TABLE AS` came back, empty, once later
   commits rewrote its catalog leaf.  A commit's leaf filter (`Collect`)
@@ -10955,3 +10949,9 @@ the first production release.
   wrong.  Now, while committed intents are pending, a run's tombstone
   stays when the run has an intent or begins the leaf (its intent may
   be in the leaf before) — vacuum's rule for keys with intents.
+- **2026-11-15** — The order to §F2 agreed (§M14.30's first
+  paragraph); §M14.31 (public benchmarks, reliably measured) and §M14.32
+  (releases and distribution) planned; the first production release
+  after the whole plan: §M26 (in §F4) gathers what prepares it —
+  §M14.29 S3/S4, §M14.30 K6, §M14.31 P2/P3, §M14.32 — while §M14.31 P1
+  stays in §F1.
