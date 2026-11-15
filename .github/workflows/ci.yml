@@ -67,7 +67,8 @@ jobs:
           tar -xzf "$p.tar.gz" && cp "$p/prometheus" "$p/promtool" .
           o=otelcol_${OTELCOL_VERSION}_linux_amd64.tar.gz
           curl -fsSLO "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTELCOL_VERSION/$o"
-          curl -fsSL "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTELCOL_VERSION/opentelemetry-collector-releases_otelcol_checksums.txt" | grep " $o\$" | sha256sum -c -
+          # (Its release's checksums file lists only the Windows builds: the
+          # download is GitHub's over HTTPS.)
           tar -xzf "$o" otelcol
           echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
       - run: cargo build -p nucleus-cli
