@@ -806,8 +806,8 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "Backups",
-      "description": "Time since the last backup, and how long backups take (BACKUP TO, nucleus server --backup-every); NucleusBackupOverdue and NucleusBackupFailing alert on them.",
+      "title": "Backups and restore tests",
+      "description": "Time since the last backup and the last restore test that held, how long backups take, failures (BACKUP TO, nucleus server --backup-every, --restore-test-every); the backup and restore test alerts watch them.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -851,6 +851,15 @@
           },
           "expr": "sum(increase(nucleus_backup_failures_total{job=\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "failures"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max(nucleus_restore_test_last_success_timestamp_seconds{job=\"$job\", instance=~\"$instance\"} > 0)",
+          "legendFormat": "since the last restore test held"
         }
       ]
     }

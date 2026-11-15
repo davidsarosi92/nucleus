@@ -12,6 +12,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut positional = Vec::new();
     let mut keys = None::<String>;
     let mut backup_key = None::<String>;
+    let mut test = false;
     let mut until = nucleus_sql::backup::Until::Latest;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
@@ -19,6 +20,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--subject-keys" => {
                 keys = Some(rest.next().ok_or("--subject-keys needs a file")?.clone());
             }
+            "--test" => test = true,
             "--backup-key" => {
                 backup_key = Some(rest.next().ok_or("--backup-key needs a file")?.clone());
             }
@@ -30,6 +32,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
             s if s.starts_with("--") => return Err(format!("restore: unknown option {s}")),
             _ => positional.push(a.clone()),
         }
+    }
+    if test {
+        let [backup] = positional.as_slice() else {
+            return Err(
+                "usage: nucleus restore <repository> --test [--subject-keys <file>] \
+                        [--backup-key <file>]"
+                    .into(),
+            );
+        };
+        if until != nucleus_sql::backup::Until::Latest {
+            return Err("restore: --test tests the last backup (no --at)".into());
+        }
+        nucleus_server::backups::load_key(backup_key.as_deref())?;
+        return test_restore(&absolute(backup)?, keys);
     }
     let [backup, dir] = positional.as_slice() else {
         return Err(
@@ -44,19 +60,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "restore: {dir} is not empty: a backup is restored into a new database"
         ));
     }
-    // A URL is a module's repository (s3://…); a path is made absolute
-    // (not canonicalized: on Windows that is a `\\?\` path).
-    let backup = if backup.contains("://") {
-        backup.clone()
-    } else {
-        if !std::path::Path::new(backup).exists() {
-            return Err(format!("restore: no repository at {backup}"));
-        }
-        std::path::absolute(backup)
-            .map_err(|e| format!("{backup}: {e}"))?
-            .to_string_lossy()
-            .into_owned()
-    };
+    let backup = absolute(backup)?;
     // A database made here and not restored is removed again.
     let made = !std::path::Path::new(dir).exists();
     let r = restore_into(dir, &backup, keys, &until);
@@ -64,6 +68,63 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(dir);
     }
     r
+}
+
+/// A URL is a module's repository (s3://…); a path is made absolute (not
+/// canonicalized: on Windows that is a `\\?\` path).
+fn absolute(backup: &str) -> Result<String, String> {
+    if backup.contains("://") {
+        return Ok(backup.to_string());
+    }
+    if !std::path::Path::new(backup).exists() {
+        return Err(format!("restore: no repository at {backup}"));
+    }
+    Ok(std::path::absolute(backup)
+        .map_err(|e| format!("{backup}: {e}"))?
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// `--test` (PLAN.md §M14.18 O4): the last backup restored into a
+/// database of its own in the temporary directory, checked, removed.
+fn test_restore(backup: &str, keys: Option<String>) -> Result<(), String> {
+    let scratch = std::env::temp_dir().join(format!("nucleus-restore-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let r = (|| {
+        let db = Database::open(&scratch, Options::default()).map_err(|e| e.to_string())?;
+        let kv: Arc<dyn Kv> = Arc::new(db);
+        if let Some(path) = keys {
+            nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(SubjectKeyFile::new(
+                std::path::PathBuf::from(path),
+                Arc::clone(&kv),
+            ))));
+        }
+        let r = nucleus_sql::backup::restore_test(&kv, &kv, &crate::sql::registry(), backup);
+        nucleus_sql::subject_keys::set_subject_keys(None);
+        r.map_err(|e| e.message)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    match r? {
+        None => Err(format!("restore: {backup} holds no finished backup")),
+        Some(t) if t.problems.is_empty() => {
+            println!(
+                "restore test of {}: it holds (commit {}, {} backup{}, {} entries, {} indexes \
+                 rebuilt, consistent, the audit chain intact)",
+                t.backup,
+                t.restored.commit,
+                t.restored.backups,
+                if t.restored.backups == 1 { "" } else { "s" },
+                t.restored.entries,
+                t.restored.indexes
+            );
+            Ok(())
+        }
+        Some(t) => Err(format!(
+            "restore test of {} FAILED:\n  {}",
+            t.backup,
+            t.problems.join("\n  ")
+        )),
+    }
 }
 
 fn restore_into(

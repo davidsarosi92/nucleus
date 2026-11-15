@@ -51,6 +51,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut backup_every = None::<std::time::Duration>;
     let mut backup_full_every = 7u64;
     let mut backup_keep = None::<u64>;
+    let mut restore_test_every = None::<std::time::Duration>;
+    let mut restore_test_dir = None::<String>;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -131,6 +133,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     .ok()
                     .filter(|n| *n > 0)
                     .ok_or_else(|| format!("--backup-full-every {n}: a number above 0"))?;
+            }
+            "--restore-test-every" => {
+                let v = rest.next().ok_or("--restore-test-every needs a duration")?;
+                let us = nucleus_sql::dbsettings::duration(v).map_err(|e| e.message)?;
+                if us < 1_000_000 {
+                    return Err(format!("--restore-test-every {v}: at least a second"));
+                }
+                restore_test_every = Some(std::time::Duration::from_micros(us as u64));
+            }
+            "--restore-test-dir" => {
+                restore_test_dir = Some(
+                    rest.next()
+                        .ok_or("--restore-test-dir needs a directory")?
+                        .clone(),
+                )
             }
             "--backup-keep" => {
                 let n = rest.next().ok_or("--backup-keep needs a number")?;
@@ -224,6 +241,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         (None, None) if backup_keep.is_none() => None,
         _ => return Err("server: --backup-to and --backup-every go together".into()),
+    };
+    let restore_tests = match (&schedule, restore_test_every) {
+        (Some(s), Some(every)) => {
+            let scratch = restore_test_dir.map_or_else(
+                || format!("{dir}.restore-test").into(),
+                std::path::PathBuf::from,
+            );
+            nucleus_server::backups::claim_scratch(&scratch)
+                .map_err(|e| format!("server: --restore-test-dir: {e}"))?;
+            Some(nucleus_server::backups::RestoreTests {
+                to: s.to.clone(),
+                every,
+                scratch,
+            })
+        }
+        (None, Some(_)) => {
+            return Err(
+                "server: --restore-test-every tests --backup-to's backups: give both".into(),
+            );
+        }
+        (_, None) if restore_test_dir.is_some() => {
+            return Err("server: --restore-test-dir goes with --restore-test-every".into());
+        }
+        (_, None) => None,
     };
     let backup_key_id = nucleus_server::backups::load_key(backup_key.as_deref())?;
     let weak_password = password.as_deref() == Some(DEFAULT_PASSWORD);
@@ -513,6 +554,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .map_or(String::new(), |id| format!(", encrypted (key {id})"))
         );
         nucleus_server::backups::start(Arc::clone(&kv), s, nucleus_server::Stop::new());
+    }
+    if let Some(t) = restore_tests {
+        nucleus_platform::log!(
+            "restore tests: of {} every {}s, in {}",
+            t.to,
+            t.every.as_secs(),
+            t.scratch.display()
+        );
+        nucleus_server::backups::start_restore_tests(
+            Arc::clone(&kv),
+            Arc::clone(&config.registry),
+            t,
+            nucleus_server::Stop::new(),
+        );
     }
     // The embedding columns' jobs (§M14.22 E4b), off the sessions.
     nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry));

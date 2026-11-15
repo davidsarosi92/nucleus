@@ -286,7 +286,7 @@ are marked ✅.
 | | M14.15 | JSON type and functions | ✅ (2026-11-14) study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
-| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O3c |
+| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ◐ O1–O4 |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9389,8 +9389,35 @@ Steps (planned 2026-11-14):
     Tests: an encrypted backup needing its key, refusing another, an
     unencrypted one and an altered manifest, a new key starting a chain;
     `KEEP`; the metrics; the CLI's scheduled encrypted backups restored.
-  - **Next steps:** O4 scheduled restore tests; O5 online `ALTER
-    COLUMN … TYPE`.
+  - **O4 ✅ (2026-11-15) — restore tests.**  `backup::restore_test`:
+    the repository's last backup restored into a scratch database and
+    checked as the crash tests check a recovery (`check::check`: catalog,
+    rows, indexes, foreign keys; `audit::check`: the chain); a restore
+    that fails is a finding too, and a restore now checks the entries
+    each backup's parts hold against its manifest's count.  The result
+    is left in the backup (`restore-test`: what a restarted schedule
+    reads), in the audit log (kind `restore test`) and counted
+    (`nucleus_restore_test*`).  `nucleus server --restore-test-every <d>
+    [--restore-test-dir <dir>]` runs them on a thread of their own in a
+    directory marked as theirs (one holding other files is refused —
+    nothing of the user's is ever removed); `nucleus restore <repo>
+    --test` by hand.  Alerts `NucleusRestoreTestFailing` (critical, at
+    once) and `NucleusRestoreTestOverdue`.  Prior art: pgBackRest's
+    `verify` (checksums of a repository's files without restoring — not
+    enough alone: it cannot see a backup that restores into an
+    inconsistent database) and the advice of every operations guide
+    (Google SRE's "nobody wants a backup, everybody wants a restore";
+    Barman and WAL-G recipes restoring into a scratch instance and
+    running `amcheck`) — taken: the restore itself is the test, and
+    nucleus's own consistency check stands in for `amcheck`.  Not taken:
+    comparing the restored database with the live one (they differ by
+    every write since the backup; the backup's own counts are checked by
+    the restore).  Tests: a restore test catching a part's byte flipped,
+    a part cut short behind a manifest made to match and an altered count
+    of entries, holding again once mended; the CLI's scheduled restore tests failing on a flipped
+    byte, `nucleus restore --test`.  This meets the milestone's "the
+    scheduled restore test catches a deliberately corrupted backup".
+  - **Next steps:** O5 online `ALTER COLUMN … TYPE`.
 - **Health checks**: liveness and readiness endpoints for orchestrators
   (`/health/live`, `/health/ready` — ready only once recovery is done and
   the store is open), and `nucleus status` for people.

@@ -826,6 +826,111 @@ fn scheduled_encrypted_backups() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `nucleus server --restore-test-every …` (PLAN.md §M14.18 O4): the
+/// last backup restored and checked on a schedule, as `nucleus restore
+/// --test` does by hand — both catch a deliberately corrupted backup.
+#[test]
+fn scheduled_restore_tests_catch_a_corrupted_backup() {
+    use std::io::BufRead;
+
+    let dir = temp_dir("restoretests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (db, repo) = (dir.join("db"), dir.join("repo"));
+    let (d, r) = (db.to_str().unwrap(), repo.to_str().unwrap());
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args([
+                "server",
+                d,
+                "--listen",
+                "127.0.0.1:0",
+                "--metrics",
+                "127.0.0.1:0",
+                "--backup-to",
+                r,
+                "--backup-every",
+                "1s",
+                "--backup-full-every",
+                "1000",
+                "--restore-test-every",
+                "1s",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufReader::new(server.0.stderr.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let addrs: Vec<&str> = first
+        .split_whitespace()
+        .filter(|w| w.starts_with("127.0.0.1:"))
+        .collect();
+    let (addr, metrics) = (addrs[0].to_string(), addrs[1].to_string());
+    let (ok, out) = ncsql(
+        &["-h", &addr],
+        "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);\nCREATE INDEX t_v ON t (v);\nINSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 1000) g;\n",
+    );
+    assert!(ok, "{out}");
+    let value = |series: &str| sample(&http_get(&metrics, "/metrics", None).1, series);
+    let wait_for = |what: &str, cond: &dyn Fn() -> bool| {
+        for _ in 0..600 {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("{what}: {}", http_get(&metrics, "/metrics", None).1);
+    };
+    wait_for("a restore test", &|| {
+        value("nucleus_restore_tests_total") >= 2.0
+            && value("nucleus_restore_test_last_success_timestamp_seconds") > 0.0
+    });
+    assert_eq!(value("nucleus_restore_test_failing"), 0.0);
+    assert_eq!(value("nucleus_restore_test_interval_seconds"), 1.0);
+    let (ok, text) = nucleus(&["restore", r, "--test"], "");
+    assert!(ok && text.contains("it holds"), "{text}");
+    // A byte of the chain's first part flipped (the first backup, of an
+    // empty database, may have none): the next test fails.
+    let mut backups: Vec<_> = std::fs::read_dir(&repo)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    backups.sort();
+    let part = backups
+        .iter()
+        .map(|b| b.join("part-000000"))
+        .find(|p| p.exists())
+        .unwrap();
+    let mut b = std::fs::read(&part).unwrap();
+    let mid = b.len() / 2;
+    b[mid] ^= 0x40;
+    std::fs::write(&part, &b).unwrap();
+    wait_for("the restore test failing", &|| {
+        value("nucleus_restore_test_failing") == 1.0
+    });
+    assert!(value("nucleus_restore_test_failures_total") >= 1.0);
+    let (ok, text) = nucleus(&["restore", r, "--test"], "");
+    assert!(
+        !ok && text.contains("FAILED") && text.contains("SHA-256"),
+        "{text}"
+    );
+    drop(server);
+    // The scratch directory: marked, the database in it removed.
+    let scratch = dir.join("db.restore-test");
+    assert!(scratch.join(".nucleus-restore-test").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `nucleus server --metrics` (PLAN.md §M14.18): Prometheus's `GET
 /// /metrics` moving with a workload, the same numbers in
 /// `nc_catalog.metrics`, and the health checks.

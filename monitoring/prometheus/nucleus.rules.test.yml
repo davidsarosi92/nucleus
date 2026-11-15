@@ -306,6 +306,46 @@ tests:
             exp_annotations:
               summary: 'backups of db:20037 fail'
               runbook: 'DOCS.md §8.39 NucleusBackupFailing'
+  - name: NucleusRestoreTestFailing
+    interval: 1m
+    input_series:
+      - series: 'nucleus_restore_test_failing{job="nucleus",instance="db:20037"}'
+        values: '0 0 0 1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NucleusRestoreTestFailing
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: NucleusRestoreTestFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: "a restore test of db:20037's backups failed: they may not restore"
+              runbook: 'DOCS.md §8.39 NucleusRestoreTestFailing'
+  - name: NucleusRestoreTestOverdue
+    interval: 1m
+    input_series:
+      - series: 'nucleus_restore_test_interval_seconds{job="nucleus",instance="db:20037"}'
+        values: '3600x200'
+      - series: 'nucleus_restore_test_last_success_timestamp_seconds{job="nucleus",instance="db:20037"}'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 140m
+        alertname: NucleusRestoreTestOverdue
+        exp_alerts: []
+      - eval_time: 160m
+        alertname: NucleusRestoreTestOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: 'nucleus'
+              instance: 'db:20037'
+            exp_annotations:
+              summary: "no restore test of db:20037's backups has held for two of its schedule's intervals"
+              runbook: 'DOCS.md §8.39 NucleusRestoreTestOverdue'
   - name: healthy
     interval: 1m
     input_series:
@@ -342,6 +382,12 @@ tests:
       - series: 'nucleus_backup_last_success_timestamp_seconds{job="nucleus",instance="db:20037"}'
         values: '0+60x60'
       - series: 'nucleus_backup_failing{job="nucleus",instance="db:20037"}'
+        values: '0x60'
+      - series: 'nucleus_restore_test_interval_seconds{job="nucleus",instance="db:20037"}'
+        values: '86400x60'
+      - series: 'nucleus_restore_test_last_success_timestamp_seconds{job="nucleus",instance="db:20037"}'
+        values: '0x60'
+      - series: 'nucleus_restore_test_failing{job="nucleus",instance="db:20037"}'
         values: '0x60'
       - series: 'node_filesystem_avail_bytes{job="node",instance="node:9100",mountpoint="/data",fstype="ext4",device="sda"}'
         values: '500x60'
@@ -389,4 +435,10 @@ tests:
         exp_alerts: []
       - eval_time: 55m
         alertname: NucleusBackupFailing
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusRestoreTestFailing
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: NucleusRestoreTestOverdue
         exp_alerts: []

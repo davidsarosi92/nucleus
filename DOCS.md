@@ -1242,6 +1242,7 @@ nucleus sql [<dir> | :memory:] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <d
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
 nucleus restore <repository> <dir> [--at <commit|backup|time>] [--subject-keys <file>] [--backup-key <file>]   # §8.30
+nucleus restore <repository> --test [--subject-keys <file>] [--backup-key <file>]   # a restore test, §8.30
 nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
@@ -5255,6 +5256,36 @@ repository's last at its start), `nucleus_backup_last_bytes`,
 `nucleus_backup_interval_seconds` — the alerts `NucleusBackupOverdue`
 and `NucleusBackupFailing` (§8.39) watch them.
 
+**Restore tests** (§M14.18 O4).  A backup is good when it restores:
+`backup::restore_test(kv, scratch, registry, repo)` restores the
+repository's last backup (its chain) into `scratch`, a new database,
+and checks what it made as the crash tests check a recovery —
+`check::check` (catalog, rows and indexes agree, every foreign key
+holds, no stray keys) and `audit::check` (the audit chain holds); a
+restore that fails (a part missing, its SHA-256 differing, a manifest's
+MAC, a part that does not decrypt or decompress) is a problem found
+too.  The result, `Tested` (`backup`, `restored`, `problems`), is left
+in the backup as `restore-test` (when, the commit, `result ok` or
+`failed`, the problems), in the database's audit log (kind `restore
+test`, `ok`, the backup and the problems as its detail; not when the
+database tested is the scratch one, as `nucleus restore --test`'s) and
+counted: `nucleus_restore_tests_total`,
+`nucleus_restore_test_failures_total`, `nucleus_restore_test_failing`,
+`nucleus_restore_test_last_success_timestamp_seconds`,
+`nucleus_restore_test_duration_seconds`,
+`nucleus_restore_test_interval_seconds`.  `nucleus server
+--restore-test-every <duration> [--restore-test-dir <dir>]` (with
+`--backup-to`; `nucleus_server::backups::start_restore_tests`) runs one
+an interval after the repository's last (`last_restore_test` reads the
+last 50 backups' records), in `<dir>.restore-test` by default — a
+directory of its own, marked `.nucleus-restore-test` (one holding
+anything else is refused: its files are never thrown away), the
+database restored in its `db` and removed after; room for a copy of
+the database is needed there while it runs.  `nucleus restore
+<repository> --test` runs one by hand, in the temporary directory
+(exit status 1 and the problems when it fails).  The alerts
+`NucleusRestoreTestFailing` and `NucleusRestoreTestOverdue` watch them.
+
 **What is sealed.**  An entry about a subject (§8.29): a row of a table
 with subject columns (a partition's are its parent's) whose subject
 columns are not all NULL, and — with the subjects of the row it
@@ -5314,7 +5345,8 @@ after it, each following the one before (one missing or unfinished:
 format before repositories, `nucleus backup 1`) is restored by itself.
 Each manifest is checked against the backup key (above); each part
 against its length and SHA-256 (`22000`), then decrypted and
-decompressed; the
+decompressed, and the entries each backup's parts hold against its
+manifest's count (`entries` and `deleted`; `22000`); the
 entries are written in transactions of about 4 MiB, backup after backup
 — a sealed one opened with its keys (one that does not open: `22000`,
 the backup changed or another database's keys), left out when one of
@@ -5332,8 +5364,7 @@ The time a restore reaches is a backup's: point-in-time restore is as
 fine as the backups are frequent — incremental ones cost what changed,
 so they can be taken often.  Not the WAL archived: the log holds every
 entry in the clear, and a subject's rows in an archived log could not
-be forgotten (§M14.24), while a backup's are sealed.  Not yet
-(§M14.18 O4): scheduled restore tests.  Tests:
+be forgotten (§M14.24), while a backup's are sealed.  Tests:
 `tests/backup.rs` (a restore is the database as the backup saw it, its
 indexes used; a backup holds no subject's value in the clear; a restore
 after `FORGET` leaves the subject out, the audit chain intact, a later
@@ -5342,7 +5373,10 @@ the database is opened again too — restored to each point, a subject's
 row's delete sealed, `FORGET` dropping the kept branch; an encrypted
 backup needing its key, refusing another, an altered manifest and an
 unencrypted backup, a new key starting a new chain; `KEEP` removing the
-older chains, the metrics counting backups and failures), `storage
+older chains, the metrics counting backups and failures; a restore test
+catching a part's byte flipped, a part cut short behind a manifest
+made to match and a manifest's count of entries altered, holding again
+once mended, each in the audit log), `storage
 tests/branch.rs` (the ranges two branches differ in hold every
 difference, a base written since too), `kv tests/contract.rs`
 (`changed_since` holds every change: deletes of runs, a transaction
@@ -5350,7 +5384,10 @@ running across the branch point, spilled ones), the CLI's
 `backups_restored_to_a_point` and `scheduled_encrypted_backups` (a
 server backing up each second, a full one every second backup, one
 chain kept, nothing of the rows in the clear, the metrics, `nucleus
-restore` with and without the key); `modules/s3` (the signature examples;
+restore` with and without the key) and
+`scheduled_restore_tests_catch_a_corrupted_backup` (a server's restore
+tests failing once a part's byte is flipped, the metrics, `nucleus
+restore --test`); `modules/s3` (the signature examples;
 a stand-in store checking every signature, listing in pages, a full and
 an incremental backup restored from it) and `scripts/s3-test.sh`, CI's
 **backups in object storage (S3)**, against rclone's real S3 server.
@@ -6104,8 +6141,10 @@ metrics: nucleus does not measure the disk.
 | `NucleusBackupOverdue` (critical) | a schedule's last backup older than two intervals, for 10 min | The server's log says why each backup failed (`backup to … failed`); `NucleusBackupFailing` usually fired first.  Is the repository reachable and writable (disk full, credentials expired, a bucket's policy)?  A backup by hand (`BACKUP TO`) shows the error at once. |
 | `NucleusBackupFailing` | the last backup failed, for 15 min | As above; the schedule tries again within five minutes.  An encrypted repository needs the same key (a new one starts a new chain, never fails); `22023` from a key mismatch is a restore's, not a backup's. |
 
-Restore tests' alerts come with them (O4), replication lag's with
-§M17.5.
+| `NucleusRestoreTestFailing` (critical) | the last restore test failed | The backups may not restore.  The server's log and the backup's `restore-test` file name the problems: a part damaged (its SHA-256 differs: the storage under the repository), a manifest altered, rows or indexes inconsistent.  Make a full backup at once (`BACKUP FULL TO`), run `nucleus restore <repo> --test`, and find what damaged the repository. |
+| `NucleusRestoreTestOverdue` | no restore test held for two intervals, for 30 min | The tests fail (above) or do not run: the log says why (the repository unreachable, no room in `--restore-test-dir` for a copy of the database). |
+
+Replication lag's alert comes with §M17.5.
 
 ## 9. Server (`nucleus-server`)
 
@@ -6119,15 +6158,17 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--subject-keys <file>] [--history <duration>]
                      [--backup-key <file>] [--backup-to <repository>
                       --backup-every <duration> [--backup-full-every <n>]
-                      [--backup-keep <n>]]
+                      [--backup-keep <n>] [--restore-test-every <duration>
+                      [--restore-test-dir <dir>]]]
 ```
 
 `--subject-keys` names the file of subjects' keys (§8.30; default
 `<dir>.subject-keys`).  `--backup-key` the file of the key backups are
 encrypted with (or `NUCLEUS_BACKUP_KEY_FILE`); `--backup-to` and
 `--backup-every` back up on a schedule, every `--backup-full-every`-th
-backup (default 7) a full one, the last `--backup-keep` full ones kept
-(§8.30).
+backup (default 7) a full one, the last `--backup-keep` full ones kept;
+`--restore-test-every` restores the last backup and checks it, in
+`--restore-test-dir` (default `<dir>.restore-test`) (§8.30).
 
 `--metrics` serves Prometheus's `GET /metrics` and the health checks
 `/health/live`, `/health/ready` (default `127.0.0.1:20037`), `--otlp`
@@ -7138,6 +7179,14 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-15 — §M14.18 O4, restore tests:** `backup::restore_test`
+  (the last backup restored into a scratch database, `check::check`
+  and the audit chain), its record in the backup, `nucleus server
+  --restore-test-every`, `nucleus restore --test`, the
+  `nucleus_restore_test*` metrics, the alerts
+  `NucleusRestoreTestFailing` and `NucleusRestoreTestOverdue` (§8.30,
+  §8.39).
 
 - **2026-11-15 — §M14.18 O3c, backups compressed, encrypted, kept and
   scheduled:** parts in LZ4's block format; with a backup key

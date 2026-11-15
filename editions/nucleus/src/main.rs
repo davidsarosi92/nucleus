@@ -69,7 +69,8 @@ usage:
                      [--index-cache <size>] [--secrets-key <file>] [--subject-keys <file>]
                      [--history <duration>] [--backup-key <file>]
                      [--backup-to <repository> --backup-every <duration>
-                      [--backup-full-every <n>] [--backup-keep <n>]]
+                      [--backup-full-every <n>] [--backup-keep <n>]
+                      [--restore-test-every <duration> [--restore-test-dir <dir>]]]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -122,7 +123,10 @@ usage:
                                     with those after them; --backup-key the
                                     file of the key (64 hex digits: openssl
                                     rand -hex 32; or NUCLEUS_BACKUP_KEY_FILE)
-                                    backups are encrypted with
+                                    backups are encrypted with;
+                                    --restore-test-every restores the last
+                                    backup into --restore-test-dir (default
+                                    <dir>.restore-test) and checks it
   nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>]
                  | list | drop <name> | reset <name>
                                     a local database's branches: a copy made in
@@ -134,6 +138,7 @@ usage:
                                     keeps (its --history, given again)
   nucleus restore <repository> <dir> [--at <commit|backup|time>]
                  [--subject-keys <file>] [--backup-key <file>]
+  nucleus restore <repository> --test [--subject-keys <file>] [--backup-key <file>]
                                     a new database in <dir> from the backups
                                     BACKUP TO '<repository>' wrote: the last,
                                     or the last by --at (a commit, a backup's
@@ -149,7 +154,11 @@ usage:
                                     AWS_SECRET_ACCESS_KEY, AWS_REGION,
                                     AWS_ENDPOINT_URL for MinIO and others);
                                     encrypted backups need --backup-key (or
-                                    NUCLEUS_BACKUP_KEY_FILE)
+                                    NUCLEUS_BACKUP_KEY_FILE); --test restores
+                                    the last backup into a temporary
+                                    database, checks it (rows, indexes,
+                                    foreign keys, the audit chain) and
+                                    removes it
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

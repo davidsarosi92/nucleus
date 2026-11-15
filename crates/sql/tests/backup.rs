@@ -676,3 +676,116 @@ fn keep_removes_the_older_chains() {
     assert_eq!(BACKUP_FAILURES.get(), failed + 1);
     assert_eq!(code(&mut s, "BACKUP TO '/repo' KEEP 0"), "42601");
 }
+
+/// PLAN.md §M14.18 O4: a restore test restores the last backup into a
+/// database of its own and checks it; it catches a corrupted backup — a
+/// part's byte flipped (its SHA-256 differs), a part cut short with the
+/// manifest made to match (it does not decompress) — and leaves its
+/// result in the backup and the metrics.
+#[test]
+fn a_restore_test_catches_a_corrupted_backup() {
+    use nucleus_sql::backup::{last_restore_test, restore_test};
+    use nucleus_sql::metrics::{RESTORE_TEST_FAILING, RESTORE_TESTS};
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(8));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv));
+    schema(&mut s);
+    backed_up(&mut s, "BACKUP TO '/repo'");
+    s.execute("INSERT INTO cities VALUES ('Győr', 130000)")
+        .unwrap();
+    backed_up(&mut s, "BACKUP TO '/repo'");
+    let registry = s.registry().clone();
+    let tests = RESTORE_TESTS.get();
+    let mut n = 0;
+    let mut test = || {
+        n += 1;
+        let scratch = open(&p, &format!("/scratch{n}"));
+        restore_test(&kv, &scratch, &registry, "/repo")
+            .unwrap()
+            .unwrap()
+    };
+    let t = test();
+    assert_eq!(t.backup, "000002-incr");
+    assert!(t.problems.is_empty(), "{t:?}");
+    assert!(t.restored.indexes > 0 && t.restored.entries > 0, "{t:?}");
+    assert_eq!(RESTORE_TEST_FAILING.get(), 0);
+    let record = String::from_utf8(read(&p, "/repo/000002-incr/restore-test")).unwrap();
+    assert!(record.contains("\nresult ok\n"), "{record}");
+    let (name, _, held) = last_restore_test(&kv, "/repo").unwrap().unwrap();
+    assert_eq!((name.as_str(), held), ("000002-incr", true));
+
+    // A byte of the full backup's part flipped.
+    let part = "/repo/000001-full/part-000000";
+    let good = read(&p, part);
+    let mut bad = good.clone();
+    let mid = bad.len() / 2;
+    bad[mid] ^= 0x40;
+    write(&p, part, &bad);
+    let t = test();
+    assert!(
+        t.problems.len() == 1 && t.problems[0].contains("SHA-256"),
+        "{t:?}"
+    );
+    assert_eq!(RESTORE_TEST_FAILING.get(), 1);
+    let record = String::from_utf8(read(&p, "/repo/000002-incr/restore-test")).unwrap();
+    assert!(record.contains("\nresult failed\n"), "{record}");
+    assert!(!last_restore_test(&kv, "/repo").unwrap().unwrap().2);
+
+    // Cut short, the manifest made to match: it does not decompress.
+    let cut = &good[..good.len() / 2];
+    write(&p, part, cut);
+    let manifest = "/repo/000001-full/manifest";
+    let m = String::from_utf8(read(&p, manifest)).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let fixed: String = m
+        .lines()
+        .map(|l| {
+            if l.starts_with("part part-000000 ") {
+                format!(
+                    "part part-000000 {} {}\n",
+                    cut.len(),
+                    hex(&nucleus_crypto::sha256(cut))
+                )
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect();
+    write(&p, manifest, fixed.as_bytes());
+    let t = test();
+    assert!(
+        t.problems.len() == 1 && t.problems[0].contains("damaged"),
+        "{t:?}"
+    );
+    // The manifest's count of entries altered: the parts hold others.
+    write(&p, part, &good);
+    let recount: String = m
+        .lines()
+        .map(|l| match l.strip_prefix("entries ") {
+            Some(n) => format!("entries {}\n", n.parse::<u64>().unwrap() + 1),
+            None => format!("{l}\n"),
+        })
+        .collect();
+    write(&p, manifest, recount.as_bytes());
+    let t = test();
+    assert!(
+        t.problems.len() == 1 && t.problems[0].contains("its manifest"),
+        "{t:?}"
+    );
+    // Mended: it holds again.
+    write(&p, manifest, m.as_bytes());
+    assert!(test().problems.is_empty());
+    assert_eq!(RESTORE_TEST_FAILING.get(), 0);
+    assert_eq!(RESTORE_TESTS.get(), tests + 5);
+    // Each in the database's audit log.
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT ok, count(*) FROM nc_catalog.audit WHERE kind = 'restore test' \
+             GROUP BY ok ORDER BY ok"
+        ),
+        ["f 3", "t 2"]
+    );
+}

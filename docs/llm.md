@@ -179,7 +179,9 @@ a repository — the first a full backup, each next one only what changed
 n full backups and those after them), compressed, encrypted when the
 server has `--backup-key FILE` (64 hex digits; `openssl rand -hex 32`;
 restore needs it too), on a schedule with `nucleus server --backup-to
-<repo> --backup-every 1d [--backup-keep n]` — each subject's rows sealed under
+<repo> --backup-every 1d [--backup-keep n] [--restore-test-every 1w]`
+(the last backup restored into a scratch database and checked; `nucleus
+restore <repo> --test` by hand) — each subject's rows sealed under
 the subject's key (the server's `<dir>.subject-keys` file; keep it apart
 from the backups), which `FORGET SUBJECT` destroys; `nucleus restore
 <repo> <newdir> [--at <commit|000003-incr|'time'>] [--subject-keys

@@ -6,7 +6,7 @@ tests and a dashboard, over the metrics `nucleus server --metrics` serves
 
 | file | what |
 |---|---|
-| `prometheus/nucleus.rules.yml` | the alert rules: down, not ready, disk low or filling, WAL not checkpointed, a long transaction, conflicts, the cache's hit ratio, failed logins, a locked role, failing and slow statements, a backup overdue or failing |
+| `prometheus/nucleus.rules.yml` | the alert rules: down, not ready, disk low or filling, WAL not checkpointed, a long transaction, conflicts, the cache's hit ratio, failed logins, a locked role, failing and slow statements, a backup or a restore test overdue or failing |
 | `prometheus/nucleus.rules.test.yml` | `promtool test rules`: each alert provoked by series made for it, none on healthy ones |
 | `grafana/nucleus.json` | a Grafana dashboard (import it; pick the Prometheus data source) |
 | `test.sh` | all of it against the real tools: promtool, a Prometheus scraping a server, an OpenTelemetry Collector receiving OTLP |

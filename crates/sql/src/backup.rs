@@ -1185,6 +1185,144 @@ pub fn prune(kv: &Arc<dyn Kv>, to: &str, keep: u64) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+/// What a restore test found (PLAN.md §M14.18 O4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tested {
+    /// The backup restored (its directory).
+    pub backup: String,
+    /// What the restore did.
+    pub restored: Restored,
+    /// What the checks found wrong: none when the backup is good.
+    pub problems: Vec<String>,
+}
+
+/// The file a restore test leaves in the backup it tested.
+const RESTORE_TEST: &str = "restore-test";
+
+/// A restore test (PLAN.md §M14.18 O4): repository `to`'s last backup
+/// restored into `scratch` (a new, empty database, the caller's to throw
+/// away), then checked as the crash tests check a recovery — catalog,
+/// rows and indexes agree, every foreign key holds ([`crate::check`]),
+/// the audit chain holds ([`crate::audit::check`]).  A restore that
+/// fails is a problem found too.  The result is left in the backup
+/// (`restore-test`: when, and whether it held) — what a schedule reads
+/// at its start — and counted in the metrics (`nucleus_restore_test*`).
+/// `kv` is the database whose repository it is (a directory is its file
+/// system's).
+pub fn restore_test(
+    kv: &Arc<dyn Kv>,
+    scratch: &Arc<dyn Kv>,
+    reg: &Registry,
+    to: &str,
+) -> Result<Option<Tested>> {
+    let Some(last) = last_backup(kv, to)? else {
+        return Ok(None);
+    };
+    let started = std::time::Instant::now();
+    let mut t = Tested {
+        backup: last.name.clone(),
+        restored: Restored::default(),
+        problems: Vec::new(),
+    };
+    match restore_to(scratch, reg, to, &Until::Name(last.name.clone())) {
+        Err(e) => t
+            .problems
+            .push(format!("the restore failed: {}", e.message)),
+        Ok(r) => {
+            t.restored = r;
+            let txn = scratch.begin(TxnOptions::read_only())?;
+            t.problems.extend(crate::check::check(&*txn, reg)?);
+            let chain = crate::audit::check(&*txn)?;
+            if !chain.intact {
+                t.problems.push(format!(
+                    "the audit chain breaks at record {}: {}",
+                    chain.broken_at.unwrap_or(0),
+                    chain.problem.unwrap_or_default()
+                ));
+            }
+        }
+    }
+    let now = kv
+        .wall_clock()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    crate::metrics::restore_test_done(t.problems.is_empty(), started.elapsed(), now / 1_000_000);
+    let target = open_target(kv, to)?;
+    let mut record = format!(
+        "nucleus restore test 1\ntime {now}\ncommit {}\nresult {}\n",
+        t.restored.commit,
+        if t.problems.is_empty() {
+            "ok"
+        } else {
+            "failed"
+        }
+    );
+    for p in &t.problems {
+        record.push_str(&format!("problem {}\n", p.replace('\n', " ")));
+    }
+    put(
+        &*target,
+        &format!("{}/{RESTORE_TEST}", last.name),
+        record.as_bytes(),
+    )?;
+    // And in the database's audit log (when it is not the scratch one).
+    if !Arc::ptr_eq(kv, scratch) {
+        let detail = format!(
+            "{} of {to}: {}",
+            last.name,
+            if t.problems.is_empty() {
+                "it holds".to_string()
+            } else {
+                t.problems.join("; ")
+            }
+        );
+        let mut r = crate::audit::record_of(
+            &crate::access::Who::system(),
+            "restore test",
+            t.problems.is_empty(),
+            if t.problems.is_empty() { "" } else { "XX001" },
+            &detail,
+        );
+        r.at = crate::datetime::from_system(kv.wall_clock());
+        let mut attempt = 0;
+        loop {
+            let mut txn = kv.begin(TxnOptions::default())?;
+            match crate::audit::append(txn.as_mut(), r.clone()).and_then(|()| Ok(txn.commit()?)) {
+                Err(e) if e.code == "40001" && attempt < 20 => {
+                    attempt += 1;
+                    kv.back_off(attempt);
+                }
+                done => {
+                    done?;
+                    break;
+                }
+            }
+        }
+    }
+    Ok(Some(t))
+}
+
+/// The last restore test of repository `to`: its backup, when (µs since
+/// the Unix epoch), and whether it held — of the last 50 backups.
+pub fn last_restore_test(kv: &Arc<dyn Kv>, to: &str) -> Result<Option<(String, u64, bool)>> {
+    let target = open_target(kv, to)?;
+    let t = &*target;
+    for (_, name) in listing(t)?.into_iter().rev().take(50) {
+        let Some(b) = get(t, &format!("{name}/{RESTORE_TEST}"))? else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&b);
+        let field = |f: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(f)?.strip_prefix(' '))
+                .map(str::to_string)
+        };
+        let time = field("time").and_then(|t| t.parse().ok()).unwrap_or(0);
+        return Ok(Some((name, time, field("result").as_deref() == Some("ok"))));
+    }
+    Ok(None)
+}
+
 /// A repository's last finished backup, for a schedule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Last {
@@ -1487,6 +1625,9 @@ struct Manifest {
     source: Option<String>,
     analyzed: Vec<u32>,
     parts: Vec<(String, u64, String)>,
+    /// The entries its parts hold: written, and deleted.
+    entries: Option<u64>,
+    deleted: u64,
     /// Its parts compressed (LZ4's block format).
     compressed: bool,
     /// Its parts encrypted: the key's id.
@@ -1582,6 +1723,8 @@ fn manifest(text: &str) -> Result<Manifest> {
         compressed: false,
         key_id: None,
         mac: None,
+        entries: None,
+        deleted: 0,
     };
     if let Some(i) = text.rfind("\nmac ") {
         let mac = text[i + 5..].trim();
@@ -1598,6 +1741,8 @@ fn manifest(text: &str) -> Result<Manifest> {
         match f.as_slice() {
             ["commit", n] => m.commit = n.parse().map_err(|_| bad(line))?,
             ["time", n] => m.time = n.parse().map_err(|_| bad(line))?,
+            ["entries", n] => m.entries = Some(n.parse().map_err(|_| bad(line))?),
+            ["deleted", n] => m.deleted = n.parse().map_err(|_| bad(line))?,
             ["kind", k] => m.incremental = *k == "incremental",
             ["base", b] => m.base = Some(name(b)?),
             ["branch", b] => m.branch = Some((*b).to_string()),
@@ -1848,6 +1993,8 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
     for (dir, m) in &chain {
         m.check(dir, key.as_ref())?;
     }
+    // The entries each backup's parts hold, against its manifest's count.
+    let mut counted: HashMap<&str, u64> = HashMap::new();
     let parts = chain
         .iter()
         .flat_map(|(dir, m)| m.parts.iter().map(move |p| (dir, m, p)));
@@ -1864,7 +2011,9 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
         }
         let b = m.open_part(&path, b, key.as_ref())?;
         let mut r = Reader { b: &b, at: 0 };
+        let read = counted.entry(dir.as_str()).or_insert(0);
         while r.at < b.len() {
+            *read += 1;
             let kind = r.u8()?;
             // A delete (an incremental backup's).
             let gone = match kind {
@@ -1960,6 +2109,16 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
         }
     }
     txn.commit()?;
+    for (dir, m) in &chain {
+        let read = counted.get(dir.as_str()).copied().unwrap_or(0);
+        if let Some(want) = m.entries.map(|n| n + m.deleted)
+            && read != want
+        {
+            return Err(Error::data_exception(format!(
+                "{dir} holds {read} entries, its manifest {want}"
+            )));
+        }
+    }
     let system = Arc::new(crate::access::Who::system());
     let now = crate::datetime::from_system(kv.wall_clock());
     crate::access::with_who(&system, || {

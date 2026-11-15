@@ -120,6 +120,51 @@ pub static BACKUP_INTERVAL: Gauge = Gauge::new(
     "The server's backup schedule's interval (--backup-every), 0 without one.",
 );
 
+/// Restore tests run.
+pub static RESTORE_TESTS: Counter = Counter::new(
+    "nucleus_restore_tests_total",
+    "Restore tests run (the server's --restore-test-every, nucleus restore --test).",
+);
+/// Restore tests that found a problem.
+pub static RESTORE_TEST_FAILURES: Counter = Counter::new(
+    "nucleus_restore_test_failures_total",
+    "Restore tests that failed: the restore, or the check of what it made.",
+);
+/// 1 while the last restore test failed.
+pub static RESTORE_TEST_FAILING: Gauge = Gauge::new(
+    "nucleus_restore_test_failing",
+    "1 if the last restore test failed, 0 once one holds.",
+);
+/// When the last restore test held.
+pub static RESTORE_TEST_LAST: Gauge = Gauge::new(
+    "nucleus_restore_test_last_success_timestamp_seconds",
+    "When the last restore test held (Unix time; the repository's last at the schedule's start), 0 if none.",
+);
+/// How long restore tests took.
+pub static RESTORE_TEST_TIME: Histogram = Histogram::new(
+    "nucleus_restore_test_duration_seconds",
+    "How long restore tests took: the restore and the checks.",
+);
+/// The restore tests' schedule's interval.
+pub static RESTORE_TEST_INTERVAL: Gauge = Gauge::new(
+    "nucleus_restore_test_interval_seconds",
+    "The server's restore test schedule's interval (--restore-test-every), 0 without one.",
+);
+
+/// A restore test, recorded: whether it held, how long it took, and now
+/// (Unix seconds).
+pub(crate) fn restore_test_done(held: bool, took: std::time::Duration, now: u64) {
+    RESTORE_TEST_TIME.observe(took);
+    RESTORE_TESTS.inc();
+    if held {
+        RESTORE_TEST_FAILING.set(0);
+        RESTORE_TEST_LAST.set(now as i64);
+    } else {
+        RESTORE_TEST_FAILURES.inc();
+        RESTORE_TEST_FAILING.set(1);
+    }
+}
+
 /// A backup, recorded: its bytes if it was made, how long it took, and
 /// now (Unix seconds).
 pub(crate) fn backup_done(bytes: Option<u64>, took: std::time::Duration, now: u64) {
@@ -196,6 +241,12 @@ pub fn register() {
             &BACKUP_BYTES,
             &BACKUP_TIME,
             &BACKUP_INTERVAL,
+            &RESTORE_TESTS,
+            &RESTORE_TEST_FAILURES,
+            &RESTORE_TEST_FAILING,
+            &RESTORE_TEST_LAST,
+            &RESTORE_TEST_TIME,
+            &RESTORE_TEST_INTERVAL,
         ]);
         global().collector(|s| {
             s.gauge(
