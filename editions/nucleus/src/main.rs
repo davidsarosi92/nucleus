@@ -79,8 +79,10 @@ usage:
                                     127.0.0.1:20037; beyond loopback over TLS
                                     unless --insecure), with --otlp the metrics
                                     pushed to an OpenTelemetry collector
-                                    (OTLP/HTTP; or OTEL_EXPORTER_OTLP_ENDPOINT,
-                                    _HEADERS, OTEL_METRIC_EXPORT_INTERVAL);
+                                    with a span per statement (OTLP/HTTP; or
+                                    OTEL_EXPORTER_OTLP_ENDPOINT, _HEADERS,
+                                    OTEL_METRIC_EXPORT_INTERVAL,
+                                    OTEL_TRACES_SAMPLER[_ARG]);
                                     clients log in as
                                     nucleus / nucleus unless changed; with a
                                     certificate, TLS for clients that ask; with

@@ -9260,7 +9260,26 @@ Steps (planned 2026-11-14):
     mixins (the rules beside the dashboard, tested by promtool),
     CockroachDB's shipped alert rules.  Under MIT, as the examples:
     copied into others' configurations.
-  - **Next steps:** O2b traces (a span per statement over OTLP); O3 backups
+  - **O2b ✅ (2026-11-15) — traces.**  `nucleus_platform::trace` (a
+    `SpanSink` a module installs, W3C `traceparent` parsing, ids from a
+    SplitMix64 seeded by the OS) and the `otlp` module's sink: a bounded
+    queue (2048, the SDKs' batch processor's size; a drop counted and
+    logged, never a wait on the statement's thread), sent every 5 s to
+    `/v1/traces`.  A span per statement with the OpenTelemetry database
+    semantic conventions (`db.system.name`, `db.query.text`, …); the text
+    normalized, so constants never leave in a trace.  The client's trace:
+    `SET traceparent` or Google's sqlcommenter comment
+    (`/*traceparent='…'*/`, what ORMs' sqlcommenter integrations add) —
+    the server then shows inside the application's request; otherwise a
+    trace of its own, sampled by `OTEL_TRACES_SAMPLER`/`_ARG` on the trace
+    id's last 8 bytes (TraceIdRatioBased).  Tested end to end: a server
+    with `--otlp` to a stand-in collector — the client's trace and parent
+    by both ways, a failed statement's status and SQLSTATE, a root trace
+    —, and in `monitoring/test.sh` by the real collector.  Not taken (yet):
+    the plan's nodes as child spans — they need the per-node timing of
+    `EXPLAIN ANALYZE` on every sampled statement; a later step when it
+    can be had cheaply.
+  - **Next steps:** O3 backups
     (incremental, targets as modules, WAL archiving, point-in-time
     restore, retention); O4 scheduled restore tests; O5 online `ALTER
     COLUMN … TYPE`.

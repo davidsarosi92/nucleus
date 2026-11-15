@@ -796,6 +796,155 @@ fn metrics_and_health_checks() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `nucleus server --otlp` (PLAN.md §M14.18 O2b): a span per statement
+/// reaches a collector — a listener here standing in for one — in the
+/// client's trace when it names one (`SET traceparent`, a sqlcommenter
+/// comment), its text without constants.
+#[test]
+fn statements_traced_over_otlp() {
+    use std::io::{BufRead, Read};
+    use std::sync::mpsc;
+
+    let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", collector.local_addr().unwrap());
+    let (tx, rx) = mpsc::channel::<(String, serde_json::Value)>();
+    std::thread::spawn(move || {
+        for s in collector.incoming() {
+            let Ok(s) = s else { return };
+            let mut r = std::io::BufReader::new(s);
+            let mut line = String::new();
+            if r.read_line(&mut line).is_err() {
+                continue;
+            }
+            let mut len = 0;
+            loop {
+                let mut h = String::new();
+                r.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            r.read_exact(&mut body).unwrap();
+            let _ = r
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            let path = line.split(' ').nth(1).unwrap_or("").to_string();
+            let _ = tx.send((path, serde_json::from_slice(&body).unwrap()));
+        }
+    });
+    let dir = temp_dir("otlp");
+    let d = dir.to_str().unwrap();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args(["server", d, "--listen", "127.0.0.1:0", "--otlp", &endpoint])
+            .env("OTEL_METRIC_EXPORT_INTERVAL", "200")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufReader::new(server.0.stderr.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let addr = first
+        .split_whitespace()
+        .find(|w| w.starts_with("127.0.0.1:"))
+        .unwrap()
+        .to_string();
+    let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let (ok, out) = ncsql(
+        &["-h", &addr],
+        &format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);\n\
+             SET traceparent = '{parent}';\n\
+             INSERT INTO t VALUES (1, 'secret');\n\
+             RESET traceparent;\n\
+             SELECT name FROM t WHERE id = 1 /*traceparent='00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'*/;\n\
+             SELECT nope FROM t;\n"
+        ),
+    );
+    assert!(out.contains("secret"), "{ok} {out}");
+    // The spans, until all three looked for came.
+    let mut spans: Vec<serde_json::Value> = Vec::new();
+    let mut metrics = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let has = |spans: &[serde_json::Value], name: &str| spans.iter().any(|s| s["name"] == name);
+    while !(metrics
+        && has(&spans, "INSERT")
+        && has(&spans, "SELECT")
+        && spans.iter().any(|s| s["status"]["code"] == 2))
+    {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let (path, body) = rx
+            .recv_timeout(left)
+            .unwrap_or_else(|_| panic!("spans so far: {spans:#?}"));
+        match path.as_str() {
+            "/v1/traces" => spans.extend(
+                body["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            ),
+            "/v1/metrics" => metrics = true,
+            other => panic!("{other}"),
+        }
+    }
+    let attr = |s: &serde_json::Value, k: &str| {
+        s["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["key"] == k)
+            .map(|a| a["value"].clone())
+            .unwrap_or_else(|| panic!("no {k} in {s}"))
+    };
+    let insert = spans.iter().find(|s| s["name"] == "INSERT").unwrap();
+    assert_eq!(
+        insert["traceId"], "4bf92f3577b34da6a3ce929d0e0e4736",
+        "{insert}"
+    );
+    assert_eq!(insert["parentSpanId"], "00f067aa0ba902b7", "{insert}");
+    assert_eq!(insert["kind"], 2);
+    assert_eq!(attr(insert, "db.system.name")["stringValue"], "nucleus");
+    // No constant in the text a trace keeps.
+    let text = attr(insert, "db.query.text")["stringValue"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!text.contains("secret") && text.contains("$"), "{text}");
+    let select = spans
+        .iter()
+        .find(|s| s["name"] == "SELECT" && s["traceId"] == "0af7651916cd43dd8448eb211c80319c")
+        .unwrap_or_else(|| panic!("{spans:#?}"));
+    assert_eq!(select["parentSpanId"], "b7ad6b7169203331");
+    assert_eq!(attr(select, "db.response.returned_rows")["intValue"], "1");
+    let failed = spans.iter().find(|s| s["status"]["code"] == 2).unwrap();
+    assert_eq!(
+        attr(failed, "db.response.status_code")["stringValue"],
+        "42703"
+    );
+    // A statement outside a client's trace starts one of its own.
+    let create = spans.iter().find(|s| s["name"] == "CREATE").unwrap();
+    assert!(
+        create.get("parentSpanId").is_none() && create["traceId"].as_str().unwrap().len() == 32
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `nucleus mcp` end to end (PLAN.md §M14.10): an MCP client lists,
 /// describes and queries a database over standard input and output.
 #[test]

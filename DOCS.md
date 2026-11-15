@@ -5901,6 +5901,25 @@ cumulative temporality from the process's start, a counter a monotonic
 resource `service.name = nucleus`.  A failure is logged once and again
 when sending works; TLS to anything but loopback.
 
+**Traces** (§M14.18 O2b): with `--otlp`, a span per statement goes to
+`<endpoint>/v1/traces` (batched every 5 s, at most 2048 waiting — more
+are dropped and the drop logged): server kind, named by the statement's
+first word (`SELECT`, `INSERT`), with the database semantic conventions'
+attributes — `db.system.name` (`nucleus`), `db.namespace` (the branch),
+`db.operation.name`, `db.query.text` (normalized: constants are `$n`, as
+in `nc_catalog.statements`, so no value leaves in a trace), `db.user`,
+`db.response.returned_rows`, `nucleus.rows_read`, `nucleus.front_end`,
+and on failure the error status with `db.response.status_code` (the
+SQLSTATE).  A client puts its statements in its own trace with a W3C
+`traceparent` — `SET traceparent = '00-<trace>-<span>-01'` (until
+`RESET`), or per statement a sqlcommenter comment, `SELECT …
+/*traceparent='00-…-01'*/` — and its sampled flag decides; a statement
+outside one starts a trace, kept by `OTEL_TRACES_SAMPLER`
+(`parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1` keeps a
+tenth; `always_off` or `OTEL_TRACES_EXPORTER=none`: no spans).  Spans
+are made only while the exporter is installed (`nucleus_platform::trace`:
+one relaxed load per statement otherwise).
+
 Recording costs nothing measurable: the kv benchmark and `bench/run.py`
 against the commit before, within the runs' spread
 (`docs/benchmarks.md`, Metrics).
@@ -6964,6 +6983,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — §M14.18 O2b, traces:** a span per statement over OTLP
+  (`nucleus_platform::trace`, the `otlp` module's `/v1/traces`), the
+  client's trace by `SET traceparent` or a sqlcommenter comment, the
+  SDKs' samplers (§8.38).
 - **2026-11-15 — §M14.18 O2, alerts:** `monitoring/` — alert rules
   and their promtool tests, a Grafana dashboard, `test.sh` with a real
   Prometheus and OpenTelemetry Collector (CI's **monitoring**);

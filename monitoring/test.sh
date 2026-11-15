@@ -11,7 +11,8 @@
 #   that silently never fires);
 # - a Prometheus scrapes `nucleus server --metrics` with the rules loaded,
 #   and its numbers move with a workload;
-# - an OpenTelemetry Collector receives the same metrics over OTLP.
+# - an OpenTelemetry Collector receives the same metrics over OTLP, and
+#   the statements' spans.
 #
 # Needs promtool, prometheus and otelcol on the PATH (or PROMTOOL,
 # PROMETHEUS, OTELCOL); CI downloads them (.github/workflows/ci.yml).
@@ -54,6 +55,9 @@ exporters:
 service:
   pipelines:
     metrics:
+      receivers: [otlp]
+      exporters: [debug]
+    traces:
       receivers: [otlp]
       exporters: [debug]
 YAML
@@ -122,4 +126,5 @@ echo "== the collector received them over OTLP"
 wait_for "the collector got no nucleus_commits_total" grep -q "nucleus_commits_total" "$work/otelcol.log"
 wait_for "the collector got no statement histogram" grep -q "nucleus_statement_duration_seconds" "$work/otelcol.log"
 grep -q "service.name: Str(nucleus)" "$work/otelcol.log" || fail "no service.name in what the collector got"
-echo "the monitoring test passed: $want rules, Prometheus and OTLP"
+wait_for "the collector got no statement spans" grep -q "db.query.text" "$work/otelcol.log"
+echo "the monitoring test passed: $want rules, Prometheus, OTLP metrics and spans"

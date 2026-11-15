@@ -33,6 +33,7 @@ pub mod real;
 mod rng;
 pub mod sim;
 pub mod slots;
+pub mod trace;
 
 pub use rng::SplitMix64;
 

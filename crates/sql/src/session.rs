@@ -279,6 +279,27 @@ pub const READ_AS_OF: &str = "read_as_of";
 /// read, its tables, the ids it returned (PLAN.md §M14.24 R5).
 pub const REQUEST_ID: &str = "request_id";
 
+/// The session setting naming the client's trace (a W3C `traceparent`):
+/// its statements' spans are children of that span (PLAN.md §M14.18 O2b).
+pub const TRACEPARENT: &str = "traceparent";
+
+/// A sqlcommenter comment's `traceparent='…'` in a statement's text
+/// (`SELECT … /*traceparent='00-…-01'*/`): only inside a `/* */` comment.
+fn commented_traceparent(text: &str) -> Option<&str> {
+    let mut rest = text;
+    while let Some(open) = rest.find("/*") {
+        let body = &rest[open + 2..];
+        let close = body.find("*/")?;
+        let comment = &body[..close];
+        if let Some(at) = comment.find("traceparent='") {
+            let value = &comment[at + 13..];
+            return value.find('\'').map(|end| &value[..end]);
+        }
+        rest = &body[close + 2..];
+    }
+    None
+}
+
 /// Ids a read record keeps at most.
 const READ_IDS: usize = 1000;
 
@@ -998,6 +1019,14 @@ impl Session {
                 if name == "work_mem" {
                     crate::dbsettings::memory(value)?;
                 }
+                if name == TRACEPARENT
+                    && !value.is_empty()
+                    && nucleus_platform::trace::parse_traceparent(value).is_none()
+                {
+                    return Err(Error::invalid_parameter(
+                        "traceparent is a W3C trace context: 00-<32 hex>-<16 hex>-<2 hex>",
+                    ));
+                }
                 if name == REQUEST_ID && (value.len() > 200 || value.chars().any(char::is_control))
                 {
                     return Err(Error::invalid_parameter(
@@ -1153,6 +1182,8 @@ impl Session {
             crate::budget::scanned(),
             crate::budget::model_cost(),
         );
+        // Its span's start, while a trace exporter is installed.
+        let traced = nucleus_platform::trace::enabled().then(|| self.kv.wall_clock());
         crate::audit::begin_statement();
         // A query serving a request: its read recorded.
         let request = match stmt {
@@ -1216,6 +1247,9 @@ impl Session {
         // In the statistics when its text is known (every front end
         // notes it, and `execute`).
         let Some(text) = text.as_deref() else {
+            if let Some(began) = traced {
+                self.trace_statement(began, elapsed, None, stmt, &r, rows_read, rows_returned);
+            }
             return r;
         };
         let normalized = match self.normalized.get(text) {
@@ -1228,6 +1262,17 @@ impl Session {
                 n
             }
         };
+        if let Some(began) = traced {
+            self.trace_statement(
+                began,
+                elapsed,
+                Some((text, &normalized.1)),
+                stmt,
+                &r,
+                rows_read,
+                rows_returned,
+            );
+        }
         crate::statements::record(
             &self.kv,
             crate::statements::Run {
@@ -1243,6 +1288,81 @@ impl Session {
             },
         );
         r
+    }
+
+    /// The span of a statement that began at `began` and took `elapsed`
+    /// (PLAN.md §M14.18 O2b), to the trace exporter: in the client's
+    /// trace when it named one — a sqlcommenter comment's `traceparent`
+    /// in the statement, else the session's `traceparent` setting — or
+    /// in a trace of its own, sampled as the exporter says.  Its text is
+    /// the normalized one: constants are `$n`, as in
+    /// `nc_catalog.statements`.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_statement(
+        &self,
+        began: std::time::SystemTime,
+        elapsed: std::time::Duration,
+        text: Option<(&str, &str)>,
+        stmt: &Statement,
+        r: &Result<Output>,
+        rows_read: u64,
+        rows_returned: u64,
+    ) {
+        use nucleus_platform::trace::{self, Attr};
+        let Some(sink) = trace::sink() else { return };
+        let ctx = text
+            .and_then(|(t, _)| commented_traceparent(t))
+            .or_else(|| self.settings.get(TRACEPARENT).map(String::as_str))
+            .and_then(trace::parse_traceparent)
+            .unwrap_or_else(trace::new_trace);
+        if !ctx.sampled {
+            return;
+        }
+        let start_nanos = began
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let shown = text.map(|(_, shown)| shown);
+        let name = shown.and_then(|s| s.split_whitespace().next()).map_or_else(
+            || {
+                if read_only(stmt) {
+                    "query".to_string()
+                } else {
+                    "statement".to_string()
+                }
+            },
+            str::to_ascii_uppercase,
+        );
+        let who = crate::access::current();
+        let mut attributes = vec![
+            ("db.system.name", Attr::Text("nucleus".into())),
+            ("db.namespace", Attr::Text(self.kv.branch_name())),
+            ("db.operation.name", Attr::Text(name.clone())),
+            ("db.user", Attr::Text(who.user.clone())),
+            (
+                "nucleus.front_end",
+                Attr::Text(who.context.front_end.clone()),
+            ),
+            ("nucleus.rows_read", Attr::Int(rows_read as i64)),
+            ("db.response.returned_rows", Attr::Int(rows_returned as i64)),
+        ];
+        if let Some(shown) = shown {
+            attributes.push(("db.query.text", Attr::Text(shown.to_string())));
+        }
+        let error = r.as_ref().err().map(|e| {
+            attributes.push(("db.response.status_code", Attr::Text(e.code.to_string())));
+            e.message.clone()
+        });
+        sink.record(trace::Span {
+            trace_id: ctx.trace_id,
+            span_id: trace::span_id(),
+            parent: ctx.parent,
+            name,
+            start_nanos,
+            end_nanos: start_nanos
+                .saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)),
+            attributes,
+            error,
+        });
     }
 
     fn run_unaudited(

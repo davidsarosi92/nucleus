@@ -18,7 +18,9 @@ what to use instead.  For people the full reference is DOCS.md §8.
   and password `nucleus` by default); `-c "<sql>"` runs one command.
 - **Operations:** `SELECT * FROM nc_catalog.metrics` (the server's metrics:
   statements, latencies, commits, cache, sizes — what Prometheus scrapes
-  from `nucleus server --metrics`), `nucleus status` for a summary.
+  from `nucleus server --metrics`), `nucleus status` for a summary;
+  `SET traceparent = '00-…'` puts the session's statements in the
+  caller's OpenTelemetry trace (with `nucleus server --otlp`).
 - **Drivers:** Rust, Python, JavaScript, Java, C, C++, Swift over nucleus's protocol
   `ncp` (port 20035); PostgreSQL clients through the pg-compat front end
   (`nucleus server --pg-compat`, port 5432).  Large results: a cursor
