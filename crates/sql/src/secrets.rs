@@ -71,7 +71,7 @@ fn keyring() -> Option<Arc<dyn Keyring>> {
 
 fn no_key() -> Error {
     Error::prerequisite("there is no key for secrets").with_hint(
-        "start the server with --secrets-key FILE, or give an embedded database a keyring \
+        "start the server (its keyring holds the key), or give an embedded database a keyring \
          (nucleus_sql::secrets::set_keyring); a secret FROM ENV needs none",
     )
 }
@@ -370,7 +370,7 @@ pub fn reveal(txn: &dyn KvTxn, name: &str) -> Result<Revealed> {
                 return Err(Error::prerequisite(format!(
                     "secret \"{name}\" was sealed with another key than this server's"
                 ))
-                .with_hint("start the server with the --secrets-key it was made with, or set the secret again"));
+                .with_hint("start the server with the root key (and keyring) it was made with, or set the secret again"));
             }
             let v = aead::open(&key, nonce, &aad(name), sealed).ok_or_else(|| {
                 Error::data_exception(format!("secret \"{name}\" does not open: its record is damaged"))

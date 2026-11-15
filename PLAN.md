@@ -9762,6 +9762,27 @@ in the background (K2's pages as they are rewritten, a backup chain at
 its next full one).  `nc_catalog.keys` lists ids, kinds, providers and
 ages — never a key.
 
+*K1 in steps* (2026-11-15): **K1a ✅** `nucleus_crypto::keys` — `Key`
+(zeroed when dropped, a best effort without `unsafe`: the zeros passed
+to `black_box`; the memory not locked — `mlock` needs `unsafe`, the
+platform layer's to add), a deterministic wrap (the nonce an HMAC of the
+purpose and the key under a key derived from the root, ChaCha20-Poly1305
+under another, the purpose as associated data: RFC 3394's key wrap and
+RFC 5297's synthetic IV — no randomness needed, a nonce never shared by
+two keys), `KeyProvider`, `LocalRoot`, a passphrase's root (PBKDF2,
+600,000 rounds: OWASP's figure; Argon2id when asked).  **K1b ✅** the
+keyring `<dir>.keyring` (`nucleus_server::keyring`), the root's custody
+options (`--root-key`, `--root-key-env`, `--root-passphrase-env`, the
+database-managed `<dir>.root-key` by default), the secrets' key as the
+data key `secrets` with the old file taken in (`--old-key-files`),
+`nc_catalog.keys`, `nucleus keys <dir> list|import`; tests: the wrap
+refusing every flipped byte, another root and another purpose; the
+keyring read back by another process, refused under another root, the
+old file removed, kept or left as set (`keyring.rs`); the CLI's
+`key_hierarchy`.  **K1c** the backups' key (wrapped in each manifest;
+`--encrypt-backups`), **K1d** the subject keys' table sealed, **K1e**
+root rotation (`nucleus keys rotate-root`) and the DEKs' re-encryption.
+
 **K2 — encryption at rest.**  Every page of the data file sealed by an
 AEAD under the database's DEK: the nonce from the page's id and its
 birth (copy-on-write: a page is never rewritten in place, so a

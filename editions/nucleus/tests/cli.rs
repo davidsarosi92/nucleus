@@ -1331,3 +1331,67 @@ fn an_mcp_client_lists_describes_and_queries() {
     assert!(out.contains(" 3 "), "{out}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The key hierarchy (PLAN.md §M14.30 K1): an old secrets key file taken
+/// into the keyring, wrapped by a root made at first use, and removed —
+/// or kept, as the owner sets; `nc_catalog.keys` and `nucleus keys list`
+/// show ids, never a key; a root that did not wrap the keyring is refused.
+#[test]
+fn key_hierarchy() {
+    let dir = temp_dir("keys");
+    std::fs::create_dir_all(&dir).unwrap();
+    let side = |db: &str, what: &str| dir.join(format!("{db}.{what}"));
+    let old = "ab".repeat(32);
+    for (db, flags, kept) in [
+        ("a", vec![], false),
+        ("b", vec!["--old-key-files", "keep"], true),
+    ] {
+        let d = dir.join(db);
+        let d = d.to_str().unwrap();
+        std::fs::write(side(db, "secrets-key"), format!("{old}\n")).unwrap();
+        let mut args = vec!["sql", d, "-c", "CREATE SECRET s VALUE 'x'"];
+        args.extend(&flags);
+        let (ok, out) = nucleus(&args, "");
+        assert!(ok, "{out}");
+        assert_eq!(side(db, "secrets-key").exists(), kept, "{db}: {out}");
+        let ring = std::fs::read_to_string(side(db, "keyring")).unwrap();
+        assert!(ring.starts_with("nucleus keyring 1\n") && ring.contains("\ndek secrets "));
+        assert!(!ring.contains(&old), "the old key in the clear");
+        assert!(side(db, "root-key").exists());
+        let (ok, out) = nucleus(
+            &[
+                "sql",
+                d,
+                "-c",
+                "SELECT name, role FROM nc_catalog.keys ORDER BY name",
+            ],
+            "",
+        );
+        assert!(
+            ok && out.contains("root") && out.contains("secrets"),
+            "{out}"
+        );
+        let (ok, out) = nucleus(&["keys", d, "list"], "");
+        assert!(
+            ok && out.contains("secrets  data") && !out.contains(&old),
+            "{out}"
+        );
+    }
+    // Another root: refused, naming both.
+    let other = dir.join("other.key");
+    std::fs::write(&other, format!("{}\n", "11".repeat(32))).unwrap();
+    let d = dir.join("a");
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            d.to_str().unwrap(),
+            "--root-key",
+            other.to_str().unwrap(),
+            "-c",
+            "SELECT 1",
+        ],
+        "",
+    );
+    assert!(!ok && out.contains("wrapped by the root key"), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

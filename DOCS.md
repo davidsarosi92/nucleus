@@ -6239,6 +6239,9 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>]
                      [--subject-keys <file>] [--history <duration>]
+                     [--root-key <file> | --root-key-env <var> |
+                      --root-passphrase-env <var>] [--old-key-files remove|keep|manual]
+                     [--encrypt-backups yes|no]
                      [--backup-key <file>] [--backup-to <repository>
                       --backup-every <duration> [--backup-full-every <n>]
                       [--backup-keep <n>] [--restore-test-every <duration>
@@ -6409,18 +6412,48 @@ dropped, a renamed one keeps it); `GRANT USAGE ON SECRET name TO role`
 lets a role use it — name it in a model (E2b) — and see it in
 `nc_catalog.secrets` (`name`, `owner`, `source` `value` or `env`, `env`,
 `created`, `changed`; never a value).  The keyring (`secrets::Keyring`,
-set for the process by `secrets::set_keyring`) is the server's
-`--secrets-key FILE` (`nucleus_server::keyfile::KeyFile`: 64 hex
-digits, made with mode 0600 when the first secret with a value is;
-default `<dir>.secrets-key` beside the data directory), so a copy of
-the directory or a backup holds no secret in the clear — the key file
-must be kept and backed up apart.  Without a keyring a secret with a
+set for the process by `secrets::set_keyring`) is the key hierarchy's
+data key `secrets` (below), so a copy of the directory or a backup holds
+no secret in the clear.  Without a keyring a secret with a
 value is refused (`55000`); a damaged record does not open (`22000`).
 Values are `secrets::Revealed`, which prints as `***`; a statement that
 names a secret or a password is kept in the audit log and the server's
 query log with its strings as `'***'` (`statements::redacted`), and a
 mistyped `CREATE SECRET k 'v'` is a syntax error that does not echo the
 string.
+
+**The key hierarchy** (§M14.30 K1; `nucleus_crypto::keys`,
+`nucleus_sql::keys`, `nucleus_server::keyring`).  One root key wraps
+the data keys — `secrets` now; the backups' and the subject keys' table
+follow (K1c, K1d) — which are kept only wrapped, in the keyring
+`<dir>.keyring` beside the data directory (text: `nucleus keyring 1`,
+`root <id> <custody>`, a passphrase root's `salt <hex> <iterations>`,
+`dek <purpose> <id> <wrapped> <made>`; mode 0600, each change a new
+file synced and renamed over the old one).  A wrapped key is
+deterministic authenticated encryption (RFC 3394's key wrap and SIV's
+synthetic IV): the nonce an HMAC of the purpose and the key under a
+key derived from the root, ChaCha20-Poly1305 under another, the
+purpose as associated data — 61 bytes, opened only by its root and for
+its purpose.  The root's custody is the owner's (`nucleus server`,
+`nucleus sql <dir>`, `nucleus keys`): *database-managed* by default,
+`<dir>.root-key` made at first use (mode 0600: it guards a copied
+directory or a stolen backup, not a compromised host); *user-managed*
+with `--root-key FILE` (64 hex digits; or `NUCLEUS_ROOT_KEY_FILE`),
+`--root-key-env VAR`, or `--root-passphrase-env VAR` (PBKDF2-HMAC-SHA-256,
+600,000 rounds, its salt in the keyring); a KMS is a module's
+`KeyProvider` (K3).  A root that did not wrap the keyring is refused,
+naming both ids.  An old key file (`<dir>.secrets-key`, or
+`--secrets-key`'s) is taken in at start — its bytes become the data
+key, so what it sealed still opens — and, by `--old-key-files`,
+removed once the keyring holding it is on disk and read back (the
+default), kept with a warning at every start (`keep`), or used as
+before until `nucleus keys <dir> import` (`manual`).
+`--encrypt-backups yes|no` (default: yes with a root given, no with the
+database-managed one, which a lost disk takes with it) is K1c's.
+`nc_catalog.keys` (an administrator's: `name`, `role` root or data,
+`id`, `custody`, `location`, `created`) and `nucleus keys <dir> list`
+show the hierarchy — never a key.  `Key` overwrites its bytes with
+zeros when dropped (a best effort without `unsafe`) and never prints.
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
 FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |
@@ -7678,8 +7711,8 @@ checks `psql` with and without TLS.
   secrets with the server's key file too.
 - **2026-11-12 — §M14.22 E2a, secrets:** `CREATE | ALTER | DROP SECRET`,
   sealed by ChaCha20-Poly1305 (`nucleus_crypto::aead`, RFC 8439's
-  vectors) under a keyring's key outside the data directory (`nucleus
-  server --secrets-key`, `KeyFile`), or `FROM ENV`; `GRANT USAGE ON
+  vectors) under the key hierarchy's data key `secrets`, wrapped by a
+  root outside the data directory (§M14.30 K1), or `FROM ENV`; `GRANT USAGE ON
   SECRET`; `nc_catalog.secrets`; `tests/secrets.rs`.  The audit log and
   the query log mask the strings of a statement naming a secret or a
   password (`statements::redacted`) — a password was kept as written

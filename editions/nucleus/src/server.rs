@@ -44,6 +44,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut history_time = std::time::Duration::ZERO;
     let mut secrets_key = None::<String>;
     let mut subject_keys = None::<String>;
+    let mut key_options = crate::keys::KeyOptions::default();
     let mut metrics = None::<String>;
     let mut otlp = None::<String>;
     let mut backup_key = None::<String>;
@@ -106,6 +107,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 );
             }
             "--log-queries" => log_queries = true,
+            k if key_options.take(k, &mut rest)? => {}
             "--secrets-key" => {
                 secrets_key = Some(rest.next().ok_or("--secrets-key needs a file")?.clone())
             }
@@ -396,12 +398,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let db = Database::open(dir, opts).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
-    let key_path =
-        secrets_key.map_or_else(|| nucleus_server::keyfile::KeyFile::beside(dir), Into::into);
-    nucleus_sql::secrets::set_keyring(Some(Arc::new(nucleus_server::keyfile::KeyFile::new(
-        key_path,
-        Arc::clone(&kv),
-    ))));
+    // The key hierarchy (PLAN.md §M14.30 K1): the keyring, the secrets'
+    // key in it.
+    crate::keys::install(
+        dir,
+        &kv,
+        key_options.settings(dir),
+        secrets_key.map(Into::into),
+    )?;
     let subject_path = subject_keys.map_or_else(
         || nucleus_server::subject_keyfile::SubjectKeyFile::beside(dir),
         Into::into,

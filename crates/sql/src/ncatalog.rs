@@ -319,6 +319,17 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "keys",
+        &[
+            ("name", T),
+            ("role", T),
+            ("id", T),
+            ("custody", T),
+            ("location", T),
+            ("created", DataType::TimestampTz),
+        ],
+    ),
+    (
         "models",
         &[
             ("name", T),
@@ -1129,6 +1140,25 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             for name in crate::models::provider_names() {
                 let remote = crate::models::provider(&name)?.remote();
                 out.push(vec![text(name), Value::Bool(remote)]);
+            }
+        }
+        "keys" if crate::access::current().superuser => {
+            // The key hierarchy (PLAN.md §M14.30 K1): ids, custody, where,
+            // when made — never a key.  Empty without a custody installed.
+            if let Some(c) = crate::keys::custody() {
+                for k in c
+                    .list()
+                    .map_err(|e| Error::prerequisite(format!("keys: {e}")))?
+                {
+                    out.push(vec![
+                        text(k.name),
+                        text(k.role),
+                        text(k.id),
+                        text(k.custody),
+                        text(k.location),
+                        k.created.map_or(Value::Null, Value::TimestampTz),
+                    ]);
+                }
             }
         }
         "secrets" => {

@@ -1,5 +1,8 @@
 //! `ncsql`: the nucleus SQL shell (the same as `nucleus sql`).
 
+#[path = "keys.rs"]
+#[allow(dead_code)] // `nucleus keys` is `nucleus`'s.
+mod keys;
 #[path = "sql.rs"]
 mod sql;
 

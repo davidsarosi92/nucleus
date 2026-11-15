@@ -55,6 +55,7 @@ pub mod index_method;
 pub mod inet;
 pub mod json;
 mod keyfilter;
+pub mod keys;
 mod keytable;
 pub(crate) mod object_cache;
 /// Sizes the decoded index objects kept across transactions

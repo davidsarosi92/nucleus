@@ -4,6 +4,7 @@ mod branch;
 mod codegen;
 mod dump;
 mod init;
+mod keys;
 mod kv;
 mod mcp;
 mod migrate;
@@ -27,6 +28,7 @@ usage:
   nucleus kv <dir> checkpoint | vacuum
   nucleus kv <dir>                  interactive shell (type `help`)
   nucleus sql [<dir> | :memory:] [-h <host[:port]>] [-U <user>] [-d <db>] [-c <sql>]
+              [the root key's options of nucleus server, for a <dir>]
                                     SQL shell (also `ncsql`): a local database (or
                                     one in memory, gone at the end) or a server;
                                     a script on stdin, or one command
@@ -68,6 +70,8 @@ usage:
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>] [--subject-keys <file>]
                      [--history <duration>] [--backup-key <file>]
+                     [--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>]
+                     [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
                      [--backup-to <repository> --backup-every <duration>
                       [--backup-full-every <n>] [--backup-keep <n>]
                       [--restore-test-every <duration> [--restore-test-dir <dir>]]]
@@ -105,10 +109,23 @@ usage:
                                     PostgreSQL's shared_buffers); --index-cache
                                     the decoded index objects kept (HNSW graphs,
                                     text segments; default a quarter of the
-                                    machine's memory); --secrets-key the file
-                                    whose key seals secrets (CREATE SECRET;
-                                    default <dir>.secrets-key, made when the
-                                    first secret is); --subject-keys the file
+                                    machine's memory); the root key wrapping
+                                    the database's keys (kept wrapped in
+                                    <dir>.keyring): --root-key a file (64 hex
+                                    digits; or NUCLEUS_ROOT_KEY_FILE),
+                                    --root-key-env a variable holding one,
+                                    --root-passphrase-env a passphrase's
+                                    variable — by default <dir>.root-key, made
+                                    at first use; --old-key-files: the key
+                                    files of before (<dir>.secrets-key, …)
+                                    taken into the keyring and removed (the
+                                    default), kept with a warning, or left for
+                                    nucleus keys import; --encrypt-backups:
+                                    backups encrypted unasked (default yes
+                                    with a root given, no with the default
+                                    one); --secrets-key the old file
+                                    of the secrets' key, taken in from
+                                    (default <dir>.secrets-key); --subject-keys the file
                                     of the keys each subject's rows are sealed
                                     with in backups, destroyed by FORGET
                                     SUBJECT (default <dir>.subject-keys); --history keeps every
@@ -136,6 +153,12 @@ usage:
                                     the branch as their database); --at: as it
                                     was then, within the history the server
                                     keeps (its --history, given again)
+  nucleus keys <dir> list | import [the root key's options of nucleus server]
+                                    the key hierarchy: the root and the data
+                                    keys it wraps (ids, custody, where — never
+                                    a key; also nc_catalog.keys); import takes
+                                    the old key files in (with the server
+                                    stopped)
   nucleus restore <repository> <dir> [--at <commit|backup|time>]
                  [--subject-keys <file>] [--backup-key <file>]
   nucleus restore <repository> --test [--subject-keys <file>] [--backup-key <file>]
@@ -187,6 +210,7 @@ fn main() -> ExitCode {
         Some("mcp") => mcp::run(&args[1..]),
         Some("server") => server::run(&args[1..]),
         Some("restore") => restore::run(&args[1..]),
+        Some("keys") => keys::run(&args[1..]),
         Some("branch") => branch::run(&args[1..]),
         Some("dump") => dump::run(&args[1..]),
         Some("migrate") => migrate::run(&args[1..]),

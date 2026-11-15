@@ -792,6 +792,8 @@ pub(crate) struct Target {
     tls: Option<nucleus_tls::ClientTls>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    /// The key hierarchy's options, for a local directory (§M14.30 K1).
+    keys: crate::keys::KeyOptions,
 }
 
 impl Target {
@@ -807,6 +809,7 @@ impl Target {
             tls: None,
             tls_cert: None,
             tls_key: None,
+            keys: crate::keys::KeyOptions::default(),
         }
     }
 
@@ -861,6 +864,7 @@ impl Target {
             "--tls-cert" => self.tls_cert = Some(value("a certificate file")?),
             "--token" => self.cfg.token = Some(value("a token")?),
             "--tls-key" => self.tls_key = Some(value("a key file")?),
+            k if self.keys.take_with(k, value)? => {}
             s if s.starts_with('-') => return Ok(false),
             s => {
                 if self.dir.replace(s.to_string()).is_some() {
@@ -907,12 +911,8 @@ impl Target {
                 // Secrets sealed as the server seals them: its key file
                 // (none for a database in memory: no secrets kept).
                 if dir != MEMORY {
-                    nucleus_sql::secrets::set_keyring(Some(Arc::new(
-                        nucleus_server::keyfile::KeyFile::new(
-                            nucleus_server::keyfile::KeyFile::beside(&dir),
-                            kv.clone(),
-                        ),
-                    )));
+                    // The key hierarchy as the server's (§M14.30 K1).
+                    crate::keys::install(&dir, &kv, self.keys.settings(&dir), None)?;
                     // The backups' key, as the server's
                     // (NUCLEUS_BACKUP_KEY_FILE).
                     nucleus_server::backups::load_key(None)?;

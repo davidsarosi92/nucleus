@@ -14,6 +14,7 @@
 pub mod backups;
 mod columnar;
 pub mod keyfile;
+pub mod keyring;
 mod native;
 pub mod subject_keyfile;
 pub mod throttle;
