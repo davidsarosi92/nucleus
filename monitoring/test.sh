@@ -128,7 +128,13 @@ query() { # <promql>: the first value, or nothing
   curl -sf --get http://127.0.0.1:29090/api/v1/query --data-urlencode "query=$1" |
     python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "")'
 }
-wait_for "Prometheus did not scrape nucleus" test "$(query 'up{job="nucleus"}')" = 1
+scraped() { test "$(query 'up{job="nucleus"}')" = 1; }
+if ! (for _ in $(seq 120); do scraped && exit 0; sleep 0.5; done; exit 1); then
+  # Why: the target's last error, as Prometheus saw it.
+  curl -sf http://127.0.0.1:29090/api/v1/targets >"$work/targets.log" 2>&1 || true
+  why=$(python3 -c 'import json,sys; print([(t["health"], t["lastError"]) for t in json.load(open(sys.argv[1]))["data"]["activeTargets"]])' "$work/targets.log" 2>&1)
+  fail "Prometheus did not scrape nucleus: $why"
+fi
 before=$(query 'nucleus_statements_total{job="nucleus",kind="write"}')
 "$nucleus" sql -h "$addr" -c "CREATE TABLE m (id INT PRIMARY KEY); INSERT INTO m SELECT * FROM generate_series(1, 1000); UPDATE m SET id = id + 1000" >"$work/sql.log" 2>&1 ||
   fail "the workload failed"
