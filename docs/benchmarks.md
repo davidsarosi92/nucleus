@@ -1094,18 +1094,19 @@ SIV costs no more than the AEAD: both pass once with ChaCha20 and once
 with Poly1305 over the page.  A page is sealed when it is written and
 opened when it is read from the file — never while it is cached.
 
-In the store (K2b): 400,000 rows of 100-byte values written in batches
-of 1,000 and checkpointed (a 52 MB data file), then scanned whole three
-times through a 8 MiB buffer pool — every page read from the file and,
-encrypted, opened again (the file is in the OS's cache: the cost of the
-cipher shows undiluted).
+In the store (K2b, K2c): 400,000 rows of 100-byte values written in
+batches of 1,000 (each a WAL record, synced) and checkpointed (a 52 MB
+data file), then scanned whole three times through a 8 MiB buffer pool
+— every page read from the file and, encrypted, opened again (the file
+is in the OS's cache: the cost of the cipher shows undiluted).
 
 | | in the clear | encrypted |
 |---|---:|---:|
-| load and checkpoint | 195 ms | 241 ms (+24 %) |
-| scan (best of three) | 50 ms | 128 ms (×2.6) |
+| load and checkpoint (WAL and pages sealed) | 150–180 ms | 305 ms (×1.7–2) |
+| scan (best of three) | 48 ms | 126 ms (×2.6) |
 
-The scan's difference is the ~6,600 pages opened at ~12 µs each:
+The differences are the cipher's: ~47 MB of WAL records and ~6,600
+pages sealed, the pages opened again by the scan, at ~660 MB/s —
 ChaCha20 in portable Rust is the limit.  The target is under 10 %.
 
 ```sh

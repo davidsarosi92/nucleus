@@ -18,6 +18,18 @@
 //! position by an earlier life of the file never passes for the record that
 //! belongs there.
 //!
+//! An encrypted log (PLAN.md §M14.30 K2c; the store's page key) has a
+//! 28-byte header instead: the payload length (4), the SIV tag of
+//! [`crate::cipher`] in place of the CRC (16), the LSN (8); the payload
+//! is encrypted, the LSN its nonce and, with the length, its associated
+//! data — so a stale record fails as it does in the clear.  An
+//! encrypted log's segment whose first record is valid in the clear is
+//! refused ([`Error::Key`]) rather than cut off as a torn tail.  (The
+//! other way round there is no telling without the key — a torn record
+//! of zeros looks like a sealed one at LSN 0 —, and needs none: the
+//! store opens its data file first, which refuses to open in the clear
+//! when it is encrypted.)
+//!
 //! # Durability
 //!
 //! [`Wal::append`] writes a record and returns the LSN just past it; the
@@ -62,11 +74,36 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use nucleus_platform::{File, OpenMode, Platform};
 
+use crate::cipher::PageCipher;
 use crate::crc32c::crc32c;
 use crate::error::{Error, Result};
 use crate::page::PageId;
 
+/// A record's header in the clear.
 const RECORD_HEADER: u64 = 16;
+/// An encrypted record's header.
+const SEALED_HEADER: u64 = 28;
+
+/// The form of a log's records: in the clear, or sealed under a key.
+#[derive(Clone, Copy)]
+struct Form<'c> {
+    cipher: Option<&'c PageCipher>,
+}
+
+impl Form<'_> {
+    fn header(self) -> u64 {
+        if self.cipher.is_some() {
+            SEALED_HEADER
+        } else {
+            RECORD_HEADER
+        }
+    }
+
+    /// Where the LSN is in a header.
+    fn lsn_at(self) -> usize {
+        self.header() as usize - 8
+    }
+}
 
 /// A preallocated segment grows ahead of its records by this much.
 const GROW: u64 = 1 << 20;
@@ -104,6 +141,8 @@ pub struct Wal {
     state: Mutex<State>,
     /// Serialises `fsync`s; holds the LSN known durable.
     durable: Mutex<Lsn>,
+    /// The key its records are sealed under, if it is encrypted.
+    cipher: Option<PageCipher>,
 }
 
 impl std::fmt::Debug for Wal {
@@ -156,6 +195,21 @@ impl Wal {
         segment_size: u64,
         from: Lsn,
     ) -> Result<Self> {
+        Self::open_with(platform, dir, segment_size, from, None)
+    }
+
+    /// [`open_from`](Self::open_from), its records sealed under `cipher`
+    /// if one is given (PLAN.md §M14.30 K2c).
+    pub fn open_with(
+        platform: Arc<dyn Platform>,
+        dir: &Path,
+        segment_size: u64,
+        from: Lsn,
+        cipher: Option<PageCipher>,
+    ) -> Result<Self> {
+        let form = Form {
+            cipher: cipher.as_ref(),
+        };
         let fs = platform.fs();
         let in_place = fs.writes_in_place();
         let mut starts = Vec::new();
@@ -196,7 +250,7 @@ impl Wal {
             }
             let path = dir.join(segment_name(start));
             let file: Arc<dyn File> = Arc::from(fs.open(&path, OpenMode::ReadWrite)?);
-            let valid = scan(file.as_ref(), start, |_, _| Ok(()))?;
+            let valid = scan(file.as_ref(), start, form, |_, _| Ok(()))?;
             let mut len = file.size()?;
             if let Some(&next) = starts.get(i + 1) {
                 // A segment before the last ends where the next begins
@@ -211,7 +265,7 @@ impl Wal {
                     file.set_len(valid)?;
                     file.sync()?;
                     len = valid;
-                } else if !zeros_or_older(file.as_ref(), start, valid)? {
+                } else if !zeros_or_older(file.as_ref(), start, valid, form)? {
                     // A torn record of this log's own: zeros over the
                     // rest, so nothing of it is read past a later record.
                     zero(file.as_ref(), valid, len)?;
@@ -229,7 +283,7 @@ impl Wal {
         let wal = Self {
             platform,
             dir: dir.to_path_buf(),
-            segment_size: segment_size.max(RECORD_HEADER + 1),
+            segment_size: segment_size.max(form.header() + 1),
             in_place,
             state: Mutex::new(State {
                 segments,
@@ -239,6 +293,7 @@ impl Wal {
                 spares,
             }),
             durable: Mutex::new(end),
+            cipher,
         };
         if wal.lock().segments.is_empty() {
             let mut s = wal.lock();
@@ -272,6 +327,18 @@ impl Wal {
         Ok(())
     }
 
+    fn form(&self) -> Form<'_> {
+        Form {
+            cipher: self.cipher.as_ref(),
+        }
+    }
+
+    /// The bytes a record of `payload_len` bytes takes in the log: the
+    /// LSN after one at `lsn` is `lsn + record_len(..)`.
+    pub fn record_len(&self, payload_len: usize) -> u64 {
+        self.form().header() + payload_len as u64
+    }
+
     /// The LSN the next record will get.
     pub fn end(&self) -> Lsn {
         self.lock().end
@@ -289,7 +356,7 @@ impl Wal {
         if s.poisoned {
             return Err(Error::Poisoned);
         }
-        let len = RECORD_HEADER + payload.len() as u64;
+        let len = self.record_len(payload.len());
         let current = s.segments.last().expect("the log always has a segment");
         if s.end > current.start && s.end - current.start + len > self.segment_size {
             // Move to a new segment; the old one must be complete on disk
@@ -320,9 +387,20 @@ impl Wal {
         let lsn = s.end;
         let mut rec = Vec::with_capacity(len as usize);
         rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        rec.extend_from_slice(&record_crc(lsn, payload).to_le_bytes());
-        rec.extend_from_slice(&lsn.to_le_bytes());
-        rec.extend_from_slice(payload);
+        match &self.cipher {
+            None => {
+                rec.extend_from_slice(&record_crc(lsn, payload).to_le_bytes());
+                rec.extend_from_slice(&lsn.to_le_bytes());
+                rec.extend_from_slice(payload);
+            }
+            Some(c) => {
+                rec.extend_from_slice(&[0; 16]);
+                rec.extend_from_slice(&lsn.to_le_bytes());
+                rec.extend_from_slice(payload);
+                let tag = c.seal_record(lsn, &mut rec[SEALED_HEADER as usize..]);
+                rec[4..20].copy_from_slice(&tag);
+            }
+        }
         let in_place = self.in_place;
         let segment_size = self.segment_size;
         let seg = s.segments.last_mut().expect("the log always has a segment");
@@ -391,12 +469,13 @@ impl Wal {
         if from < segments[0].0 {
             return Err(corrupt("replay starts before the log"));
         }
+        let form = self.form();
         for (i, (start, file)) in segments.iter().enumerate() {
             let next = segments.get(i + 1).map(|g| g.0);
             if next.is_some_and(|n| n <= from) {
                 continue;
             }
-            scan(file.as_ref(), *start, |lsn, payload| {
+            scan(file.as_ref(), *start, form, |lsn, payload| {
                 if lsn >= from { f(lsn, payload) } else { Ok(()) }
             })?;
         }
@@ -520,13 +599,15 @@ impl Wal {
 /// Whether what follows the records of the segment starting at `start`,
 /// at `at`, is zeros (or nothing) or a record older than the segment (a
 /// recycled file's) — not a torn record of its own.
-fn zeros_or_older(file: &dyn File, start: Lsn, at: u64) -> Result<bool> {
-    let mut header = [0u8; RECORD_HEADER as usize];
-    let n = file.read_at(&mut header, at)?;
+fn zeros_or_older(file: &dyn File, start: Lsn, at: u64, form: Form) -> Result<bool> {
+    let mut header = [0u8; SEALED_HEADER as usize];
+    let header = &mut header[..form.header() as usize];
+    let n = file.read_at(header, at)?;
     if header[..n].iter().all(|&b| b == 0) {
         return Ok(true);
     }
-    Ok(n == header.len() && u64::from_le_bytes(header[8..16].try_into().unwrap()) < start)
+    let l = form.lsn_at();
+    Ok(n == header.len() && u64::from_le_bytes(header[l..l + 8].try_into().unwrap()) < start)
 }
 
 /// Writes zeros over `from..to`.
@@ -548,27 +629,54 @@ fn record_crc(lsn: Lsn, payload: &[u8]) -> u32 {
     crc32c(&buf)
 }
 
+/// The record at `off` of the segment starting at `start`, read in
+/// `form`: its payload, if it is whole and valid there.
+fn record(file: &dyn File, start: Lsn, off: u64, len: u64, form: Form) -> Result<Option<Vec<u8>>> {
+    let h = form.header();
+    let mut header = [0u8; SEALED_HEADER as usize];
+    let header = &mut header[..h as usize];
+    if off + h > len {
+        return Ok(None);
+    }
+    file.read_exact_at(header, off)?;
+    let plen = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
+    let l = form.lsn_at();
+    let lsn = u64::from_le_bytes(header[l..l + 8].try_into().unwrap());
+    if lsn != start + off || off + h + plen > len {
+        return Ok(None);
+    }
+    let mut payload = vec![0u8; plen as usize];
+    file.read_exact_at(&mut payload, off + h)?;
+    let valid = match form.cipher {
+        None => record_crc(lsn, &payload) == u32::from_le_bytes(header[4..8].try_into().unwrap()),
+        Some(c) => c.open_record(lsn, &mut payload, header[4..20].try_into().unwrap()),
+    };
+    Ok(valid.then_some(payload))
+}
+
 /// Reads the valid records of the segment starting at `start`, calling `f`
-/// for each; returns the length of the valid prefix.
-fn scan(file: &dyn File, start: Lsn, mut f: impl FnMut(Lsn, &[u8]) -> Result<()>) -> Result<u64> {
+/// for each; returns the length of the valid prefix.  A segment whose
+/// first record is not valid sealed but is in the clear — a log in the
+/// clear opened with a key — is refused.
+fn scan(
+    file: &dyn File,
+    start: Lsn,
+    form: Form,
+    mut f: impl FnMut(Lsn, &[u8]) -> Result<()>,
+) -> Result<u64> {
     let len = file.size()?;
     let mut off = 0u64;
-    let mut header = [0u8; RECORD_HEADER as usize];
-    while off + RECORD_HEADER <= len {
-        file.read_exact_at(&mut header, off)?;
-        let plen = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
-        let crc = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        let lsn = u64::from_le_bytes(header[8..16].try_into().unwrap());
-        if lsn != start + off || off + RECORD_HEADER + plen > len {
-            break;
-        }
-        let mut payload = vec![0u8; plen as usize];
-        file.read_exact_at(&mut payload, off + RECORD_HEADER)?;
-        if record_crc(lsn, &payload) != crc {
-            break;
-        }
-        f(lsn, &payload)?;
-        off += RECORD_HEADER + plen;
+    while let Some(payload) = record(file, start, off, len, form)? {
+        f(start + off, &payload)?;
+        off += form.header() + payload.len() as u64;
+    }
+    if off == 0
+        && form.cipher.is_some()
+        && record(file, start, 0, len, Form { cipher: None })?.is_some()
+    {
+        return Err(Error::Key(
+            "the log is in the clear, the database encrypted".into(),
+        ));
     }
     Ok(off)
 }

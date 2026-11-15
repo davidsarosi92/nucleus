@@ -82,9 +82,9 @@ pub struct StoreOptions {
     pub cache_pages: usize,
     /// WAL segment size in bytes.
     pub wal_segment_size: u64,
-    /// The key the data file's pages are sealed under (PLAN.md §M14.30
-    /// K2b): a new store is created encrypted, an existing one must be
-    /// encrypted under it.  `None`: in the clear.
+    /// The key the data file's pages (PLAN.md §M14.30 K2b) and the WAL's
+    /// records (K2c) are sealed under: a new store is created encrypted,
+    /// an existing one must be encrypted under it.  `None`: in the clear.
     pub page_key: Option<crate::PageCipher>,
 }
 
@@ -598,11 +598,12 @@ fn open_branch(
     // A large commit's leaves prepared on the CPUs there are (one in
     // the simulation).
     tree.set_workers(platform.parallelism());
-    let wal = Wal::open_from(
+    let wal = Wal::open_with(
         Arc::clone(platform),
         wal_dir,
         opts.wal_segment_size,
         checkpoint,
+        opts.page_key.clone(),
     )?;
     let mut meta = meta;
     let mut replayed = 0;
@@ -616,6 +617,7 @@ fn open_branch(
         });
     }
     let mut deferred = Deferred::new();
+    let header = wal.record_len(0);
     wal.replay(applied, |lsn, payload| {
         let (batch, covered, put) = Batch::decode_full(payload)?;
         apply(&mut tree, &batch, None)?;
@@ -623,7 +625,7 @@ fn open_branch(
         overlay(&mut deferred, &batch, put);
         meta = batch.meta;
         replayed += 1;
-        applied = lsn + 16 + payload.len() as u64;
+        applied = lsn + header + payload.len() as u64;
         Ok(())
     })?;
     Ok(Branch {

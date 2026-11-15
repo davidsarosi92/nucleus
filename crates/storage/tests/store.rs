@@ -11,7 +11,7 @@ use nucleus_platform::harness;
 use nucleus_platform::real::RealPlatform;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
 use nucleus_platform::{OpenMode, Platform, Rng, SplitMix64};
-use nucleus_storage::{Batch, Error, PageCipher, Store, StoreOptions};
+use nucleus_storage::{Batch, Error, PageCipher, Store, StoreOptions, Wal};
 
 const DIR: &str = "/db";
 
@@ -478,41 +478,67 @@ fn checkpoints_overlapping_writes() {
     store.read().unwrap().check().unwrap();
 }
 
-/// An encrypted store's data file (PLAN.md §M14.30 K2b): a value
-/// planted in it is found in a file in the clear and not in an encrypted
-/// one, which reopens under its key only.
+/// The files under `dir` that hold `needle`, raw.
+fn files_holding(p: &SimPlatform, dir: &Path, needle: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut names = p.fs().list_dir(dir).unwrap();
+    names.sort();
+    for name in names {
+        let path = dir.join(&name);
+        if p.fs().list_dir(&path).is_ok() {
+            out.extend(files_holding(p, &path, needle));
+            continue;
+        }
+        let file = p.fs().open(&path, OpenMode::ReadOnly).unwrap();
+        let mut bytes = vec![0u8; file.size().unwrap() as usize];
+        file.read_exact_at(&mut bytes, 0).unwrap();
+        if bytes.windows(needle.len()).any(|w| w == needle) {
+            out.push(name.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
+/// An encrypted store (PLAN.md §M14.30 K2b, K2c): a value planted in it
+/// — checkpointed into the data file, and written since, in the log only
+/// — is found in a store in the clear, in both, and in no file of an
+/// encrypted one, which recovers its log and reopens under its key only.
+/// A log in the clear opened with a key is refused, not cut off.
 #[test]
-fn a_planted_value_is_not_in_an_encrypted_data_file() {
+fn a_planted_value_is_in_no_file_of_an_encrypted_store() {
     let planted = b"planted-value-4cb1e0f2-searched-for".to_vec();
     for encrypted in [false, true] {
         ENCRYPTED.set(encrypted);
         let p = sim(3);
         {
             let (store, _) = open(&p).unwrap();
-            for i in 0..50u64 {
+            for i in 0..60u64 {
                 let mut v = planted.clone();
                 v.extend_from_slice(&i.to_le_bytes());
-                store
+                let lsn = store
                     .write(&Batch {
                         meta: i + 1,
                         ops: vec![(format!("k{i:03}").into_bytes(), Some(v))],
                     })
                     .unwrap();
+                store.wait_durable(lsn).unwrap();
+                if i == 49 {
+                    store.checkpoint().unwrap();
+                }
             }
-            store.checkpoint().unwrap();
         }
-        let file = p
-            .fs()
-            .open(Path::new("/db/data"), OpenMode::ReadOnly)
-            .unwrap();
-        let mut bytes = vec![0u8; file.size().unwrap() as usize];
-        file.read_exact_at(&mut bytes, 0).unwrap();
-        let found = bytes.windows(planted.len()).any(|w| w == planted);
-        assert_eq!(found, !encrypted, "encrypted: {encrypted}");
+        let found = files_holding(&p, Path::new(DIR), &planted);
+        if encrypted {
+            assert!(found.is_empty(), "found in {found:?}");
+        } else {
+            assert!(found.iter().any(|f| f == "data"), "{found:?}");
+            assert!(found.iter().any(|f| f.ends_with(".wal")), "{found:?}");
+        }
 
         let (store, rec) = open(&p).unwrap();
-        assert_eq!(rec.meta, 50);
-        assert_eq!(contents(&store).len(), 50);
+        assert_eq!(rec.meta, 60);
+        assert_eq!(rec.replayed, 10);
+        assert_eq!(contents(&store).len(), 60);
         drop(store);
         ENCRYPTED.set(!encrypted);
         let refused = open(&p).err().map(|e| e.to_string());
@@ -520,6 +546,16 @@ fn a_planted_value_is_not_in_an_encrypted_data_file() {
             matches!(&refused, Some(e) if e.contains("encrypted") || e.contains("key")),
             "{refused:?}"
         );
+        if !encrypted {
+            // The log alone, in the clear, opened with a key.
+            let key = Some(PageCipher::new([7; 32]));
+            let p2: Arc<dyn Platform> = Arc::clone(&p) as Arc<dyn Platform>;
+            match Wal::open_with(p2, Path::new("/db/wal"), 2048, 0, key) {
+                Err(Error::Key(_)) => {}
+                Err(e) => panic!("{e}"),
+                Ok(_) => panic!("a log in the clear opened as encrypted"),
+            }
+        }
     }
     let p = sim(3);
     ENCRYPTED.set(true);

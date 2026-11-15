@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2a–K2b ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2a–K2c ✅ (2026-11-15) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9900,7 +9900,22 @@ target.  Next for it, before K2e measures the edition: the CPU's AES
 pages opened on several cores.  The erasure scan of §M14.24
 (`nucleus_storage::scan`) reads files raw: in an encrypted file it finds
 nothing by construction — it must open the pages to say something;
-with K2e.  **K2c** WAL records.  **K2d** the other files: spill and
+with K2e.  **K2c ✅** WAL records (2026-11-15): sealed under the store's
+page key, every branch's log — a 28-byte header (length, the SIV tag in
+place of the CRC, LSN), the payload encrypted, the LSN as nonce and with
+the length as associated data; a torn tail written again at the same
+LSNs is safe by the SIV.  The store's replay takes a record's length
+from the log (`Wal::record_len`) instead of a fixed 16.  A log in the
+clear opened with a key is refused (`Error::Key`) rather than cut off as
+a torn tail; the other way needs no check — without the key the data
+file refuses first — and has none that holds: a first draft took a
+torn record of zeros at LSN 0 for a sealed one (the branch crash test
+caught it).  Tests: `a_planted_value_is_in_no_file_of_an_encrypted_store`
+(checkpointed and logged-only rows: in the data file and a segment in
+the clear, in no file encrypted; ten records replayed); the store's two
+crash tests and the branch crash test run their odd seeds encrypted
+(2 of 3 there).  Measured: the load ×1.7–2 now (the WAL's ~47 MB sealed
+too), the scan ×2.6 — the case for the CPU's AES stands.  **K2d** the other files: spill and
 scratch, column segments, index files, the embedding queue.  **K2e**
 the edition: the keyring's data key `data`, an existing database
 encrypted by rewriting its pages (`nucleus keys <dir> encrypt`, the

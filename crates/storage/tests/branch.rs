@@ -2,7 +2,8 @@
 //! shares every page it has not changed; writes on either side stay
 //! invisible to the other; dropping a branch gives back what it changed
 //! and what its parent kept for it; every page is in one place at every
-//! step, and after a crash at any I/O point.
+//! step, and after a crash at any I/O point — the odd seeds' with the
+//! store encrypted, its branches' logs included (PLAN.md §M14.30 K2c).
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use nucleus_platform::harness;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
 use nucleus_platform::{Platform, Rng, SplitMix64};
-use nucleus_storage::{Batch, Error, MAIN_NAME, Store, StoreOptions};
+use nucleus_storage::{Batch, Error, MAIN_NAME, PageCipher, Store, StoreOptions};
 
 const DIR: &str = "/db";
 
@@ -20,11 +21,17 @@ type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 /// Every branch's contents, by name.
 type Forest = BTreeMap<String, Model>;
 
+thread_local! {
+    /// Whether this thread's stores are encrypted (the crash test's odd
+    /// seeds).
+    static ENCRYPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn opts() -> StoreOptions {
     StoreOptions {
         cache_pages: 16,
         wal_segment_size: 4096,
-        ..Default::default()
+        page_key: ENCRYPTED.get().then(|| PageCipher::new([3; 32])),
     }
 }
 
@@ -382,6 +389,7 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Forest>, usize) {
 fn crash_at_every_io_point() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
         harness::run("branch_crash_at_every_io_point", 3, |seed| {
+            ENCRYPTED.set(seed % 2 == 1);
             let dry = sim(seed);
             let (history, done) = workload(&dry, seed);
             assert_eq!(done, history.len() - 1);

@@ -21,6 +21,11 @@
 //! the page keeps its usual header (type, birth in the LSN field, id), so
 //! nothing above the pager knows.
 //!
+//! A WAL record (K2c) is sealed the same way: its length, the tag in
+//! place of the checksum, its LSN — a 28-byte header instead of 16 —
+//! and the payload encrypted, the LSN the nonce and, with the length,
+//! the associated data ([`crate::wal`]).
+//!
 //! The two header pages stay readable without the key — they say the file
 //! is encrypted, with which cipher, and which key (a key check value) —
 //! and are authenticated under it: a tag over the header's bytes, so
@@ -137,6 +142,32 @@ impl PageCipher {
         write_u64(b, 8, packed >> 8);
         write_u64(b, 16, id.0);
         Ok(page)
+    }
+}
+
+/// A WAL record's nonce and associated data: its LSN, and its LSN and
+/// payload length (PLAN.md §M14.30 K2c).
+fn record_nonce_aad(lsn: u64, len: u32) -> ([u8; 12], [u8; 12]) {
+    let mut a = [0u8; 12];
+    a[..8].copy_from_slice(&lsn.to_le_bytes());
+    a[8..].copy_from_slice(&len.to_le_bytes());
+    (nonce(lsn, b"wal\0"), a)
+}
+
+impl PageCipher {
+    /// Seals a WAL record's payload at `lsn` in place; its tag.  A record
+    /// torn and written again at the same LSN is sealed again under the
+    /// same nonce, which the SIV allows.
+    pub(crate) fn seal_record(&self, lsn: u64, payload: &mut [u8]) -> [u8; 16] {
+        let (n, a) = record_nonce_aad(lsn, payload.len() as u32);
+        siv::seal_in_place(&self.key, &n, &a, payload)
+    }
+
+    /// Opens in place a record [`seal_record`](Self::seal_record) sealed:
+    /// `false` (the payload zeroed) if it is not what was sealed at `lsn`.
+    pub(crate) fn open_record(&self, lsn: u64, payload: &mut [u8], tag: &[u8; 16]) -> bool {
+        let (n, a) = record_nonce_aad(lsn, payload.len() as u32);
+        siv::open_in_place(&self.key, &n, &a, payload, tag)
     }
 }
 

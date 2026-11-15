@@ -6549,7 +6549,14 @@ refused as such, `Error::Key`, not as damage) and a tag over the
 header's bytes, so a header changed with its CRC made right again is
 passed over like a torn copy.  A file in the clear opened with a key is
 refused (encrypting one comes with `nucleus keys <dir> encrypt`, K2e).
-The WAL, spill and scratch files are not encrypted yet (K2c, K2d).
+The WAL's records (K2c), the main branch's and every other's, are
+sealed the same way under the same key: a 28-byte header — the length,
+the SIV tag in place of the CRC, the LSN — and the payload encrypted,
+the LSN as nonce and, with the length, associated data; a torn tail
+written again at the same LSNs is what the SIV allows.  A log in the
+clear opened as encrypted is refused (`Error::Key`), not cut off as a
+torn tail.  Spill and scratch files, column segments, index files and
+the embedding queue are not encrypted yet (K2d).
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
 FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |
