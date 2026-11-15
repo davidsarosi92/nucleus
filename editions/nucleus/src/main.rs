@@ -161,7 +161,9 @@ usage:
                                     stopped)
   nucleus restore <repository> <dir> [--at <commit|backup|time>]
                  [--subject-keys <file>] [--backup-key <file>]
+                 [the root key's options of nucleus server]
   nucleus restore <repository> --test [--subject-keys <file>] [--backup-key <file>]
+                 [the root key's options of nucleus server]
                                     a new database in <dir> from the backups
                                     BACKUP TO '<repository>' wrote: the last,
                                     or the last by --at (a commit, a backup's
@@ -176,7 +178,10 @@ usage:
                                     s3://bucket/prefix (AWS_ACCESS_KEY_ID,
                                     AWS_SECRET_ACCESS_KEY, AWS_REGION,
                                     AWS_ENDPOINT_URL for MinIO and others);
-                                    encrypted backups need --backup-key (or
+                                    an encrypted backup needs the root key
+                                    that wrapped its key (--root-key …: the
+                                    backup's keys then go into <dir>.keyring)
+                                    or its key (--backup-key, or
                                     NUCLEUS_BACKUP_KEY_FILE); --test restores
                                     the last backup into a temporary
                                     database, checks it (rows, indexes,

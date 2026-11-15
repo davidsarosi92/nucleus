@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1a, K1b ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1a–K1c ✅ (2026-11-15) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9764,9 +9764,22 @@ data key `secrets` with the old file taken in (`--old-key-files`),
 refusing every flipped byte, another root and another purpose; the
 keyring read back by another process, refused under another root, the
 old file removed, kept or left as set (`keyring.rs`); the CLI's
-`key_hierarchy`.  **K1c** the backups' key (wrapped in each manifest;
-`--encrypt-backups`), **K1d** the subject keys' table sealed, **K1e**
-root rotation (`nucleus keys rotate-root`) and the DEKs' re-encryption.
+`key_hierarchy`.  **K1c ✅** the backups' key: the data key `backup`
+when `--encrypt-backups` (default: a root given, or a backup key in the
+keyring — not the database-managed root alone, which a lost disk takes
+with it); `--backup-key` taken in, never removed; the manifest carrying
+the backup's and the secrets' keys wrapped by the root (`key <purpose>
+<root id> <wrapped>`, under the MAC; subject keys never), so the root
+alone restores a backup and `nucleus restore --root-key` writes the new
+database's keyring; tests: `the_root_alone_restores_a_backup`
+(`tests/backup.rs`: the chain kept, another root refused naming both,
+an unencrypted backup refused while backups are encrypted) and the
+CLI's `the_root_key_restores_an_encrypted_backup`.  *Found:* the
+server's first line of output is no longer always the one naming its
+addresses (a keyring made at first start logs before it) — the CLI
+tests look for `listening on`.  **K1d** the subject keys' table sealed,
+**K1e** root rotation (`nucleus keys rotate-root`) and the DEKs'
+re-encryption.
 
 **K2 — encryption at rest.**  Every page of the data file sealed by an
 AEAD under the database's DEK: the nonce from the page's id and its

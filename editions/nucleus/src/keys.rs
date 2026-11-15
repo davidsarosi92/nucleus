@@ -94,7 +94,8 @@ impl KeyOptions {
 /// Installs the key hierarchy of data directory `dir` for this process:
 /// the keyring as the custody, the secrets' key from it — the old key
 /// file (`secrets_file`, else `<dir>.secrets-key`) taken in as the owner
-/// set.  An explicit root is checked at once.
+/// set — and the backup key set (load it first) taken in.  An explicit
+/// root is checked at once.
 pub fn install(
     dir: &str,
     kv: &Arc<dyn Kv>,
@@ -115,6 +116,14 @@ pub fn install(
             secrets_file,
             Arc::clone(kv),
         ))));
+    }
+    // A backup key given (`--backup-key`, NUCLEUS_BACKUP_KEY_FILE) taken
+    // in as the data key `backup` — the user's file, never removed — so
+    // the backups made without it later go on with the same key.
+    if let Some(k) = nucleus_sql::backup::backup_key()
+        && !ring.has("backup")?
+    {
+        ring.import("backup", &nucleus_crypto::keys::Key::new(*k.bytes()))?;
     }
     nucleus_sql::keys::set_custody(Some(ring.clone() as Arc<dyn nucleus_sql::keys::Custody>));
     Ok(ring)

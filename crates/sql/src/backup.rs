@@ -575,6 +575,61 @@ impl BackupKey {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    /// Its bytes (for the key hierarchy to take in, §M14.30 K1).
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.key
+    }
+}
+
+fn custody_error(e: String) -> Error {
+    Error::prerequisite(format!("keys: {e}"))
+}
+
+/// The key a backup is made with: the one set (`--backup-key`), else —
+/// when the key hierarchy encrypts backups (§M14.30 K1) — its data key
+/// `backup`, made at the first backup.
+fn writing_key() -> Result<Option<BackupKey>> {
+    if let Some(k) = backup_key() {
+        return Ok(Some(k));
+    }
+    match crate::keys::custody() {
+        Some(c) if c.encrypt_backups() => Ok(c
+            .dek("backup", true)
+            .map_err(custody_error)?
+            .map(|k| BackupKey::new(*k.bytes()))),
+        _ => Ok(None),
+    }
+}
+
+/// The data keys a manifest carries, wrapped by the root, so the root
+/// alone restores it: `key <purpose> <root id> <wrapped, hex>` lines — the
+/// backup's own key (when it is the hierarchy's) and the secrets' (a
+/// restored database reads its secrets).  Subject keys never: `FORGET`
+/// must reach every backup.
+fn wrapped_keys(key: Option<&BackupKey>) -> Result<String> {
+    let Some(c) = crate::keys::custody() else {
+        return Ok(String::new());
+    };
+    let Some(root) = c.root(false).map_err(custody_error)? else {
+        return Ok(String::new());
+    };
+    let mut out = String::new();
+    for purpose in ["backup", "secrets"] {
+        let Some(dek) = c.dek(purpose, false).map_err(custody_error)? else {
+            continue;
+        };
+        if purpose == "backup" && key.map(BackupKey::bytes) != Some(dek.bytes()) {
+            continue;
+        }
+        let blob = root.wrap(purpose, &dek).map_err(custody_error)?;
+        out.push_str(&format!(
+            "key {purpose} {} {}\n",
+            root.id(),
+            crate::audit::hex(&blob)
+        ));
+    }
+    Ok(out)
 }
 
 impl std::fmt::Debug for BackupKey {
@@ -1370,7 +1425,7 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
         }
     }
     // Encrypted with the key set, or neither: a chain is read with one key.
-    let key = backup_key();
+    let key = writing_key()?;
     let source = kv.branch_name();
     let branches: HashSet<String> = kv.branches()?.into_iter().map(|b| b.name).collect();
     let mut base = None;
@@ -1557,6 +1612,7 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     if let Some(key) = &key {
         m.push_str(&format!("encryption chacha20-poly1305 {}\n", key.id));
     }
+    m.push_str(&wrapped_keys(key.as_ref())?);
     m.push_str("analyzed");
     for t in &analyzed {
         m.push_str(&format!(" {t}"));
@@ -1609,6 +1665,9 @@ pub struct Restored {
     /// Rows whose keys were set to `NULL` or their defaults, the rows they
     /// referenced left out.
     pub nulled: u64,
+    /// The data keys the last backup carried wrapped: (purpose, the root's
+    /// id, the wrapped key) — for the restored database's keyring.
+    pub keys: Vec<(String, String, Vec<u8>)>,
 }
 
 /// A manifest read.
@@ -1634,6 +1693,8 @@ struct Manifest {
     key_id: Option<String>,
     /// What its MAC covers, and the MAC (hexadecimal).
     mac: Option<(String, String)>,
+    /// Data keys wrapped by the root: (purpose, root id, wrapped).
+    wrapped: Vec<(String, String, Vec<u8>)>,
 }
 
 impl Manifest {
@@ -1643,7 +1704,8 @@ impl Manifest {
         match (key, &self.key_id) {
             (None, None) => Ok(()),
             (None, Some(id)) => Err(Error::invalid_parameter(format!(
-                "{dir} is encrypted (key {id}): restoring it needs its key (--backup-key)"
+                "{dir} is encrypted (key {id}): restoring it needs the root key that wrapped \
+                 its key (--root-key …), or the key itself (--backup-key)"
             ))),
             (Some(_), None) => Err(Error::invalid_parameter(format!(
                 "{dir} is not encrypted, and a backup key is set: a backup made without \
@@ -1723,6 +1785,7 @@ fn manifest(text: &str) -> Result<Manifest> {
         compressed: false,
         key_id: None,
         mac: None,
+        wrapped: Vec::new(),
         entries: None,
         deleted: 0,
     };
@@ -1751,6 +1814,11 @@ fn manifest(text: &str) -> Result<Manifest> {
             ["compression", c] => return Err(bad(&format!("compression {c} is not known"))),
             ["encryption", "chacha20-poly1305", id] => m.key_id = Some((*id).to_string()),
             ["encryption", ..] => return Err(bad(line)),
+            ["key", purpose, root, blob] => m.wrapped.push((
+                (*purpose).to_string(),
+                (*root).to_string(),
+                nucleus_crypto::keys::from_hex(blob).ok_or_else(|| bad(line))?,
+            )),
             ["analyzed", ids @ ..] => {
                 for id in ids {
                     m.analyzed.push(id.parse().map_err(|_| bad(line))?);
@@ -1910,6 +1978,62 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The key a chain is restored with: the one set (`--backup-key`), else
+/// the backup's own, unwrapped from its manifest by the key hierarchy's
+/// root (§M14.30 K1).  With the hierarchy encrypting backups, a chain not
+/// encrypted is refused, as with a key set (whoever can write to the
+/// repository could otherwise add one).
+fn reading_key(chain: &[(String, Manifest)]) -> Result<Option<BackupKey>> {
+    if let Some(k) = backup_key() {
+        return Ok(Some(k));
+    }
+    let custody = crate::keys::custody();
+    let Some((dir, m)) = chain.last() else {
+        return Ok(None);
+    };
+    let Some(id) = &m.key_id else {
+        if custody.as_ref().is_some_and(|c| c.encrypt_backups()) {
+            return Err(Error::invalid_parameter(format!(
+                "{dir} is not encrypted, and backups are (the root key given): a backup made \
+                 without encryption is restored with --encrypt-backups no"
+            )));
+        }
+        return Ok(None);
+    };
+    let needs = || {
+        Error::invalid_parameter(format!(
+            "{dir} is encrypted (key {id}): restoring it needs the root key that wrapped its \
+             key (--root-key …), or the key itself (--backup-key)"
+        ))
+    };
+    let Some((_, root_id, blob)) = m.wrapped.iter().find(|w| w.0 == "backup") else {
+        return Err(needs());
+    };
+    let Some(root) = custody
+        .map(|c| c.root(false))
+        .transpose()
+        .map_err(custody_error)?
+        .flatten()
+    else {
+        return Err(needs());
+    };
+    if root.id() != *root_id {
+        return Err(Error::invalid_parameter(format!(
+            "{dir}'s key is wrapped by the root key {root_id}; the root given ({}) is {}",
+            root.describe(),
+            root.id()
+        )));
+    }
+    let k = root.unwrap("backup", blob).map_err(custody_error)?;
+    let key = BackupKey::new(*k.bytes());
+    if key.id != *id {
+        return Err(Error::data_exception(format!(
+            "{dir}'s wrapped key is not the key its parts are encrypted with"
+        )));
+    }
+    Ok(Some(key))
+}
+
 /// The key of the entries sealed under the keys `kids` — `None` once one
 /// of them is destroyed (or no store is set).
 fn restore_key(
@@ -1983,13 +2107,14 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
     let mut out = Restored {
         commit: m.commit,
         backups: chain.len() as u64,
+        keys: m.wrapped.clone(),
         ..Restored::default()
     };
     // The tables whose rows were left out, by id.
     let mut lost: HashSet<u32> = HashSet::new();
     let mut txn = kv.begin(TxnOptions::default())?;
     let mut batch = 0usize;
-    let key = backup_key();
+    let key = reading_key(&chain)?;
     for (dir, m) in &chain {
         m.check(dir, key.as_ref())?;
     }

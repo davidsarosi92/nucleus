@@ -89,7 +89,7 @@ pub struct Settings {
     pub old_files: OldFiles,
     /// Whether backups are encrypted without being asked; `None`: when the
     /// root was given explicitly (not the database-managed one, which a
-    /// lost disk takes with it).
+    /// lost disk takes with it), or the keyring has a backup key already.
     pub encrypt_backups: Option<bool>,
 }
 
@@ -666,10 +666,13 @@ impl Custody for Keyring {
         Keyring::root(self, create)
     }
 
+    /// The owner's setting; by default yes when the root was given
+    /// explicitly, or once backups were encrypted with the hierarchy's key
+    /// (a chain is not dropped back to plaintext).
     fn encrypt_backups(&self) -> bool {
-        self.settings
-            .encrypt_backups
-            .unwrap_or(!matches!(self.settings.root, Root::Managed(_)))
+        self.settings.encrypt_backups.unwrap_or_else(|| {
+            !matches!(self.settings.root, Root::Managed(_)) || self.has("backup").unwrap_or(false)
+        })
     }
 
     fn list(&self) -> Result<Vec<KeyInfo>, String> {

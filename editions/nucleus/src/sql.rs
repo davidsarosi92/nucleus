@@ -911,11 +911,11 @@ impl Target {
                 // Secrets sealed as the server seals them: its key file
                 // (none for a database in memory: no secrets kept).
                 if dir != MEMORY {
-                    // The key hierarchy as the server's (§M14.30 K1).
-                    crate::keys::install(&dir, &kv, self.keys.settings(&dir), None)?;
                     // The backups' key, as the server's
                     // (NUCLEUS_BACKUP_KEY_FILE).
                     nucleus_server::backups::load_key(None)?;
+                    // The key hierarchy as the server's (§M14.30 K1).
+                    crate::keys::install(&dir, &kv, self.keys.settings(&dir), None)?;
                     // Subjects' keys too (BACKUP TO, FORGET SUBJECT).
                     nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
                         nucleus_server::subject_keyfile::SubjectKeyFile::new(

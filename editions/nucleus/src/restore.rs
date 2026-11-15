@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use nucleus_kv::{Database, Kv, Options};
+use nucleus_server::keyring::Keyring;
 use nucleus_server::subject_keyfile::SubjectKeyFile;
 
 /// Runs the command.
@@ -14,8 +15,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut backup_key = None::<String>;
     let mut test = false;
     let mut until = nucleus_sql::backup::Until::Latest;
+    let mut key_options = crate::keys::KeyOptions::default();
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
+        if key_options.take(a, &mut rest)? {
+            continue;
+        }
         match a.as_str() {
             "--subject-keys" => {
                 keys = Some(rest.next().ok_or("--subject-keys needs a file")?.clone());
@@ -45,7 +50,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             return Err("restore: --test tests the last backup (no --at)".into());
         }
         nucleus_server::backups::load_key(backup_key.as_deref())?;
-        return test_restore(&absolute(backup)?, keys);
+        return test_restore(&absolute(backup)?, keys, &key_options);
     }
     let [backup, dir] = positional.as_slice() else {
         return Err(
@@ -63,7 +68,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let backup = absolute(backup)?;
     // A database made here and not restored is removed again.
     let made = !std::path::Path::new(dir).exists();
-    let r = restore_into(dir, &backup, keys, &until);
+    let r = restore_into(dir, &backup, keys, &until, &key_options);
     if r.is_err() && made {
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -87,7 +92,11 @@ fn absolute(backup: &str) -> Result<String, String> {
 
 /// `--test` (PLAN.md §M14.18 O4): the last backup restored into a
 /// database of its own in the temporary directory, checked, removed.
-fn test_restore(backup: &str, keys: Option<String>) -> Result<(), String> {
+fn test_restore(
+    backup: &str,
+    keys: Option<String>,
+    key_options: &crate::keys::KeyOptions,
+) -> Result<(), String> {
     let scratch = std::env::temp_dir().join(format!("nucleus-restore-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let r = (|| {
@@ -99,7 +108,11 @@ fn test_restore(backup: &str, keys: Option<String>) -> Result<(), String> {
                 Arc::clone(&kv),
             ))));
         }
+        // The root, for a backup whose key it wrapped (§M14.30 K1).
+        let d = scratch.to_string_lossy();
+        set_custody(&d, &kv, key_options)?;
         let r = nucleus_sql::backup::restore_test(&kv, &kv, &crate::sql::registry(), backup);
+        nucleus_sql::keys::set_custody(None);
         nucleus_sql::subject_keys::set_subject_keys(None);
         r.map_err(|e| e.message)
     })();
@@ -127,11 +140,24 @@ fn test_restore(backup: &str, keys: Option<String>) -> Result<(), String> {
     }
 }
 
+/// The key hierarchy of the database restored into `dir`, as the custody
+/// for the restore: its root (`--root-key` …) unwraps a backup's key.
+fn set_custody(
+    dir: &str,
+    kv: &Arc<dyn Kv>,
+    key_options: &crate::keys::KeyOptions,
+) -> Result<Arc<Keyring>, String> {
+    let ring = Arc::new(Keyring::new(dir, key_options.settings(dir), Arc::clone(kv)));
+    nucleus_sql::keys::set_custody(Some(ring.clone() as Arc<dyn nucleus_sql::keys::Custody>));
+    Ok(ring)
+}
+
 fn restore_into(
     dir: &str,
     backup: &str,
     keys: Option<String>,
     until: &nucleus_sql::backup::Until,
+    key_options: &crate::keys::KeyOptions,
 ) -> Result<(), String> {
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
@@ -147,11 +173,36 @@ fn restore_into(
         path,
         Arc::clone(&kv),
     ))));
+    let ring = set_custody(dir, &kv, key_options)?;
     let r = nucleus_sql::backup::restore_to(&kv, &crate::sql::registry(), backup, until);
-    // The keys' store holds on to the database: let both go.
+    // The keys' stores hold on to the database: let them go.
     nucleus_sql::subject_keys::set_subject_keys(None);
+    nucleus_sql::keys::set_custody(None);
     drop(kv);
     let r = r.map_err(|e| e.message)?;
+    // The data keys the backup carried, wrapped by the root: into the
+    // restored database's keyring, when that root is given.
+    let mut taken = Vec::new();
+    for (purpose, root_id, blob) in &r.keys {
+        match ring.root(false)? {
+            Some(root) if root.id() == *root_id => {
+                ring.import(purpose, &root.unwrap(purpose, blob)?)?;
+                taken.push(purpose.as_str());
+            }
+            _ => eprintln!(
+                "nucleus: the backup holds the key for {purpose} wrapped by the root key \
+                 {root_id}: restore with that root (--root-key …) to take it in"
+            ),
+        }
+    }
+    if !taken.is_empty() {
+        println!(
+            "keys: {} in {}, wrapped by the root ({}) — start the database with it",
+            taken.join(", "),
+            ring.path().display(),
+            ring.root(false)?.map_or(String::new(), |r| r.describe())
+        );
+    }
     println!(
         "restored commit {} from {} backup{}: {} entries ({} opened), {} deleted, \
          {} indexes rebuilt; left out {} entries of forgotten subjects, blanked {} audit \

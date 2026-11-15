@@ -789,3 +789,138 @@ fn a_restore_test_catches_a_corrupted_backup() {
         ["f 3", "t 2"]
     );
 }
+
+/// A key hierarchy in memory (PLAN.md §M14.30 K1): a root, data keys
+/// made on demand.
+struct TestCustody {
+    root: Option<Arc<dyn nucleus_sql::keys::KeyProvider>>,
+    deks: Mutex<std::collections::HashMap<String, nucleus_sql::keys::Key>>,
+    encrypt: bool,
+}
+
+impl TestCustody {
+    fn new(root: u8, encrypt: bool) -> Arc<Self> {
+        Arc::new(Self {
+            root: Some(Arc::new(nucleus_crypto::keys::LocalRoot::new(
+                nucleus_sql::keys::Key::new([root; 32]),
+                "user",
+                &format!("the test's root {root}"),
+            ))),
+            deks: Mutex::new(Default::default()),
+            encrypt,
+        })
+    }
+}
+
+impl nucleus_sql::keys::Custody for TestCustody {
+    fn dek(&self, purpose: &str, create: bool) -> Result<Option<nucleus_sql::keys::Key>, String> {
+        let mut d = self.deks.lock().unwrap();
+        if create && !d.contains_key(purpose) {
+            d.insert(
+                purpose.into(),
+                nucleus_sql::keys::Key::new([purpose.len() as u8 + 40; 32]),
+            );
+        }
+        Ok(d.get(purpose).cloned())
+    }
+    fn root(&self, _: bool) -> Result<Option<Arc<dyn nucleus_sql::keys::KeyProvider>>, String> {
+        Ok(self.root.clone())
+    }
+    fn encrypt_backups(&self) -> bool {
+        self.encrypt
+    }
+    fn list(&self) -> Result<Vec<nucleus_sql::keys::KeyInfo>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// PLAN.md §M14.30 K1c: with a key hierarchy that encrypts backups, a
+/// backup is encrypted with its data key `backup`, which the manifest
+/// carries wrapped by the root (with the secrets' key) — the root alone
+/// restores it, another root is refused naming both, and the restore
+/// hands the wrapped keys on for the new database's keyring; a backup not
+/// encrypted is refused while backups are.
+#[test]
+fn the_root_alone_restores_a_backup() {
+    use nucleus_sql::backup::{Until, restore_to};
+    use nucleus_sql::keys::set_custody;
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    struct Unset;
+    impl Drop for Unset {
+        fn drop(&mut self) {
+            set_custody(None);
+        }
+    }
+    let _unset = Unset;
+    let p = Arc::new(SimPlatform::new(16));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute(
+        "CREATE TABLE t (id int PRIMARY KEY, v text); \
+         INSERT INTO t SELECT g, 'the town of Pécs ' || g FROM generate_series(1, 300) g",
+    )
+    .unwrap();
+    // Not encrypted: no hierarchy.
+    backed_up(&mut s, "BACKUP TO '/repo'");
+    let custody = TestCustody::new(7, true);
+    custody
+        .deks
+        .lock()
+        .unwrap()
+        .insert("secrets".into(), nucleus_sql::keys::Key::new([9; 32]));
+    set_custody(Some(custody.clone()));
+    let b = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(b["backup"], "000002-full", "a new key, a new chain");
+    s.execute("INSERT INTO t VALUES (1000, 'Eger')").unwrap();
+    let b = backed_up(&mut s, "BACKUP TO '/repo'");
+    assert_eq!(b["kind"], "incremental", "the same key: the chain goes on");
+    let raw = read(&p, "/repo/000002-full/part-000000");
+    assert!(!holds(&raw, "Pécs"));
+    let m = String::from_utf8(read(&p, "/repo/000003-incr/manifest")).unwrap();
+    assert!(m.contains("\nencryption chacha20-poly1305 "), "{m}");
+    let root_id = custody.root.as_ref().unwrap().id();
+    for purpose in ["backup", "secrets"] {
+        assert!(m.contains(&format!("\nkey {purpose} {root_id} ")), "{m}");
+    }
+    let want = texts(&mut s, "SELECT count(*), max(v) FROM t");
+    let registry = s.registry().clone();
+    let restore = |dir: &str, until: Until| {
+        let r = open(&p, dir);
+        restore_to(&r, &registry, "/repo", &until).map(|x| (r, x))
+    };
+    // The root alone (a custody of another process: the keys not there).
+    set_custody(Some(TestCustody::new(7, true)));
+    let (r, done) = restore("/r1", Until::Latest).unwrap();
+    assert_eq!(
+        texts(&mut Session::new(r), "SELECT count(*), max(v) FROM t"),
+        want
+    );
+    let purposes: Vec<&str> = done.keys.iter().map(|k| k.0.as_str()).collect();
+    assert_eq!(purposes, ["backup", "secrets"]);
+    let root = custody.root.as_ref().unwrap();
+    assert_eq!(
+        root.unwrap("secrets", &done.keys[1].2).unwrap(),
+        nucleus_sql::keys::Key::new([9; 32])
+    );
+    // Another root: refused, naming both.
+    set_custody(Some(TestCustody::new(8, true)));
+    let e = restore("/r2", Until::Latest).err().unwrap();
+    assert!(
+        e.message.contains(&root_id) && e.message.contains("the root given"),
+        "{e:?}"
+    );
+    // The unencrypted backup, while backups are encrypted: refused; with
+    // the hierarchy not encrypting them, restored.
+    set_custody(Some(TestCustody::new(7, true)));
+    let e = restore("/r3", Until::Name("000001-full".into()))
+        .err()
+        .unwrap();
+    assert!(e.message.contains("not encrypted"), "{e:?}");
+    set_custody(Some(TestCustody::new(7, false)));
+    restore("/r4", Until::Name("000001-full".into())).unwrap();
+    // No hierarchy, no key: the message says what would open it.
+    set_custody(None);
+    let e = restore("/r5", Until::Latest).err().unwrap();
+    assert!(e.message.contains("--root-key"), "{e:?}");
+}

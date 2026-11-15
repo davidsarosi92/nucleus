@@ -5318,6 +5318,26 @@ same key (or both without): a new key starts a new chain.  The key must
 be kept apart from the repository — lost, its backups are; the
 subjects' sealing (below) is independent of it.
 
+*Under the key hierarchy* (§M14.30 K1c).  Without `--backup-key`, a
+backup is encrypted with the hierarchy's data key `backup` (made at the
+first backup) when the owner's `--encrypt-backups` says so — by
+default when the root key was given explicitly (`--root-key`, a
+variable, a passphrase, a KMS), or once the keyring holds a backup key;
+not with the database-managed root alone, which a lost disk takes with
+it.  A `--backup-key` given is taken into the keyring as that data key
+(the user's file, never removed), so the backups made without it later
+go on with the same key and chain.  The manifest then carries the data
+keys wrapped by the root — `key backup <root id> <wrapped>` and the
+secrets' `key secrets …` (never the subject keys: `FORGET` must reach
+every backup) — under its MAC, so the root alone restores it:
+`nucleus restore <repo> <dir> --root-key FILE` (or the other root
+options) unwraps the backup's key, refuses another root naming both
+ids, and takes the wrapped keys into `<dir>.keyring`, so the restored
+database opens its secrets with that root (`backup::Restored::keys`;
+the backup's `--backup-key` still opens it as before).  While backups
+are encrypted, an unencrypted backup is refused as with a key set
+(`--encrypt-backups no` restores it).
+
 **Retention and schedule** (§M14.18 O3c).  `KEEP n` (`backup::prune`)
 removes, once the backup is made, the repository's backups older than
 its last `n` full ones — whole chains, oldest first, each backup's
@@ -6425,7 +6445,8 @@ string.
 **The key hierarchy** (§M14.30 K1; `nucleus_crypto::keys`,
 `nucleus_sql::keys`, `nucleus_server::keyring`).  One root key wraps
 the data keys — `secrets` now; the backups' and the subject keys' table
-follow (K1c, K1d) — which are kept only wrapped, in the keyring
+`backup` (§8.30, *Under the key hierarchy*), the subject keys' table
+following (K1d) — which are kept only wrapped, in the keyring
 `<dir>.keyring` beside the data directory (text: `nucleus keyring 1`,
 `root <id> <custody>`, a passphrase root's `salt <hex> <iterations>`,
 `dek <purpose> <id> <wrapped> <made>`; mode 0600, each change a new
@@ -6448,8 +6469,9 @@ key, so what it sealed still opens — and, by `--old-key-files`,
 removed once the keyring holding it is on disk and read back (the
 default), kept with a warning at every start (`keep`), or used as
 before until `nucleus keys <dir> import` (`manual`).
-`--encrypt-backups yes|no` (default: yes with a root given, no with the
-database-managed one, which a lost disk takes with it) is K1c's.
+`--encrypt-backups yes|no` encrypts backups unasked (default: yes with
+a root given or a backup key in the keyring, no with the
+database-managed root alone, which a lost disk takes with it).
 `nc_catalog.keys` (an administrator's: `name`, `role` root or data,
 `id`, `custody`, `location`, `created`) and `nucleus keys <dir> list`
 show the hierarchy — never a key.  `Key` overwrites its bytes with

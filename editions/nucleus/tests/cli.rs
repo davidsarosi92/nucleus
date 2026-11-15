@@ -23,6 +23,19 @@ fn nucleus(args: &[&str], stdin: &str) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// The server's line saying where it listens (`… listening on …`): the
+/// lines before it (a key made at first use, §M14.30 K1) passed over.
+fn listening_line(stderr: std::process::ChildStderr) -> String {
+    use std::io::BufRead;
+    let mut r = std::io::BufReader::new(stderr);
+    loop {
+        let mut line = String::new();
+        if r.read_line(&mut line).unwrap() == 0 || line.contains(" listening on ") {
+            return line;
+        }
+    }
+}
+
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("nucleus-cli-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -415,11 +428,7 @@ fn migrations_dry_run_and_diff() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    use std::io::BufRead as _;
-    let mut first = String::new();
-    std::io::BufReader::new(server.stderr.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
+    let first = listening_line(server.stderr.take().unwrap());
     let addr = first
         .split_whitespace()
         .find(|w| w.starts_with("127.0.0.1:"))
@@ -607,8 +616,6 @@ fn ncsql(args: &[&str], stdin: &str) -> (bool, String) {
 
 #[test]
 fn ncsql_local_and_over_the_network() {
-    use std::io::BufRead;
-
     let dir = temp_dir("ncsql");
     let d = dir.to_str().unwrap();
     let schema = "CREATE TABLE dept (id INT PRIMARY KEY, name TEXT UNIQUE);\n\
@@ -654,10 +661,7 @@ fn ncsql_local_and_over_the_network() {
         .unwrap();
     // Its first line only: the pipe is closed after it, and the server
     // goes on (its log lines never fail on a stderr gone).
-    let mut first = String::new();
-    std::io::BufReader::new(server.stderr.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
+    let first = listening_line(server.stderr.take().unwrap());
     let addr = first
         .split_whitespace()
         .find(|w| w.starts_with("127.0.0.1:"))
@@ -733,8 +737,6 @@ fn sample(text: &str, series: &str) -> f64 {
 /// in the metrics; `nucleus restore` needs the key.
 #[test]
 fn scheduled_encrypted_backups() {
-    use std::io::BufRead;
-
     let dir = temp_dir("scheduled");
     std::fs::create_dir_all(&dir).unwrap();
     let (db, repo, key) = (dir.join("db"), dir.join("repo"), dir.join("backup.key"));
@@ -776,10 +778,7 @@ fn scheduled_encrypted_backups() {
             .spawn()
             .unwrap(),
     );
-    let mut first = String::new();
-    std::io::BufReader::new(server.0.stderr.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
+    let first = listening_line(server.0.stderr.take().unwrap());
     let addrs: Vec<&str> = first
         .split_whitespace()
         .filter(|w| w.starts_with("127.0.0.1:"))
@@ -842,8 +841,6 @@ fn scheduled_encrypted_backups() {
 /// --test` does by hand — both catch a deliberately corrupted backup.
 #[test]
 fn scheduled_restore_tests_catch_a_corrupted_backup() {
-    use std::io::BufRead;
-
     let dir = temp_dir("restoretests");
     std::fs::create_dir_all(&dir).unwrap();
     let (db, repo) = (dir.join("db"), dir.join("repo"));
@@ -878,10 +875,7 @@ fn scheduled_restore_tests_catch_a_corrupted_backup() {
             .spawn()
             .unwrap(),
     );
-    let mut first = String::new();
-    std::io::BufReader::new(server.0.stderr.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
+    let first = listening_line(server.0.stderr.take().unwrap());
     let addrs: Vec<&str> = first
         .split_whitespace()
         .filter(|w| w.starts_with("127.0.0.1:"))
@@ -947,8 +941,6 @@ fn scheduled_restore_tests_catch_a_corrupted_backup() {
 /// `nc_catalog.metrics`, and the health checks.
 #[test]
 fn metrics_and_health_checks() {
-    use std::io::BufRead;
-
     let dir = temp_dir("metrics");
     let d = dir.to_str().unwrap();
     /// The server killed even when an assertion fails.
@@ -974,10 +966,7 @@ fn metrics_and_health_checks() {
             .spawn()
             .unwrap(),
     );
-    let mut first = String::new();
-    std::io::BufReader::new(server.0.stderr.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
+    let first = listening_line(server.0.stderr.take().unwrap());
     let addrs: Vec<&str> = first
         .split_whitespace()
         .filter(|w| w.starts_with("127.0.0.1:"))
@@ -1145,10 +1134,7 @@ fn statements_traced_over_otlp() {
             .spawn()
             .unwrap(),
     );
-    let mut first = String::new();
-    std::io::BufReader::new(server.0.stderr.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
+    let first = listening_line(server.0.stderr.take().unwrap());
     let addr = first
         .split_whitespace()
         .find(|w| w.starts_with("127.0.0.1:"))
@@ -1393,5 +1379,58 @@ fn key_hierarchy() {
         "",
     );
     assert!(!ok && out.contains("wrapped by the root key"), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PLAN.md §M14.30 K1c: with a root key given, backups are encrypted
+/// unasked, and the root alone restores one — the backup's keys going
+/// into the new database's keyring, so its secrets open with that root.
+#[test]
+fn the_root_key_restores_an_encrypted_backup() {
+    let dir = temp_dir("root-backup");
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = dir.join("root.key");
+    std::fs::write(&root, format!("{}\n", "5a".repeat(32))).unwrap();
+    let (db, repo, new) = (dir.join("db"), dir.join("repo"), dir.join("new"));
+    let (db, repo, new, root) = (
+        db.to_str().unwrap(),
+        repo.to_str().unwrap(),
+        new.to_str().unwrap(),
+        root.to_str().unwrap(),
+    );
+    let (ok, out) = nucleus(
+        &["sql", db, "--root-key", root],
+        &format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);\n\
+             INSERT INTO t SELECT g, 'Tihany ' || g FROM generate_series(1, 50) g;\n\
+             CREATE SECRET s VALUE 'x';\nBACKUP TO '{repo}';\n"
+        ),
+    );
+    assert!(ok, "{out}");
+    let m = std::fs::read_to_string(dir.join("repo/000001-full/manifest")).unwrap();
+    assert!(
+        m.contains("\nencryption chacha20-poly1305 ")
+            && m.contains("\nkey backup ")
+            && m.contains("\nkey secrets "),
+        "{m}"
+    );
+    // Without the root: refused, saying what opens it.
+    let (ok, out) = nucleus(&["restore", repo, new], "");
+    assert!(!ok && out.contains("--root-key"), "{out}");
+    // With it: restored, the keys taken in.
+    let (ok, out) = nucleus(&["restore", repo, new, "--root-key", root], "");
+    assert!(ok && out.contains("keys: backup, secrets in"), "{out}");
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            new,
+            "--root-key",
+            root,
+            "-c",
+            "SELECT count(*) FROM t UNION ALL SELECT count(*) FROM nc_catalog.keys",
+        ],
+        "",
+    );
+    assert!(ok && out.contains("50") && out.contains(" 3"), "{out}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
