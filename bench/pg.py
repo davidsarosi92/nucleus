@@ -120,6 +120,7 @@ class Cluster:
         """Stopped and started again: its caches empty (not the OS's)."""
         subprocess.run([self._tool("pg_ctl"), "-D", self.data, "-m", "fast", "-w", "stop"],
                        check=True, capture_output=True)
+        shutil.rmtree(self.sock, ignore_errors=True)
         self.sock = tempfile.mkdtemp(prefix="pg-")
         return self.__enter__()
 

@@ -28,6 +28,7 @@ which repeats the script (PLAN.md §M14.31).
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -293,6 +294,10 @@ def main():
         curve(test, truth, k, a.threads, efs, len(test), after=" after inserts")
     finally:
         stop()
+        # The vectors' copies (590 MB for dbpedia's): left behind, every
+        # run's filled the disk (2026-11-16: 39 of them, 20 GB).
+        if not a.work:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":
