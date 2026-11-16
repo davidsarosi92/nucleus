@@ -265,7 +265,8 @@ nucleus server ./mydb --backup-to /backups/db --backup-every 1d --backup-keep 4 
                                         # (--restore-test-every 1w: restores and checks the last)
 nucleus restore /backups/db ./restored --backup-key backup.key --at '2026-11-15 14:00:00+01'
 nucleus server ./mydb --root-key root.key   # encrypted at rest: pages, log, scratch (a new database;
-                                        # an existing one: nucleus keys ./mydb encrypt)
+                                        # an existing one: nucleus keys ./mydb encrypt;
+                                        # a new data key, the server running: ROTATE KEY data)
 nucleus server ./mydb --root-kms aws-kms:alias/db   # the root key kept in AWS KMS
                                         # (or vault-transit:<key>, gcp-kms:…, azure-kv:<vault>/<key>,
                                         #  'pkcs11:token=…;object=…?module-path=…' for an HSM)

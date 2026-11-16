@@ -45,6 +45,7 @@ fn opts() -> StoreOptions {
         cache_pages: 8,
         wal_segment_size: 2048,
         page_key: ENCRYPTED.get().then(|| PageCipher::new([7; 32])),
+        previous_page_key: None,
     }
 }
 

@@ -165,7 +165,12 @@ pub fn find_with(
     let adopted = match cipher {
         Some(c) => match crate::pager::file_cipher(fs, &dir.join("data"))? {
             Some(code) if code != crate::cipher::CIPHER_NONE => {
-                Some(c.for_code(code).map_err(Error::Key)?)
+                let mut own = c.for_code(code).map_err(Error::Key)?;
+                // The previous key kept: pages still under it open too.
+                if let Some(p) = c.previous() {
+                    own = own.with_previous(p.for_code(code).map_err(Error::Key)?);
+                }
+                Some(own)
             }
             _ => Some(c.clone()),
         },

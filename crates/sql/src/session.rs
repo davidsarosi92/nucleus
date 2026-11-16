@@ -992,6 +992,18 @@ impl Session {
                 self.kv.vacuum()?;
                 Ok(Output::Command("VACUUM".into()))
             }
+            Statement::RotateKey { purpose } => {
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "ROTATE KEY cannot run inside a transaction block",
+                    ));
+                }
+                if !self.who.superuser {
+                    return Err(crate::access::denied("ROTATE KEY needs a superuser"));
+                }
+                crate::keys::rotate(&self.kv, purpose)?;
+                Ok(Output::Command("ROTATE KEY".into()))
+            }
             Statement::SetStoragePolicy { table, policy } => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
@@ -1946,6 +1958,11 @@ pub(crate) fn execute_statement(
         Statement::Vacuum => {
             return Err(Error::active_txn(
                 "VACUUM cannot run inside a transaction block",
+            ));
+        }
+        Statement::RotateKey { .. } => {
+            return Err(Error::active_txn(
+                "ROTATE KEY cannot run inside a transaction block",
             ));
         }
         Statement::Backup { .. } => {

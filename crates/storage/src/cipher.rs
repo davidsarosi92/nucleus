@@ -11,13 +11,16 @@
 //! | Offset | Size | Field |
 //! |-------:|-----:|-------|
 //! | 0  | 16 | the SIV tag |
-//! | 16 | 8  | `birth << 8 \| page type`, little-endian, in the clear |
+//! | 16 | 8  | `parity << 63 \| birth << 8 \| page type`, little-endian, in the clear |
 //! | 24 | 8168 | the payload, encrypted |
 //!
 //! The page's id is not stored: it is the nonce's first 8 bytes and part
 //! of the associated data, so a page read anywhere but where it was
 //! written does not open (the misdirected write a plain page's stored id
-//! catches).  The birth and type are authenticated with it.  In memory
+//! catches).  The birth and type are authenticated with it, and so is
+//! the parity: the low bit of the key's generation (K3f), which tells,
+//! while the pages are being sealed again under a new key, which of the
+//! two a page is under.  In memory
 //! the page keeps its usual header (type, birth in the LSN field, id), so
 //! nothing above the pager knows.
 //!
@@ -151,11 +154,22 @@ impl Aead {
 /// The key a database file's pages are sealed under, and the cipher
 /// ([`Aead`]) they are sealed with.  Its bytes are zeroed when it is
 /// dropped and never printed.
+///
+/// A file's key has a generation, counted by its header from 0 (PLAN.md
+/// §M14.30 K3f): a new key is the next one, and while what the one before
+/// sealed is sealed again under it, the cipher holds that one too
+/// ([`with_previous`](Self::with_previous)) — a page opened under the key
+/// its parity bit names, a log record under either.
 #[derive(Clone)]
 pub struct PageCipher {
     key: [u8; 32],
     aead: Aead,
+    generation: u32,
+    previous: Option<Box<PageCipher>>,
 }
+
+/// A sealed page's parity bit, in its clear `packed` field.
+const PARITY: u64 = 1 << 63;
 
 impl std::fmt::Debug for PageCipher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -184,17 +198,78 @@ impl PageCipher {
     /// fastest ([`Aead::new`]).
     pub fn new(key: [u8; 32]) -> Self {
         let aead = Aead::new(&key);
-        Self { key, aead }
+        Self {
+            key,
+            aead,
+            generation: 0,
+            previous: None,
+        }
     }
 
-    /// The same key with cipher `code` — a file's, from its header.
+    /// The same key with cipher `code` — a file's, from its header (its
+    /// generation kept, no previous key).
     pub fn for_code(&self, code: u32) -> Result<Self, String> {
         let aead = Aead::of(code, &self.key)
             .ok_or_else(|| format!("cipher {code} is not known (a file of a newer nucleus?)"))?;
         Ok(Self {
             key: self.key,
             aead,
+            generation: self.generation,
+            previous: None,
         })
+    }
+
+    /// The same key as generation `generation` of a file's keys.
+    pub fn with_generation(mut self, generation: u32) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    /// The same key with `previous` — the generation before — kept beside
+    /// it, to open what that sealed (K3f).
+    pub fn with_previous(mut self, previous: PageCipher) -> Self {
+        let previous = previous
+            .without_previous()
+            .with_generation(self.generation.wrapping_sub(1));
+        self.previous = Some(Box::new(previous));
+        self
+    }
+
+    /// The same key without the previous one.
+    pub fn without_previous(mut self) -> Self {
+        self.previous = None;
+        self
+    }
+
+    /// The key's generation in its file (K3f).
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// The key of the generation before, while what it sealed is being
+    /// sealed again (K3f).
+    pub fn previous(&self) -> Option<&PageCipher> {
+        self.previous.as_deref()
+    }
+
+    /// The key whose parity `parity` is (a page's bit): this one or the
+    /// previous.
+    fn by_parity(&self, parity: u64) -> Option<&PageCipher> {
+        if parity == u64::from(self.generation & 1) {
+            Some(self)
+        } else {
+            self.previous()
+        }
+    }
+
+    /// Whether the page sealed as `bytes` is under the previous key — by
+    /// its parity bit, unauthenticated (K3f): `None` for a page never
+    /// written.
+    pub(crate) fn sealed_before(&self, bytes: &[u8]) -> Option<bool> {
+        if bytes.iter().all(|&b| b == 0) {
+            return None;
+        }
+        Some(read_u64(bytes, 16) >> 63 != u64::from(self.generation & 1))
     }
 
     /// The cipher's code in a file header ([`CIPHER_CHACHA20_SIV`] or
@@ -225,10 +300,11 @@ impl PageCipher {
     pub(crate) fn seal(&self, id: PageId, page: &Page, out: &mut [u8]) -> Result<(), &'static str> {
         let b = page.bytes();
         let birth = read_u64(b, 8);
-        if birth >> 56 != 0 {
-            return Err("a birth past 2^56 does not fit an encrypted page");
+        if birth >> 55 != 0 {
+            return Err("a birth past 2^55 does not fit an encrypted page");
         }
-        let packed = birth << 8 | u64::from(b[4]);
+        let parity = u64::from(self.generation & 1) << 63;
+        let packed = parity | birth << 8 | u64::from(b[4]);
         write_u64(out, 16, packed);
         out[PAGE_HEADER_SIZE..PAGE_SIZE].copy_from_slice(&b[PAGE_HEADER_SIZE..]);
         let tag = self.aead.seal_in_place(
@@ -249,7 +325,10 @@ impl PageCipher {
         let b = page.bytes_mut();
         let tag: [u8; 16] = b[..16].try_into().expect("16 bytes");
         let packed = read_u64(b, 16);
-        if !self.aead.open_in_place(
+        let Some(under) = self.by_parity(packed >> 63) else {
+            return Err("sealed under the key before this one, which is not given");
+        };
+        if !under.aead.open_in_place(
             &nonce(id.0, b"page"),
             &aad(id, packed),
             &mut b[PAGE_HEADER_SIZE..],
@@ -259,7 +338,7 @@ impl PageCipher {
         }
         b[..8].fill(0);
         b[4] = packed as u8;
-        write_u64(b, 8, packed >> 8);
+        write_u64(b, 8, (packed & !PARITY) >> 8);
         write_u64(b, 16, id.0);
         Ok(page)
     }
@@ -285,9 +364,20 @@ impl PageCipher {
 
     /// Opens in place a record [`seal_record`](Self::seal_record) sealed:
     /// `false` (the payload zeroed) if it is not what was sealed at `lsn`.
+    /// While a new key replaces the previous one, a record sealed under
+    /// either opens (a record carries no parity: the log is short-lived,
+    /// and both keys are tried only then).
     pub(crate) fn open_record(&self, lsn: u64, payload: &mut [u8], tag: &[u8; 16]) -> bool {
         let (n, a) = record_nonce_aad(lsn, payload.len() as u32);
-        self.aead.open_in_place(&n, &a, payload, tag)
+        let Some(prev) = self.previous() else {
+            return self.aead.open_in_place(&n, &a, payload, tag);
+        };
+        let sealed = payload.to_vec();
+        if self.aead.open_in_place(&n, &a, payload, tag) {
+            return true;
+        }
+        payload.copy_from_slice(&sealed);
+        prev.aead.open_in_place(&n, &a, payload, tag)
     }
 }
 
@@ -393,10 +483,47 @@ mod tests {
         assert!(base.for_code(CIPHER_NONE).is_err());
     }
 
+    /// A page sealed under generation 1 opens under generation 1 alone,
+    /// or under generation 2 holding it as the previous key; its parity
+    /// tells which; a record opens under either while both are held.
+    #[test]
+    fn a_page_opens_under_the_key_its_parity_names() {
+        let old = cipher(1).with_generation(1);
+        let new = cipher(2).with_generation(2);
+        let both = new.clone().with_previous(old.clone());
+        assert_eq!(both.previous().unwrap().generation(), 1);
+        let page = sample();
+        let mut a = vec![0u8; PAGE_SIZE];
+        let mut b = vec![0u8; PAGE_SIZE];
+        old.seal(PageId(9), &page, &mut a).unwrap();
+        both.seal(PageId(9), &page, &mut b).unwrap();
+        assert_eq!(both.sealed_before(&a), Some(true));
+        assert_eq!(both.sealed_before(&b), Some(false));
+        assert_eq!(both.sealed_before(&vec![0u8; PAGE_SIZE]), None);
+        for (bytes, under) in [(&a, &both), (&b, &both), (&b, &new), (&a, &old)] {
+            let back = under.open(PageId(9), bytes).unwrap();
+            assert_eq!((back.lsn(), back.payload()), (41, page.payload()));
+        }
+        assert_eq!(
+            new.open(PageId(9), &a).unwrap_err(),
+            "sealed under the key before this one, which is not given"
+        );
+        // The parity bit is authenticated: flipped, nothing opens it.
+        let mut flipped = a.clone();
+        flipped[23] ^= 0x80;
+        assert!(both.open(PageId(9), &flipped).is_err());
+
+        let mut r = *b"a log record";
+        let tag = old.seal_record(77, &mut r);
+        assert!(!new.open_record(77, &mut r.clone(), &tag));
+        assert!(both.open_record(77, &mut r, &tag));
+        assert_eq!(&r, b"a log record");
+    }
+
     #[test]
     fn a_birth_too_large_is_refused_and_key_checks_differ() {
         let mut page = sample();
-        page.set_lsn(1 << 56);
+        page.set_lsn(1 << 55);
         let mut out = vec![0u8; PAGE_SIZE];
         assert!(cipher(1).seal(PageId(9), &page, &mut out).is_err());
         assert_ne!(cipher(1).check_value(), cipher(2).check_value());

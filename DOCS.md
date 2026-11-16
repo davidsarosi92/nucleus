@@ -1203,7 +1203,11 @@ distributed implementation will provide (§F3).
   and the next call goes on from it (with the transactions it began
   with: their statuses go when a sweep has passed every key).
   `Kv::activity()`: transactions begun so far; `Kv::running()`: running
-  now.  The server's maintenance thread (`nucleus_server::maintain`)
+  now.  `Kv::rekey(key)` makes `key` the one the files are sealed under
+  (§9, *A new data key*), `Kv::rekey_state()` says where sealing again
+  under it stands, `Kv::reseal_background(go_on)` does it 256 pages a
+  batch; `Options::previous_encryption_key` opens a database midway.
+  The server's maintenance thread (`nucleus_server::maintain`)
   vacuums when no transaction began in the last 10 s and none is running
   (a long `COPY` is), stopping at the first one that begins; after 10 minutes
   without such a pause, paced instead (each batch followed by a pause
@@ -1285,7 +1289,7 @@ nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   #
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
 nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b> | --queries <file|dir> …] [--import <module>] [--package <name>] [--class <name>]   # §8.37
 nucleus status [<dir>] [connection options]   # a server's health for people, §8.38
-nucleus keys <dir> list | import | encrypt | rotate-root --to-… | rotate <secrets|subjects|backup> [root key options]   # the key hierarchy, §9
+nucleus keys <dir> list | import | encrypt | rotate-root --to-… | rotate <data|secrets|subjects|backup> [root key options]   # the key hierarchy, §9
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -2876,6 +2880,14 @@ reserved word (as in PostgreSQL), so it ends a table's alias.
 either way; not in a transaction block, `25001`) runs the KV's maintenance
 (`Kv::vacuum`: versions no snapshot sees removed, committed intents made
 versions, §5.2).
+
+`ROTATE KEY data` (a superuser's; not in a transaction block, `25001`)
+gives the database a new data key with it running (§9, *A new data
+key*): the key custody's new key at once, what the old one sealed
+sealed again by the maintenance thread.  A second one while the first
+runs is `55006`; another purpose (`secrets`, `subjects`, `backup`) is
+`0A000`, naming `nucleus keys <dir> rotate <purpose>`; a database in the
+clear is `0A000` too.
 
 `ANALYZE [table]` stores rows, and per column NULLs, distinct values and a
 16-bucket equi-depth histogram — from every row of a table up to 30 000
@@ -6623,7 +6635,7 @@ encryption_key`) is created encrypted, and an existing one opens only
 under the key it was made with.  Every data page, free-list pages
 included, is sealed on its way to the file and opened on its way back —
 never while cached, so nothing above the pager changes.  On disk: the
-16-byte SIV tag, then `birth << 8 | page type` (8 bytes, in the clear,
+16-byte SIV tag, then `parity << 63 | birth << 8 | page type` (8 bytes, in the clear,
 authenticated), then the 8,168-byte payload encrypted; the page id is
 the nonce's first 8 bytes and associated data, not stored — a page read
 anywhere else does not open, as a plain page's stored id catches a
@@ -6690,6 +6702,54 @@ reads in an encrypted database: every data page that opens, free ones
 too, decoded as in the clear, and every WAL record from each segment's
 and spare's first on; scratch files, under keys gone with their
 queries, are left out.  Measured: `docs/benchmarks.md`, *Sealing a
+page*.
+
+*A new data key* (K3f).  `ROTATE KEY data` (the server running) or
+`nucleus keys <dir> rotate data` (stopped) replaces the key the files
+are sealed under.  The keyring makes the new key and keeps the old as
+`prev data`; the store takes the new one at once (`Store::rekey`): the
+file's key gets the next *generation* (header offset 180, 0 for a file
+never given a new key), every page and log record written from then on
+is sealed under it, and a page says which of the two keys sealed it by
+the top bit of its clear `packed` field — the generation's parity,
+authenticated with the rest — so a read needs no trial.  The header
+names the previous key's check value and the range still to look at
+(offsets 216–247, inside the header's tag past generation 0; a file
+never rotated is tagged exactly as before).  Then the pages the old key
+sealed are sealed again *in place* (`Pager::reseal_step`) — the one
+exception to the pager's rule that a durable page is never written,
+safe because the contents stay the same: no state changes, only the
+key.  What a torn write could do is undone by a journal, InnoDB's
+doublewrite buffer for this one use: each batch's old bytes go to
+`data.reseal` (its entry synced when made) and are synced before the
+pages are overwritten; opening puts back from it every page that opens
+under neither key.  A batch takes only pages durable and in use (not
+free, not freed since the last commit, not a commit in flight's), and
+a commit making pages free waits for a batch, so no page is reused
+under it; a read meeting a page mid-write (opening under neither key)
+waits for the batch and reads again.  Batches start once the new key's
+first commit is durable — every page written under the old key until
+then is in it — and cover the pages the file had when the key was
+made; the header keeps how far they got from one commit to the next.
+Done, every branch's log moves to a new segment (its directory entry
+synced) and a checkpoint writes a header naming no previous key, so
+the log starts where no record is under the old key; the pager lets the
+old key go, and only then does the keyring drop `prev data`
+(`nucleus_server::reseal`, after a rotation it saw running — never
+between a `ROTATE KEY`'s keyring and its store).  Midway the database
+opens only with both keys (`Options::previous_encryption_key`, the
+edition's `open_database` from the keyring); a file still under the old
+key opened with both is given the new one as it opens (a crash between
+the keyring and the store); one done before the keyring dropped the old
+key has it dropped then.  The maintenance thread seals again at full
+speed while the database is idle, else paced as a forced vacuum.
+Pages shared by branches are sealed once — the file's, not each
+tree's — which is why it is done in place rather than by copying every
+tree.  The erased-bytes search reads pages under either key.  Tests: a
+crash at every I/O point of it, dropped or torn
+(`crates/storage/tests/rekey.rs`), the server's step with writes
+between batches (`crates/server/tests/rotate_data_key.rs`), the CLI's
+`the_data_key_rotated`.  Measured: `docs/benchmarks.md`, *Sealing a
 page*.
 
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
@@ -7533,6 +7593,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K3f, a new data key online:** `ROTATE KEY
+  data`, `nucleus keys <dir> rotate data`; the page cipher's key
+  generation, parity bit and previous key (`PageCipher::with_previous`);
+  the header's new-key fields; `Pager::rekey`, `reseal_step`,
+  `recover_reseal` (the `data.reseal` journal); `Store::rekey`,
+  `reseal`; `Wal::set_cipher`, `sync_dir`; `Kv::rekey`, `rekey_state`,
+  `reseal_background`, `Options::previous_encryption_key`; the key
+  custody's `rotate`, `rotating`, `retire`; `nucleus_server::reseal` in
+  the maintenance thread.  Fixed on the way: the erased-bytes search
+  used the key the database was opened with, not the file's as it is.
 - **2026-11-16 — §M14.30 K3b–K3e, the root key in Vault Transit,
   Google Cloud KMS, Azure Key Vault and a PKCS#11 token:**
   `modules/vault-transit`, `modules/gcp-kms`, `modules/azure-kv`,

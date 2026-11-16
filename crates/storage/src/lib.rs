@@ -23,7 +23,7 @@ pub use buffer::{BufferPool, PageRef};
 pub use cipher::PageCipher;
 pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
-pub use pager::Pager;
+pub use pager::{Pager, Rekey};
 pub use store::{
     Batch, BranchInfo, Checkpoint, DEFERRED_MAX, Deferred, MAIN, MAIN_NAME, Recovery, Scrubbed,
     Store, StoreOptions, valid_branch_name,

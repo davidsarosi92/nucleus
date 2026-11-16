@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3d Azure Key Vault ✅, K3e PKCS#11 ✅ (2026-11-16) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10036,9 +10036,8 @@ key, refused while disabled, another key refused, a file's root moved
 there) and `scripts/kms-test.sh`, CI's **root key in a KMS**, against
 moto's KMS server — moto rather than LocalStack: a pip package, no
 Docker, and its KMS enforces key state and the encryption context.
-Left for K3: re-wrapping the data keys under a rotated KMS key is
-`rotate-root` (seconds); the data re-encrypted under a new DEK online
-is K3's last step.
+Re-wrapping the data keys under a rotated KMS key is `rotate-root`
+(seconds); the data re-encrypted under a new DEK online is K3f.
 
 **K3b — Vault Transit ✅** (2026-11-16).  `modules/vault-transit`:
 `vault-transit:[<mount>/]<key>`, configured as Vault's CLI is
@@ -10120,6 +10119,41 @@ AES-256 or unable to decrypt, a wrong PIN, no PIN; and
 `scripts/kms-test.sh pkcs11`, the token's directory moved away and
 back.  CI's kms job installs SoftHSM2 and requires those tests
 (`NUCLEUS_TEST_SOFTHSM_REQUIRED`); elsewhere they skip without it.
+
+**K3f — a new data key, online ✅** (2026-11-16).  `ROTATE KEY data`
+(the server running; `nucleus keys <dir> rotate data` stopped): the
+keyring's new key, the old kept as `prev data`; the store takes the new
+one at once and the maintenance thread seals again what the old one
+sealed, then the old key is dropped (DOCS §9, *A new data key*).
+Chosen: *in place*, not by copy-on-write.  Copying every page through
+the trees would keep the pager's rule (a durable page is never written)
+but would copy a page shared by branches once per branch, undoing the
+sharing (§M14.13), and dirty every tree.  Sealing again in place
+changes no state — the same contents under another key — so it needs
+only what makes an in-place write safe: InnoDB's doublewrite buffer
+(the batch's old bytes journaled and synced first, a page that opens
+under neither key put back at open), SQL Server's TDE encryption scan
+as the model of a background pass over the file while it is in use,
+and a bit that tells which key sealed a page (the key generation's
+parity, authenticated) so reads never try two keys — the log, short
+lived, tries both while both are held.  Oracle's online tablespace
+rekey copies into new files (twice the space); MySQL's master-key
+rotation rewraps only the tablespace keys — what `rotate-root` already
+is.  Safety came from the crash test, which found three things the
+design had to say: the journal's directory entry must be synced when it
+is made (else a torn page with no journal), the log must move to a new
+segment before the header drops the old key (a log under the new key
+alone would end at the first old record — and the open would cut the
+newer ones as a torn tail), and that segment's entry synced too.  Also
+found: the erased-bytes search used the key the database was opened
+with, not the file's generation.  Measured: ~600 MB/s (a 302 MB file in
+0.5 s, `docs/benchmarks.md`).  Tests: `crates/storage/tests/rekey.rs`
+(online with writes and a branch, a reopening midway, the new key at
+open, a crash at every I/O point, dropped and torn),
+`crates/server/tests/rotate_data_key.rs`, the CLI's
+`the_data_key_rotated`.  Not yet: `ROTATE KEY` for the secrets' and
+subjects' keys (their rotation is offline, `nucleus keys`), and a
+progress view beyond `Kv::rekey_state`.
 
 **K4 — keys per tenant and per user, released for a session.**  The
 subject keys of §M14.24 extended from backups to live data: a tenant's

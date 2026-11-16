@@ -1758,3 +1758,77 @@ fn a_root_key_in_kms() {
     assert!(ok && out.contains(planted), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The data key rotated (PLAN.md §M14.30 K3f): `ROTATE KEY data` with
+/// the database in use — the keyring holds both keys, the database opens
+/// and takes writes midway, a second rotation waits for the first —,
+/// `nucleus keys <dir> rotate data` finishing it (every page sealed again,
+/// the old key dropped), then a rotation done by it alone; the rows the
+/// same, none in the clear.
+#[test]
+fn the_data_key_rotated() {
+    let dir = temp_dir("rotate-data");
+    std::fs::create_dir_all(&dir).unwrap();
+    let planted = "planted-rotate-data-3c9e71a2";
+    let db = dir.join("db");
+    let dbs = db.to_str().unwrap();
+    let (ok, out) = nucleus(
+        &["sql", dbs, "--encrypt-data", "yes"],
+        &format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);\n\
+             INSERT INTO t SELECT g, '{planted} ' || g FROM generate_series(1, 3000) g;\n"
+        ),
+    );
+    assert!(ok, "{out}");
+    let keyring = || std::fs::read_to_string(dir.join("db.keyring")).unwrap();
+    let data_id = || {
+        keyring()
+            .lines()
+            .find(|l| l.starts_with("dek data "))
+            .unwrap()
+            .split(' ')
+            .nth(2)
+            .unwrap()
+            .to_string()
+    };
+    let first = data_id();
+
+    let (ok, out) = nucleus(&["sql", dbs, "-c", "ROTATE KEY data"], "");
+    assert!(ok, "{out}");
+    assert!(keyring().contains("prev data "), "{}", keyring());
+    assert_ne!(data_id(), first);
+    let (ok, out) = nucleus(
+        &["sql", dbs],
+        "INSERT INTO t VALUES (5000, 'midway');\nSELECT count(*) FROM t;\n",
+    );
+    assert!(ok && out.contains("3001"), "{out}");
+    let (ok, out) = nucleus(&["sql", dbs, "-c", "ROTATE KEY data"], "");
+    assert!(!ok && out.contains("still running"), "{out}");
+    let (ok, out) = nucleus(&["sql", dbs, "-c", "ROTATE KEY secrets"], "");
+    assert!(
+        !ok && out.contains("nucleus keys <dir> rotate secrets"),
+        "{out}"
+    );
+
+    let (ok, out) = nucleus(&["keys", dbs, "rotate", "data"], "");
+    assert!(ok && out.contains("sealed again under it"), "{out}");
+    assert!(!keyring().contains("prev data "), "{}", keyring());
+    let second = data_id();
+    let (ok, out) = nucleus(&["keys", dbs, "rotate", "data"], "");
+    assert!(ok, "{out}");
+    assert!(!keyring().contains("prev data "), "{}", keyring());
+    assert_ne!(data_id(), second);
+
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            dbs,
+            "-c",
+            "SELECT count(*), max(v) FROM t WHERE id < 5000",
+        ],
+        "",
+    );
+    assert!(ok && out.contains("3000") && out.contains(planted), "{out}");
+    assert_eq!(files_holding(&db, planted.as_bytes()), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+}

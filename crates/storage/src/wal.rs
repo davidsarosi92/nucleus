@@ -141,8 +141,11 @@ pub struct Wal {
     state: Mutex<State>,
     /// Serialises `fsync`s; holds the LSN known durable.
     durable: Mutex<Lsn>,
-    /// The key its records are sealed under, if it is encrypted.
-    cipher: Option<PageCipher>,
+    /// The key its records are sealed under, if it is encrypted — and,
+    /// while the data file's pages are sealed again under a new key, the
+    /// one before, a record opened under either (PLAN.md §M14.30 K3f).
+    /// Replaced by [`set_cipher`](Self::set_cipher).
+    cipher: std::sync::RwLock<Option<Arc<PageCipher>>>,
 }
 
 impl std::fmt::Debug for Wal {
@@ -293,7 +296,7 @@ impl Wal {
                 spares,
             }),
             durable: Mutex::new(end),
-            cipher,
+            cipher: std::sync::RwLock::new(cipher.map(Arc::new)),
         };
         if wal.lock().segments.is_empty() {
             let mut s = wal.lock();
@@ -327,16 +330,34 @@ impl Wal {
         Ok(())
     }
 
-    fn form(&self) -> Form<'_> {
-        Form {
-            cipher: self.cipher.as_ref(),
+    /// The key (and previous key) as they are now.
+    fn keys(&self) -> Option<Arc<PageCipher>> {
+        self.cipher
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Seals the records from now on under `cipher` — the data file's
+    /// new key, holding the previous one while that one's records may
+    /// still be read (K3f).  A log in the clear stays so: `None` and a
+    /// key are not exchanged.
+    pub fn set_cipher(&self, cipher: Option<Arc<PageCipher>>) {
+        let mut slot = self.cipher.write().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() == cipher.is_some() {
+            *slot = cipher;
         }
     }
 
     /// The bytes a record of `payload_len` bytes takes in the log: the
     /// LSN after one at `lsn` is `lsn + record_len(..)`.
     pub fn record_len(&self, payload_len: usize) -> u64 {
-        self.form().header() + payload_len as u64
+        let keys = self.keys();
+        Form {
+            cipher: keys.as_deref(),
+        }
+        .header()
+            + payload_len as u64
     }
 
     /// The LSN the next record will get.
@@ -387,7 +408,7 @@ impl Wal {
         let lsn = s.end;
         let mut rec = Vec::with_capacity(len as usize);
         rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        match &self.cipher {
+        match self.keys() {
             None => {
                 rec.extend_from_slice(&record_crc(lsn, payload).to_le_bytes());
                 rec.extend_from_slice(&lsn.to_le_bytes());
@@ -469,7 +490,10 @@ impl Wal {
         if from < segments[0].0 {
             return Err(corrupt("replay starts before the log"));
         }
-        let form = self.form();
+        let keys = self.keys();
+        let form = Form {
+            cipher: keys.as_deref(),
+        };
         for (i, (start, file)) in segments.iter().enumerate() {
             let next = segments.get(i + 1).map(|g| g.0);
             if next.is_some_and(|n| n <= from) {
@@ -512,6 +536,25 @@ impl Wal {
         s.dir_dirty = false;
         let start = s.end;
         self.new_segment(&mut s, start)
+    }
+
+    /// Makes the directory entries of the segments made so far durable
+    /// (a segment [`roll`](Self::roll) made is otherwise so only with
+    /// its first record's sync): a checkpoint after it then starts the
+    /// log at that segment even across a crash (PLAN.md §M14.30 K3f).
+    pub fn sync_dir(&self) -> Result<()> {
+        let mut s = self.lock();
+        if s.poisoned {
+            return Err(Error::Poisoned);
+        }
+        if s.dir_dirty {
+            if let Err(e) = self.platform.fs().sync_dir(&self.dir) {
+                s.poisoned = true;
+                return Err(e.into());
+            }
+            s.dir_dirty = false;
+        }
+        Ok(())
     }
 
     /// Deletes the segments that hold only records before `lsn`.  The

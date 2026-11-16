@@ -1122,6 +1122,12 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Statement::Vacuum)
             }
+            "rotate" => {
+                self.pos += 1;
+                self.expect_kw("key")?;
+                let purpose = self.ident()?;
+                Ok(Statement::RotateKey { purpose })
+            }
             "analyze" => {
                 self.pos += 1;
                 // `ANALYZE QUERY <statement>` (a table named `query` stays

@@ -143,8 +143,20 @@ pub fn open_database(
             nucleus_kv::encrypt(dir, &opts, &cipher).map_err(|e| format!("{dir}: {e}"))?;
         }
         opts.encryption_key = Some(cipher);
+        // A rotation of the data key not ended (PLAN.md §M14.30 K3f): the
+        // files need the old key too until they are all sealed again —
+        // and a file still under it is given the new one as it opens.
+        if let Some(p) = ring.previous("data")? {
+            opts.previous_encryption_key = Some(nucleus_kv::PageCipher::new(*p.bytes()));
+        }
     }
-    nucleus_kv::Database::open(dir, opts).map_err(|e| format!("{dir}: {e}"))
+    let db = nucleus_kv::Database::open(dir, opts).map_err(|e| format!("{dir}: {e}"))?;
+    // Every page sealed again before a crash took the keyring's turn:
+    // the old key dropped now.
+    if ring.rotating("data")? && nucleus_kv::Kv::rekey_state(&db) == nucleus_kv::Rekey::Idle {
+        ring.retire("data")?;
+    }
+    Ok(db)
 }
 
 /// Installs the key hierarchy of data directory `dir` for this process:
@@ -263,12 +275,50 @@ pub fn subject_keys(
     Ok(Arc::new(sealed))
 }
 
+/// `nucleus keys <dir> rotate data` (PLAN.md §M14.30 K3f): a new data
+/// key, the old one kept beside it in the keyring while every page it
+/// sealed is sealed again — here, at once — then dropped.  `ROTATE KEY
+/// data` does the same with the server running, in the background.
+fn rotate_data(dir: &str, ring: &Arc<Keyring>, kv: &Arc<dyn Kv>) -> Result<(), String> {
+    if !ring.has("data")? {
+        return Err(format!(
+            "{dir} is not encrypted (`nucleus keys {dir} encrypt` encrypts it)"
+        ));
+    }
+    // A rotation cut short (the keyring has both keys: the database was
+    // opened with both and goes on with it).
+    if !ring.rotating("data")? {
+        ring.rotate_dek("data", true)?;
+        let key = ring
+            .dek("data", false)?
+            .ok_or_else(|| format!("{dir}: no data key after its rotation"))?;
+        kv.rekey(nucleus_kv::PageCipher::new(*key.bytes()))
+            .map_err(|e| format!("{dir}: {e}"))?;
+    }
+    let started = std::time::Instant::now();
+    let st = kv
+        .reseal_background(&mut || true)
+        .map_err(|e| format!("{dir}: {e}"))?;
+    if st != nucleus_kv::Rekey::Idle {
+        return Err(format!(
+            "{dir}: sealing again under the new key stopped at {st:?}"
+        ));
+    }
+    ring.retire("data")?;
+    println!(
+        "data: a new key — every page of the database sealed again under it ({:.1} s), the old \
+         one dropped",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// The usage of `nucleus keys`.
 pub const USAGE: &str = "usage: nucleus keys <dir> list|import|encrypt [options]
        nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
                   | --to-root-passphrase-env <var> | --to-root-kms <scheme>:<key>
                   | --to-managed-root  [options]
-       nucleus keys <dir> rotate secrets|subjects|backup  [options]";
+       nucleus keys <dir> rotate data|secrets|subjects|backup  [options]";
 
 /// `nucleus keys <dir> encrypt` (PLAN.md §M14.30 K2e): the database in
 /// the clear, the server stopped, encrypted in place under a new data key
@@ -414,6 +464,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "rotate" => {
             let purpose = purpose.expect("matched");
             let ring = Arc::new(Keyring::new(dir, settings, Arc::clone(&kv)));
+            if purpose == "data" {
+                return rotate_data(dir, &ring, &kv);
+            }
             let began = match purpose {
                 "secrets" | "subjects" => ring.rotate_dek(purpose, true)?,
                 // A backup chain starts again (a full backup) with the new

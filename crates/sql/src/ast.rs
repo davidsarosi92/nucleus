@@ -558,6 +558,13 @@ pub enum Statement {
     /// no snapshot sees removed, committed intents made versions) — of all
     /// of it, whatever tables are named.
     Vacuum,
+    /// `ROTATE KEY data` (PLAN.md §M14.30 K3f): a new key for the
+    /// database's files, the old one's pages sealed again in the
+    /// background ([`crate::keys::rotate`]).
+    RotateKey {
+        /// The data key's purpose (`data`).
+        purpose: String,
+    },
     /// `BACKUP [FULL] TO 'repo' [KEEP n]` (PLAN.md §M14.24 R6, §M14.18
     /// O3): the database as one snapshot saw it, into a repository of
     /// backups on the server — what changed since its last backup, or all

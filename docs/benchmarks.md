@@ -1138,6 +1138,15 @@ than they serve.  Sealed scratch alone: 32 MiB appended in 65,000-byte
 pieces in 20 ms (5.6 in memory), read back in 15 ms (1.4) — `cargo test
 --release -p nucleus-kv sealed_scratch_speed -- --ignored --nocapture`.
 
+A new data key (K3f; `nucleus keys <dir> rotate data`, release, real
+files on the M2 Pro's SSD): a database of 1,000,000 rows of ~210 bytes
+(a 302 MB data file) sealed again under the new key in place, 256 pages
+a batch — each batch's old bytes journaled and synced, then the pages
+written and synced — in 0.5 s, three runs alike (~600 MB/s, about twice
+the file's bytes written); the rows read back the same, none in the
+clear.  `ROTATE KEY data` with the server running does the same in the
+background, paced while transactions run.
+
 ```sh
 cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture --test-threads=1
 cargo test --release -p nucleus-sql --test encrypted -- --ignored --nocapture

@@ -552,9 +552,37 @@ pub const VACUUM_FORCE_AFTER: std::time::Duration = std::time::Duration::from_se
 /// after [`VACUUM_FORCE_AFTER`] without one, paced instead (each batch
 /// followed by a pause four times as long).  Every [`MAINTENANCE_EVERY`]
 /// too it deletes the rows that expired (`SET EXPIRY`,
-/// [`nucleus_sql::expiry`]).
+/// [`nucleus_sql::expiry`]).  While the file is sealed again under a new
+/// key (`ROTATE KEY data`) it goes on with that at each check
+/// ([`reseal`]): at full speed while no transaction runs, else paced.
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
     maintain_until(kv, Stop::new())
+}
+
+/// Seals again under the database's new key what the old one sealed
+/// (`ROTATE KEY data`, PLAN.md §M14.30 K3f) as the maintenance thread
+/// does: batches until it is done or `go_on` says stop.  Done, the key
+/// custody's previous data key is dropped — only then, and only after a
+/// rotation this call saw running, so a `ROTATE KEY` between its custody's
+/// new key and the database's is never cut short.  Whether it is done.
+pub fn reseal(kv: &Arc<dyn Kv>, go_on: &mut dyn FnMut() -> bool) -> Result<bool, String> {
+    if kv.rekey_state() == nucleus_kv::Rekey::Idle {
+        return Ok(true);
+    }
+    let st = kv.reseal_background(go_on).map_err(|e| e.to_string())?;
+    if st != nucleus_kv::Rekey::Idle {
+        return Ok(false);
+    }
+    if let Some(c) = nucleus_sql::keys::custody()
+        && c.rotating("data")?
+    {
+        c.retire("data")?;
+    }
+    nucleus_platform::log!(
+        "nucleus-server: the data key rotated: every page sealed again under the new key, the \
+         old one dropped"
+    );
+    Ok(true)
 }
 
 /// [`maintain`] until `stop` is stopped (an embedded database closing,
@@ -608,6 +636,27 @@ pub fn maintain_with(
                 }
             } else {
                 waiting = None;
+            }
+            // A new key for the database's files (`ROTATE KEY data`): what
+            // the old one sealed sealed again, at full speed while the
+            // database is idle, else paced as a forced vacuum is.
+            if kv.rekey_state() != nucleus_kv::Rekey::Idle {
+                let started = kv.activity();
+                let mut batch = std::time::Instant::now();
+                let mut go_on = || {
+                    if stop.stopped() {
+                        return false;
+                    }
+                    if kv.activity() != started || kv.running() != 0 {
+                        let worked = batch.elapsed().min(std::time::Duration::from_millis(50));
+                        std::thread::sleep(worked * VACUUM_PAUSE_FACTOR);
+                    }
+                    batch = std::time::Instant::now();
+                    true
+                };
+                if let Err(e) = reseal(&kv, &mut go_on) {
+                    nucleus_platform::log!("nucleus-server: sealing again under the new key: {e}");
+                }
             }
             if tick.is_multiple_of(policies_every) {
                 let now = nucleus_sql::datetime::from_system(kv.wall_clock());

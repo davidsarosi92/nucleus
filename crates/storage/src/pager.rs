@@ -37,13 +37,37 @@
 //! | 40 | 8 | number of free pages |
 //! | 48 | 8 × [`META_SLOTS`] | meta slots, owned by the layers above |
 //! | 176 | 4 | the cipher (0: in the clear; [`crate::cipher`]) |
-//! | 180 | 4 | reserved, zero |
+//! | 180 | 4 | the key's generation (encrypted files; 0 at first) |
 //! | 184 | 16 | the key's check value (encrypted files) |
-//! | 200 | 16 | the tag of bytes `0..200` under the key (encrypted files) |
+//! | 200 | 16 | the tag of bytes `0..200` — and, past generation 0, `216..248` — under the key (encrypted files) |
+//! | 216 | 16 | the previous key's check value, while pages are sealed again under the key (zero: none) |
+//! | 232 | 8 | the first page not yet looked at by that |
+//! | 240 | 8 | the page it ends before |
 //!
 //! An encrypted file (PLAN.md §M14.30 K2b) is format version
 //! [`ENCRYPTED_FORMAT_VERSION`]: its data pages are sealed
 //! ([`crate::cipher`]), its headers stay readable and are authenticated.
+//!
+//! # A new key (K3f)
+//!
+//! [`Pager::rekey`] makes a new key the file's — the next generation —
+//! and keeps the one before beside it: every write from then on is
+//! sealed under the new key, and a page says by its parity bit which of
+//! the two it is under.  The pages the old key sealed are then sealed
+//! again under the new one by [`Pager::reseal_step`], a batch at a time,
+//! *in place* — the one exception to the rule above, made safe by
+//! keeping it to the same contents: a durable page's bytes are written
+//! again with what they held, sealed under another key, so no state
+//! changes.  A torn write is what could still harm it, so each batch's
+//! old bytes are first written to a journal (`data.reseal`, synced:
+//! InnoDB's doublewrite buffer, for this one use), and a page that opens
+//! under neither key after a crash is put back from it
+//! ([`Pager::recover_reseal`]).  A batch takes only pages that are
+//! durable and in use, and no commit frees a page while one runs, so no
+//! page is reused under it.  A read that meets a page mid-write (it
+//! opens under neither key) waits for the batch and reads again.  Once
+//! every page the old key sealed is done, the next commit's header names
+//! no previous key and the pager lets go of it.
 //!
 //! # The free list
 //!
@@ -57,7 +81,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use nucleus_platform::{File, FileSystem, OpenMode};
 
@@ -83,8 +107,13 @@ pub const ENCRYPTED_FORMAT_VERSION: u32 = 3;
 
 /// Where the header's cipher fields start, in its payload.
 const CIPHER_AT: usize = 48 + 8 * META_SLOTS;
-/// The bytes of the header payload its tag covers.
+/// The bytes of the header payload its tag covers (and, past key
+/// generation 0, [`REKEY_AT`]'s too).
 const TAGGED: usize = CIPHER_AT + 24;
+/// Where a new key's fields are (K3f): the previous key's check value,
+/// the next page to look at, the end.
+const REKEY_AT: usize = TAGGED + 16;
+const REKEY_LEN: usize = 32;
 
 /// The first page that can hold data; 0 and 1 are the header copies.
 pub const FIRST_DATA_PAGE: PageId = PageId(2);
@@ -116,6 +145,15 @@ pub struct Header {
     pub cipher: u32,
     /// The key's check value ([`PageCipher::check_value`]).
     pub key_check: [u8; 16],
+    /// The key's generation (K3f): 0, then one more for each new key.
+    pub key_generation: u32,
+    /// While the pages are being sealed again under the key: the check
+    /// value of the one before (K3f).
+    pub previous_check: Option<[u8; 16]>,
+    /// The first page the sealing again has not looked at.
+    pub reseal_next: u64,
+    /// The page it ends before: the file's end when the key was made.
+    pub reseal_end: u64,
 }
 
 impl Header {
@@ -128,6 +166,10 @@ impl Header {
             meta: [0; META_SLOTS],
             cipher: cipher.map_or(CIPHER_NONE, PageCipher::code),
             key_check: cipher.map_or([0; 16], PageCipher::check_value),
+            key_generation: cipher.map_or(0, PageCipher::generation),
+            previous_check: None,
+            reseal_next: 0,
+            reseal_end: 0,
         }
     }
 
@@ -150,7 +192,13 @@ impl Header {
             write_u64(p, 48 + 8 * i, *m);
         }
         write_u32(p, CIPHER_AT, self.cipher);
+        write_u32(p, CIPHER_AT + 4, self.key_generation);
         p[CIPHER_AT + 8..CIPHER_AT + 24].copy_from_slice(&self.key_check);
+        if self.key_generation != 0 {
+            p[REKEY_AT..REKEY_AT + 16].copy_from_slice(&self.previous_check.unwrap_or([0; 16]));
+            write_u64(p, REKEY_AT + 16, self.reseal_next);
+            write_u64(p, REKEY_AT + 24, self.reseal_end);
+        }
         page
     }
 
@@ -182,6 +230,17 @@ impl Header {
         for (i, m) in meta.iter_mut().enumerate() {
             *m = read_u64(p, 48 + 8 * i);
         }
+        let key_generation = read_u32(p, CIPHER_AT + 4);
+        let (previous_check, reseal_next, reseal_end) = if key_generation == 0 {
+            (None, 0, 0)
+        } else {
+            let c: [u8; 16] = p[REKEY_AT..REKEY_AT + 16].try_into().expect("16 bytes");
+            (
+                (c != [0; 16]).then_some(c),
+                read_u64(p, REKEY_AT + 16),
+                read_u64(p, REKEY_AT + 24),
+            )
+        };
         Ok(Self {
             seq: read_u64(p, 16),
             page_count: read_u64(p, 24),
@@ -192,9 +251,52 @@ impl Header {
             key_check: p[CIPHER_AT + 8..CIPHER_AT + 24]
                 .try_into()
                 .expect("16 bytes"),
+            key_generation,
+            previous_check,
+            reseal_next,
+            reseal_end,
         })
     }
 }
+
+/// The header payload's bytes its tag covers: those before the tag and,
+/// past key generation 0, a new key's fields (a file never given a new
+/// key is tagged as before them).
+fn tagged(p: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if read_u32(p, CIPHER_AT + 4) == 0 {
+        std::borrow::Cow::Borrowed(&p[..TAGGED])
+    } else {
+        let mut v = p[..TAGGED].to_vec();
+        v.extend_from_slice(&p[REKEY_AT..REKEY_AT + REKEY_LEN]);
+        std::borrow::Cow::Owned(v)
+    }
+}
+
+/// Where sealing a file's pages again under a new key stands
+/// ([`Pager::rekey_state`], PLAN.md §M14.30 K3f).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rekey {
+    /// None runs.
+    Idle,
+    /// The pages from `next` to `end` are still to be looked at;
+    /// `commit_needed`: not before the new key's first commit is durable
+    /// (the pages written under the old key until then are all in it).
+    Running {
+        /// The first page not looked at.
+        next: u64,
+        /// The page it ends before.
+        end: u64,
+        /// A commit must come first.
+        commit_needed: bool,
+    },
+    /// Every page is sealed under the new key: the next commit lets the
+    /// old one go.
+    Finishing,
+}
+
+/// The journal of a batch sealed again in place: its pages' old bytes
+/// (K3f).
+const JOURNAL_MAGIC: &[u8; 8] = b"NUCRSL01";
 
 #[derive(Debug)]
 struct State {
@@ -308,8 +410,14 @@ pub struct Accounting {
 /// reads and writes run in parallel, allocation and `sync` take a lock.
 pub struct Pager {
     file: Box<dyn File>,
-    /// The key its pages are sealed under, if it is encrypted.
-    cipher: Option<PageCipher>,
+    /// The key its pages are sealed under, if it is encrypted — and,
+    /// while they are sealed again under a new one, the one before
+    /// (K3f).  Read by every page read and write; replaced by
+    /// [`rekey`](Self::rekey) and when that ends.
+    cipher: RwLock<Option<Arc<PageCipher>>>,
+    /// Held by a batch sealed again in place, and by a commit while it
+    /// makes pages free: no page in a batch is reused under it (K3f).
+    reseal: Mutex<()>,
     state: Mutex<State>,
     /// The state's page count and poisoned flag, mirrored (changed under
     /// the state lock, read without it): a page read checks its id against
@@ -387,8 +495,46 @@ impl Pager {
     /// encrypted file needs it ([`Error::Key`] without it, or with
     /// another), a file in the clear refuses one.
     pub fn open_with(fs: &dyn FileSystem, path: &Path, cipher: Option<PageCipher>) -> Result<Self> {
+        Self::open_keys(fs, path, cipher, None)
+    }
+
+    /// [`open_with`](Self::open_with) with the key before `cipher` too,
+    /// while the pages it sealed are sealed again under `cipher` (PLAN.md
+    /// §M14.30 K3f): a file whose header names it as the previous key
+    /// needs it; a file still under it is given `cipher` as its new key
+    /// at once ([`rekey`](Self::rekey), the header written at the next
+    /// commit); a file under `cipher` alone ignores it.
+    pub fn open_keys(
+        fs: &dyn FileSystem,
+        path: &Path,
+        cipher: Option<PageCipher>,
+        previous: Option<PageCipher>,
+    ) -> Result<Self> {
         let file = fs.open(path, OpenMode::ReadWrite)?;
-        let hdr = read_best_header(file.as_ref(), cipher.as_ref())?;
+        let candidates: Vec<&PageCipher> = cipher.iter().chain(previous.iter()).collect();
+        let hdr = read_best_header(file.as_ref(), &candidates)?;
+        // A file still under the previous key: opened under it, then
+        // given the new one at once.
+        let under_previous = match (&cipher, &previous) {
+            (Some(c), Some(p)) => {
+                hdr.cipher != CIPHER_NONE
+                    && hdr.key_check == p.check_value()
+                    && hdr.key_check != c.check_value()
+            }
+            _ => false,
+        };
+        let (cipher, previous, rekey_now) = if under_previous {
+            if hdr.previous_check.is_some() {
+                return Err(Error::Key(format!(
+                    "{}: its pages are being sealed again under the key before the one given, \
+                     which needs the one before that",
+                    path.display()
+                )));
+            }
+            (previous, None, cipher)
+        } else {
+            (cipher, previous, None)
+        };
         match (&cipher, hdr.cipher) {
             (None, CIPHER_NONE) => {}
             (None, _) => {
@@ -413,12 +559,36 @@ impl Pager {
                 }
             }
         }
-        // The file's own cipher, whichever this CPU would choose.
-        let cipher = match cipher {
-            Some(c) => Some(
-                c.for_code(hdr.cipher)
-                    .map_err(|e| Error::Key(format!("{}: {e}", path.display())))?,
+        // A file whose pages are being sealed again under its key needs
+        // the previous one too.
+        let previous = match (hdr.previous_check, &cipher) {
+            (Some(check), Some(_)) => Some(
+                previous
+                    .filter(|p| p.check_value() == check)
+                    .ok_or_else(|| {
+                        Error::Key(format!(
+                            "{}: its pages are being sealed again under a new key; the \
+                             previous key is needed until that ends",
+                            path.display()
+                        ))
+                    })?,
             ),
+            _ => None,
+        };
+        // The file's own cipher, whichever this CPU would choose; its
+        // generation the header's.
+        let own = |c: &PageCipher| {
+            c.for_code(hdr.cipher)
+                .map_err(|e| Error::Key(format!("{}: {e}", path.display())))
+        };
+        let cipher = match cipher {
+            Some(c) => {
+                let mut c = own(&c)?.with_generation(hdr.key_generation);
+                if let Some(p) = &previous {
+                    c = c.with_previous(own(p)?);
+                }
+                Some(c)
+            }
             None => None,
         };
         let header_page = PageId(hdr.seq % 2);
@@ -435,7 +605,11 @@ impl Pager {
             });
         }
         let (free, freelist_pages) = read_freelist(file.as_ref(), &hdr, cipher.as_ref())?;
-        Ok(Self::with(file, cipher, hdr, free, freelist_pages))
+        let pager = Self::with(file, cipher, hdr, free, freelist_pages);
+        if let Some(new) = rekey_now {
+            pager.rekey(new)?;
+        }
+        Ok(pager)
     }
 
     fn with(
@@ -450,7 +624,8 @@ impl Pager {
             pages: AtomicU64::new(hdr.page_count),
             poisoned: AtomicBool::new(false),
             file,
-            cipher,
+            cipher: RwLock::new(cipher.map(Arc::new)),
+            reseal: Mutex::new(()),
             state: Mutex::new(State {
                 durable: hdr.clone(),
                 hdr,
@@ -470,15 +645,44 @@ impl Pager {
     /// Writes `page` at `id`; past the pages the file is known to hold,
     /// under the state lock (an extension of the file).
     fn write_at(&self, id: PageId, page: &mut Page) -> Result<()> {
-        let cipher = self.cipher.as_ref();
         if id.0 < self.lock().known_len {
-            return write_raw(self.file.as_ref(), id, page, cipher);
+            let cipher = self.keys();
+            return write_raw(self.file.as_ref(), id, page, cipher.as_deref());
         }
         let mut s = self.lock();
         if id.0 >= s.known_len {
             s.known_len = extend(self.file.as_ref(), s.known_len, id.0 + 1)?;
         }
-        write_raw(self.file.as_ref(), id, page, cipher)
+        let cipher = self.keys();
+        write_raw(self.file.as_ref(), id, page, cipher.as_deref())
+    }
+
+    /// The key (and previous key) as they are now.
+    fn keys(&self) -> Option<Arc<PageCipher>> {
+        self.cipher
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn reseal_lock(&self) -> MutexGuard<'_, ()> {
+        self.reseal.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A read that failed while pages are sealed again in place: it may
+    /// have met one mid-write — once the batch is done, read again.
+    fn read_again<T>(
+        &self,
+        r: Result<T>,
+        read: impl Fn(Option<&PageCipher>) -> Result<T>,
+    ) -> Result<T> {
+        match r {
+            Err(Error::Corrupt { .. }) if self.keys().is_some_and(|c| c.previous().is_some()) => {
+                let _batch = self.reseal_lock();
+                read(self.keys().as_deref())
+            }
+            r => r,
+        }
     }
 
     /// Whether `id` may be written back: allocated since the last freeze,
@@ -517,7 +721,9 @@ impl Pager {
         if id < FIRST_DATA_PAGE || id.0 >= self.pages.load(Ordering::Acquire) {
             return Err(Error::InvalidPage(id));
         }
-        read_raw(self.file.as_ref(), id, self.cipher.as_ref())
+        let read = |c: Option<&PageCipher>| read_raw(self.file.as_ref(), id, c);
+        let r = read(self.keys().as_deref());
+        self.read_again(r, read)
     }
 
     /// Reads and verifies the `n` pages from `first` on with one read of
@@ -530,18 +736,214 @@ impl Pager {
         if first < FIRST_DATA_PAGE || end.is_none_or(|e| e > self.pages.load(Ordering::Acquire)) {
             return Err(Error::InvalidPage(first));
         }
-        read_run(self.file.as_ref(), first, n, self.cipher.as_ref())
+        let read = |c: Option<&PageCipher>| read_run(self.file.as_ref(), first, n, c);
+        let r = read(self.keys().as_deref());
+        self.read_again(r, read)
     }
 
     /// The key and cipher its pages are sealed with — the file's, from its
-    /// header (PLAN.md §M14.30): `None` in the clear.
-    pub fn cipher(&self) -> Option<&PageCipher> {
-        self.cipher.as_ref()
+    /// header (PLAN.md §M14.30): `None` in the clear.  While its pages
+    /// are sealed again under a new key, it holds the previous one too.
+    pub fn cipher(&self) -> Option<Arc<PageCipher>> {
+        self.keys()
     }
 
     /// Whether its pages are sealed (PLAN.md §M14.30 K2b).
     pub fn is_encrypted(&self) -> bool {
-        self.cipher.is_some()
+        self.keys().is_some()
+    }
+
+    /// Makes `key` the file's key (PLAN.md §M14.30 K3f): the next
+    /// generation, the one now kept beside it as the previous until every
+    /// page it sealed is sealed again ([`reseal_step`](Self::reseal_step)).
+    /// Every write from now on is sealed under `key`; the header says so
+    /// from the next commit, and the pages to look at are those the file
+    /// holds now.  [`Error::Key`] for a file in the clear, for one whose
+    /// pages are still being sealed again, or for the same key.
+    pub fn rekey(&self, key: PageCipher) -> Result<()> {
+        let _batch = self.reseal_lock();
+        let mut s = self.begin()?;
+        let mut slot = self.cipher.write().unwrap_or_else(|e| e.into_inner());
+        let Some(cur) = slot.clone() else {
+            return Err(Error::Key(
+                "a file in the clear has no key to replace".into(),
+            ));
+        };
+        if cur.previous().is_some() || s.hdr.previous_check.is_some() {
+            return Err(Error::Key(
+                "its pages are still being sealed again under the key before".into(),
+            ));
+        }
+        if key.check_value() == cur.check_value() {
+            return Err(Error::Key("the new key is the key it has".into()));
+        }
+        let generation = cur
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| Error::Key("no key generation left".into()))?;
+        let new = key
+            .for_code(cur.code())
+            .map_err(Error::Key)?
+            .with_generation(generation)
+            .with_previous((*cur).clone());
+        s.hdr.key_check = new.check_value();
+        s.hdr.key_generation = generation;
+        s.hdr.previous_check = Some(cur.check_value());
+        s.hdr.reseal_next = FIRST_DATA_PAGE.0;
+        s.hdr.reseal_end = s.hdr.page_count;
+        *slot = Some(Arc::new(new));
+        Ok(())
+    }
+
+    /// Where sealing the pages again under a new key stands.
+    pub fn rekey_state(&self) -> Rekey {
+        let s = self.lock();
+        let Some(c) = self.keys().filter(|c| c.previous().is_some()) else {
+            return Rekey::Idle;
+        };
+        if s.hdr.previous_check.is_none() {
+            return Rekey::Finishing;
+        }
+        Rekey::Running {
+            next: s.hdr.reseal_next,
+            end: s.hdr.reseal_end,
+            commit_needed: s.durable.key_generation != c.generation()
+                || s.durable.previous_check.is_none(),
+        }
+    }
+
+    /// Whether page `id` is durable and in use: in the last committed
+    /// state, neither free, nor freed since, nor holding a commit in
+    /// flight's free list.
+    fn durable_in_use(s: &State, id: u64) -> bool {
+        id < s.durable.page_count
+            && !s.free.contains(&id)
+            && !s.pending.contains(&id)
+            && !s.allocated.contains(&id)
+            && !s.frozen.as_ref().is_some_and(|f| {
+                f.pages.contains(&id) || f.carry.contains(&id) || f.list_pages.contains(&id)
+            })
+    }
+
+    /// Seals again under the new key up to `max` of the pages the old key
+    /// sealed (PLAN.md §M14.30 K3f): the next pages from where the last
+    /// step stopped that are durable and in use, those under the old key
+    /// read, their old bytes written to `journal` and synced, then the
+    /// same contents sealed under the new key written in their place and
+    /// synced.  Where it stands after.  A step before the new key's first
+    /// commit is durable does nothing (`commit_needed`).
+    pub fn reseal_step(&self, journal: &dyn File, max: usize) -> Result<Rekey> {
+        let _batch = self.reseal_lock();
+        let Some(c) = self.keys().filter(|c| c.previous().is_some()) else {
+            return Ok(Rekey::Idle);
+        };
+        let (ids, upto) = {
+            let s = self.begin()?;
+            if s.hdr.previous_check.is_none() {
+                return Ok(Rekey::Finishing);
+            }
+            if s.durable.key_generation != c.generation() || s.durable.previous_check.is_none() {
+                drop(s);
+                return Ok(self.rekey_state());
+            }
+            let mut ids = Vec::new();
+            let mut id = s.hdr.reseal_next;
+            while id < s.hdr.reseal_end && ids.len() < max {
+                if Self::durable_in_use(&s, id) {
+                    ids.push(id);
+                }
+                id += 1;
+            }
+            (ids, id)
+        };
+        // The pages under the old key: their bytes now, and sealed anew.
+        let mut batch = Vec::new();
+        let mut bytes = vec![0u8; PAGE_SIZE];
+        for id in ids {
+            self.file.read_exact_at(&mut bytes, PageId(id).offset())?;
+            if c.sealed_before(&bytes) != Some(true) {
+                continue;
+            }
+            let corrupt = |reason| Error::Corrupt {
+                page: PageId(id),
+                reason,
+            };
+            let page = c.open(PageId(id), &bytes).map_err(corrupt)?;
+            let mut new = vec![0u8; PAGE_SIZE];
+            c.seal(PageId(id), &page, &mut new).map_err(corrupt)?;
+            batch.push((id, bytes.clone(), new));
+        }
+        if !batch.is_empty() {
+            let mut j = Vec::with_capacity(16 + batch.len() * (8 + PAGE_SIZE) + 4);
+            j.extend_from_slice(JOURNAL_MAGIC);
+            j.extend_from_slice(&(batch.len() as u64).to_le_bytes());
+            for (id, old, _) in &batch {
+                j.extend_from_slice(&id.to_le_bytes());
+                j.extend_from_slice(old);
+            }
+            let crc = crate::crc32c::crc32c(&j);
+            j.extend_from_slice(&crc.to_le_bytes());
+            journal.write_all_at(&j, 0)?;
+            journal.set_len(j.len() as u64)?;
+            journal.sync()?;
+            for (id, _, new) in &batch {
+                self.file.write_all_at(new, PageId(*id).offset())?;
+            }
+            self.file.sync()?;
+        }
+        let mut s = self.begin()?;
+        s.hdr.reseal_next = upto;
+        if upto >= s.hdr.reseal_end {
+            // Every page done: the next commit names no previous key.
+            s.hdr.previous_check = None;
+            s.hdr.reseal_next = 0;
+            s.hdr.reseal_end = 0;
+        }
+        drop(s);
+        Ok(self.rekey_state())
+    }
+
+    /// After a crash, puts back from `journal` the pages of a batch sealed
+    /// again in place ([`reseal_step`](Self::reseal_step)) that open under
+    /// neither key — torn by the crash — and empties it.  A journal not
+    /// whole (the crash came while it was written: no page was touched
+    /// yet) is ignored.  The pages put back.
+    pub fn recover_reseal(&self, journal: &dyn File) -> Result<u64> {
+        let _batch = self.reseal_lock();
+        let len = journal.size()? as usize;
+        let mut j = vec![0u8; len];
+        journal.read_exact_at(&mut j, 0)?;
+        let whole = len >= 20
+            && &j[..8] == JOURNAL_MAGIC
+            && read_u64(&j, 8).checked_mul((8 + PAGE_SIZE) as u64) == Some(len as u64 - 20)
+            && crate::crc32c::crc32c(&j[..len - 4]) == read_u32(&j, len - 4);
+        let mut restored = 0;
+        if whole {
+            let c = self.keys();
+            let mut now = vec![0u8; PAGE_SIZE];
+            for e in j[16..len - 4].as_chunks::<{ 8 + PAGE_SIZE }>().0 {
+                let id = PageId(read_u64(e, 0));
+                if id < FIRST_DATA_PAGE {
+                    continue;
+                }
+                match self.file.read_exact_at(&mut now, id.offset()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => now.fill(0),
+                    Err(e) => return Err(e.into()),
+                }
+                let opens = c.as_deref().is_some_and(|c| c.open(id, &now).is_ok());
+                if !opens {
+                    self.file.write_all_at(&e[8..], id.offset())?;
+                    restored += 1;
+                }
+            }
+            if restored > 0 {
+                self.file.sync()?;
+            }
+        }
+        journal.set_len(0)?;
+        journal.sync()?;
+        Ok(restored)
     }
 
     /// Writes `page` at `id`, stamping its id and checksum.  Only pages
@@ -747,7 +1149,7 @@ impl Pager {
                 self.file.as_ref(),
                 PageId(id),
                 &mut page,
-                self.cipher.as_ref(),
+                self.keys().as_deref(),
             )?;
             zeroed += 1;
         }
@@ -880,6 +1282,8 @@ impl Pager {
     /// is poisoned (see [`sync`](Self::sync)).
     pub fn commit_frozen(&self, frozen: Frozen) -> Result<()> {
         let result = self.write_frozen(&frozen);
+        // No page in a batch sealed again in place becomes free under it.
+        let _batch = self.reseal_lock();
         let mut s = self.lock();
         if let Err(e) = result {
             s.poisoned = true;
@@ -892,6 +1296,14 @@ impl Pager {
         s.free.extend(old_list);
         s.hdr.seq = frozen.hdr.seq;
         s.durable = frozen.hdr;
+        // Every page sealed again and a header naming no previous key
+        // durable: the previous key is let go (K3f).
+        if s.durable.previous_check.is_none() && s.hdr.previous_check.is_none() {
+            let mut slot = self.cipher.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(c) = slot.as_ref().filter(|c| c.previous().is_some()) {
+                *slot = Some(Arc::new((**c).clone().without_previous()));
+            }
+        }
         Ok(())
     }
 
@@ -928,7 +1340,7 @@ impl Pager {
         // The data the new header refers to, before it (ordering is all it
         // needs: the header's sync makes both durable).
         self.file.sync_order()?;
-        write_header(self.file.as_ref(), &f.hdr, self.cipher.as_ref())?;
+        write_header(self.file.as_ref(), &f.hdr, self.keys().as_deref())?;
         self.file.sync()?; // the header itself
         Ok(())
     }
@@ -937,7 +1349,8 @@ impl Pager {
     /// no page is in two places at once.
     pub fn check(&self) -> Result<()> {
         let s = self.begin()?;
-        let (on_disk, pages) = read_freelist(self.file.as_ref(), &s.durable, self.cipher.as_ref())?;
+        let (on_disk, pages) =
+            read_freelist(self.file.as_ref(), &s.durable, self.keys().as_deref())?;
         let corrupt = |reason| Error::Corrupt {
             page: PageId(s.durable.seq % 2),
             reason,
@@ -1146,7 +1559,13 @@ fn write_header(file: &dyn File, hdr: &Header, cipher: Option<&PageCipher>) -> R
     let slot = PageId(hdr.seq % 2);
     let mut page = hdr.encode();
     if let Some(c) = cipher {
-        let tag = c.header_tag(slot, &page.payload()[..TAGGED]);
+        // Under the key the header names: a commit frozen before a new
+        // key was made is the old key's (K3f).
+        let c = match c.previous() {
+            Some(p) if hdr.key_check == p.check_value() => p,
+            _ => c,
+        };
+        let tag = c.header_tag(slot, &tagged(page.payload()));
         page.payload_mut()[TAGGED..TAGGED + 16].copy_from_slice(&tag);
     }
     page.seal(slot);
@@ -1157,7 +1576,7 @@ fn write_header(file: &dyn File, hdr: &Header, cipher: Option<&PageCipher>) -> R
 /// sequence number.  With `cipher`, an encrypted copy counts as valid
 /// only if its tag is the key's (a copy of a file in the clear, or under
 /// another key, is told apart afterwards by its fields).
-fn read_best_header(file: &dyn File, cipher: Option<&PageCipher>) -> Result<Header> {
+fn read_best_header(file: &dyn File, cipher: &[&PageCipher]) -> Result<Header> {
     let mut best: Option<Header> = None;
     let mut not_ours = None;
     for slot in [PageId(0), PageId(1)] {
@@ -1206,7 +1625,7 @@ pub fn file_cipher(fs: &dyn FileSystem, path: &Path) -> Result<Option<u32>> {
         return Ok(None);
     }
     let file = fs.open(path, OpenMode::ReadOnly)?;
-    Ok(Some(read_best_header(file.as_ref(), None)?.cipher))
+    Ok(Some(read_best_header(file.as_ref(), &[])?.cipher))
 }
 
 /// Encrypts the database file at `path`, in the clear and closed, under
@@ -1217,7 +1636,7 @@ pub fn file_cipher(fs: &dyn FileSystem, path: &Path) -> Result<Option<u32>> {
 /// Pages never written stay zeros.  The pages sealed.
 pub fn encrypt_file(fs: &dyn FileSystem, path: &Path, cipher: &PageCipher) -> Result<u64> {
     let file = fs.open(path, OpenMode::ReadOnly)?;
-    let hdr = read_best_header(file.as_ref(), None)?;
+    let hdr = read_best_header(file.as_ref(), &[])?;
     if hdr.cipher != CIPHER_NONE {
         return Err(Error::Key(format!(
             "{} is encrypted already",
@@ -1288,13 +1707,15 @@ pub fn encrypt_file(fs: &dyn FileSystem, path: &Path, cipher: &PageCipher) -> Re
 /// Whether an encrypted header copy's tag is not what `cipher` gives
 /// (under the key it was written with: one under another key is refused
 /// by its key check instead).
-fn tag_fails(page: &Page, h: &Header, slot: PageId, cipher: Option<&PageCipher>) -> bool {
-    let Some(c) = cipher.filter(|c| h.cipher != CIPHER_NONE && h.key_check == c.check_value())
+fn tag_fails(page: &Page, h: &Header, slot: PageId, cipher: &[&PageCipher]) -> bool {
+    let Some(c) = cipher
+        .iter()
+        .find(|c| h.cipher != CIPHER_NONE && h.key_check == c.check_value())
     else {
         return false;
     };
     let p = page.payload();
-    !nucleus_crypto::constant_time_eq(&c.header_tag(slot, &p[..TAGGED]), &p[TAGGED..TAGGED + 16])
+    !nucleus_crypto::constant_time_eq(&c.header_tag(slot, &tagged(p)), &p[TAGGED..TAGGED + 16])
 }
 
 #[cfg(test)]

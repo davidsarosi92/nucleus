@@ -1078,6 +1078,24 @@ impl Custody for Keyring {
     fn list(&self) -> Result<Vec<KeyInfo>, String> {
         Keyring::list(self)
     }
+
+    fn rotate(&self, purpose: &str) -> Result<Key, String> {
+        if !self.rotate_dek(purpose, true)? {
+            return Err(format!(
+                "a rotation of the key \"{purpose}\" begun before is not finished"
+            ));
+        }
+        Keyring::dek(self, purpose, false)?
+            .ok_or_else(|| format!("no key \"{purpose}\" after its rotation"))
+    }
+
+    fn rotating(&self, purpose: &str) -> Result<bool, String> {
+        Keyring::rotating(self, purpose)
+    }
+
+    fn retire(&self, purpose: &str) -> Result<(), String> {
+        Keyring::retire(self, purpose)
+    }
 }
 
 /// The secrets' key (§M14.22) as the keyring's data key `secrets`.

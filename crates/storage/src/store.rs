@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
-use nucleus_platform::{FileSystem, Platform};
+use nucleus_platform::{FileSystem, OpenMode, Platform};
 
 use crate::btree::{BTree, LeafFilter};
 use crate::buffer::BufferPool;
@@ -86,6 +86,11 @@ pub struct StoreOptions {
     /// records (K2c) are sealed under: a new store is created encrypted,
     /// an existing one must be encrypted under it.  `None`: in the clear.
     pub page_key: Option<crate::PageCipher>,
+    /// The key before `page_key`, while what it sealed is sealed again
+    /// under `page_key` (PLAN.md §M14.30 K3f): needed by a store whose
+    /// header names it; a store still under it is given `page_key` at
+    /// once ([`Pager::open_keys`]).
+    pub previous_page_key: Option<crate::PageCipher>,
 }
 
 impl Default for StoreOptions {
@@ -94,9 +99,17 @@ impl Default for StoreOptions {
             cache_pages: 1024,
             wal_segment_size: 16 << 20,
             page_key: None,
+            previous_page_key: None,
         }
     }
 }
+
+/// The journal of a batch of pages sealed again in place (K3f), beside
+/// the data file.
+const RESEAL_JOURNAL: &str = "data.reseal";
+
+/// Pages a step of sealing again under a new key looks at: 2 MiB.
+pub const RESEAL_BATCH: usize = 256;
 
 /// What [`Store::scrub`] overwrote.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -603,7 +616,8 @@ fn open_branch(
         wal_dir,
         opts.wal_segment_size,
         checkpoint,
-        opts.page_key.clone(),
+        // The data file's key as it is now (a new one's, K3f).
+        pool.pager().cipher().map(|c| (*c).clone()),
     )?;
     let mut meta = meta;
     let mut replayed = 0;
@@ -663,15 +677,33 @@ impl Store {
         })?;
         let data = dir.join("data");
         let pager = if fs.exists(&data)? {
-            Pager::open_with(fs, &data, opts.page_key.clone())?
+            Pager::open_keys(
+                fs,
+                &data,
+                opts.page_key.clone(),
+                opts.previous_page_key.clone(),
+            )?
         } else {
             Pager::create_with(fs, &data, opts.page_key.clone())?
         };
+        // A batch sealed again in place cut short by a crash: its torn
+        // pages put back (K3f).
+        let journal = dir.join(RESEAL_JOURNAL);
+        if fs.exists(&journal)? {
+            let j = fs.open(&journal, OpenMode::ReadWrite)?;
+            let restored = pager.recover_reseal(j.as_ref())?;
+            if restored > 0 {
+                nucleus_platform::log!(
+                    "nucleus-storage: {} page(s) torn while sealed again under a new key, put back",
+                    restored
+                );
+            }
+        }
         let pager = Arc::new(pager);
         // The logs are sealed with the data file's cipher (its header's,
         // whichever this CPU would choose for a new one).
         let opts = &StoreOptions {
-            page_key: pager.cipher().cloned(),
+            page_key: pager.cipher().map(|c| (*c).clone()),
             ..opts.clone()
         };
         let pool = Arc::new(BufferPool::new(Arc::clone(&pager), opts.cache_pages));
@@ -1139,6 +1171,111 @@ impl Store {
     /// [`Checkpoint::finish`]).
     pub fn checkpoint(&self) -> Result<()> {
         self.checkpoint_begin()?.finish()
+    }
+
+    /// Makes `key` the data file's key (PLAN.md §M14.30 K3f): from now on
+    /// every page and log record is sealed under it, the old key kept
+    /// beside it until [`reseal`](Self::reseal) has sealed again what it
+    /// sealed — the database open and in use meanwhile.  A checkpoint
+    /// makes it durable.  The keyring keeps both keys until then: a store
+    /// reopened midway needs them ([`StoreOptions::previous_page_key`]).
+    pub fn rekey(&self, key: crate::PageCipher) -> Result<()> {
+        self.check()?;
+        let sh = &*self.shared;
+        sh.pool.pager().rekey(key)?;
+        self.share_cipher();
+        self.checkpoint()
+    }
+
+    /// Every branch's log sealed under the data file's key as it is now.
+    fn share_cipher(&self) {
+        let sh = &*self.shared;
+        let c = sh.pool.pager().cipher();
+        for b in sh.branches().values() {
+            b.wal.set_cipher(c.clone());
+        }
+    }
+
+    /// Where sealing the data file's pages again under a new key stands.
+    pub fn rekey_state(&self) -> crate::pager::Rekey {
+        self.shared.pool.pager().rekey_state()
+    }
+
+    /// Seals again under the data file's new key what the old one sealed
+    /// ([`rekey`](Self::rekey)), `pages` pages at a time
+    /// ([`RESEAL_BATCH`]), `go_on` asked after each — `false` stops
+    /// there, and the next call goes on from it (the header keeps how far
+    /// it got from one commit to the next).  Once every page is done, the
+    /// logs move to new segments and a checkpoint writes a header that
+    /// names no previous key — the segments before, the old key's
+    /// records in them, dropped with it — and the old key is let go; then
+    /// where it stands is [`Rekey::Idle`](crate::pager::Rekey::Idle), and
+    /// only then may the keyring forget the old key.  Writes go on
+    /// meanwhile.
+    pub fn reseal(
+        &self,
+        pages: usize,
+        go_on: &mut dyn FnMut() -> bool,
+    ) -> Result<crate::pager::Rekey> {
+        use crate::pager::Rekey;
+        self.check()?;
+        let sh = &*self.shared;
+        let pager = sh.pool.pager();
+        let fs = sh.platform.fs();
+        let path = sh.dir.join(RESEAL_JOURNAL);
+        let mut journal: Option<Box<dyn nucleus_platform::File>> = None;
+        let mut checkpoints = 0;
+        loop {
+            match pager.rekey_state() {
+                Rekey::Idle => {
+                    drop(journal.take());
+                    if fs.exists(&path)? {
+                        fs.remove_file(&path)?;
+                    }
+                    self.share_cipher();
+                    return Ok(Rekey::Idle);
+                }
+                st @ (Rekey::Finishing
+                | Rekey::Running {
+                    commit_needed: true,
+                    ..
+                }) => {
+                    // (Twice at most: one already running may have been
+                    // frozen before.)
+                    if checkpoints == 2 {
+                        return Ok(st);
+                    }
+                    checkpoints += 1;
+                    if st == Rekey::Finishing {
+                        // No record under the old key in the segment the
+                        // checkpoint starts the log at: the log under the
+                        // new key alone would end at the first.
+                        let all: Vec<Arc<Branch>> = sh.branches().values().cloned().collect();
+                        for b in all {
+                            b.wal.roll()?;
+                            b.wal.sync_dir()?;
+                        }
+                    }
+                    self.checkpoint()?;
+                }
+                Rekey::Running { .. } => {
+                    if journal.is_none() {
+                        let made = !fs.exists(&path)?;
+                        journal = Some(fs.open(&path, OpenMode::Create)?);
+                        // A journal a crash could lose with its entry
+                        // would put back no torn page.
+                        if made {
+                            fs.sync_dir(&sh.dir)?;
+                        }
+                    }
+                    let j = journal.as_deref().expect("opened");
+                    let st = pager.reseal_step(j, pages.max(1))?;
+                    if matches!(st, Rekey::Running { .. }) && !go_on() {
+                        return Ok(st);
+                    }
+                }
+            }
+        }
     }
 
     /// Removes from the files what the trees no longer hold (PLAN.md

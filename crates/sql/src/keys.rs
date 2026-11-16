@@ -46,6 +46,68 @@ pub trait Custody: Send + Sync {
 
     /// The keys, for `nc_catalog.keys`.
     fn list(&self) -> Result<Vec<KeyInfo>, String>;
+
+    /// Begins a new data key for `purpose` (PLAN.md §M14.30 K3f), the one
+    /// there kept as the previous until [`retire`](Self::retire); the new
+    /// key.  An error when a rotation of it has not ended, or there is no
+    /// key for `purpose`.  The default: not supported.
+    fn rotate(&self, purpose: &str) -> Result<Key, String> {
+        Err(format!(
+            "this key custody cannot rotate the key \"{purpose}\""
+        ))
+    }
+
+    /// Whether a rotation of `purpose`'s key has not ended.  The default:
+    /// no.
+    fn rotating(&self, purpose: &str) -> Result<bool, String> {
+        let _ = purpose;
+        Ok(false)
+    }
+
+    /// Ends a rotation of `purpose`'s key: what the previous key sealed
+    /// is all sealed again, and it is dropped.  The default: nothing to
+    /// do.
+    fn retire(&self, purpose: &str) -> Result<(), String> {
+        let _ = purpose;
+        Ok(())
+    }
+}
+
+/// `ROTATE KEY data` (PLAN.md §M14.30 K3f): a new key for the database's
+/// files, the database open — the custody's new data key given to the
+/// database at once, so everything written from now on is sealed under
+/// it, while what the old key sealed is sealed again in the background
+/// (the server's maintenance), after which the old key is dropped.  The
+/// other data keys are rotated with the server stopped (`nucleus keys
+/// <dir> rotate secrets|subjects|backup`).
+pub fn rotate(kv: &Arc<dyn nucleus_kv::Kv>, purpose: &str) -> Result<(), crate::Error> {
+    if purpose != "data" {
+        return Err(crate::Error::feature(format!(
+            "ROTATE KEY {purpose}: only the data key rotates online; the server stopped, \
+             `nucleus keys <dir> rotate {purpose}` rotates it"
+        )));
+    }
+    let c = custody().ok_or_else(|| {
+        crate::Error::feature("ROTATE KEY: this database has no key custody installed")
+    })?;
+    let running = |m: &str| crate::Error::object_in_use(format!("ROTATE KEY data: {m}"));
+    if kv.rekey_state() != nucleus_kv::Rekey::Idle || c.rotating("data").map_err(io)? {
+        return Err(running(
+            "the rotation begun before is still running (its pages are being sealed again)",
+        ));
+    }
+    if c.dek("data", false).map_err(io)?.is_none() {
+        return Err(crate::Error::feature(
+            "ROTATE KEY data: the database is not encrypted (`nucleus keys <dir> encrypt`)",
+        ));
+    }
+    let key = c.rotate("data").map_err(io)?;
+    kv.rekey(nucleus_kv::PageCipher::new(*key.bytes()))?;
+    Ok(())
+}
+
+fn io(m: String) -> crate::Error {
+    crate::Error::io(m)
 }
 
 static CUSTODY: RwLock<Option<Arc<dyn Custody>>> = RwLock::new(None);

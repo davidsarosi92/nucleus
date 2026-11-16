@@ -31,11 +31,15 @@ mod sealed_scratch;
 pub use nucleus_platform::SyncPolicy;
 /// The key an encrypted database is sealed under ([`Options::encryption_key`]).
 pub use nucleus_storage::PageCipher;
+pub use nucleus_storage::Rekey;
 /// LZ4-block compression (a backup's parts are compressed with it).
 pub use nucleus_storage::lz;
 /// Finding bytes in a database's files ([`Kv::find_bytes`]'s search, for tools
 /// and tests that want where).
 pub use nucleus_storage::scan;
+/// Pages a background step of sealing again under a new key takes
+/// (PLAN.md §M14.30 K3f).
+pub use nucleus_storage::store::RESEAL_BATCH;
 pub use nucleus_txn::{Chunk, Isolation, Timestamp};
 
 /// Errors of the KV contract.
@@ -432,6 +436,37 @@ pub trait Kv: Send + Sync {
     /// resolve them meanwhile, for a little more).  The default: no.
     fn vacuum_wanted(&self) -> bool {
         false
+    }
+
+    /// Makes `key` the key the database's files are sealed under (PLAN.md
+    /// §M14.30 K3f), the database open and in use: everything written
+    /// from now on is sealed under it, and what the old key sealed is
+    /// sealed again in the background ([`reseal_background`]) — until
+    /// then the database needs both keys to open
+    /// ([`Options::previous_encryption_key`]).  The default: an error
+    /// (no files of its own to seal).
+    ///
+    /// [`reseal_background`]: Kv::reseal_background
+    fn rekey(&self, key: PageCipher) -> Result<()> {
+        let _ = key;
+        Err(Error::Storage(
+            "this database has no encrypted files to give a new key".into(),
+        ))
+    }
+
+    /// Where sealing again under a new key stands ([`Rekey::Idle`]: none
+    /// runs — the old key no longer needed).  The default: idle.
+    fn rekey_state(&self) -> Rekey {
+        Rekey::Idle
+    }
+
+    /// Seals again under the new key what the old one sealed, as a
+    /// background task: [`RESEAL_BATCH`] pages at a time, `go_on` asked
+    /// between batches — `false` stops it there, and the next call goes
+    /// on from it.  Where it stands after.  The default: idle.
+    fn reseal_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<Rekey> {
+        let _ = go_on;
+        Ok(Rekey::Idle)
     }
 
     /// Watches the keys from `start` to `end` (exclusive) for
@@ -834,6 +869,11 @@ pub struct Options {
     /// scratch files are sealed too, each under a key of its own (K2d).
     /// `None` (the default): in the clear.
     pub encryption_key: Option<PageCipher>,
+    /// The key before `encryption_key`, while what it sealed is sealed
+    /// again under it (PLAN.md §M14.30 K3f, [`Kv::rekey`]): a database
+    /// whose files name it needs it, and one still under it is given
+    /// `encryption_key` as it opens.  `None` (the default): none.
+    pub previous_encryption_key: Option<PageCipher>,
 }
 
 impl Options {
@@ -874,6 +914,7 @@ impl Default for Options {
             sync: SyncPolicy::default(),
             wal_minimal: true,
             encryption_key: None,
+            previous_encryption_key: None,
         }
     }
 }
@@ -1011,6 +1052,7 @@ fn store_options(opts: &Options) -> StoreOptions {
         cache_pages: (opts.cache_bytes / nucleus_storage::PAGE_SIZE).max(16),
         wal_segment_size: opts.wal_segment_bytes,
         page_key: opts.encryption_key.clone(),
+        previous_page_key: opts.previous_encryption_key.clone(),
     }
 }
 
@@ -1286,6 +1328,26 @@ impl Kv for Database {
         self.engine.intents_pending()
     }
 
+    fn rekey(&self, key: PageCipher) -> Result<()> {
+        Ok(self
+            .engine
+            .store()
+            .rekey(key)
+            .map_err(nucleus_txn::Error::from)?)
+    }
+
+    fn rekey_state(&self) -> Rekey {
+        self.engine.store().rekey_state()
+    }
+
+    fn reseal_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<Rekey> {
+        Ok(self
+            .engine
+            .store()
+            .reseal(RESEAL_BATCH, go_on)
+            .map_err(nucleus_txn::Error::from)?)
+    }
+
     fn watch(&self, start: &[u8], end: &[u8]) {
         self.engine.watch(start, end);
     }
@@ -1322,11 +1384,14 @@ impl Kv for Database {
     }
 
     fn find_bytes(&self, needles: &[Vec<u8>]) -> Result<Option<u64>> {
+        // The data file's key as it is now — its generation, and the
+        // previous key while pages are sealed again (PLAN.md §M14.30 K3f).
+        let key = self.engine.store().pool().pager().cipher();
         let found = nucleus_storage::scan::find_with(
             self.platform.fs(),
             &self.dir,
             needles,
-            self.page_key.as_ref(),
+            key.as_deref().or(self.page_key.as_ref()),
         )
         .map_err(|e| Error::Storage(Box::new(e)))?;
         Ok(Some(found.len() as u64))

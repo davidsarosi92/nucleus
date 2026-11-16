@@ -189,10 +189,11 @@ usage:
                  [the root key's options of nucleus server]
                                     a new root: the data keys wrapped again
                                     (seconds; the server stopped)
-  nucleus keys <dir> rotate secrets|subjects|backup [the root key's options]
+  nucleus keys <dir> rotate data|secrets|subjects|backup [the root key's options]
                                     a new data key: what the old one sealed
                                     sealed again (backup: the next backup a
-                                    full one)
+                                    full one; data: online too, by the SQL
+                                    ROTATE KEY data)
   nucleus restore <repository> <dir> [--at <commit|backup|time>]
                  [--subject-keys <file>] [--backup-key <file>]
                  [the root key's options of nucleus server]
