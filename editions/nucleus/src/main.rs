@@ -120,9 +120,12 @@ usage:
                                     variable, --root-kms a key management
                                     service's key that never leaves it
                                     (aws-kms:<key id, ARN or alias/…>, the
-                                    AWS SDKs' variables) — by default
-                                    <dir>.root-key, made at first use; --old-key-files: the key
-                                    files of before (<dir>.secrets-key, …)
+                                    AWS SDKs' variables;
+                                    vault-transit:[<mount>/]<key>,
+                                    VAULT_ADDR, VAULT_TOKEN, …) — by default
+                                    <dir>.root-key, made at first use;
+                                    --old-key-files: the key files of before
+                                    (<dir>.secrets-key, …)
                                     taken into the keyring and removed (the
                                     default), kept with a warning, or left for
                                     nucleus keys import; --encrypt-backups:
@@ -221,6 +224,7 @@ fn main() -> ExitCode {
     // Repositories of backups in object storage (BACKUP TO 's3://…').
     nucleus_s3::register();
     nucleus_aws_kms::register();
+    nucleus_vault_transit::register();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).

@@ -1,11 +1,12 @@
 //! Just enough HTTP/1.1 for nucleus's modules that call out (PLAN.md
 //! §M14.22): a request over TLS (rustls, Mozilla's roots) — plain HTTP
 //! only to a loopback address — and its response.  One request a
-//! connection.
+//! connection.  A private certificate authority (a Vault's, a company's)
+//! is trusted beside Mozilla's roots once [`trust_pem`] is given it.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A request.
@@ -105,12 +106,49 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The certificates [`trust_pem`] added, and the configuration built
+/// with them (made again after each addition).
+static TRUSTED: Mutex<(
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    Option<Arc<rustls::ClientConfig>>,
+)> = Mutex::new((Vec::new(), None));
+
+/// Trusts the certificate authorities in `pem` (PEM certificates) for
+/// every request from now on, beside Mozilla's roots: how many it added.
+/// An error when it holds no certificate or one is not a CA's.
+pub fn trust_pem(pem: &[u8]) -> Result<usize, String> {
+    use rustls::pki_types::pem::PemObject;
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("not PEM certificates: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificate in the PEM".into());
+    }
+    // Each one a usable trust anchor before any is taken.
+    let mut check = rustls::RootCertStore::empty();
+    for c in &certs {
+        check
+            .add(c.clone())
+            .map_err(|e| format!("a certificate not usable as an authority: {e}"))?;
+    }
+    let mut t = TRUSTED.lock().unwrap_or_else(|e| e.into_inner());
+    let n = certs.len();
+    t.0.extend(certs);
+    t.1 = None;
+    Ok(n)
+}
+
 fn tls_config() -> Arc<rustls::ClientConfig> {
-    static C: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    C.get_or_init(|| {
-        let roots = rustls::RootCertStore {
+    let mut t = TRUSTED.lock().unwrap_or_else(|e| e.into_inner());
+    let extra = t.0.clone();
+    t.1.get_or_insert_with(|| {
+        let mut roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
+        for c in extra {
+            // (Checked by trust_pem.)
+            let _ = roots.add(c);
+        }
         Arc::new(
             rustls::ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
@@ -379,6 +417,14 @@ mod tests {
         assert_eq!(r.retry_after(), Some(Duration::from_secs(7)));
         assert!(parse(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{}").is_err());
         assert!(parse(b"garbage").is_err());
+    }
+
+    #[test]
+    fn trusted_authorities_are_certificates() {
+        assert!(trust_pem(b"").unwrap_err().contains("no certificate"));
+        assert!(trust_pem(b"not a pem at all").is_err());
+        let junk = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        assert!(trust_pem(junk).is_err());
     }
 
     #[test]

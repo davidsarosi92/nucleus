@@ -437,6 +437,7 @@ dependencies = [
  "nucleus-server",
  "nucleus-sql",
  "nucleus-tls",
+ "nucleus-vault-transit",
  "serde_json",
 ]
 
@@ -697,6 +698,17 @@ version = "0.1.0"
 dependencies = [
  "nucleus-platform",
  "nucleus-storage",
+]
+
+[[package]]
+name = "nucleus-vault-transit"
+version = "0.1.0"
+dependencies = [
+ "nucleus-http",
+ "nucleus-kv",
+ "nucleus-server",
+ "nucleus-sql",
+ "serde_json",
 ]
 
 [[package]]

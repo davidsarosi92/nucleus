@@ -14,7 +14,8 @@ use nucleus_server::subject_keyfile::SubjectKeyFile;
 
 /// The options' usage, for the commands' help.
 pub const OPTIONS: &str = "[--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>
-                      | --root-kms aws-kms:<key id, ARN or alias/…>]
+                      | --root-kms aws-kms:<key id, ARN or alias/…>
+                      | --root-kms vault-transit:[<mount>/]<key>]
                      [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
                      [--encrypt-data yes|no]";
 
@@ -52,7 +53,7 @@ impl KeyOptions {
             "--root-key" => Root::File(value("a file")?.into()),
             "--root-key-env" => Root::Env(value("a variable's name")?),
             "--root-passphrase-env" => Root::Passphrase(value("a variable's name")?),
-            "--root-kms" => Root::Kms(value("a KMS key (aws-kms:<key>)")?),
+            "--root-kms" => Root::Kms(value("a KMS key (aws-kms:<key>, vault-transit:<key>)")?),
             "--old-key-files" => {
                 self.old_files = Some(match value("remove, keep or manual")?.as_str() {
                     "remove" => OldFiles::Remove,

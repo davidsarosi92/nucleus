@@ -50,6 +50,7 @@
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
 | `modules/aws` | `nucleus-aws` | what the AWS modules share: Signature Version 4, credentials, region and endpoint from the AWS SDKs' variables | §M14.18, §M14.30 |
 | `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
+| `modules/vault-transit` | `nucleus-vault-transit` | the keyring's root key in Vault's or OpenBao's Transit engine (`--root-kms vault-transit:[<mount>/]<key>`): data keys encrypted there, the purpose as associated data; a stand-in engine for tests (`mock`) | §M14.30 |
 | `modules/aws-kms` | `nucleus-aws-kms` | the keyring's root key in AWS KMS (`--root-kms aws-kms:<key>`): data keys wrapped by `Encrypt`, unwrapped by `Decrypt`; a stand-in KMS for tests (`mock`) | §M14.30 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
@@ -107,7 +108,8 @@ scripts/ci-tools.sh                              # CI's tools, pinned and checke
 T=target/ci-tools; PROMTOOL=$T/promtool PROMETHEUS=$T/prometheus OTELCOL=$T/otelcol \
   monitoring/test.sh target/release/nucleus      # the rules' tests, a real Prometheus and collector
 RCLONE=$T/rclone scripts/s3-test.sh target/release/nucleus   # backups in a real S3 server
-MOTO_PYTHON=<python with moto[server]> scripts/kms-test.sh target/release/nucleus  # the root in AWS KMS (moto)
+MOTO_PYTHON=$T/moto/bin/python VAULT=$T/vault \
+  scripts/kms-test.sh target/release/nucleus      # the root in AWS KMS (moto) and Vault Transit
 ```
 
 A test-kit script whose results claim PostgreSQL's is checked against a
@@ -6495,7 +6497,15 @@ an alias moved to another key is refused — and refuses a key not
 wrapped by `Encrypt` and unwrapped by `Decrypt` once at opening, under
 the encryption context `{"nucleus-purpose": <purpose>}`, so KMS itself
 refuses a wrapped key offered for another purpose.  A key disabled or
-deleted in KMS leaves the database unopenable.  A root that did not wrap the keyring is refused,
+deleted in KMS leaves the database unopenable.  Vault's (or OpenBao's)
+Transit engine is `modules/vault-transit`
+(`vault-transit:[<mount>/]<key>`, `VAULT_ADDR`, `VAULT_TOKEN` or
+`~/.vault-token`, `VAULT_NAMESPACE`, `VAULT_CACERT`): opening reads the
+key and refuses one that is not an AEAD key or cannot both encrypt and
+decrypt; a data key is encrypted with its purpose as associated data;
+the root's id is `vault-transit:<mount>/<key>`.  A token whose policy
+loses the key leaves the database unopenable.  (`nucleus-http` trusts
+a private authority beside Mozilla's roots through `trust_pem`.)  A root that did not wrap the keyring is refused,
 naming both ids.  An old key file (`<dir>.secrets-key`, or
 `--secrets-key`'s) is taken in at start — its bytes become the data
 key, so what it sealed still opens — and, by `--old-key-files`,
