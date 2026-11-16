@@ -22,9 +22,22 @@ thread_local! {
     static ENCRYPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The odd seeds of a crash test run with the data file encrypted.
-fn encrypt_if_odd(seed: u64) {
+/// The odd seeds of a crash test run with the data file encrypted —
+/// until the guard returned is dropped, so a test after it (all on one
+/// thread where there are no threads, as under WASI) starts in the clear.
+#[must_use]
+fn encrypt_if_odd(seed: u64) -> InTheClearAfter {
     ENCRYPTED.set(seed % 2 == 1);
+    InTheClearAfter
+}
+
+/// Sets this thread's stores in the clear again when dropped.
+struct InTheClearAfter;
+
+impl Drop for InTheClearAfter {
+    fn drop(&mut self) {
+        ENCRYPTED.set(false);
+    }
 }
 
 fn opts() -> StoreOptions {
@@ -375,7 +388,7 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
 fn crash_at_every_io_point() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
         harness::run("store_crash_at_every_io_point", 8, |seed| {
-            encrypt_if_odd(seed);
+            let _encrypted = encrypt_if_odd(seed);
             let dry = sim(seed);
             let (models, acked) = workload(&dry, seed);
             assert!(acked >= 18);
@@ -713,7 +726,7 @@ fn a_store_encrypted_and_a_crash_at_every_point() {
 fn crash_at_every_io_point_of_overlapping_checkpoints() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
         harness::run("store_crash_overlapping_checkpoints", 8, |seed| {
-            encrypt_if_odd(seed);
+            let _encrypted = encrypt_if_odd(seed);
             let dry = sim(seed);
             let (models, _) = workload_overlapping(&dry, seed);
             let total = dry.sim_fs().op_count();

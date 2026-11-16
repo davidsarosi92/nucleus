@@ -27,6 +27,17 @@ thread_local! {
     static ENCRYPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Sets this thread's stores in the clear again when dropped: a test
+/// after the crash test (all on one thread under WASI) starts in the
+/// clear.
+struct InTheClearAfter;
+
+impl Drop for InTheClearAfter {
+    fn drop(&mut self) {
+        ENCRYPTED.set(false);
+    }
+}
+
 fn opts() -> StoreOptions {
     StoreOptions {
         cache_pages: 16,
@@ -390,6 +401,7 @@ fn crash_at_every_io_point() {
     for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
         harness::run("branch_crash_at_every_io_point", 3, |seed| {
             ENCRYPTED.set(seed % 2 == 1);
+            let _encrypted = InTheClearAfter;
             let dry = sim(seed);
             let (history, done) = workload(&dry, seed);
             assert_eq!(done, history.len() - 1);

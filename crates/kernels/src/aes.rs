@@ -288,6 +288,7 @@ macro_rules! construction {
 /// half moved up, zeros below) and `shr64`; `aes` (a block) and `aes8`
 /// (eight, round by round); `next` (the counter's low 32 bits plus one,
 /// wrapping).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 macro_rules! vector {
     ($(#[$a:meta])*) => {
         /// H^1 … H^n (Montgomery powers), each also with its halves
