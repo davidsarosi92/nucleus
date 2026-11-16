@@ -367,7 +367,9 @@ def fmt(x):
         return f"{x:,.1f}"
     if x >= 1:
         return f"{x:,.2f}"
-    return f"{x:,.3f}"
+    if x == 0 or x >= 0.001:
+        return f"{x:,.3f}"
+    return f"{x:.3g}"  # three significant digits below a thousandth
 
 
 def cell(s):

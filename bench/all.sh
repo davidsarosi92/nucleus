@@ -235,8 +235,21 @@ if [ "${1:-}" = list ]; then
   echo build $STEPS | tr ' ' '\n'
   exit 0
 fi
-todo=${*:-build $STEPS}
-for s in $todo; do
-  echo "== $s $(date '+%H:%M:%S')" >&2
-  "step_$s"
+if [ $# -eq 1 ]; then
+  echo "== $1 $(date '+%H:%M:%S')" >&2
+  "step_$1"
+  exit 0
+fi
+# Each step in a process of its own: one that fails is reported at the
+# end, and the others still run (a failed build stops them all).
+failed=""
+for s in ${*:-build $STEPS}; do
+  if ! bash "$0" "$s"; then
+    [ "$s" = build ] && exit 1
+    failed="$failed $s"
+  fi
 done
+if [ -n "$failed" ]; then
+  echo "failed:$failed" >&2
+  exit 1
+fi

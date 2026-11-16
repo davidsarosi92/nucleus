@@ -155,7 +155,7 @@ def main():
         db.execute("ANALYZE j")
         if use_pg:
             for name, sql in INDEXES["pg"]:
-                build_pg[name] = pg_times(sql + ";", n=0, warm=False)[0]
+                build_pg[name] = pg_times(sql + ";", n=1, warm=False)[0]
             psql("ANALYZE j;")
         ix_n, ix_pg = {}, {}
         for name, q in count.items():
