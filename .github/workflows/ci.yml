@@ -172,7 +172,8 @@ jobs:
         run: |
           set -o pipefail
           if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp swift python-embedded js-embedded js-wasm codegen 2>&1 | tee drivers.log; then
-            tail -c 20000 drivers.log > failures.txt
+            # An annotation keeps about 4 KB: the log's last 3,800 bytes, where the failure is.
+            tail -c 3800 drivers.log > failures.txt
             echo "::error title=driver tests failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
             exit 1
           fi
