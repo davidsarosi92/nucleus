@@ -711,3 +711,38 @@ fn split_keys_agree_with_scanning_each_node() {
         }
     });
 }
+
+/// Two leaves merged when one ran small, their keys sharing a long prefix
+/// each but not with the other's: the merge, prefix-less, outgrows two
+/// pages — split until each piece fits (it once split in two, and a half
+/// overflowed its page).
+#[test]
+fn a_merge_of_prefixed_leaves_splits_until_it_fits() {
+    let p = platform(7);
+    let mut tree = new_tree(&p, 256);
+    let key = |region: u8, i: u16| {
+        let mut k = vec![region];
+        k.extend(std::iter::repeat_n(region, 300));
+        k.extend(i.to_be_bytes());
+        k
+    };
+    let n = 2000u16;
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for region in *b"ab" {
+        entries.extend((0..n).map(|i| (key(region, i), vec![region])));
+    }
+    tree.insert_sorted(&entries).unwrap();
+    // All of the first region but its last few: they run small and meet
+    // the second region's first leaf.
+    let removed: Vec<(Vec<u8>, Option<Vec<u8>>)> =
+        (0..n - 3).map(|i| (key(b'a', i), None)).collect();
+    tree.apply_sorted(&removed).unwrap();
+    tree.check().unwrap();
+    for i in n - 3..n {
+        assert_eq!(tree.get(&key(b'a', i)).unwrap(), Some(vec![b'a']));
+    }
+    for i in 0..n {
+        assert_eq!(tree.get(&key(b'b', i)).unwrap(), Some(vec![b'b']));
+    }
+    assert_eq!(tree.get(&key(b'a', 0)).unwrap(), None);
+}

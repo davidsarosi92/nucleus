@@ -302,7 +302,7 @@ impl Pkcs11Key {
                 Attribute::KeyType(t) => aes = t == KeyType::AES,
                 Attribute::Encrypt(b) => enc = b,
                 Attribute::Decrypt(b) => dec = b,
-                Attribute::ValueLen(l) => len = Some(u64::from(l)),
+                Attribute::ValueLen(l) => len = Some(*l),
                 Attribute::Label(l) => key.key_label = String::from_utf8_lossy(&l).into_owned(),
                 Attribute::Id(i) => key.key_id = i,
                 _ => {}

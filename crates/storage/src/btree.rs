@@ -1055,13 +1055,29 @@ impl BTree {
                 small[a] = size < MIN_FILL;
                 i = a;
             } else {
-                let (l, sep, r) = combined.split();
+                // Leaves in pieces as a batch packs them: two leaves whose
+                // keys shared a long prefix each may share a short one
+                // together, so even halves could each outgrow a page.
+                let mut pieces = match combined {
+                    Node::Leaf(leaf) => pack_entries(leaf.entries),
+                    internal => fit(internal),
+                }
+                .into_iter();
+                let (_, l) = pieces.next().expect("a piece");
+                let (sep, r) = pieces.next().expect("two pieces");
                 node.children[a] = self.store(node.children[a], &l)?;
                 node.children[b] = self.store(node.children[b], &r)?;
                 node.keys[a] = sep;
                 small[a] = false;
                 small[b] = false;
-                i = b + 1;
+                let mut at = b;
+                for (sep, n) in pieces {
+                    at += 1;
+                    node.children.insert(at, self.store_new(&n)?);
+                    node.keys.insert(at - 1, sep);
+                    small.insert(at, false);
+                }
+                i = at + 1;
             }
         }
         Ok(())
@@ -1897,6 +1913,30 @@ fn cells_size(cells: &[(&[u8], ValRef)]) -> usize {
         _ => 0,
     };
     leaf_size(bytes, cells.len(), prefix)
+}
+
+/// A leaf's entries in the pieces [`pack_cells`] cuts, each with the
+/// separator before it (empty for the first).
+fn pack_entries(mut entries: Vec<(Vec<u8>, Val)>) -> Vec<(Vec<u8>, Node)> {
+    let ranges = {
+        let cells: Vec<(&[u8], ValRef)> = entries
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_ref()))
+            .collect();
+        pack_cells(&cells)
+    };
+    let mut pieces = Vec::with_capacity(ranges.len());
+    for r in ranges.iter().rev() {
+        let piece = entries.split_off(r.start);
+        let sep = if r.start == 0 {
+            Vec::new()
+        } else {
+            piece[0].0.clone()
+        };
+        pieces.push((sep, Node::Leaf(Leaf { entries: piece })));
+    }
+    pieces.reverse();
+    pieces
 }
 
 /// [`pack_leaf`] of cells by reference: the ranges of `cells` each piece

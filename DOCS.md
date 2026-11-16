@@ -525,7 +525,10 @@ reaching it; full leaves and full internal nodes packed to about 7/8, a
 small last piece evened out with the one before — a sorted build's
 appends leave its pages full, as PostgreSQL's `nbtsort` does; neighbours a batch of
 removals left under `MIN_FILL` merged until they are not, seams of merged
-internal nodes included), `range` / `range_rev` (bounds; going forward a
+internal nodes included; two leaves too large together are cut as a batch
+cuts them, by their size as stored — two leaves whose keys each shared a
+long prefix may share none together, so their even halves could each
+outgrow a page), `range` / `range_rev` (bounds; going forward a
 range checks its end on a key before reading the key's value, so the first
 entry past the end — perhaps long, compressed, in overflow pages — is not
 read), `cursor`
@@ -7698,6 +7701,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — fix, B+tree merge:** two leaves merged after removals
+  and too large together are cut as a batch cuts leaves (`pack_cells`, by
+  size as stored), not in two even halves — a half of leaves whose keys
+  had shared long prefixes could overflow its page (CI, `retype.rs`
+  under concurrent writes).  The PKCS#11 module builds where `CK_ULONG` is
+  32 bits (Windows, i686); the fuzz job's annotation keeps a timeout's
+  stack.
 - **2026-11-16 — §M14.30 K4b, keys users hold:** `SubjectKeys::hold`,
   `held`, `held_of` (the key file's `h` line), `subject_keys::user_key`,
   `wrap`, `unwrap`; `Session::hold_subject_key`, `present_subject_key`;
