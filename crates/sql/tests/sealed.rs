@@ -348,6 +348,65 @@ fn the_cost_of_sealing() {
     }
 }
 
+/// K4c's measure: `recall` over a sealed memory store — every one of the
+/// subject's current memories read, opened and ranked — against the
+/// indexed store's HNSW and text index, a user's memories being few.
+#[test]
+#[ignore]
+fn the_cost_of_a_sealed_memory_store() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let kv: Arc<dyn Kv> = Arc::new(Database::open_in_memory(Options::default()).unwrap());
+    let k = Arc::clone(&kv);
+    subject_keys::set_subject_keys(Some(Arc::new(MemoryKeys::new(move |b| k.random_bytes(b)))));
+    let mut s = Session::new(kv);
+    run(
+        &mut s,
+        "CREATE MODEL h USING hashing WITH (dimensions = 384); SET embedding.pending = wait",
+    );
+    let subjects = 1000;
+    for per in [20, 100] {
+        let n = subjects * per;
+        for sealed in [false, true] {
+            run(&mut s, "DROP TABLE IF EXISTS notes");
+            run(
+                &mut s,
+                &format!("CREATE MEMORY STORE notes USING h WITH (sealed = {sealed})"),
+            );
+            let t = std::time::Instant::now();
+            run(
+                &mut s,
+                &format!(
+                    "INSERT INTO notes (subject, content) SELECT 'user' || (i % {subjects}), \
+                     'a memory ' || i || ' of word' || (i * 7 % 500) || ' and word' || \
+                     (i * 13 % 300) || ', kept as a model keeps one' \
+                     FROM generate_series(1, {n}) i"
+                ),
+            );
+            texts(&mut s, "SELECT count(*) FROM notes");
+            let load = t.elapsed();
+            let calls = 300;
+            let t = std::time::Instant::now();
+            for i in 0..calls {
+                let found = texts(
+                    &mut s,
+                    &format!(
+                        "SELECT content FROM recall('notes', 'user{}', 'word{} word{}', 10)",
+                        i * 37 % subjects,
+                        i * 7 % 500,
+                        i % 300
+                    ),
+                );
+                assert!(!found.is_empty());
+            }
+            let recall = t.elapsed() / calls as u32;
+            println!(
+                "{per:>4} memories a subject, {:>7}: load {n} {load:.2?}, recall {recall:.2?}",
+                if sealed { "sealed" } else { "indexed" }
+            );
+        }
+    }
+}
+
 /// What a user presents: 32 bytes only the user has.
 const SECRET: [u8; 32] = [0x5a; 32];
 
@@ -428,4 +487,91 @@ fn a_key_its_user_holds() {
     let txn = kv.begin(nucleus_kv::TxnOptions::read_only()).unwrap();
     let problems = nucleus_sql::check::check(&*txn, s.registry()).unwrap();
     assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// PLAN.md §M14.30 K4c: a memory store `WITH (sealed)` — its rows sealed,
+/// no HNSW or text index (they would hold the texts and vectors in the
+/// clear); `REMEMBER` merges and `recall` ranks over the subject's own
+/// memories exactly, BM25 by those rows' statistics.
+#[test]
+fn a_sealed_memory_store() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(5));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv) as Arc<dyn Kv>);
+    run(
+        &mut s,
+        "CREATE MODEL h USING hashing WITH (dimensions = 64); \
+         CREATE MEMORY STORE notes USING h WITH (sealed, analyzer = english); \
+         SET embedding.pending = wait",
+    );
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT name FROM nc_catalog.indexes WHERE table_name = 'notes' AND NOT is_primary"
+        ),
+        ["notes_subject"]
+    );
+    for (who, what) in [
+        ("ann", format!("{NEEDLE} drinks green tea every morning")),
+        ("ann", "walks the dog at noon".to_string()),
+        ("ann", "reads poems about the sea".to_string()),
+        ("bob", "drinks tea, black, no sugar".to_string()),
+        ("bob", "fixes bicycles".to_string()),
+    ] {
+        run(&mut s, &format!("REMEMBER '{what}' FOR '{who}' IN notes"));
+    }
+    // The same text again: merged, as in any store.
+    assert_eq!(
+        texts(
+            &mut s,
+            "REMEMBER 'walks the dog at noon' FOR 'ann' IN notes"
+        )[0]
+        .split(' ')
+        .nth(1),
+        Some("merged")
+    );
+    // Ann's memories alone, the one about tea first; the statistics hers.
+    let found = texts(
+        &mut s,
+        "SELECT content FROM recall('notes', 'ann', 'tea in the morning', 2)",
+    );
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].contains("green tea"), "{found:?}");
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT st[1], st[3] FROM (SELECT bm25_stats(content, 'tea', 'english') AS st \
+             FROM notes WHERE subject = 'ann') x"
+        ),
+        ["3 1"]
+    );
+    // An index on the texts or vectors: refused.
+    for sql in [
+        "CREATE INDEX notes_text ON notes USING text (content)",
+        "CREATE INDEX notes_vec ON notes USING hnsw (embedding vector_cosine_ops)",
+    ] {
+        assert_eq!(code(&mut s, sql), "0A000", "{sql}");
+    }
+    // The schema says it is sealed.
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT definition FROM nc_catalog.definitions WHERE kind = 'memory store'"
+        ),
+        ["CREATE MEMORY STORE notes USING h WITH (analyzer = english, sealed = 'true')"]
+    );
+    kv.checkpoint().unwrap();
+    assert!(!holds(&files(&p, "/db"), NEEDLE), "in the clear");
+    // Forgotten: nothing of hers to recall.
+    texts(&mut s, "FORGET SUBJECT 'ann'");
+    assert!(texts(&mut s, "SELECT content FROM recall('notes', 'ann', 'tea')").is_empty());
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT content FROM recall('notes', 'bob', 'tea', 1)"
+        ),
+        ["drinks tea, black, no sugar"]
+    );
 }

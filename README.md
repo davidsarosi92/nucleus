@@ -192,8 +192,9 @@ with `--backup-key`; on a schedule with `nucleus server --backup-every`;
 own key, kept apart (`<dir>.subject-keys`), which `FORGET` destroys, so
 a restore of an older backup leaves the subject out; a table stored
 `WITH (storage = sealed)` keeps its live rows under those keys too, so
-the key destroyed leaves no copy readable — on a branch, in history —,
-and `nucleus mcp
+the key destroyed leaves no copy readable — on a branch, in history —
+(a memory store `WITH (sealed)` too, recalled exactly without an index
+that would hold its texts), and `nucleus mcp
 --memory` gives an agent remember, recall, forget and cite
 ([`docs/memory.md`](docs/memory.md) walks through an assistant built on
 all of it).  It reads the past (§M14.14): with

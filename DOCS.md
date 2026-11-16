@@ -4240,6 +4240,16 @@ twice; 0 where the query does not match, a `NULL` text too.  Without a
 text index `score` is refused when bound (`0A000`), as is a query that
 varies by row.
 
+Over rows no index holds — a sealed memory store's (§8.40), one user's —
+BM25 is asked for by its parts: `bm25_stats(text, q [, analyzer])`, an
+aggregate, gives the statistics of the rows it is fed (`float8[]`:
+documents, their total length in terms, each of the query's leaves'
+documents — a prefix's and a fuzzy term's 0), and `bm25(text, q, stats
+[, analyzer])` scores a text by them with Lucene's `k1` 1.2 and `b` 0.75
+(0 where it does not match; in `rrf`/`convex` it ranks the rows `text @@
+q` holds for alone, as `score` does).  The query must be the same for
+every row (`0A000`); statistics of another query are refused (`22023`).
+
 The text index binds it (`IndexMethod::function`, §8.17;
 `text::score::bind`) as `text_score(col, q, analyzer, k1, b, (SELECT
 text_stats(table, index, q)))`: the statistics — documents, their total
@@ -5002,9 +5012,14 @@ timestamptz` (now), `valid_to timestamptz`, `expires_at timestamptz`,
 `source text`, `replaces uuid`, `created` and `last_seen timestamptz` —
 with indexes `notes_subject`, `notes_embedding` (HNSW, cosine) and
 `notes_content` (text, the analyzer given), its expiry set to
-`expires_at` and its subject columns to `subject` (§8.29).  The table
-record (version 17) keeps a store's
-`MemorySpec` (model, merge) and any table's expiry column after the
+`expires_at` and its subject columns to `subject` (§8.29).  `WITH
+(sealed)` (or `sealed = true`; a bare option is `true`, as PostgreSQL's)
+makes a sealed store (§8.40, K4c): the table stored `sealed`, the
+subject index alone — no HNSW or text index, which would hold the texts
+and vectors in the clear — and the analyzer kept in its `MemorySpec`.
+The table record (version 17) keeps a store's
+`MemorySpec` (model, merge; from version 21 the analyzer of a store
+without a text index) and any table's expiry column after the
 chunk spec.  `merge` is a cosine similarity from 0 to 1 (`22023`
 otherwise, as for an unknown option); `CREATE` on the schema is needed,
 and the model must exist (`42704`).  The store is made by SQL the module
@@ -5061,7 +5076,13 @@ FROM notes WHERE subject = $subject AND <current> ORDER BY score DESC LIMIT k  -
 fusion of BM25 and the vectors' nearness (§8.20), each side within the
 subject: analyzed, the text and HNSW indexes rank among the subject
 index's rows; not analyzed, the subject's rows are read by its index
-(§8.17) and the words checked on them.  It is a query: the
+(§8.17) and the words checked on them.  A store without its text
+index (a sealed one) is ranked exactly over the subject's current
+memories alone: `score(content @@ query)` becomes `bm25(content, query,
+(SELECT bm25_stats(content, query, analyzer) FROM notes WHERE subject =
+$subject AND <current>), analyzer)` — BM25 by those rows' statistics,
+not the store's — and the vectors' nearness is computed for each row.
+It is a query: the
 caller's privileges, row-level security and plan apply.  Deleting a
 memory is `DELETE`; the drivers' `forget` and the MCP tool are that.
 
@@ -6377,6 +6398,17 @@ refuses a database where a subject whose user holds its key has rows in
 a table not stored sealed (`55000`: it could neither seal them nor leave
 them out).  A key lost is the rows lost: nothing else opens them.
 
+**Sealed memory stores** (K4c).  `CREATE MEMORY STORE notes USING m
+WITH (sealed)` (§8.28) is a memory store whose table is stored `sealed`
+under the `subject` column: its only index is the subject's, and
+`recall` ranks the subject's current memories exactly — BM25 by those
+rows' statistics (`bm25_stats`, `bm25`, §8.19), the vectors' nearness
+computed for each — so no index holds a text or a vector in the clear.
+`REMEMBER` merges as in any store (the same text, or the nearest vector
+among the subject's, computed exactly).  A user's memories are few: at
+20 a subject `recall` costs 376 µs against the indexed store's 299 µs,
+at 100 alike (`docs/benchmarks.md`).
+
 Tests: `crates/sql/tests/sealed.rs` (nothing of a sealed table in any
 file, logged or checkpointed, a 100 KB row's chunks included; every way
 of indexing a sealed column refused; a subject forgotten — unreadable on
@@ -6389,7 +6421,9 @@ the key file keeping it wrapped, another session refused until it
 presents the secret, a wrong secret refused, a backup restored opening
 for the user alone, `FORGET` by a session without it deleting the rows
 and the key), the CLI's `a_key_its_user_holds_over_the_network` (the
-`k` message against a server).  The cost
+`k` message against a server); a sealed memory store — its indexes,
+`REMEMBER`'s merge, `recall` within the subject, its definition, nothing
+in the clear, nothing to recall after `FORGET`.  The cost
 (`the_cost_of_sealing`, ignored; `docs/benchmarks.md`): ×1.9 to load,
 ×4 to scan, lookups alike — each thread keeps the derived key of each
 set of key ids, dropped whenever a key is destroyed.
@@ -7701,6 +7735,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K4c, sealed memory stores:** `CREATE MEMORY
+  STORE … WITH (sealed)`; `MemorySpec::analyzer` (table record version
+  21); `bm25_stats` (aggregate), `bm25`; `recall` exact over a store
+  without its text index; a bare `WITH` option is `true`, and `true` /
+  `false` are option values.
 - **2026-11-16 — fix, B+tree merge:** two leaves merged after removals
   and too large together are cut as a batch cuts leaves (`pack_cells`, by
   size as stored), not in two even halves — a half of leaves whose keys

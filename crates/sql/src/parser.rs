@@ -1721,15 +1721,28 @@ impl<'a> Parser<'a> {
             self.expect_op("(")?;
             loop {
                 let key = self.ident()?;
-                self.expect_op("=")?;
-                let value = match self.peek() {
-                    Some(Token::Str(_)) => self.string()?,
-                    Some(Token::Number(n)) => {
-                        let n = n.clone();
-                        self.pos += 1;
-                        n
+                // A bare option is a boolean's `true` (as PostgreSQL's).
+                if !self.eat_op("=") {
+                    options.push((key, "true".to_string()));
+                    if !self.eat_op(",") {
+                        break;
                     }
-                    _ => self.ident()?,
+                    continue;
+                }
+                let value = if self.eat_kw("true") {
+                    "true".to_string()
+                } else if self.eat_kw("false") {
+                    "false".to_string()
+                } else {
+                    match self.peek() {
+                        Some(Token::Str(_)) => self.string()?,
+                        Some(Token::Number(n)) => {
+                            let n = n.clone();
+                            self.pos += 1;
+                            n
+                        }
+                        _ => self.ident()?,
+                    }
                 };
                 options.push((key, value));
                 if !self.eat_op(",") {

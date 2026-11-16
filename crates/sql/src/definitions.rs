@@ -357,6 +357,16 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
         {
             options.push(a.clone());
         }
+        if let Some(a) = spec
+            .analyzer
+            .as_ref()
+            .filter(|a| *a != crate::text::DEFAULT)
+        {
+            options.push(("analyzer".to_string(), a.clone()));
+        }
+        if t.storage == crate::sealed::SEALED {
+            options.push(("sealed".to_string(), "true".to_string()));
+        }
         def(
             "memory store",
             &t.name,

@@ -61,8 +61,20 @@ pub(crate) fn create(
 ) -> Result<()> {
     let mut merge = DEFAULT_MERGE;
     let mut analyzer = crate::text::DEFAULT.to_string();
+    let mut sealed = false;
     for (k, v) in options {
         match k.as_str() {
+            "sealed" => {
+                sealed = match v.to_ascii_lowercase().as_str() {
+                    "true" | "on" | "yes" | "1" => true,
+                    "false" | "off" | "no" | "0" => false,
+                    _ => {
+                        return Err(Error::invalid_parameter(format!(
+                            "sealed is true or false, not {v}"
+                        )));
+                    }
+                };
+            }
             "merge" => {
                 merge = v
                     .parse::<f64>()
@@ -77,15 +89,15 @@ pub(crate) fn create(
             "analyzer" => analyzer = v.clone(),
             _ => {
                 return Err(Error::invalid_parameter(format!(
-                    "unrecognized memory store option \"{k}\" (merge, analyzer)"
+                    "unrecognized memory store option \"{k}\" (merge, analyzer, sealed)"
                 )));
             }
         }
     }
+    crate::text::named(&analyzer)?;
     let t = quote(name);
-    let statements = [
-        format!(
-            "CREATE TABLE {t} (\
+    let table = format!(
+        "CREATE TABLE {t} (\
              id uuid PRIMARY KEY DEFAULT uuidv7(), \
              subject text NOT NULL, \
              kind text NOT NULL DEFAULT 'fact', \
@@ -99,13 +111,21 @@ pub(crate) fn create(
              source text, \
              replaces uuid, \
              created timestamptz NOT NULL DEFAULT now(), \
-             last_seen timestamptz NOT NULL DEFAULT now())",
-            quote(model)
-        ),
-        format!(
-            "CREATE INDEX {} ON {t} (subject)",
-            quote(&format!("{name}_subject"))
-        ),
+             last_seen timestamptz NOT NULL DEFAULT now()){}",
+        quote(model),
+        if sealed {
+            " WITH (storage = sealed)"
+        } else {
+            ""
+        }
+    );
+    let subject_index = format!(
+        "CREATE INDEX {} ON {t} (subject)",
+        quote(&format!("{name}_subject"))
+    );
+    // A sealed store's texts and vectors are in no index: an index would
+    // hold them in the clear (PLAN.md §M14.30 K4c).
+    let ranked = [
         format!(
             "CREATE INDEX {} ON {t} USING hnsw (embedding vector_cosine_ops)",
             quote(&format!("{name}_embedding"))
@@ -116,8 +136,8 @@ pub(crate) fn create(
             literal(&analyzer)
         ),
     ];
-    for sql in statements {
-        let stmt = crate::parser::parse(&sql)?.remove(0);
+    let run = |txn: &mut dyn KvTxn, sql: &str| -> Result<()> {
+        let stmt = crate::parser::parse(sql)?.remove(0);
         crate::session::execute_statement(
             txn,
             reg,
@@ -125,15 +145,27 @@ pub(crate) fn create(
             &[],
             &mut crate::session::Collect::default(),
         )?;
-    }
+        Ok(())
+    };
+    run(txn, &table)?;
+    // Its subject marked before its index is made: a sealed table takes
+    // indexes on its subject columns alone.
     let mut table = catalog::table(&*txn, name)?;
     table.expiry = table.column("expires_at");
     table.subject = table.column("subject").into_iter().collect();
     table.memory = Some(MemorySpec {
         model: model.to_string(),
         merge,
+        analyzer: sealed.then_some(analyzer),
     });
-    catalog::update_table(txn, &table)
+    catalog::update_table(txn, &table)?;
+    run(txn, &subject_index)?;
+    if !sealed {
+        for sql in &ranked {
+            run(txn, sql)?;
+        }
+    }
+    Ok(())
 }
 
 /// Table `name`, which must be a memory store.
@@ -152,13 +184,29 @@ const CURRENT: &str = "valid_to IS NULL AND (expires_at IS NULL OR expires_at > 
 
 /// The query `recall(store, subject, query [, k])` is bound as: its
 /// parameters `$1` the subject, `$2` the query text, `$3` how many.
+///
+/// A store without its text index — a sealed one (PLAN.md §M14.30 K4c) —
+/// ranks exactly over the subject's current memories alone: BM25 by the
+/// statistics of those rows (`bm25_stats`, `bm25`), the vectors' nearness
+/// computed for each.
 pub(crate) fn recall_query(txn: &dyn KvTxn, name: &str) -> Result<ast::Query> {
-    store(txn, name)?;
+    let (table, spec) = store(txn, name)?;
+    let content = format!("{name}_content");
+    let text = if table.indexes.iter().any(|ix| ix.name == content) {
+        "score(content @@ $2)".to_string()
+    } else {
+        let analyzer = literal(spec.analyzer.as_deref().unwrap_or(crate::text::DEFAULT));
+        format!(
+            "bm25(content, $2, (SELECT bm25_stats(content, $2, {analyzer}) FROM {} \
+             WHERE subject = $1 AND {CURRENT}), {analyzer})",
+            quote(name)
+        )
+    };
     let sql = format!(
         "SELECT id, kind, content, confidence, seen, valid_from, source, created, last_seen, \
-         rrf(score(content @@ $2), embedding <=> embed($2)) AS score, snapshot_commit() AS as_of \
+         rrf({text}, embedding <=> embed($2)) AS score, snapshot_commit() AS as_of \
          FROM {} WHERE subject = $1 AND {CURRENT} \
-         ORDER BY rrf(score(content @@ $2), embedding <=> embed($2)) DESC LIMIT $3",
+         ORDER BY rrf({text}, embedding <=> embed($2)) DESC LIMIT $3",
         quote(name)
     );
     match crate::parser::parse(&sql)?.remove(0) {

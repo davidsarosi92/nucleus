@@ -87,9 +87,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// operator classes and options; version 17 a row expiry and a memory
 /// store's definition; version 18 the subject columns (a memory store's
 /// `subject` before it); version 19 index expressions; version 20 a
-/// column's type being changed online ([`Conversion`]); older versions
-/// still read.
-const TABLE_VERSION: u8 = 20;
+/// column's type being changed online ([`Conversion`]); version 21 a
+/// memory store's analyzer; older versions still read.
+const TABLE_VERSION: u8 = 21;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -566,6 +566,9 @@ pub struct MemorySpec {
     /// `REMEMBER` merges a memory into one of the same subject whose
     /// cosine similarity is at least this.
     pub merge: f64,
+    /// The analyzer `recall` ranks its texts by where no text index keeps
+    /// it (a sealed store, PLAN.md §M14.30 K4c).
+    pub analyzer: Option<String>,
 }
 
 /// What a chunk table holds (PLAN.md §M14.22 E7): the chunks of the texts
@@ -781,7 +784,10 @@ impl Table {
                 w.u8(0);
             }
             Some(m) => {
-                w.u8(1).str(&m.model).u64(m.merge.to_bits());
+                w.u8(1)
+                    .str(&m.model)
+                    .u64(m.merge.to_bits())
+                    .opt_str(m.analyzer.as_deref());
             }
         }
         w.u32(self.subject.len() as u32);
@@ -1013,6 +1019,7 @@ impl Table {
             Some(MemorySpec {
                 model: r.str()?,
                 merge: f64::from_bits(r.u64()?),
+                analyzer: if version >= 21 { r.opt_str()? } else { None },
             })
         } else {
             None
@@ -1907,6 +1914,7 @@ mod tests {
             memory: Some(MemorySpec {
                 model: "e5".into(),
                 merge: 0.95,
+                analyzer: Some("english".into()),
             }),
             converting: Some(Conversion {
                 column: 1,

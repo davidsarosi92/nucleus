@@ -1151,6 +1151,19 @@ Sealed rows (K4a, in memory, release): 200,000 rows of ~60 bytes over
 1,000 subjects — load 436 ms (231 ms stored `row`), a full scan 42 ms
 (11 ms), a lookup by key 17 µs (16 µs).
 
+Sealed memory stores (K4c, in memory, release, a 384-dimension hashing
+model, 1,000 subjects, `recall` of 10 averaged over 300 calls):
+
+| memories a subject | store | load (embedded) | `recall` |
+|---|---|---|---|
+| 20 | indexed (HNSW, text) | 3.64 s | 299 µs |
+| 20 | sealed (exact) | 0.83 s | 376 µs |
+| 100 | indexed (HNSW, text) | 35.1 s | 19.0 ms |
+| 100 | sealed (exact) | 29.4 s | 15.8 ms |
+
+At 100,000 rows both `recall`s cost alike, the sealed one less: the cost
+is one they share, not the exact ranking (`the_cost_of_a_sealed_memory_store`).
+
 ```sh
 cargo test --release -p nucleus-sql --test sealed -- --ignored --nocapture
 cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture --test-threads=1

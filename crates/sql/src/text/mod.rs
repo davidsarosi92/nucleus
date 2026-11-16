@@ -409,6 +409,8 @@ pub fn register(r: &mut Registry) -> Result<()> {
     r.add_function(&["tokenize"], Arc::new(Tokenize))?;
     r.add_operator("@@", DataType::Text, DataType::Text, Arc::new(Matches))?;
     r.add_function(&["score"], Arc::new(score::Score))?;
+    r.add_function(&["bm25"], Arc::new(score::Bm25))?;
+    r.add_aggregate(&["bm25_stats"], Arc::new(score::Bm25Stats))?;
     r.add_function(&["highlight"], Arc::new(highlight::OfCondition::HIGHLIGHT))?;
     r.add_function(&["snippet"], Arc::new(highlight::OfCondition::SNIPPET))?;
     index::register(r)

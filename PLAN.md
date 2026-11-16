@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅ |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10267,6 +10267,29 @@ and a key given back into the server's keeping.  Also found: the
 server's key file copied the whole table before every call, so a sealed
 table's every write did — now a failed save makes the next call read
 the file again.
+
+**K4c — memories, sealed ✅** (2026-11-16).  `CREATE MEMORY STORE …
+WITH (sealed)`: the table stored `sealed`, the subject index alone, the
+analyzer kept in the store's `MemorySpec` (table record version 21).
+`recall` over a store without its text index ranks exactly over the
+subject's current memories: two SQL functions new for it, useful beyond
+it — `bm25_stats(text, q [, analyzer])`, an aggregate of the statistics
+BM25 reads (documents, length, each leaf's documents: what the text
+index's `text_stats` reads of its segments), and `bm25(text, q, stats [,
+analyzer])`, scoring by them (`found`: it ranks the matching rows alone in
+`rrf`, as `score` does) — BM25 by the subject's own statistics, which
+also keeps one user's words from weighing in another's ranking.  The
+vectors' nearness is computed for each row.  Measured (release, 1,000
+subjects, a 384-dimension hashing model, `docs/benchmarks.md`): 20
+memories a subject, `recall` 376 µs against the indexed store's 299 µs,
+the load ×4.4 faster (no HNSW, no text index to build); 100 memories a
+subject, 15.8 ms against 19.0 ms — at 100,000 rows both are dominated by
+a cost they share, not the exact ranking (next to look at, with the load
+of 500,000 rows, which took past half an hour for either store).  So the
+per-subject sealed index the design held in reserve is not asked for by
+this measure.  Also found: `normalize` cut two merged leaves in even
+halves that could each outgrow a page (fixed in a commit of its own before
+it).
 
 **K5 — client-side encrypted columns (zero-knowledge where it fits).**
 A column the drivers encrypt and decrypt: the server stores ciphertext

@@ -24,7 +24,8 @@ use super::query::{self, Leaf, Node, Query};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, SubKind, SubPlan};
 use crate::ext::{
-    Arg, ArgInfo, CallContext, FnRef, Returns, ScalarFunction, Signature, Volatility,
+    Accumulator, Aggregate, Arg, ArgInfo, CallContext, FnRef, Returns, ScalarFunction, Signature,
+    Volatility,
 };
 use crate::plan::Plan;
 use crate::types::{DataType, Value};
@@ -522,15 +523,196 @@ impl ScalarFunction for TextScore {
         if stats.df.len() != q.leaves.len() {
             return Err(Error::internal("statistics of every leaf"));
         }
-        let mut hits = q.hits();
-        let n = q.find(a.as_ref(), text, &mut hits);
-        let m = Matched {
-            len: f64::from(n),
-            hits: hits.of(),
-            freqs: None,
+        Ok(Value::Float(score_text(
+            &q,
+            a.as_ref(),
+            text,
+            &stats,
+            Params { k1: *k1, b: *b },
+        )))
+    }
+}
+
+/// `text`'s BM25 for `q` (analyzed by `a`), given `stats`.
+fn score_text(q: &Query, a: &dyn super::Analyzer, text: &str, stats: &Stats, p: Params) -> f64 {
+    let mut hits = q.hits();
+    let n = q.find(a, text, &mut hits);
+    let m = Matched {
+        len: f64::from(n),
+        hits: hits.of(),
+        freqs: None,
+    };
+    Scorer::new(q, stats, p).score(&m)
+}
+
+/// The analyzer a call names in argument `i`, or the default.
+fn analyzer_arg(args: &[Value], i: usize) -> Result<Arc<dyn super::Analyzer>> {
+    match args.get(i) {
+        None | Some(Value::Null) => super::named(super::DEFAULT),
+        Some(Value::Text(name)) => super::named(name),
+        Some(_) => Err(Error::internal("an analyzer by its name")),
+    }
+}
+
+/// `bm25_stats(text, query [, analyzer])` (PLAN.md §M14.30 K4c): the
+/// statistics BM25 reads — `[documents, their total length, each leaf's
+/// documents…]`, as [`TextStats`] reads them of an index — of the rows
+/// aggregated, for [`Bm25`]: BM25 over rows no index holds (a sealed
+/// memory store's, one subject's).  The query must be the same for every
+/// row.
+pub(crate) struct Bm25Stats;
+
+impl Aggregate for Bm25Stats {
+    fn name(&self) -> &str {
+        "bm25_stats"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=3
+    }
+
+    fn order_free(&self) -> bool {
+        true
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Convert(DataType::Text); args.len()],
+            Returns::Type(Some(DataType::Array(&DataType::Float))),
+        ))
+    }
+
+    fn start(&self) -> Box<dyn Accumulator> {
+        Box::new(StatsOf::default())
+    }
+}
+
+/// [`Bm25Stats`]'s state: the query (its text, analyzer and parse), the
+/// documents, their length, each leaf's documents.
+#[derive(Default)]
+struct StatsOf {
+    query: Option<(String, Arc<dyn super::Analyzer>, Arc<Query>)>,
+    docs: u64,
+    len: u64,
+    df: Vec<u64>,
+}
+
+impl Accumulator for StatsOf {
+    fn add(&mut self, args: &[Value]) -> Result<()> {
+        let (Value::Text(text), Value::Text(q)) = (&args[0], &args[1]) else {
+            return Ok(());
         };
-        let s = Scorer::new(&q, &stats, Params { k1: *k1, b: *b });
-        Ok(Value::Float(s.score(&m)))
+        let same = self
+            .query
+            .as_ref()
+            .is_some_and(|(t, _, _)| t.as_str() == &**q);
+        if !same {
+            if self.query.is_some() {
+                return Err(Error::feature(
+                    "bm25_stats(): the query must be the same for every row",
+                ));
+            }
+            let a = analyzer_arg(args, 2)?;
+            let parsed = query::cached(q, &a)?;
+            self.df = vec![0; parsed.leaves.len()];
+            self.query = Some((q.to_string(), a, parsed));
+        }
+        let (_, a, q) = self.query.as_ref().expect("set above");
+        let mut hits = q.hits();
+        self.docs += 1;
+        self.len += u64::from(q.find(a.as_ref(), text, &mut hits));
+        for ((l, h), df) in q.leaves.iter().zip(hits.of()).zip(&mut self.df) {
+            if matches!(l, Leaf::Exact(_)) && !h.is_empty() {
+                *df += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<Value> {
+        let mut out = vec![
+            Value::Float(self.docs as f64),
+            Value::Float(self.len as f64),
+        ];
+        out.extend(self.df.iter().map(|&n| Value::Float(n as f64)));
+        Ok(Value::Array(out))
+    }
+}
+
+/// `bm25(text, query, stats [, analyzer])` (PLAN.md §M14.30 K4c): the
+/// text's BM25 for the query given [`Bm25Stats`]'s statistics, Lucene's
+/// parameters — 0 where it does not match; in a fusion it ranks the rows
+/// `text @@ query` holds for alone, as `score()` does.
+pub(crate) struct Bm25;
+
+impl ScalarFunction for Bm25 {
+    fn name(&self) -> &str {
+        "bm25"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        3..=4
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        let mut a = vec![
+            Arg::Convert(DataType::Text),
+            Arg::Convert(DataType::Text),
+            Arg::Convert(DataType::Array(&DataType::Float)),
+        ];
+        if args.len() == 4 {
+            a.push(Arg::Convert(DataType::Text));
+        }
+        Ok(Signature::new(a, Returns::Type(Some(DataType::Float))))
+    }
+
+    fn strict(&self) -> bool {
+        false
+    }
+
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+
+    fn found(&self, args: &[Expr]) -> Option<Expr> {
+        let [text, q, _, rest @ ..] = args else {
+            return None;
+        };
+        Some(Expr::Call(
+            FnRef::new(Arc::new(super::Matches)),
+            [text.clone(), q.clone()]
+                .into_iter()
+                .chain(rest.first().cloned())
+                .collect(),
+        ))
+    }
+
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let (text, q) = match (&args[0], &args[1]) {
+            (Value::Text(t), Value::Text(q)) => (t, q),
+            (_, Value::Null) => return Ok(Value::Null),
+            _ => return Ok(Value::Float(0.0)),
+        };
+        if args[2] == Value::Null {
+            return Ok(Value::Float(0.0));
+        }
+        let mut stats = Stats::of(&args[2])?;
+        let a = analyzer_arg(args, 3)?;
+        let q = query::cached(q, &a)?;
+        // Statistics of no rows know no leaves: each then in none.
+        if stats.df.len() > q.leaves.len() {
+            return Err(Error::invalid_parameter(
+                "bm25(): the statistics are of another query (bm25_stats)",
+            ));
+        }
+        stats.df.resize(q.leaves.len(), 0.0);
+        Ok(Value::Float(score_text(
+            &q,
+            a.as_ref(),
+            text,
+            &stats,
+            DEFAULT,
+        )))
     }
 }
 
