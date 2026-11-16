@@ -118,12 +118,12 @@ fn admin(lib: &Path) -> Session {
 
 /// Makes a secret key in the token: AES of `len` bytes, or a generic
 /// secret's when `aes` is false.
-fn make_key(s: &Session, label: &str, id: &[u8], aes: bool, len: u64, decrypt: bool) {
+fn make_key(s: &Session, label: &str, id: &[u8], aes: bool, len: usize, decrypt: bool) {
     let mut t = vec![
         Attribute::Token(true),
         Attribute::Label(label.as_bytes().to_vec()),
         Attribute::Id(id.to_vec()),
-        Attribute::ValueLen(len.into()),
+        Attribute::ValueLen(len.try_into().expect("a key length")),
         Attribute::Sensitive(true),
         Attribute::Extractable(false),
     ];

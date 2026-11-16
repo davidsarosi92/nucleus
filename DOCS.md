@@ -6952,7 +6952,8 @@ and the server's `--max-connections` (`Config::max_connections`) — past
 either, `53300`.  *Statement budgets* (`budget.rs`): `SET
 statement_timeout = …` (or the database's) ends a statement that runs
 longer (`57014`), checked as rows are read or made — scans, table
-functions, recursive rounds; a token's `ROWS n` (the most rows a
+functions, recursive rounds, a JSON path's items (every 4,096 — a
+path's items can grow exponentially with its length); a token's `ROWS n` (the most rows a
 statement returns), `SCAN n` (the most it reads) — `54000` — `TIMEOUT
 '…'` and `RATE n PER MINUTE` (statements, `53400`): `CREATE TOKEN … ROWS
 1000 SCAN 100000 TIMEOUT '5s' RATE 60 PER MINUTE`.  *An insecure start*:
@@ -7735,6 +7736,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — fix, a JSON path's time:** evaluating a path looks at
+  the statement's deadline every 4,096 items (`budget::check_deadline`,
+  `57014`) — `$[0,0,…][0,0,…]…` makes exponentially many (the fuzz
+  job's `json` timeout); the fuzz target runs paths under a second's
+  deadline, and the job's annotation carries the failing input
+  (base64).  The PKCS#11 module's tests build where `CK_ULONG` is 32 bits.
 - **2026-11-16 — §M14.30 K4c, sealed memory stores:** `CREATE MEMORY
   STORE … WITH (sealed)`; `MemorySpec::analyzer` (table record version
   21); `bm25_stats` (aggregate), `bm25`; `recall` exact over a store

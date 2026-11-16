@@ -15,7 +15,11 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use nucleus_kv::{Database, Kv, Options};
+use nucleus_sql::budget::{Budget, with_budget};
+use nucleus_sql::datetime::{clock, with_now};
 use nucleus_sql::json::{form, key, ops, parse, path, to_pretty, to_text};
+use std::sync::{Arc, OnceLock};
 
 fuzz_target!(|data: &[u8]| {
     let Some((mode, rest)) = data.split_first() else {
@@ -142,11 +146,24 @@ fn paths(p: &str, doc: &str) {
     let Ok(b) = parse::parse(doc) else {
         return;
     };
-    for silent in [false, true] {
-        if let Ok(items) = path::query(&b, p, silent) {
-            for i in items {
-                form::check(&i).expect("an item is canonical");
+    // A path's items can grow exponentially with its length: a second's
+    // deadline, as a statement's would stop it (`57014`), read from a
+    // database's clock as a statement's is.
+    static DB: OnceLock<Arc<dyn Kv>> = OnceLock::new();
+    let kv = DB.get_or_init(|| {
+        Arc::new(Database::open_in_memory(Options::in_memory()).expect("a database"))
+    });
+    with_now(0, kv, || {
+        let budget = Budget {
+            deadline: clock().ok().map(|now| now + 1_000_000),
+            ..Budget::default()
+        };
+        for silent in [false, true] {
+            if let Ok(items) = with_budget(budget.clone(), || path::query(&b, p, silent)) {
+                for i in items {
+                    form::check(&i).expect("an item is canonical");
+                }
             }
         }
-    }
+    });
 }

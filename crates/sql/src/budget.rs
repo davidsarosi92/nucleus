@@ -312,6 +312,15 @@ pub fn scanned() -> u64 {
     SPENT.with(|s| s.borrow().as_ref().map_or(0, |s| s.scanned.get()))
 }
 
+/// Past the statement's deadline is `57014` — for work that reads no
+/// rows but can run long (a JSON path's items).
+pub fn check_deadline() -> Result<()> {
+    SPENT.with(|s| match s.borrow().as_ref() {
+        Some(s) => check_time(&s.budget),
+        None => Ok(()),
+    })
+}
+
 fn check_time(b: &Budget) -> Result<()> {
     if let Some(d) = b.deadline
         && crate::datetime::clock()? > d

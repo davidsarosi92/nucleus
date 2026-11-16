@@ -408,6 +408,11 @@ jobs:
             # the stack (a timeout's only clue) out.
             grep -vE '^\s*Compiling|^#[0-9]+\s' fuzz.log | cut -c1-160 | tail -c 3800 > failures.txt
             echo "::error title=fuzz ${{ matrix.target }} failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
+            # And the failing input itself (its first 3 KB, base64), to
+            # reproduce it without the artifact (`base64 -d`).
+            for f in artifacts/${{ matrix.target }}/*; do
+              [ -f "$f" ] && echo "::error title=fuzz ${{ matrix.target }} input $(basename "$f")::$(head -c 2900 "$f" | base64 -w0)"
+            done
             exit 1
           fi
       - uses: actions/upload-artifact@v4

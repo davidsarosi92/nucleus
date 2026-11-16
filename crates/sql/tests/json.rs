@@ -197,3 +197,22 @@ fn casts_and_errors() {
         ["0.000000000000000000000000000000000000000001"]
     );
 }
+
+/// A path's items can grow exponentially with its length — `$[0,0][0,0]…`
+/// makes 2ⁿ — so evaluating one looks at the statement's deadline
+/// (`57014`), as a scan does.
+#[test]
+fn a_path_stops_at_the_statement_timeout() {
+    let kv: Arc<dyn Kv> =
+        Arc::new(Database::open_in_memory(nucleus_kv::Options::in_memory()).unwrap());
+    let mut s = Session::new(kv);
+    s.execute("SET statement_timeout = '200ms'").unwrap();
+    let path = "$".to_string() + &"[0,0,0,0,0,0,0,0]".repeat(9);
+    let started = std::time::Instant::now();
+    let e = error(
+        &mut s,
+        &format!("SELECT jsonb_path_query_array('1', '{path}')"),
+    );
+    assert!(e.starts_with("57014"), "{e}");
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+}

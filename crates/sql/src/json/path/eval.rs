@@ -194,6 +194,7 @@ pub fn run<'a>(
         last: -1,
         ignore: !path.strict,
         use_tz,
+        work: 0,
     };
     if path.strict && out.is_none() {
         // Strict: every item, to see that none fails.
@@ -219,7 +220,14 @@ struct Cx<'a> {
     /// Whether structural errors are ignored (lax mode, under `.**`).
     ignore: bool,
     use_tz: bool,
+    /// Items made so far: a path's items can grow exponentially with its
+    /// length (`$[0,0][0,0]…`), so every [`DEADLINE_EVERY`] the
+    /// statement's deadline is looked at.
+    work: u32,
 }
+
+/// How many items between looks at the statement's deadline.
+const DEADLINE_EVERY: u32 = 4096;
 
 /// What kind of json value an item is.
 fn node<'b>(it: &'b Item<'_>) -> R<Option<Node<'b>>> {
@@ -267,6 +275,10 @@ impl<'a> Cx<'a> {
 
     /// The rest of a chain over `v`.
     fn next(&mut self, steps: &'a [Step], v: Item<'a>, out: Out<'_, 'a>) -> R<St> {
+        self.work = self.work.wrapping_add(1);
+        if self.work.is_multiple_of(DEADLINE_EVERY) {
+            crate::budget::check_deadline()?;
+        }
         match steps.split_first() {
             None => {
                 if let Some(o) = out {
