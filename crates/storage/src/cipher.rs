@@ -30,8 +30,20 @@
 //! is encrypted, with which cipher, and which key (a key check value) —
 //! and are authenticated under it: a tag over the header's bytes, so
 //! tree roots and the free list's head cannot be changed unseen.
+//!
+//! Two ciphers seal pages and records ([`Aead`]), both deterministic and
+//! misuse resistant: AES-256-GCM-SIV (RFC 8452, `nucleus_kernels::aes`)
+//! where the CPU has AES instructions — several times faster there — and
+//! `nucleus_crypto::siv` (ChaCha20) where it has not.  A new file takes
+//! the one this CPU runs fast; a file keeps its cipher, named in its
+//! header, wherever it is opened (AES without the instructions by a
+//! portable, constant-time copy: correct, but slow).  The key check
+//! value and the header tags are ChaCha20-SIV's whichever cipher seals
+//! the pages; AES seals under a key of its own derived from the database
+//! key (HKDF-Expand, RFC 5869), so no key serves two algorithms.
 
 use nucleus_crypto::siv;
+use nucleus_kernels::aes;
 
 use crate::page::{PAGE_HEADER_SIZE, PAGE_SIZE, Page, PageId, read_u64, write_u64};
 
@@ -40,12 +52,109 @@ pub const CIPHER_NONE: u32 = 0;
 /// Pages sealed by `nucleus_crypto::siv` (ChaCha20, Poly1305's hash; the
 /// structure of AES-GCM-SIV).
 pub const CIPHER_CHACHA20_SIV: u32 = 1;
+/// Pages sealed by AES-256-GCM-SIV (RFC 8452) under a key derived from
+/// the database key.
+pub const CIPHER_AES256_GCM_SIV: u32 = 2;
 
-/// The key a database file's pages are sealed under.  Its bytes are
-/// zeroed when it is dropped and never printed.
+/// A deterministic, misuse-resistant AEAD under a 256-bit key: one of the
+/// file ciphers ([`CIPHER_CHACHA20_SIV`], [`CIPHER_AES256_GCM_SIV`]).
+/// Its keys are zeroed when it is dropped and never printed.
+#[derive(Clone)]
+pub struct Aead {
+    kind: Kind,
+}
+
+#[derive(Clone)]
+enum Kind {
+    ChaCha([u8; 32]),
+    Aes(Box<aes::Key>),
+}
+
+impl Drop for Kind {
+    fn drop(&mut self) {
+        if let Kind::ChaCha(key) = self {
+            key.fill(0);
+            std::hint::black_box(key);
+        }
+    }
+}
+
+impl std::fmt::Debug for Aead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Aead({})", self.code())
+    }
+}
+
+impl Aead {
+    /// Under `key`, the cipher this CPU runs fastest: AES-256-GCM-SIV
+    /// where it has AES instructions, else ChaCha20-SIV.
+    pub fn new(key: &[u8; 32]) -> Self {
+        let code = if aes::hardware() {
+            CIPHER_AES256_GCM_SIV
+        } else {
+            CIPHER_CHACHA20_SIV
+        };
+        Self::of(code, key).expect("a known cipher")
+    }
+
+    /// Cipher `code` under `key`; `None` for a code not known.
+    pub fn of(code: u32, key: &[u8; 32]) -> Option<Self> {
+        let kind = match code {
+            CIPHER_CHACHA20_SIV => Kind::ChaCha(*key),
+            CIPHER_AES256_GCM_SIV => {
+                // HKDF-Expand with the key as the pseudorandom key (it is
+                // one: 32 uniform bytes), one block.
+                let mut sub =
+                    nucleus_crypto::hmac_sha256(key, b"nucleus page cipher: AES-256-GCM-SIV\x01");
+                let k = aes::Key::new(&sub);
+                sub.fill(0);
+                std::hint::black_box(&sub);
+                Kind::Aes(Box::new(k))
+            }
+            _ => return None,
+        };
+        Some(Self { kind })
+    }
+
+    /// The cipher's code in a file header.
+    pub fn code(&self) -> u32 {
+        match self.kind {
+            Kind::ChaCha(_) => CIPHER_CHACHA20_SIV,
+            Kind::Aes(_) => CIPHER_AES256_GCM_SIV,
+        }
+    }
+
+    /// Seals `data` in place; its tag.
+    pub fn seal_in_place(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8]) -> [u8; 16] {
+        match &self.kind {
+            Kind::ChaCha(key) => siv::seal_in_place(key, nonce, aad, data),
+            Kind::Aes(key) => aes::seal_in_place(key, nonce, aad, data),
+        }
+    }
+
+    /// Opens in place what [`seal_in_place`](Self::seal_in_place) sealed:
+    /// `false`, `data` zeroed, if it is not what was sealed.
+    pub fn open_in_place(
+        &self,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        data: &mut [u8],
+        tag: &[u8; 16],
+    ) -> bool {
+        match &self.kind {
+            Kind::ChaCha(key) => siv::open_in_place(key, nonce, aad, data, tag),
+            Kind::Aes(key) => aes::open_in_place(key, nonce, aad, data, tag),
+        }
+    }
+}
+
+/// The key a database file's pages are sealed under, and the cipher
+/// ([`Aead`]) they are sealed with.  Its bytes are zeroed when it is
+/// dropped and never printed.
 #[derive(Clone)]
 pub struct PageCipher {
     key: [u8; 32],
+    aead: Aead,
 }
 
 impl std::fmt::Debug for PageCipher {
@@ -71,14 +180,27 @@ fn nonce(id: u64, label: &[u8; 4]) -> [u8; 12] {
 }
 
 impl PageCipher {
-    /// The cipher of a 256-bit key.
+    /// The cipher of a 256-bit key: for a new file, the one this CPU runs
+    /// fastest ([`Aead::new`]).
     pub fn new(key: [u8; 32]) -> Self {
-        Self { key }
+        let aead = Aead::new(&key);
+        Self { key, aead }
     }
 
-    /// The cipher's code in a file header ([`CIPHER_CHACHA20_SIV`]).
+    /// The same key with cipher `code` — a file's, from its header.
+    pub fn for_code(&self, code: u32) -> Result<Self, String> {
+        let aead = Aead::of(code, &self.key)
+            .ok_or_else(|| format!("cipher {code} is not known (a file of a newer nucleus?)"))?;
+        Ok(Self {
+            key: self.key,
+            aead,
+        })
+    }
+
+    /// The cipher's code in a file header ([`CIPHER_CHACHA20_SIV`] or
+    /// [`CIPHER_AES256_GCM_SIV`]).
     pub fn code(&self) -> u32 {
-        CIPHER_CHACHA20_SIV
+        self.aead.code()
     }
 
     /// A value that tells this key from another without giving anything
@@ -109,8 +231,7 @@ impl PageCipher {
         let packed = birth << 8 | u64::from(b[4]);
         write_u64(out, 16, packed);
         out[PAGE_HEADER_SIZE..PAGE_SIZE].copy_from_slice(&b[PAGE_HEADER_SIZE..]);
-        let tag = siv::seal_in_place(
-            &self.key,
+        let tag = self.aead.seal_in_place(
             &nonce(id.0, b"page"),
             &aad(id, packed),
             &mut out[PAGE_HEADER_SIZE..PAGE_SIZE],
@@ -128,8 +249,7 @@ impl PageCipher {
         let b = page.bytes_mut();
         let tag: [u8; 16] = b[..16].try_into().expect("16 bytes");
         let packed = read_u64(b, 16);
-        if !siv::open_in_place(
-            &self.key,
+        if !self.aead.open_in_place(
             &nonce(id.0, b"page"),
             &aad(id, packed),
             &mut b[PAGE_HEADER_SIZE..],
@@ -160,14 +280,14 @@ impl PageCipher {
     /// same nonce, which the SIV allows.
     pub(crate) fn seal_record(&self, lsn: u64, payload: &mut [u8]) -> [u8; 16] {
         let (n, a) = record_nonce_aad(lsn, payload.len() as u32);
-        siv::seal_in_place(&self.key, &n, &a, payload)
+        self.aead.seal_in_place(&n, &a, payload)
     }
 
     /// Opens in place a record [`seal_record`](Self::seal_record) sealed:
     /// `false` (the payload zeroed) if it is not what was sealed at `lsn`.
     pub(crate) fn open_record(&self, lsn: u64, payload: &mut [u8], tag: &[u8; 16]) -> bool {
         let (n, a) = record_nonce_aad(lsn, payload.len() as u32);
-        siv::open_in_place(&self.key, &n, &a, payload, tag)
+        self.aead.open_in_place(&n, &a, payload, tag)
     }
 }
 
@@ -233,6 +353,44 @@ mod tests {
             c.open(PageId(9), &vec![0u8; PAGE_SIZE]).unwrap_err(),
             "never written (all zeros)"
         );
+    }
+
+    /// Both ciphers seal and open; neither opens the other's pages; the
+    /// key check is the same whichever seals; a code not known is
+    /// refused.
+    #[test]
+    fn each_cipher_opens_its_own_pages_only() {
+        let base = cipher(1);
+        let chacha = base.for_code(CIPHER_CHACHA20_SIV).unwrap();
+        let aes = base.for_code(CIPHER_AES256_GCM_SIV).unwrap();
+        assert_eq!((chacha.code(), aes.code()), (1, 2));
+        let expected = if nucleus_kernels::aes::hardware() {
+            2
+        } else {
+            1
+        };
+        assert_eq!(base.code(), expected, "a new file takes the faster");
+        let page = sample();
+        let mut a = vec![0u8; PAGE_SIZE];
+        let mut c = vec![0u8; PAGE_SIZE];
+        aes.seal(PageId(9), &page, &mut a).unwrap();
+        chacha.seal(PageId(9), &page, &mut c).unwrap();
+        assert_ne!(a, c);
+        assert_eq!(aes.open(PageId(9), &a).unwrap().payload(), page.payload());
+        assert_eq!(
+            chacha.open(PageId(9), &c).unwrap().payload(),
+            page.payload()
+        );
+        assert!(chacha.open(PageId(9), &a).is_err());
+        assert!(aes.open(PageId(9), &c).is_err());
+        assert_eq!(aes.check_value(), chacha.check_value());
+        let mut r = *b"a log record";
+        let tag = aes.seal_record(77, &mut r);
+        assert!(!chacha.open_record(77, &mut r.clone(), &tag));
+        assert!(aes.open_record(77, &mut r, &tag));
+        assert_eq!(&r, b"a log record");
+        assert!(base.for_code(3).is_err());
+        assert!(base.for_code(CIPHER_NONE).is_err());
     }
 
     #[test]

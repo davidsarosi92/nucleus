@@ -404,8 +404,8 @@ impl Pager {
                     path.display()
                 )));
             }
-            (Some(c), code) => {
-                if code != c.code() || hdr.key_check != c.check_value() {
+            (Some(c), _) => {
+                if hdr.key_check != c.check_value() {
                     return Err(Error::Key(format!(
                         "{} is sealed under another key",
                         path.display()
@@ -413,6 +413,14 @@ impl Pager {
                 }
             }
         }
+        // The file's own cipher, whichever this CPU would choose.
+        let cipher = match cipher {
+            Some(c) => Some(
+                c.for_code(hdr.cipher)
+                    .map_err(|e| Error::Key(format!("{}: {e}", path.display())))?,
+            ),
+            None => None,
+        };
         let header_page = PageId(hdr.seq % 2);
         if hdr.page_count < FIRST_DATA_PAGE.0 {
             return Err(Error::Corrupt {
@@ -523,6 +531,12 @@ impl Pager {
             return Err(Error::InvalidPage(first));
         }
         read_run(self.file.as_ref(), first, n, self.cipher.as_ref())
+    }
+
+    /// The key and cipher its pages are sealed with — the file's, from its
+    /// header (PLAN.md §M14.30): `None` in the clear.
+    pub fn cipher(&self) -> Option<&PageCipher> {
+        self.cipher.as_ref()
     }
 
     /// Whether its pages are sealed (PLAN.md §M14.30 K2b).

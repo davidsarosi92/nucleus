@@ -6531,6 +6531,34 @@ and every bit of tag, data and associated data flipped; 11.9 µs an
 8 KiB page (`docs/benchmarks.md`, *Sealing a page*).  `Key` overwrites its bytes with
 zeros when dropped (a best effort without `unsafe`) and never prints.
 
+*The CPU's AES* (§M14.30, the speed after K2; `nucleus_kernels::aes`).
+Where the CPU has AES instructions — ARMv8's AES and PMULL, x86-64's
+AES-NI and PCLMULQDQ, detected at run time — pages, log records and
+scratch blocks are sealed by AES-256-GCM-SIV proper (RFC 8452): 1.7 µs
+an 8 KiB page against ChaCha20-SIV's 12.  The instructions' copy keeps
+blocks in vector registers, hashes POLYVAL eight blocks at a time (the
+products with H^8 … H^1 summed unreduced and reduced once — the
+reduction is linear — the powers computed three products deep) and
+encrypts the counter blocks eight at a time, round by round; a
+portable, constant-time copy (the S-box as the inverse in GF(2^8) by
+multiplies, a masked carry-less multiply) is the reference it is
+tested against and opens such a file on a CPU without the instructions
+— correctly, at about 1 MB/s.  Checked against OpenSSL's AES-GCM-SIV
+(`crates/kernels/tests/aes_gcm_siv_reference.py`), FIPS-197 and RFC
+8452's vectors, both copies against each other at every length to a
+page and past, the counter's wrap, and every bit flipped; the x86-64
+copy runs under Rosetta on an Apple CPU, which emulates AES-NI and
+PCLMULQDQ.  The kernels crate's one `unsafe` per architecture is the
+call into the detected instructions, as for CRC-32C.  The cipher is
+the file's: a new data file takes the one this CPU runs fast (code 2,
+AES-256-GCM-SIV, or 1, ChaCha20-SIV, in its header), and a file opened
+keeps its own — the pager adopts the header's cipher (`PageCipher::
+for_code`) and the store seals its logs with it.  AES seals under a key
+derived from the database key by HKDF-Expand (RFC 5869; the key is
+already uniform, so it is the pseudorandom key), so no key serves two
+algorithms: the key check value and the header tags stay ChaCha20-
+SIV's under the database key, whichever cipher seals the pages.
+
 *Encrypted data files* (K2b; `nucleus_storage::cipher`).  A store opened
 with a page key (`StoreOptions::page_key`, `nucleus_kv::Options::
 encryption_key`) is created encrypted, and an existing one opens only
@@ -6564,11 +6592,17 @@ seals its scratch files too (`nucleus_kv`'s `SealedScratch`), each under
 a key of its own made at random with the file (the OS's generator) and
 never written anywhere — after a crash such a file is unreadable, and
 opening removes it.  Its bytes are kept in 4 KiB blocks, each sealed by
-the SIV — the tag, then the block encrypted, its number as nonce and,
-with its length, associated data — so a block moved, cut short or
-changed does not open; a range read or written touches its blocks in
-one read or write of the file, a write covering part of a block reads
-it first.
+the cipher this CPU runs fast (`nucleus_storage::cipher::Aead`) — the
+tag, then the block encrypted, its number as nonce and associated data
+— so a block moved or changed does not open.  The last block, while
+not full, stays in memory in the clear and goes to the file sealed
+once it is: appending, what sorts and partitions do, seals each block
+once and never reads one back; a write over blocks in the file opens,
+changes and seals them again; a read opens the blocks it covers, read
+in one read of the file, into the caller's buffer.  Larger blocks were
+measured and not taken: a run is read in 64 KiB pieces from record
+boundaries, so a larger block opens more bytes than it serves (16 and
+64 KiB: the spilled sort no faster within the noise).
 
 *The edition* (K2e).  A database is encrypted under the keyring's data
 key `data`: every command that opens a local directory (`server`, `sql`,

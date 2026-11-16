@@ -105,6 +105,7 @@ macro_rules! kernel {
     };
 }
 
+pub mod aes;
 mod neural;
 pub use neural::{
     MR, NR, PackedB, add_assign, add_assign_at, erf, exp, gelu, gelu_at, layer_norm, layer_norm_at,

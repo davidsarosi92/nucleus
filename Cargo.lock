@@ -522,7 +522,6 @@ version = "0.1.0"
 name = "nucleus-kv"
 version = "0.1.0"
 dependencies = [
- "nucleus-crypto",
  "nucleus-platform",
  "nucleus-storage",
  "nucleus-txn",

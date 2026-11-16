@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-nucleus-crypto.workspace = true
 nucleus-platform.workspace = true
 nucleus-storage.workspace = true
 nucleus-txn.workspace = true

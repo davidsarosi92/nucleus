@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅ (2026-11-16) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9965,10 +9965,50 @@ database (`the_scrub_leaves_none_of_the_values_in_an_encrypted_database`:
 found before through the opened pages, none after, his still found).
 *Measured through SQL* (`docs/benchmarks.md`): load +14 %, an aggregate
 over every row ×1.6, an `ORDER BY` past `work_mem` ×2.3 (scratch sealed
-in 4 KiB blocks, twice).  With K2 done, the speed comes next, before K3:
-the CPU's AES (AES-GCM-SIV, RFC 8452) behind a runtime check, the
-read-ahead's pages opened on several cores, and larger scratch blocks;
-the target stays under 10 %.  **K2d** the other files: spill and
+in 4 KiB blocks, twice).  **The speed after K2 ✅** (2026-11-16): the
+CPU's AES.  `nucleus_kernels::aes` — AES-256-GCM-SIV (RFC 8452) by
+ARMv8's AES and PMULL or x86-64's AES-NI and PCLMULQDQ, detected at run
+time (the kernels crate's one `unsafe` per architecture, the call into
+them, as CRC-32C's), and a portable constant-time copy (the S-box by
+inversion in GF(2^8), a masked carry-less multiply) as reference and
+for files opened where the instructions are missing.  *Taken from GCM
+and GCM-SIV implementations* (Gueron and Lindell's GCM-SIV papers,
+OpenSSL's and BoringSSL's aggregated GHASH/POLYVAL): POLYVAL eight
+blocks at a time — the products with H^8 … H^1 summed unreduced and
+reduced once, valid as the Montgomery reduction is linear
+(dot(dot(a, H), H) = dot(a, dot(H, H))) — the reduction as two folds by
+x^57 + x^62 + x^63, the counter blocks encrypted eight at a time round
+by round; ours: the powers of H three products deep (H^4 = H^2·H^2),
+the six key-derivation blocks under one load of the round keys, the
+master key expanded once (`aes::Key`), loads and stores without
+`unsafe`.  Measured: a first scalar version 1.1 GB/s; vector registers,
+aggregation and eight-wide CTR 4.9 GB/s — 1.67 µs an 8 KiB page
+against ChaCha20-SIV's 12.4.  Checked against OpenSSL
+(`crates/kernels/tests/aes_gcm_siv_reference.py`), FIPS-197 and RFC
+8452's vectors, POLYVAL's product against its bit-by-bit definition,
+both copies at every length to past a page, the counter's wrap, every
+bit flipped; the x86-64 copy run under Rosetta (which has AES-NI and
+PCLMULQDQ).  The cipher is the file's: code 2 in the header for
+AES-256-GCM-SIV, 1 for ChaCha20-SIV; a new file takes the one this CPU
+runs fast, an opened one keeps its own (`PageCipher::for_code`; the
+store seals its logs with the pager's); AES under a key derived by
+HKDF-Expand (RFC 5869) from the database key, the key check and
+header tags ChaCha20-SIV's whichever seals the pages — no key serves
+two algorithms.  Scratch (`nucleus_storage::cipher::Aead`, the faster
+cipher) keeps its last, partial block in memory until it is full: an
+append seals each block once and reads none back.  *Now*
+(`docs/benchmarks.md`): the store's cold scan +19 % (×2.6 before),
+its load within the noise; through SQL the aggregate ±0, the load
+within the noise, the spilled sort +15–20 % (×2.3).  *Not taken:* the
+read-ahead's pages opened on several cores — a scoped thread costs
+21 µs to start and join (seven 78 µs) against ~28 µs to open 16 pages,
+so it waits for workers kept running (the morsel scheduler's, M15);
+larger scratch blocks — 16 and 64 KiB no faster within the noise, a
+run's reads from record boundaries opening more than they serve.
+Left: the scan's +19 % (those workers; the derived message keys' fixed
+~0.25 µs), the sort's scratch (~1 µs a 4 KiB block, copies), and a
+bitsliced portable AES (fixslicing, Adomnicai and Peyrin) should files
+move to CPUs without the instructions — ~1 MB/s now.  **K2d** the other files: spill and
 scratch, column segments, index files, the embedding queue.  **K2e**
 the edition: the keyring's data key `data`, an existing database
 encrypted by rewriting its pages (`nucleus keys <dir> encrypt`, the

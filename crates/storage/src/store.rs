@@ -668,6 +668,12 @@ impl Store {
             Pager::create_with(fs, &data, opts.page_key.clone())?
         };
         let pager = Arc::new(pager);
+        // The logs are sealed with the data file's cipher (its header's,
+        // whichever this CPU would choose for a new one).
+        let opts = &StoreOptions {
+            page_key: pager.cipher().cloned(),
+            ..opts.clone()
+        };
         let pool = Arc::new(BufferPool::new(Arc::clone(&pager), opts.cache_pages));
 
         // The branch directory first: a free in any branch, replayed,

@@ -1074,25 +1074,34 @@ RETYPE_DIR=/abs/retype-bench RETYPE_ROWS=1000000 cargo test --release \
 
 ## Sealing a page
 
-PLAN.md §M14.30 K2a: what an 8 KiB page costs to seal on one core
-(release, an M2 Pro, the best of three passes over 32 MiB).  The
-checksum pages carry today against the two AEADs: RFC 8439's and the
-misuse-resistant one the encrypted file will use (`nucleus_crypto::siv`,
-RFC 8452's structure with ChaCha20).
+PLAN.md §M14.30 K2a and the speed after K2: what an 8 KiB page costs to
+seal on one core (release, an M2 Pro, the best of three passes over
+32 MiB).  The checksum pages carry in the clear against the AEADs:
+RFC 8439's, the misuse-resistant ChaCha20 one (`nucleus_crypto::siv`,
+RFC 8452's structure with ChaCha20) and AES-256-GCM-SIV by the CPU's
+instructions (`nucleus_kernels::aes`), which encrypted files use where
+the CPU has them.
 
 | | MB/s | µs a page |
 |---|---:|---:|
-| CRC-32C (the CPU's instruction) | 23,300 | 0.35 |
-| ChaCha20-Poly1305 seal | 680 | 12.1 |
-| `siv` seal | 685 | 11.9 |
-| `siv` seal and open | 344 | 23.8 |
+| CRC-32C (the CPU's instruction) | 21,900 | 0.37 |
+| ChaCha20-Poly1305 seal | 655 | 12.5 |
+| `siv` (ChaCha20) seal | 660 | 12.4 |
+| `siv` seal and open | 330 | 24.8 |
+| AES-256-GCM-SIV seal | 4,900 | 1.67 |
+| AES-256-GCM-SIV seal and open | 2,460 | 3.33 |
 
-ChaCha20 runs four blocks side by side (1,010 MB/s; 640 a block at a
-time) and Poly1305 in 64-bit limbs (2,220 MB/s; 1,350 in 26-bit ones),
-both portable Rust the compiler vectorizes or multiplies natively.  The
-SIV costs no more than the AEAD: both pass once with ChaCha20 and once
-with Poly1305 over the page.  A page is sealed when it is written and
-opened when it is read from the file — never while it is cached.
+ChaCha20 runs four blocks side by side and Poly1305 in 64-bit limbs,
+portable Rust the compiler vectorizes.  AES-GCM-SIV by ARMv8's AES and
+PMULL: POLYVAL eight blocks at a time, reduced once, and the counter
+blocks encrypted eight at a time.  A message costs a fixed ~0.25 µs
+besides (its keys from the nonce, the powers of H): 0.31 µs for 64
+bytes, 0.96 for 4 KiB, 11.2 for 64 KiB (5.8 GB/s;
+`cargo test --release -p nucleus-kernels --test aes_speed -- --ignored
+--nocapture`).  The portable, constant-time AES — for a file opened on
+a CPU without the instructions — seals a page in ~9 ms.  A page is
+sealed when it is written and opened when it is read from the file —
+never while it is cached.
 
 In the store (K2b, K2c): 400,000 rows of 100-byte values written in
 batches of 1,000 (each a WAL record, synced) and checkpointed (a 52 MB
@@ -1100,26 +1109,34 @@ data file), then scanned whole three times through a 8 MiB buffer pool
 — every page read from the file and, encrypted, opened again (the file
 is in the OS's cache: the cost of the cipher shows undiluted).
 
+| | in the clear | ChaCha20-SIV | AES-256-GCM-SIV |
+|---|---:|---:|---:|
+| load and checkpoint (WAL and pages sealed) | 225–270 ms | 370–390 ms | 225–240 ms |
+| scan (best of three) | 49 ms | 130 ms (×2.6) | 58.5 ms (+19 %) |
+
+The scan's difference is ~6,600 pages opened at ~1.7 µs each.  Opening
+the read-ahead's 16 pages (~28 µs) on several cores was measured and not
+taken: a scoped thread costs 21 µs to start and join here (three 40,
+seven 78) — it needs workers kept running.
+
+Through SQL (K2e and after; real files, release, best of three for the
+queries, three runs): 300,000 rows (`id`, `g`, a 40-byte text) inserted
+and checkpointed, an aggregate over them all through an 8 MiB page
+cache, and an `ORDER BY` past a 1 MB `work_mem` (its runs in scratch
+files, sealed when the database is).  Encrypted with AES-256-GCM-SIV.
+
 | | in the clear | encrypted |
 |---|---:|---:|
-| load and checkpoint (WAL and pages sealed) | 150–180 ms | 305 ms (×1.7–2) |
-| scan (best of three) | 48 ms | 126 ms (×2.6) |
+| load (`INSERT … SELECT`, checkpoint) | 385–405 ms | 363–380 ms (within the noise) |
+| `GROUP BY` over all rows | 10 ms | 10–11 ms |
+| `ORDER BY` past `work_mem` | 118–130 ms | 138–149 ms (+15–20 %) |
 
-The differences are the cipher's: ~47 MB of WAL records and ~6,600
-pages sealed, the pages opened again by the scan, at ~660 MB/s —
-ChaCha20 in portable Rust is the limit.  The target is under 10 %.
-
-Through SQL (K2e; real files, release, best of three for the queries):
-300,000 rows (`id`, `g`, a 40-byte text) inserted and checkpointed, an
-aggregate over them all through an 8 MiB page cache, and an `ORDER BY`
-past a 1 MB `work_mem` (its runs in scratch files, sealed when the
-database is).
-
-| | in the clear | encrypted |
-|---|---:|---:|
-| load (`INSERT … SELECT`, checkpoint) | 365 ms | 420 ms (+14 %) |
-| `GROUP BY` over all rows | 11 ms | 17 ms (×1.6) |
-| `ORDER BY` past `work_mem` | 105 ms | 240 ms (×2.3) |
+The sort's scratch is sealed in 4 KiB blocks (~0.96 µs each); 16 and
+64 KiB blocks were no faster within the noise (124 and 138 ms against
+123), a run's 64 KiB reads from record boundaries opening more bytes
+than they serve.  Sealed scratch alone: 32 MiB appended in 65,000-byte
+pieces in 20 ms (5.6 in memory), read back in 15 ms (1.4) — `cargo test
+--release -p nucleus-kv sealed_scratch_speed -- --ignored --nocapture`.
 
 ```sh
 cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture --test-threads=1

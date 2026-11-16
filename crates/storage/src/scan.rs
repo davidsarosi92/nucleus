@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use nucleus_platform::{File, FileSystem, OpenMode};
 
 use crate::cipher::PageCipher;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::node::{LEAF, ValRef, View, decode_overflow};
 use crate::page::{PAGE_SIZE, Page, PageId};
 
@@ -161,6 +161,17 @@ pub fn find_with(
     cipher: Option<&PageCipher>,
 ) -> Result<Vec<Found>> {
     let n = Needles::new(needles);
+    // The data file's own cipher, from its header.
+    let adopted = match cipher {
+        Some(c) => match crate::pager::file_cipher(fs, &dir.join("data"))? {
+            Some(code) if code != crate::cipher::CIPHER_NONE => {
+                Some(c.for_code(code).map_err(Error::Key)?)
+            }
+            _ => Some(c.clone()),
+        },
+        None => None,
+    };
+    let cipher = adopted.as_ref();
     let mut out = BTreeSet::new();
     let mut files = Vec::new();
     walk(fs, dir, &mut files)?;

@@ -4,16 +4,20 @@
 //! the file is and never written anywhere: the file is unreadable once
 //! its handle is gone (after a crash too; opening removes such files).
 //!
-//! The bytes are kept in 4 KiB blocks, each sealed by
-//! `nucleus_crypto::siv` — its tag, then its bytes encrypted, the block's
-//! number as nonce and, with its length, associated data — so a block
-//! moved, cut short, or changed does not open.  A block written again
-//! (the last one, growing) is sealed again under the same nonce, which
-//! the SIV allows.  A write or read of any range touches the blocks it
-//! covers in one read or write of the file; a write that covers part of
-//! a block reads it first.
+//! The bytes are kept in 4 KiB blocks, each sealed by the cipher this CPU
+//! runs fastest (`nucleus_storage::cipher::Aead`: AES-256-GCM-SIV where it
+//! has AES instructions, ChaCha20-SIV where not; the file never outlives
+//! the process) — its tag, then its bytes encrypted, the block's number
+//! as nonce and associated data — so a block moved or changed does not
+//! open.  The last block, while it is not full, stays in memory in the
+//! clear and goes to the file sealed once it is: appending — what sorts
+//! and partitions do — seals every block once and never reads one back.
+//! A write over blocks in the file opens them, changes them and seals
+//! them again (under the same nonce, which the SIV allows); a read opens
+//! the blocks it covers, read in one read of the file, into the caller's
+//! buffer.
 
-use nucleus_crypto::siv;
+use nucleus_storage::cipher::Aead;
 
 use crate::{Error, Result, Scratch};
 
@@ -27,16 +31,12 @@ const SLOT: u64 = BLOCK + TAG;
 /// Scratch space whose blocks are sealed into another (a file).
 pub(crate) struct SealedScratch {
     raw: Box<dyn Scratch>,
-    key: [u8; 32],
+    aead: Aead,
     /// Bytes written (the highest end).
     len: u64,
-}
-
-impl Drop for SealedScratch {
-    fn drop(&mut self) {
-        self.key.fill(0);
-        std::hint::black_box(&self.key);
-    }
+    /// The last block's bytes while it is not full (`len % BLOCK` of
+    /// them): blocks before it are full and in the file.
+    tail: Vec<u8>,
 }
 
 fn nonce(i: u64) -> [u8; 12] {
@@ -46,10 +46,10 @@ fn nonce(i: u64) -> [u8; 12] {
     n
 }
 
-fn aad(i: u64, len: u64) -> [u8; 16] {
+fn aad(i: u64) -> [u8; 16] {
     let mut a = [0u8; 16];
     a[..8].copy_from_slice(&i.to_le_bytes());
-    a[8..].copy_from_slice(&len.to_le_bytes());
+    a[8..].copy_from_slice(&BLOCK.to_le_bytes());
     a
 }
 
@@ -60,37 +60,113 @@ fn damaged() -> Error {
 impl SealedScratch {
     /// Scratch space sealed under `key` into `raw` (empty).
     pub(crate) fn new(raw: Box<dyn Scratch>, key: [u8; 32]) -> Self {
-        Self { raw, key, len: 0 }
+        Self {
+            raw,
+            aead: Aead::new(&key),
+            len: 0,
+            tail: Vec::with_capacity(BLOCK as usize),
+        }
     }
 
-    /// The bytes block `i` holds now.
-    fn held(&self, i: u64) -> u64 {
-        self.len.saturating_sub(i * BLOCK).min(BLOCK)
+    /// Bytes in the file's blocks (all full).
+    fn sealed_len(&self) -> u64 {
+        self.len - self.tail.len() as u64
     }
 
-    /// The bytes of blocks `first..=last` (all held), opened.
-    fn read_blocks(&self, first: u64, last: u64) -> Result<Vec<u8>> {
-        let phys = (last - first) * SLOT + TAG + self.held(last);
-        let mut buf = vec![0u8; phys as usize];
-        self.raw.read_at(first * SLOT, &mut buf)?;
-        let mut out = Vec::with_capacity(((last - first + 1) * BLOCK) as usize);
-        for i in first..=last {
-            let at = ((i - first) * SLOT) as usize;
-            let n = self.held(i) as usize;
-            let (tag, rest) = buf[at..at + TAG as usize + n].split_at_mut(TAG as usize);
+    /// Block `i`'s bytes, `parts` together (`BLOCK` of them), sealed onto
+    /// the end of `out`: its tag, then them encrypted.
+    fn seal_onto(&self, out: &mut Vec<u8>, i: u64, parts: &[&[u8]]) {
+        let at = out.len();
+        out.extend_from_slice(&[0u8; TAG as usize]);
+        for p in parts {
+            out.extend_from_slice(p);
+        }
+        let tag = self
+            .aead
+            .seal_in_place(&nonce(i), &aad(i), &mut out[at + TAG as usize..]);
+        out[at..at + TAG as usize].copy_from_slice(&tag);
+    }
+
+    /// Blocks `first..=last` of the file, read and opened in place: slot
+    /// `k` (block `first + k`) its tag, then its bytes.
+    fn open_blocks(&self, first: u64, last: u64) -> Result<Vec<u8>> {
+        let mut slots = vec![0u8; ((last - first + 1) * SLOT) as usize];
+        self.raw.read_at(first * SLOT, &mut slots)?;
+        for (k, slot) in slots
+            .as_chunks_mut::<{ SLOT as usize }>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            let i = first + k as u64;
+            let (tag, bytes) = slot.split_at_mut(TAG as usize);
             let tag: [u8; 16] = (&*tag).try_into().expect("16 bytes");
-            if !siv::open_in_place(&self.key, &nonce(i), &aad(i, n as u64), rest, &tag) {
+            if !self.aead.open_in_place(&nonce(i), &aad(i), bytes, &tag) {
                 return Err(damaged());
             }
-            out.extend_from_slice(rest);
         }
-        Ok(out)
+        Ok(slots)
     }
 
-    /// Bytes `from..to` of block `i` as held now.
-    fn held_bytes(&self, i: u64, from: u64, to: u64) -> Result<Vec<u8>> {
-        let block = self.read_blocks(i, i)?;
-        Ok(block[from as usize..to as usize].to_vec())
+    /// `data` after the end.
+    fn append(&mut self, mut data: &[u8]) -> Result<()> {
+        let room = BLOCK as usize - self.tail.len();
+        if data.len() < room {
+            self.tail.extend_from_slice(data);
+            self.len += data.len() as u64;
+            return Ok(());
+        }
+        let first = self.sealed_len() / BLOCK;
+        let blocks = 1 + (data.len() - room) / BLOCK as usize;
+        let mut out = Vec::with_capacity(blocks * SLOT as usize);
+        self.seal_onto(&mut out, first, &[&self.tail, &data[..room]]);
+        self.len += data.len() as u64;
+        data = &data[room..];
+        let (whole, rest) = data.split_at(data.len() / BLOCK as usize * BLOCK as usize);
+        for (k, chunk) in whole.as_chunks::<{ BLOCK as usize }>().0.iter().enumerate() {
+            self.seal_onto(&mut out, first + 1 + k as u64, &[&chunk[..]]);
+        }
+        self.raw.write_at(first * SLOT, &out)?;
+        self.tail.clear();
+        self.tail.extend_from_slice(rest);
+        Ok(())
+    }
+
+    /// `data` over bytes there are, from `offset`.
+    fn overwrite(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        let end = offset + data.len() as u64;
+        let sealed = self.sealed_len();
+        if offset < sealed {
+            let to = end.min(sealed);
+            let (first, last) = (offset / BLOCK, (to - 1) / BLOCK);
+            let mut slots = self.open_blocks(first, last)?;
+            let mut pos = offset;
+            while pos < to {
+                let (i, within) = (pos / BLOCK, pos % BLOCK);
+                let n = (BLOCK - within).min(to - pos) as usize;
+                let at = ((i - first) * SLOT + TAG + within) as usize;
+                let from = (pos - offset) as usize;
+                slots[at..at + n].copy_from_slice(&data[from..from + n]);
+                pos += n as u64;
+            }
+            for (k, slot) in slots
+                .as_chunks_mut::<{ SLOT as usize }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                let i = first + k as u64;
+                let (tag, bytes) = slot.split_at_mut(TAG as usize);
+                tag.copy_from_slice(&self.aead.seal_in_place(&nonce(i), &aad(i), bytes));
+            }
+            self.raw.write_at(first * SLOT, &slots)?;
+        }
+        if end > sealed {
+            let from = offset.max(sealed);
+            self.tail[(from - sealed) as usize..(end - sealed) as usize]
+                .copy_from_slice(&data[(from - offset) as usize..]);
+        }
+        Ok(())
     }
 }
 
@@ -99,44 +175,13 @@ impl Scratch for SealedScratch {
         // A gap: zeros, as scratch space in memory reads there.
         while self.len < offset {
             let n = (offset - self.len).min(1 << 20);
-            self.write_at(self.len, &vec![0u8; n as usize])?;
+            self.append(&vec![0u8; n as usize])?;
         }
-        if data.is_empty() {
-            return Ok(());
+        let over = (self.len.min(offset + data.len() as u64) - offset) as usize;
+        if over > 0 {
+            self.overwrite(offset, &data[..over])?;
         }
-        let end = offset + data.len() as u64;
-        let first = offset / BLOCK;
-        let last = (end - 1) / BLOCK;
-        let start = first * BLOCK;
-        // What the blocks will hold: what they held before `offset` in the
-        // first, `data`, what they held after `end` in the last.
-        let tail_end = self.len.min((last + 1) * BLOCK).max(end);
-        let mut plain = Vec::with_capacity((tail_end - start) as usize);
-        if offset > start {
-            plain.extend(self.held_bytes(first, 0, offset - start)?);
-        }
-        plain.extend_from_slice(data);
-        if tail_end > end {
-            let at = last * BLOCK;
-            plain.extend(self.held_bytes(last, end - at, tail_end - at)?);
-        }
-        let mut out = Vec::with_capacity(plain.len() + ((last - first + 1) * TAG) as usize);
-        for (k, chunk) in plain.chunks(BLOCK as usize).enumerate() {
-            let i = first + k as u64;
-            let at = out.len();
-            out.extend_from_slice(&[0u8; TAG as usize]);
-            out.extend_from_slice(chunk);
-            let tag = siv::seal_in_place(
-                &self.key,
-                &nonce(i),
-                &aad(i, chunk.len() as u64),
-                &mut out[at + TAG as usize..],
-            );
-            out[at..at + TAG as usize].copy_from_slice(&tag);
-        }
-        self.raw.write_at(first * SLOT, &out)?;
-        self.len = self.len.max(end);
-        Ok(())
+        self.append(&data[over..])
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
@@ -147,10 +192,26 @@ impl Scratch for SealedScratch {
         if end > self.len {
             return Err(Error::Storage("read past the end of scratch space".into()));
         }
-        let first = offset / BLOCK;
-        let plain = self.read_blocks(first, (end - 1) / BLOCK)?;
-        let from = (offset - first * BLOCK) as usize;
-        buf.copy_from_slice(&plain[from..from + buf.len()]);
+        let sealed = self.sealed_len();
+        if offset < sealed {
+            let to = end.min(sealed);
+            let first = offset / BLOCK;
+            let slots = self.open_blocks(first, (to - 1) / BLOCK)?;
+            let mut pos = offset;
+            while pos < to {
+                let (i, within) = (pos / BLOCK, pos % BLOCK);
+                let n = (BLOCK - within).min(to - pos) as usize;
+                let at = ((i - first) * SLOT + TAG + within) as usize;
+                let into = (pos - offset) as usize;
+                buf[into..into + n].copy_from_slice(&slots[at..at + n]);
+                pos += n as u64;
+            }
+        }
+        if end > sealed {
+            let from = offset.max(sealed);
+            buf[(from - offset) as usize..]
+                .copy_from_slice(&self.tail[(from - sealed) as usize..(end - sealed) as usize]);
+        }
         Ok(())
     }
 }
@@ -161,8 +222,8 @@ mod tests {
     use crate::MemoryScratch;
 
     /// Writes of every shape — appends, overwrites inside and across
-    /// blocks, a gap — read back as scratch space in memory does, and
-    /// nothing written shows in the file.
+    /// blocks and into the last one, a gap — read back as scratch space
+    /// in memory does, and nothing written shows in the file.
     #[test]
     fn reads_back_what_memory_would() {
         let mut sealed = SealedScratch::new(Box::new(MemoryScratch::default()), [4; 32]);
@@ -176,16 +237,18 @@ mod tests {
         };
         for step in 0..300 {
             let len = sealed.len;
-            let offset = match step % 4 {
-                0 | 1 => len,             // append
-                2 => next() % (len + 1),  // overwrite somewhere
-                _ => len + next() % 9000, // past the end: a gap
+            let offset = match step % 5 {
+                0 | 1 => len,                           // append
+                2 => next() % (len + 1),                // overwrite somewhere
+                3 => len.saturating_sub(next() % 6000), // over the end
+                _ => len + next() % 9000,               // past the end: a gap
             };
             let n = (next() % 20_000) as usize;
             let data: Vec<u8> = (0..n).map(|k| (k as u64 * 13 + step) as u8 | 1).collect();
             sealed.write_at(offset, &data).unwrap();
             model.write_at(offset, &data).unwrap();
             assert_eq!(sealed.len, model.0.len() as u64);
+            assert_eq!(sealed.tail.len() as u64, sealed.len % BLOCK);
             for _ in 0..4 {
                 let from = next() % (sealed.len + 1);
                 let to = from + next() % (sealed.len - from + 1);
@@ -200,15 +263,19 @@ mod tests {
         assert!(sealed.read_at(sealed.len, &mut past).is_err());
     }
 
-    /// A byte of the file changed: the block holding it does not open.
+    /// The file holds whole blocks only, none of them readable; a byte of
+    /// it changed, the block holding it does not open.
     #[test]
     fn a_changed_block_does_not_open() {
         let data: Vec<u8> = (0..10_000u32).map(|k| (k * 7) as u8).collect();
         let mut sealed = SealedScratch::new(Box::new(MemoryScratch::default()), [4; 32]);
         sealed.write_at(0, &data).unwrap();
-        let mut raw = MemoryScratch::default();
-        let mut file = vec![0u8; (2 * SLOT + TAG + 10_000 - 2 * BLOCK) as usize];
+        let mut file = vec![0u8; 2 * SLOT as usize];
         sealed.raw.read_at(0, &mut file).unwrap();
+        assert!(
+            sealed.raw.read_at(2 * SLOT, &mut [0u8; 1]).is_err(),
+            "the tail is not in the file"
+        );
         assert!(
             !file
                 .windows(64)
@@ -216,14 +283,65 @@ mod tests {
             "plain bytes in the file"
         );
         file[SLOT as usize + 100] ^= 1;
+        let mut raw = MemoryScratch::default();
         raw.write_at(0, &file).unwrap();
         let tampered = SealedScratch {
             raw: Box::new(raw),
-            key: [4; 32],
+            aead: Aead::new(&[4; 32]),
             len: 10_000,
+            tail: data[2 * BLOCK as usize..].to_vec(),
         };
         let mut buf = vec![0u8; 100];
         assert!(tampered.read_at(0, &mut buf).is_ok(), "block 0 is intact");
+        assert!(
+            tampered.read_at(9_000, &mut buf).is_ok(),
+            "the tail is in memory"
+        );
         assert!(tampered.read_at(BLOCK + 10, &mut buf).is_err());
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+    use crate::MemoryScratch;
+
+    /// What sealing costs scratch space: 32 MiB written as a sort's run
+    /// is (unaligned 64 KiB pieces) and read back so, sealed and in
+    /// memory.  `cargo test --release -p nucleus-kv sealed_scratch_speed -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement: run it in release"]
+    fn sealed_scratch_speed() {
+        let piece: Vec<u8> = (0..65_000u32).map(|i| (i * 7) as u8).collect();
+        for sealed in [false, true] {
+            let mut s: Box<dyn Scratch> = if sealed {
+                Box::new(SealedScratch::new(
+                    Box::new(MemoryScratch::default()),
+                    [1; 32],
+                ))
+            } else {
+                Box::new(MemoryScratch::default())
+            };
+            let t = std::time::Instant::now();
+            let mut at = 0u64;
+            while at < 32 << 20 {
+                s.write_at(at, &piece).unwrap();
+                at += piece.len() as u64;
+            }
+            let w = t.elapsed();
+            let t = std::time::Instant::now();
+            let mut buf = vec![0u8; 65_000];
+            let mut r = 0u64;
+            while r + 65_000 <= at {
+                s.read_at(r, &mut buf).unwrap();
+                r += 60_000;
+            }
+            println!(
+                "{:6} write {:6.1} ms   read {:6.1} ms",
+                if sealed { "sealed" } else { "memory" },
+                w.as_secs_f64() * 1e3,
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
     }
 }

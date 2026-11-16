@@ -1,8 +1,9 @@
 //! What sealing a page costs (PLAN.md §M14.30 K2a): an 8 KiB page through
-//! CRC-32C (today's checksum), ChaCha20-Poly1305 (RFC 8439) and the
-//! misuse-resistant `nucleus_crypto::siv`, in MB/s on one core; and what
+//! CRC-32C (today's checksum), ChaCha20-Poly1305 (RFC 8439), the
+//! misuse-resistant `nucleus_crypto::siv` and AES-256-GCM-SIV by the CPU's
+//! instructions (`nucleus_kernels::aes`), in MB/s on one core; and what
 //! it costs a store (K2b): a load checkpointed, then a scan through a
-//! cold buffer pool, in the clear and encrypted.
+//! cold buffer pool, in the clear and encrypted with each cipher.
 //!
 //! `cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture`
 
@@ -12,8 +13,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nucleus_crypto::{aead, siv};
+use nucleus_kernels::aes;
 use nucleus_platform::Platform;
 use nucleus_platform::real::RealPlatform;
+use nucleus_storage::cipher::{CIPHER_AES256_GCM_SIV, CIPHER_CHACHA20_SIV};
 use nucleus_storage::crc32c::crc32c;
 use nucleus_storage::{Batch, PageCipher, Store, StoreOptions};
 
@@ -59,6 +62,18 @@ fn page_sealing_speed() {
         let t = siv::seal_in_place(&key, &[0u8; 12], &aad, p);
         assert!(siv::open_in_place(&key, &[0u8; 12], &aad, p, &t));
     });
+    if aes::hardware() {
+        let k = aes::Key::new(&key);
+        rate("aes-gcm-siv seal (in place)", |p, n| {
+            let t = aes::seal_in_place(&k, &[0u8; 12], &n.to_le_bytes(), p);
+            sink ^= u64::from(t[0]);
+        });
+        rate("aes-gcm-siv seal + open", |p, n| {
+            let aad = n.to_le_bytes();
+            let t = aes::seal_in_place(&k, &[0u8; 12], &aad, p);
+            assert!(aes::open_in_place(&k, &[0u8; 12], &aad, p, &t));
+        });
+    }
     println!("({sink})");
 }
 
@@ -70,11 +85,16 @@ fn page_sealing_speed() {
 fn store_load_and_scan_encrypted() {
     const ROWS: u64 = 400_000;
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("page_crypto_store");
-    for key in [None, Some(PageCipher::new([9; 32]))] {
-        let name = if key.is_some() {
-            "encrypted"
-        } else {
-            "in the clear"
+    let key = PageCipher::new([9; 32]);
+    for key in [
+        None,
+        Some(key.for_code(CIPHER_CHACHA20_SIV).unwrap()),
+        Some(key.for_code(CIPHER_AES256_GCM_SIV).unwrap()),
+    ] {
+        let name = match key.as_ref().map(PageCipher::code) {
+            None => "in the clear",
+            Some(CIPHER_CHACHA20_SIV) => "chacha20-siv",
+            Some(_) => "aes-gcm-siv",
         };
         let dir = root.join(name.replace(' ', "-"));
         let _ = std::fs::remove_dir_all(&dir);

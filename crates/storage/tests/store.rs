@@ -571,6 +571,53 @@ fn a_planted_value_is_in_no_file_of_an_encrypted_store() {
     ENCRYPTED.set(false);
 }
 
+/// A store keeps the cipher it was made with (PLAN.md §M14.30, the speed
+/// after K2): made with each of the two, its pages and its log — the last
+/// writes only logged — are read with that cipher when it is opened with
+/// the key alone, whichever this CPU would choose for a new one; and the
+/// planted value is in no file either way.
+#[test]
+fn a_store_keeps_its_cipher() {
+    use nucleus_storage::cipher::{CIPHER_AES256_GCM_SIV, CIPHER_CHACHA20_SIV};
+    let planted = b"cipher-kept-planted-71e3a9d0".to_vec();
+    for code in [CIPHER_CHACHA20_SIV, CIPHER_AES256_GCM_SIV] {
+        let p = sim(4);
+        let made = StoreOptions {
+            page_key: Some(PageCipher::new([7; 32]).for_code(code).unwrap()),
+            ..opts()
+        };
+        {
+            let (store, _) =
+                Store::open(Arc::clone(&p) as Arc<dyn Platform>, Path::new(DIR), &made).unwrap();
+            for i in 0..40u64 {
+                let mut v = planted.clone();
+                v.extend_from_slice(&i.to_le_bytes());
+                let lsn = store
+                    .write(&Batch {
+                        meta: i + 1,
+                        ops: vec![(format!("k{i:03}").into_bytes(), Some(v))],
+                    })
+                    .unwrap();
+                store.wait_durable(lsn).unwrap();
+                if i == 29 {
+                    store.checkpoint().unwrap();
+                }
+            }
+        }
+        assert!(files_holding(&p, Path::new(DIR), &planted).is_empty());
+        let fs = p.fs();
+        assert_eq!(
+            nucleus_storage::pager::file_cipher(fs, &Path::new(DIR).join("data")).unwrap(),
+            Some(code)
+        );
+        ENCRYPTED.set(true);
+        let (store, rec) = open(&p).unwrap();
+        ENCRYPTED.set(false);
+        assert_eq!((rec.meta, rec.replayed), (40, 10), "cipher {code}");
+        assert_eq!(contents(&store).len(), 40);
+    }
+}
+
 /// A store in the clear — its main tree and a branch, the last writes
 /// only logged — built for [`a_store_encrypted_and_a_crash_at_every_point`];
 /// its contents, main and branch.
