@@ -49,6 +49,7 @@ use nucleus_platform::{FileSystem, OpenMode, Platform};
 
 use crate::btree::{BTree, LeafFilter};
 use crate::buffer::BufferPool;
+use crate::engines::{self, Engine, EngineKind, Route, Tables};
 use crate::error::{Error, Result};
 use crate::node::MAX_KEY;
 use crate::page::PageId;
@@ -430,7 +431,8 @@ impl Shared {
 /// One branch: its tree, its log, its writer.
 struct Branch {
     info: BranchInfo,
-    tree: RwLock<BTree>,
+    /// Its B+tree and the engines of the store's routes (§M14.28 L1).
+    tree: RwLock<Tables>,
     /// Writers waiting for the tree: new readers let them go first (a
     /// while), so a stream of scans does not keep a writer out.
     writers_waiting: std::sync::atomic::AtomicUsize,
@@ -600,6 +602,7 @@ fn open_branch(
     wal_dir: &Path,
     checkpoint: Lsn,
     meta: u64,
+    engines: (Vec<Route>, Vec<Box<dyn Engine>>),
 ) -> Result<Branch> {
     ensure_dir(platform.fs(), wal_dir)?;
     let mut tree = if root == 0 {
@@ -611,6 +614,7 @@ fn open_branch(
     // A large commit's leaves prepared on the CPUs there are (one in
     // the simulation).
     tree.set_workers(platform.parallelism());
+    let mut tree = Tables::new(tree, engines.0, engines.1);
     let wal = Wal::open_with(
         Arc::clone(platform),
         wal_dir,
@@ -724,6 +728,21 @@ impl Store {
             pager.set_space(id, Some(sp));
         }
 
+        // The engines of the store's routes (§M14.28 L1), each branch's
+        // as its checkpoint saved them.
+        let routes = engines::read_routes(fs, dir)?;
+        let load = |id: u32, lsn: u64| -> Result<(Vec<Route>, Vec<Box<dyn Engine>>)> {
+            let mut es = Vec::with_capacity(routes.len());
+            for r in &routes {
+                let path = engines::engine_file(dir, id, r.id, lsn);
+                es.push(if fs.exists(&path)? {
+                    r.kind.load(fs, &path)?
+                } else {
+                    r.kind.empty()
+                });
+            }
+            Ok((routes.clone(), es))
+        };
         let main_root = pager.meta(META_ROOT);
         let main = Arc::new(open_branch(
             &platform,
@@ -739,6 +758,7 @@ impl Store {
             &branch_wal(dir, MAIN),
             pager.meta(META_CHECKPOINT_LSN),
             pager.meta(META_USER),
+            load(MAIN, pager.meta(META_CHECKPOINT_LSN))?,
         )?);
         let mut replayed = main.recovery.replayed;
         let mut branches = BTreeMap::new();
@@ -754,6 +774,7 @@ impl Store {
                 &branch_wal(dir, id),
                 r.lsn,
                 r.meta,
+                load(id, r.lsn)?,
             )?;
             b.tag.store(r.tag, Ordering::Release);
             replayed += b.recovery.replayed;
@@ -791,6 +812,15 @@ impl Store {
             }),
             b: main,
         };
+        // Engines' files of checkpoints that did not commit, or of
+        // branches gone.
+        let keep: Vec<(u32, u64)> = store
+            .shared
+            .branches()
+            .values()
+            .map(|b| (b.info.id, b.checkpoint_lsn.load(Ordering::Acquire)))
+            .collect();
+        remove_stale_engine_files(fs, dir, &keep)?;
         if replayed > 0 || main_root == 0 {
             store.checkpoint()?; // so the next open starts from here
         }
@@ -1143,7 +1173,7 @@ impl Store {
     }
 
     /// The tree, for reading.  Hold the guard briefly: writers wait for it.
-    pub fn read(&self) -> Result<RwLockReadGuard<'_, BTree>> {
+    pub fn read(&self) -> Result<RwLockReadGuard<'_, Tables>> {
         self.check()?;
         // A writer waiting goes first — for a few hundred yields at most
         // (a reader that holds the tree already, reading again, must not
@@ -1163,6 +1193,79 @@ impl Store {
     /// The value of `key`.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.read()?.get(key)
+    }
+
+    /// Routes `[start, end)` to a new engine of `kind` on every branch
+    /// (PLAN.md §M14.28 L1): the range must hold nothing on any branch
+    /// yet and meet no other route.  The route is durable when this
+    /// returns, and a checkpoint has saved every engine.  Its id.
+    pub fn add_engine(&self, start: &[u8], end: &[u8], kind: EngineKind) -> Result<u32> {
+        self.check()?;
+        if start >= end {
+            return Err(Error::Engine(
+                "an engine's key range must not be empty".into(),
+            ));
+        }
+        let sh = &*self.shared;
+        if sh.pool.pager().cipher().is_some() {
+            return Err(Error::Engine(
+                "the map engine keeps its file in the clear: not on an encrypted database".into(),
+            ));
+        }
+        let id = {
+            let _running = self.running();
+            let list: Vec<Arc<Branch>> = sh.branches().values().cloned().collect();
+            let _writers: Vec<_> = list.iter().map(|b| b.writer()).collect();
+            let mut all: Vec<_> = list
+                .iter()
+                .map(|b| b.tree.write().unwrap_or_else(|e| e.into_inner()))
+                .collect();
+            // Every branch has the store's routes.
+            let routes = all.first().map(|t| t.routes.clone()).unwrap_or_default();
+            if routes
+                .iter()
+                .any(|r| start < r.end.as_slice() && r.start.as_slice() < end)
+            {
+                return Err(Error::Engine("the key range meets another engine's".into()));
+            }
+            for t in &all {
+                if !t.tree_empty_in(start, end)? {
+                    return Err(Error::Engine(
+                        "the key range holds entries: an engine is given an empty one".into(),
+                    ));
+                }
+            }
+            let id = routes.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+            let mut new = routes;
+            new.push(Route {
+                id,
+                kind,
+                start: start.to_vec(),
+                end: end.to_vec(),
+            });
+            new.sort_by(|a, b| a.start.cmp(&b.start));
+            engines::write_routes(sh.platform.fs(), &sh.dir, &new)?;
+            for t in &mut all {
+                let mut old: BTreeMap<u32, Box<dyn Engine>> = std::mem::take(&mut t.routes)
+                    .into_iter()
+                    .map(|r| r.id)
+                    .zip(std::mem::take(&mut t.engines))
+                    .collect();
+                t.engines = new
+                    .iter()
+                    .map(|r| old.remove(&r.id).unwrap_or_else(|| r.kind.empty()))
+                    .collect();
+                t.routes = new.clone();
+            }
+            id
+        };
+        self.checkpoint()?;
+        Ok(id)
+    }
+
+    /// The store's routes (§M14.28 L1), sorted.
+    pub fn routes(&self) -> Result<Vec<Route>> {
+        Ok(self.read()?.routes().to_vec())
     }
 
     /// Makes every branch's current tree the data file's committed state
@@ -1420,7 +1523,7 @@ impl Store {
             let mut tree = s.0.tree.write().unwrap_or_else(|e| e.into_inner());
             let mut d = s.0.deferred.lock().unwrap_or_else(|e| e.into_inner());
             settle(&mut tree, &mut d)?;
-            s.1 = tree.root().0;
+            s.1 = tree.tree.root().0;
         }
         // The dead lists so far into the directory (a drop reads them).
         let dead = pager.take_dead();
@@ -1467,6 +1570,17 @@ impl Store {
                 t.insert(&key, &rec)?;
             }
         }
+        // Each branch's engines saved as of its LSN, durably, before the
+        // checkpoint that names that LSN commits (§M14.28 L1).
+        for (b, _, lsn, _) in &states {
+            let tables = b.tree.read().unwrap_or_else(|e| e.into_inner());
+            for (route, engine) in tables.routes.iter().zip(&tables.engines) {
+                engine.save(
+                    sh.platform.fs(),
+                    &engines::engine_file(&sh.dir, b.info.id, route.id, *lsn),
+                )?;
+            }
+        }
         let main = states
             .iter()
             .find(|s| s.0.info.id == MAIN)
@@ -1507,6 +1621,13 @@ impl Store {
             .find(|s| s.0.info.id == parent)
             .ok_or_else(|| Error::Branch("the parent branch was dropped".into()))?;
         let (root, meta) = (p.1, p.3);
+        // Its engines a copy of its parent's now (its tree shares the
+        // parent's pages; an engine's state is copied).
+        let engines = {
+            let pt = p.0.tree.read().unwrap_or_else(|e| e.into_inner());
+            let forks: Vec<Box<dyn Engine>> = pt.engines.iter().map(|e| e.fork()).collect();
+            (pt.routes.clone(), forks)
+        };
         let t = system_tree(sys, &sh.pool)?;
         let id = match t.get(NEXT_ID_KEY)? {
             Some(v) if v.len() == 4 => u32::from_le_bytes(v.try_into().unwrap()),
@@ -1534,6 +1655,7 @@ impl Store {
             &wal_dir,
             0,
             meta,
+            engines,
         )?);
         let mut ps = pager.space(parent);
         ps.points.push(origin);
@@ -1573,7 +1695,7 @@ impl Store {
             // none after (it is marked dropped first).
             let tree = b.tree.write().unwrap_or_else(|e| e.into_inner());
             b.dropped.store(true, Ordering::Release);
-            tree.release_younger(Some(origin))?;
+            tree.tree.release_younger(Some(origin))?;
         }
         // Its own frees just now went nowhere but free (it has no
         // branches), so the dead lists in the directory are whole.
@@ -1630,7 +1752,7 @@ impl Store {
         let mut used = BTreeSet::new();
         for b in &list {
             let tree = b.tree.read().unwrap_or_else(|e| e.into_inner());
-            used.extend(tree.check()?.pages);
+            used.extend(tree.tree.check()?.pages);
         }
         if let Some(t) = sh.system.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             used.extend(t.check()?.pages);
@@ -1729,6 +1851,8 @@ impl Checkpoint<'_> {
             for b in &dropped {
                 remove_wal_files(s.platform.fs(), &branch_wal(&s.dir, b.info.id))?;
             }
+            let keep: Vec<(u32, u64)> = lsns.iter().map(|(b, lsn)| (b.info.id, *lsn)).collect();
+            remove_stale_engine_files(s.platform.fs(), &s.dir, &keep)?;
             crate::metrics::CHECKPOINTS.inc();
             Ok(())
         })();
@@ -1752,7 +1876,7 @@ fn overlay(d: &mut Deferred, batch: &Batch, put: Vec<(Vec<u8>, Vec<u8>)>) {
 }
 
 /// The deferred puts into the tree.
-fn settle(tree: &mut BTree, d: &mut Deferred) -> Result<()> {
+fn settle(tree: &mut Tables, d: &mut Deferred) -> Result<()> {
     if d.is_empty() {
         return Ok(());
     }
@@ -1760,32 +1884,45 @@ fn settle(tree: &mut BTree, d: &mut Deferred) -> Result<()> {
         .into_iter()
         .map(|(k, v)| (k, Some(v)))
         .collect();
-    tree.apply_sorted(&ops)
+    tree.apply_sorted(&ops, None)
 }
 
-/// Replay's half of [`Store::write_covering`]: every entry left in the
-/// covered ranges deleted.
-fn remove_covered(tree: &mut BTree, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-    for (start, end) in covered {
-        let keys = tree
-            .range(
-                std::ops::Bound::Included(start),
-                std::ops::Bound::Excluded(end),
-            )?
-            .map(|e| e.map(|(k, _)| k))
-            .collect::<Result<Vec<_>>>()?;
-        for k in keys {
-            tree.remove(&k)?;
+/// Removes the engines' files not of a branch's checkpoint in `keep`
+/// (`(branch, lsn)`): of checkpoints that did not commit, before the
+/// last, or of branches gone.
+fn remove_stale_engine_files(fs: &dyn FileSystem, dir: &Path, keep: &[(u32, u64)]) -> Result<()> {
+    let edir = engines::engines_dir(dir);
+    if !fs.exists(&edir)? {
+        return Ok(());
+    }
+    for name in fs.list_dir(&edir)? {
+        let Some(n) = name.to_str() else { continue };
+        let parts: Vec<&str> = n.split('-').collect();
+        let [b, _, l] = parts.as_slice() else {
+            continue;
+        };
+        let (Ok(b), Ok(l)) = (b.parse::<u32>(), l.parse::<u64>()) else {
+            continue;
+        };
+        if !keep.contains(&(b, l)) {
+            fs.remove_file(&edir.join(&name))?;
         }
     }
     Ok(())
 }
 
-fn apply(tree: &mut BTree, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<()> {
-    let sorted = |tree: &mut BTree, ops: &[(Vec<u8>, Option<Vec<u8>>)]| match filter {
-        Some(f) => tree.apply_sorted_filtered(ops, f),
-        None => tree.apply_sorted(ops),
-    };
+/// Replay's half of [`Store::write_covering`]: every entry left in the
+/// covered ranges deleted.
+fn remove_covered(tree: &mut Tables, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+    for (start, end) in covered {
+        tree.remove_range(start, end)?;
+    }
+    Ok(())
+}
+
+fn apply(tree: &mut Tables, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<()> {
+    let sorted =
+        |tree: &mut Tables, ops: &[(Vec<u8>, Option<Vec<u8>>)]| tree.apply_sorted(ops, filter);
     // When no key comes twice (how the engine writes batches), the order
     // does not matter: one sorted pass over the tree, a page written once
     // for all its keys.
@@ -1804,9 +1941,7 @@ fn apply(tree: &mut BTree, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Re
     for (k, v) in &batch.ops {
         match v {
             Some(v) => tree.insert(k, v)?,
-            None => {
-                tree.remove(k)?;
-            }
+            None => tree.remove(k)?,
         }
     }
     Ok(())

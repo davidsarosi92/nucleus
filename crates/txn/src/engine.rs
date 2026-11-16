@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLock
 use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
-use nucleus_storage::{BTree, Batch, BranchInfo, Deferred, Recovery, Store, StoreOptions};
+use nucleus_storage::{Batch, BranchInfo, Deferred, Recovery, Store, StoreOptions, Tables};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
@@ -474,10 +474,10 @@ fn overlaps(span: &Span, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
 /// The store's entries in `[from, to)` that are versions: the reserved
 /// keys (`00 01` – `00 FF`) skipped.
 fn versions<'t>(
-    tree: &'t BTree,
+    tree: &'t Tables,
     from: Bound<&[u8]>,
     to: Bound<&[u8]>,
-) -> Result<Vec<nucleus_storage::btree::Range<'t>>> {
+) -> Result<Vec<nucleus_storage::engines::Scan<'t>>> {
     let before_reserved = match from {
         Bound::Unbounded => true,
         Bound::Included(f) | Bound::Excluded(f) => f < &RESERVED_END[..],
@@ -1306,7 +1306,7 @@ impl Inner {
 
     /// The first commit time record at or after commit `ts`, in the tree
     /// or deferred.
-    fn time_from(tree: &BTree, d: &Deferred, ts: u64) -> Result<Option<(u64, u64)>> {
+    fn time_from(tree: &Tables, d: &Deferred, ts: u64) -> Result<Option<(u64, u64)>> {
         let start = time_key(ts);
         let end = mvcc::time_key(u64::MAX);
         let in_tree = match tree
@@ -2601,7 +2601,7 @@ impl Transaction {
 
     /// Up to `parts - 1` user keys inside `[start, end)` cutting it into
     /// parts of about equal size in the store, each of at least
-    /// `min_leaves` of its leaves; ascending ([`BTree::split_keys`]).
+    /// `min_leaves` of its leaves; ascending ([`nucleus_storage::BTree::split_keys`]).
     pub fn split_points(
         &self,
         start: &[u8],

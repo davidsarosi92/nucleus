@@ -28,7 +28,7 @@
 | Path | Crate | Contents | Milestone |
 |------|-------|----------|-----------|
 | `crates/platform` | `nucleus-platform` | file system, clock and randomness traits; real and simulated implementations; simulation harness | §M0 |
-| `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
+| `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store, engines behind it (§4.6) | §M1–§M4 ✅, §M14.28 L1 |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
 | `crates/kernels` | `nucleus-kernels` | the vectorized executor's batch kernels, compiled per CPU level and chosen at run time; a neural network's forward pass (f32 matrix product, GELU, softmax, layer normalization) | §M14.20, §M14.22 |
@@ -731,6 +731,38 @@ window the fewest other needles share (then the least like zeros and
 runs), and a place reaches the map of anchors only through a bitmap of
 their hashes (2^20 bits) — ~80 ms for 100 needles over 96 MiB.
 
+**Engines** (`engines`, §M14.28 L1).  A key range — a table, an index,
+a partition — can be routed to an engine other than the B+tree:
+`add_engine(start, end, kind)` → the route's id, `routes()`.  Routes are
+the store's, apart and sorted (`engines/routes`, CRC-32C, written
+atomically); every key outside them — the reserved keys, the catalog,
+every table not routed — stays the B+tree's.  A branch's tree is
+`Tables`: its B+tree and one engine a route (`read()` hands it out;
+`tree()` the B+tree, `get`, `range`, `range_rev`, `cursor` across all of
+them).  A commit stays one WAL record whatever engines it touches —
+the record is the store's, written before any engine sees it — so it is
+atomic across engines without two-phase commit; replay routes its ops
+the same way.  The engines hold apart ranges, so a scan is their pieces
+one after another (`Scan`, `TablesCursor`), no merge.  An engine keeps
+its state in memory between checkpoints, as dirty pages are; a
+checkpoint saves each branch's in `engines/<branch>-<route>-<lsn>`,
+written and synced before the checkpoint commits, the older ones
+removed after it (and at open: of checkpoints that never committed, of
+branches gone); open loads the file of the checkpoint it starts from and
+replays the WAL after it.  A branch starts with a copy of its parent's
+engines (`Engine::fork`).  `diff_ranges` adds a routed range whole where
+either side's engine holds anything (an engine keeps no births).
+`add_engine` refuses (`Error::Engine`) an empty range, one meeting
+another route, one the B+tree holds entries in on any branch, and an
+encrypted database (the map engine's file is in the clear); it holds
+every writer and tree while it writes the routes, then checkpoints.  The
+`Engine` trait: `get`, `scan(start, end, reverse)`, `apply(ops)`,
+`remove_range`, `is_empty`, `fork`, `save`.  `EngineKind::Map` is the
+trivial engine that proves the boundary — a sorted map saved whole at
+each checkpoint, not for tables of any size; the LSM tree (L2) is the
+engine the boundary is for.  With no route, every call goes straight to
+the B+tree.
+
 ### 4.7 Tests
 
 - `pager.rs` — round trips (simulated and real), the immutability rule,
@@ -759,11 +791,21 @@ their hashes (2^20 bits) — ~80 ms for 100 needles over 96 MiB.
   and a crash at every I/O point (both modes) of writes, makes, a drop
   and a reset — the steps done or the one in flight, every page in one
   place.
+- `engines.rs` (§M14.28 L1) — a routed range read as one map (gets,
+  scans either way, a cursor; the routed keys not in the B+tree; after a
+  crash), the refusals, branches with engines of their own (and their
+  files gone with a dropped branch), and a crash at every I/O point (both
+  modes) of batches across the B+tree and the map engine with
+  checkpoints between: a prefix of the batches, every acknowledged one,
+  in both engines alike.  The unit tests: every bound of a scan across
+  two routes, either way, and a range removed across them; a map
+  engine's file saved, loaded and refused when damaged.
 
 Mutations each caught by these tests: writing committed pages in place,
 reusing freed committed pages before a commit, header before data, skipped
 rebalancing, wrong split separators, segment creation without a directory
-sync, checkpoint without a WAL sync (and, by `pager.rs`'s first version:
+sync, checkpoint without a WAL sync, a checkpoint that does not save the
+engines (and, by `pager.rs`'s first version:
 allocating from the durable free list, in-place create, no file extension).
 
 ## 5. Transaction layer (`nucleus-txn`)

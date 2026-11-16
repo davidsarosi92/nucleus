@@ -40,6 +40,9 @@ pub enum Error {
     /// A branch (PLAN.md §M14.13) that does not exist, already exists, was
     /// dropped, or cannot be dropped (it has branches of its own).
     Branch(String),
+    /// An engine behind the store (PLAN.md §M14.28 L1) refused: a route
+    /// that meets another, a range not empty, an encrypted database.
+    Engine(String),
     /// An encrypted file opened without its key or with another, or a
     /// key given for a file in the clear (PLAN.md §M14.30 K2b).
     Key(String),
@@ -65,6 +68,7 @@ impl fmt::Display for Error {
                 "the database {dir} is in use by another process (only one may open it)"
             ),
             Error::Branch(why) => f.write_str(why),
+            Error::Engine(why) => f.write_str(why),
             Error::Key(why) => f.write_str(why),
         }
     }
