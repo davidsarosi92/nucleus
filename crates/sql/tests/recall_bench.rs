@@ -166,6 +166,17 @@ fn recall_latency() {
         quantile(&mut times, 0.5),
         quantile(&mut times, 0.95)
     );
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    metric(
+        "recall, a question a statement: p50",
+        &[ms(quantile(&mut times, 0.5))],
+        "ms",
+    );
+    metric(
+        "recall, a question a statement: p95",
+        &[ms(quantile(&mut times, 0.95))],
+        "ms",
+    );
     // Batches of 16 questions of one subject.
     let batch = nucleus_sql::parser::parse(
         "SELECT n, r.id, r.score FROM unnest($2::text[]) WITH ORDINALITY AS b(q, n), \
@@ -196,8 +207,29 @@ fn recall_latency() {
         quantile(&mut per, 0.5),
         quantile(&mut per, 0.95)
     );
+    metric(
+        "recall, 16 questions a statement: p50",
+        &[ms(quantile(&mut per, 0.5))],
+        "ms",
+    );
+    metric(
+        "recall, 16 questions a statement: p95",
+        &[ms(quantile(&mut per, 0.95))],
+        "ms",
+    );
     assert_eq!(answers.len(), asks);
     drop(s);
     drop(kv);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

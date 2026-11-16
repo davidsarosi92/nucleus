@@ -17,6 +17,13 @@ fn rate(n: u64, start: Instant) -> String {
     format!("{n:>8} in {s:>7.3} s = {:>10.0} /s", n as f64 / s)
 }
 
+/// `rate`'s line, and its number for `bench/method.py run`.
+fn report(name: &str, n: u64, start: Instant) {
+    let s = start.elapsed().as_secs_f64();
+    println!("{name:23} {}", rate(n, start));
+    metric(name, &[n as f64 / s], "/s");
+}
+
 fn key(i: u64) -> Vec<u8> {
     format!("user{i:010}").into_bytes()
 }
@@ -49,7 +56,7 @@ fn main() {
     for i in 0..n {
         transact(&db, TxnOptions::default(), |txn| txn.put(&key(i), &value)).unwrap();
     }
-    println!("single-row commits      {}", rate(n, t));
+    report("single-row commits", n, t);
 
     let (batches, per) = (200, 500);
     let t = Instant::now();
@@ -63,7 +70,7 @@ fn main() {
         .unwrap();
     }
     let total = n + batches * per;
-    println!("rows in 500-row commits {}", rate(batches * per, t));
+    report("rows in 500-row commits", batches * per, t);
 
     let threads = 8;
     let t = Instant::now();
@@ -79,7 +86,7 @@ fn main() {
             });
         }
     });
-    println!("group commit, 8 threads {}", rate(threads * 250, t));
+    report("group commit, 8 threads", threads * 250, t);
 
     let reads = 200_000;
     let txn = db.begin(TxnOptions::read_only()).unwrap();
@@ -87,14 +94,14 @@ fn main() {
     for i in 0..reads {
         assert!(txn.get(&key(i * 7919 % total)).unwrap().is_some());
     }
-    println!("point reads             {}", rate(reads, t));
+    report("point reads", reads, t);
 
     let t = Instant::now();
     let rows = txn
         .scan(Bound::Unbounded, Bound::Unbounded)
         .unwrap()
         .count() as u64;
-    println!("full scan               {}", rate(rows, t));
+    report("full scan", rows, t);
     drop(txn);
 
     if history.is_some() {
@@ -106,8 +113,19 @@ fn main() {
             let at = started + std::time::Duration::from_micros(i * 7919 % span.max(1));
             let _ = db.snapshot_at(at);
         }
-        println!("snapshot_at             {}", rate(lookups, t));
+        report("snapshot_at", lookups, t);
     }
     db.close().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the program run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

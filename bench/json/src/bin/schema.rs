@@ -46,12 +46,18 @@ const SCHEMA: &str = r##"{
 }"##;
 
 fn document(i: usize) -> String {
-    let unit = if i % 10 == 7 { "kelvin" } else if i % 2 == 0 { "celsius" } else { "fahrenheit" };
+    let unit = if i % 10 == 7 {
+        "kelvin"
+    } else if i.is_multiple_of(2) {
+        "celsius"
+    } else {
+        "fahrenheit"
+    };
     let hours: Vec<String> = (0..i % 6).map(|h| ((h * 5 + i) % 24).to_string()).collect();
-    let detail = if i % 3 == 0 {
+    let detail = if i.is_multiple_of(3) {
         r#""brief""#.to_string()
     } else {
-        format!(r#"{{"wind": {}, "rain": true}}"#, i % 2 == 0)
+        format!(r#"{{"wind": {}, "rain": true}}"#, i.is_multiple_of(2))
     };
     format!(
         r#"{{"place": {{"city": "city{}", "country": "HU"}}, "unit": "{unit}", "days": {}, "hours": [{}], "detail": {detail}}}"#,
@@ -61,11 +67,25 @@ fn document(i: usize) -> String {
     )
 }
 
+/// A figure as an `@metric` line, for `bench/method.py run`, which
+/// repeats the whole binary (PLAN.md §M14.31).
+fn metric(name: &str, value: f64, unit: &str, system: &str) {
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{value}], \"unit\": {unit:?}, \
+         \"system\": {system:?}, \"phase\": \"warm\"}}"
+    );
+}
+
 fn main() {
-    let n: usize = std::env::args().nth(1).map_or(100_000, |a| a.parse().expect("a count"));
+    let n: usize = std::env::args()
+        .nth(1)
+        .map_or(100_000, |a| a.parse().expect("a count"));
     let texts: Vec<String> = (0..n).map(document).collect();
     let ours: Vec<Vec<u8>> = texts.iter().map(|t| parse::parse(t).unwrap()).collect();
-    let theirs: Vec<serde_json::Value> = texts.iter().map(|t| serde_json::from_str(t).unwrap()).collect();
+    let theirs: Vec<serde_json::Value> = texts
+        .iter()
+        .map(|t| serde_json::from_str(t).unwrap())
+        .collect();
     let s_ours = Schema::compile(&parse::parse(SCHEMA).unwrap()).unwrap();
     let s_theirs = jsonschema::validator_for(&serde_json::from_str(SCHEMA).unwrap()).unwrap();
 
@@ -83,30 +103,73 @@ fn main() {
         std::hint::black_box(theirs.iter().filter(|d| s_theirs.is_valid(d)).count());
     });
     let e_ours = median(|| {
-        std::hint::black_box(ours.iter().map(|d| s_ours.errors(d).unwrap().len()).sum::<usize>());
+        std::hint::black_box(
+            ours.iter()
+                .map(|d| s_ours.errors(d).unwrap().len())
+                .sum::<usize>(),
+        );
     });
     let e_theirs = median(|| {
         std::hint::black_box(
-            theirs.iter().map(|d| s_theirs.iter_errors(d).map(|e| e.to_string().len()).sum::<usize>()).sum::<usize>(),
+            theirs
+                .iter()
+                .map(|d| {
+                    s_theirs
+                        .iter_errors(d)
+                        .map(|e| e.to_string().len())
+                        .sum::<usize>()
+                })
+                .sum::<usize>(),
         );
     });
     let c_ours = median(|| {
         std::hint::black_box(Schema::compile(&parse::parse(SCHEMA).unwrap()).unwrap());
     });
     let c_theirs = median(|| {
-        std::hint::black_box(jsonschema::validator_for(&serde_json::from_str(SCHEMA).unwrap()).unwrap());
+        std::hint::black_box(
+            jsonschema::validator_for(&serde_json::from_str(SCHEMA).unwrap()).unwrap(),
+        );
     });
     let schema_bytes = parse::parse(SCHEMA).unwrap();
     let cached = median(|| {
         for _ in 0..1000 {
-            std::hint::black_box(nucleus_sql::json::schema::compiled(std::hint::black_box(&schema_bytes)).unwrap());
+            std::hint::black_box(
+                nucleus_sql::json::schema::compiled(std::hint::black_box(&schema_bytes)).unwrap(),
+            );
         }
     }) / 1000.0;
-    println!("{n} documents, {fit_ours} fit; errors: nucleus {errs_ours}, jsonschema {errs_theirs}");
-    println!("{:<22} {:>10} {:>12}", "", "nucleus", "jsonschema");
     let per = |t: f64| t / n as f64 * 1e9;
-    println!("{:<22} {:>8.0}ns {:>10.0}ns", "fits (a document)", per(m_ours), per(m_theirs));
-    println!("{:<22} {:>8.0}ns {:>10.0}ns", "errors (a document)", per(e_ours), per(e_theirs));
-    println!("{:<22} {:>8.1}µs {:>10.1}µs", "compile (the schema)", c_ours * 1e6, c_theirs * 1e6);
+    for (what, ours, theirs) in [
+        ("fits (a document)", m_ours, m_theirs),
+        ("errors (a document)", e_ours, e_theirs),
+    ] {
+        metric(what, per(ours), "ns", "nucleus");
+        metric(what, per(theirs), "ns", "jsonschema");
+    }
+    metric("compile (the schema)", c_ours * 1e6, "µs", "nucleus");
+    metric("compile (the schema)", c_theirs * 1e6, "µs", "jsonschema");
+    metric("compiled, kept", cached * 1e9, "ns", "nucleus");
+    println!(
+        "{n} documents, {fit_ours} fit; errors: nucleus {errs_ours}, jsonschema {errs_theirs}"
+    );
+    println!("{:<22} {:>10} {:>12}", "", "nucleus", "jsonschema");
+    println!(
+        "{:<22} {:>8.0}ns {:>10.0}ns",
+        "fits (a document)",
+        per(m_ours),
+        per(m_theirs)
+    );
+    println!(
+        "{:<22} {:>8.0}ns {:>10.0}ns",
+        "errors (a document)",
+        per(e_ours),
+        per(e_theirs)
+    );
+    println!(
+        "{:<22} {:>8.1}µs {:>10.1}µs",
+        "compile (the schema)",
+        c_ours * 1e6,
+        c_theirs * 1e6
+    );
     println!("{:<22} {:>8.0}ns", "compiled, kept", cached * 1e9);
 }

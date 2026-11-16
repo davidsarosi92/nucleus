@@ -24,7 +24,10 @@ cosine, its defaults): text and vector alone, and RRF as ParadeDB's
 documentation writes it — each ranking's first 100 rows in a CTE, ranked
 by `RANK()`, joined `FULL OUTER` on the id — with `hnsw.ef_search` 100
 for it (pgvector's HNSW returns at most `ef_search` rows), timed by
-`psql`'s `\\timing` (the server's time, without the client's).
+`psql`'s `\\timing` (the server's time, without the client's), in
+Docker (no native build here), which its results record.  Every number is
+printed as an `@metric` line too, for `bench/method.py run` (PLAN.md
+§M14.31).
 """
 
 import argparse
@@ -43,6 +46,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
                                 "drivers", "python"))
 import beir  # noqa: E402
 import nucleus  # noqa: E402
+from beir import method  # noqa: E402
+
+
+def emit(name, mode, scores, times, system):
+    method.emit(f"{name} {mode}: nDCG@10", sum(scores) / len(scores), unit="nDCG@10", system=system)
+    method.emit(f"{name} {mode}: mean", sum(times) / len(times), system=system)
+    method.emit(f"{name} {mode}: p50", times[len(times) // 2], system=system)
 
 
 def vec(v):
@@ -69,6 +79,17 @@ def paradedb(a):
         return subprocess.run(cmd, input=stdin, capture_output=True, text=True,
                               check=True).stdout
 
+    subprocess.run(["docker", "start", a.container], capture_output=True)
+    for _ in range(300):
+        if subprocess.run(["docker", "exec", a.container, "pg_isready", "-U", "postgres"],
+                          capture_output=True).returncode == 0:
+            break
+        time.sleep(0.2)
+    psql("CREATE EXTENSION IF NOT EXISTS vector")
+    method.emit_system("paradedb", {
+        "version": "pg_search " + psql("SELECT extversion FROM pg_extension WHERE extname = 'pg_search'").strip()
+                   + ", pgvector " + psql("SELECT extversion FROM pg_extension WHERE extname = 'vector'").strip(),
+        "native": False, "settings": "the image's (paradedb/paradedb), in Docker's Linux VM"})
     print("ParadeDB hybrid: pg_search BM25 (English stemmer), pgvector HNSW cosine, RRF")
     print(f"{'set':10} {'mode':7} {'nDCG@10':>8} {'mean ms':>9} {'p50 ms':>9}")
     psql("CREATE EXTENSION IF NOT EXISTS vector")
@@ -145,6 +166,7 @@ def paradedb(a):
             times.sort()
             print(f"{name:10} {mode:7} {sum(scores) / len(scores):8.4f} "
                   f"{sum(times) / len(times):9.2f} {times[len(times) // 2]:9.2f}", flush=True)
+            emit(name, mode, scores, times, "paradedb")
         psql("DROP TABLE docs")
 
 
@@ -208,6 +230,7 @@ def main():
                 c.execute("CREATE INDEX docs_sv ON docs USING sparse (sv)")
                 print(f"{name:10} sparse index {(time.perf_counter() - t) * 1000:.0f} ms",
                       flush=True)
+                method.emit(f"{name}: sparse index", (time.perf_counter() - t) * 1000)
             c.execute("ANALYZE docs")
             modes = {
                 "text": "SELECT id FROM docs WHERE body @@ {q} ORDER BY score(body @@ {q}) "
@@ -245,6 +268,7 @@ def main():
                 times.sort()
                 print(f"{name:10} {mode:7} {sum(scores) / len(scores):8.4f} "
                       f"{sum(times) / len(times):9.2f} {times[len(times) // 2]:9.2f}", flush=True)
+                emit(name, mode, scores, times, "nucleus")
         c.close()
     finally:
         server.terminate()

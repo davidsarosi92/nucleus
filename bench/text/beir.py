@@ -45,6 +45,11 @@ Anserini's bag of words — a word twice counts twice there and here.
 nDCG@10 is trec_eval's as Anserini runs it (`-c -m ndcg_cut.10`): linear
 gains, every judged query (0 for one that retrieves nothing); ArguAna's query is a document of the corpus, which BEIR
 leaves out of its own ranking (`ignore_identical_ids`), and so does this.
+
+Every number is printed as an `@metric` line too, for `bench/method.py
+run`, which repeats the script (PLAN.md §M14.31).  ParadeDB runs in
+Docker (Linux in a VM on macOS: it has no native build here), which its
+results record.
 """
 
 import argparse
@@ -57,6 +62,9 @@ import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import method  # noqa: E402
 
 # Anserini's BM25 flat nDCG@10 (docs/regressions/regressions-beir-v1.0.0-*.md).
 ANSERINI = {"scifact": 0.6789, "nfcorpus": 0.3218, "arguana": 0.3970, "fiqa": 0.2361}
@@ -110,8 +118,12 @@ def lit(s):
     return "'" + s.replace("'", "''") + "'"
 
 
-def report(name, docs, scores, index_ms, times):
+def report(name, docs, scores, index_ms, times, system):
     times.sort()
+    method.emit(f"{name}: nDCG@10", sum(scores) / len(scores), unit="nDCG@10", system=system)
+    method.emit(f"{name}: CREATE INDEX", index_ms, system=system)
+    method.emit(f"{name}: mean", sum(times) / len(times), system=system)
+    method.emit(f"{name}: p50", times[len(times) // 2], system=system)
     print(f"{name:10} {docs:7} {len(scores):7} {sum(scores) / len(scores):8.4f} "
           f"{ANSERINI.get(name, float('nan')):8.4f} {index_ms:9.0f} "
           f"{sum(times) / len(times):9.2f} {times[len(times) // 2]:9.2f}", flush=True)
@@ -130,6 +142,15 @@ def paradedb(a):
         return subprocess.run(cmd, input=stdin, capture_output=True, text=True,
                               check=True).stdout
 
+    subprocess.run(["docker", "start", a.container], capture_output=True)
+    for _ in range(300):
+        if subprocess.run(["docker", "exec", a.container, "pg_isready", "-U", "postgres"],
+                          capture_output=True).returncode == 0:
+            break
+        time.sleep(0.2)
+    version = psql("SELECT extversion FROM pg_extension WHERE extname = 'pg_search'").strip()
+    method.emit_system("paradedb", {"version": f"pg_search {version}", "native": False,
+                                    "settings": "the image's (paradedb/paradedb), in Docker's Linux VM"})
     print("ParadeDB pg_search, English tokenizer, k1 1.2, b 0.75")
     print(HEADER)
     for name in a.sets.split(","):
@@ -173,7 +194,7 @@ def paradedb(a):
             ranked = [x.split("|")[0] for x in lines[:-1]]
             ranked = [x for x in ranked if x != qid][:10]
             scores.append(ndcg10(ranked, qrels[qid]))
-        report(name, ndocs, scores, index_ms, times)
+        report(name, ndocs, scores, index_ms, times, "paradedb" + (", snippets" if a.snippets else ""))
         psql("DROP TABLE docs")
 
 
@@ -191,6 +212,8 @@ def snippets(c, name, qrels, queries):
     times.sort()
     print(f"{name:10} snippets        {sum(times) / len(times):8.2f} mean "
           f"{times[len(times) // 2]:8.2f} p50", flush=True)
+    method.emit(f"{name}: mean", sum(times) / len(times), system="nucleus, snippets")
+    method.emit(f"{name}: p50", times[len(times) // 2], system="nucleus, snippets")
 
 
 def filtered(c, name, qrels, queries, p, unranked):
@@ -219,9 +242,13 @@ def filtered(c, name, qrels, queries, p, unranked):
     got = []
     mean, p50 = run("")
     line = f"{name:10} filter {p:3}%  ranked {mean:8.2f} mean {p50:8.2f} p50"
+    method.emit(f"{name}: filter {p}%, mean", mean, system="nucleus, ranked by the index")
+    method.emit(f"{name}: filter {p}%, p50", p50, system="nucleus, ranked by the index")
     if unranked:
         mean, p50 = run(" + 0", check=got)
         line += f"   unranked {mean:8.2f} mean {p50:8.2f} p50"
+        method.emit(f"{name}: filter {p}%, mean", mean, system="nucleus, every match scored")
+        method.emit(f"{name}: filter {p}%, p50", p50, system="nucleus, every match scored")
     print(line, flush=True)
 
 
@@ -301,7 +328,8 @@ def main():
                     times.append((time.perf_counter() - t) * 1000)
                     ranked = [r[0] for r in rows if r[0] != qid][:10]
                     scores.append(ndcg10(ranked, rels))
-            report(name, ndocs, scores, index_ms, times)
+            report(name, ndocs, scores, index_ms, times,
+                   "nucleus" + (f" ({a.layout})" if a.layout != "row" else ""))
             if a.snippets:
                 snippets(c, name, qrels, queries)
             for p in [int(x) for x in a.filters.split(",") if x]:

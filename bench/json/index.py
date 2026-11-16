@@ -23,15 +23,16 @@ an index, then with nucleus's and PostgreSQL's:
   cannot serve `?` (PostgreSQL scans), nucleus's index can.
 
 Also each index's build, and each count asserted equal to PostgreSQL's
-(and, in nucleus, to the count without an index).  PostgreSQL runs in
-Docker (postgres:18-alpine, its defaults); nucleus as a server of the
-given binary.  Both on this machine, one at a time.
+(and, in nucleus, to the count without an index).  PostgreSQL runs
+native on this machine (bench/pg.py's cluster, tuned for it); nucleus as
+a server of the given binary.  One at a time.  Every time is printed as
+an `@metric` line too, for `bench/method.py run`, which repeats the
+whole script (PLAN.md §M14.31).
 """
 
 import argparse
 import os
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -39,9 +40,12 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "drivers", "python"))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import method  # noqa: E402
 import nucleus  # noqa: E402
+import pg  # noqa: E402
 
-PG = "nucleus-json-index-pg"
+CLUSTER = None  # the PostgreSQL cluster, while main runs
 
 QUERIES = [
     ("id", "doc->>'id' = '123457'"),
@@ -75,29 +79,28 @@ def documents(n):
         )
 
 
-def median(f, n=5):
+def times(f, n=5):
+    """n timed runs of f() after one untimed, in seconds."""
     f()
     t = []
     for _ in range(n):
         s = time.perf_counter()
         f()
         t.append(time.perf_counter() - s)
-    return statistics.median(t)
+    return t
 
 
-def psql(sql, *, timing=False):
-    cmd = ["docker", "exec", "-i", PG, "psql", "-U", "postgres", "-qAt", "-v", "ON_ERROR_STOP=1"]
-    script = ("\\timing on\n" if timing else "") + sql + "\n"
-    out = subprocess.run(cmd, input=script, capture_output=True, text=True, check=True).stdout
-    if timing:
-        ms = [float(line.split()[1]) for line in out.splitlines() if line.startswith("Time:")]
-        return ms[-1] / 1000
-    return out.strip()
+def psql(sql):
+    return CLUSTER.sql(file=sql + "\n").strip()
 
 
-def pg_time(sql, n=5):
-    psql(sql, timing=True)
-    return statistics.median(psql(sql, timing=True) for _ in range(n))
+def pg_times(sql, n=5, warm=True):
+    """n runs in one session, after one untimed (with `warm`), by psql's
+    clock."""
+    first = 1 if warm else 0
+    out = CLUSTER.sql(file="\\timing on\n" + (sql + "\n") * (n + first))
+    ms = [float(line.split()[1]) for line in out.splitlines() if line.startswith("Time:")]
+    return [m / 1000 for m in ms[first:]]
 
 
 def main():
@@ -107,20 +110,19 @@ def main():
     a.add_argument("--no-pg", action="store_true", help="nucleus alone")
     args = a.parse_args()
     docs = list(documents(args.rows))
-    pg = not args.no_pg
+    use_pg = not args.no_pg
+    global CLUSTER
 
-    if pg:
-        subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
-        subprocess.run(["docker", "run", "-d", "--name", PG, "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
-                        "postgres:18-alpine"], check=True, capture_output=True)
+    if use_pg:
+        CLUSTER = pg.Cluster(pg.DEFAULT).__enter__()
+        method.emit_system("postgresql", CLUSTER.describe())
+        psql("DROP TABLE IF EXISTS j;")
     work = tempfile.mkdtemp(prefix="nucleus-json-index-")
     server = subprocess.Popen([args.nucleus, "server", os.path.join(work, "db"), "--listen",
                                "127.0.0.1:20236"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(60):
             try:
-                if pg:
-                    psql("SELECT 1")
                 db = nucleus.connect("nucleus://nucleus:nucleus@127.0.0.1:20236/nucleus")
                 break
             except Exception:
@@ -131,18 +133,17 @@ def main():
             db.execute_many("INSERT INTO j VALUES ($1, $2::json)",
                             [(k + i, t) for i, t in enumerate(docs[k:k + 5000])])
         db.execute("ANALYZE j")
-        if pg:
+        if use_pg:
             psql("CREATE TABLE j (id int PRIMARY KEY, doc jsonb);")
             copy = "".join(f"{i}\t{t}\n" for i, t in enumerate(docs))
-            subprocess.run(["docker", "exec", "-i", PG, "psql", "-U", "postgres", "-q", "-c",
-                            "COPY j FROM STDIN"], input=copy, text=True, check=True)
+            CLUSTER.sql(file="COPY j FROM STDIN;\n" + copy + "\\.\n")
             psql("VACUUM ANALYZE j;")
         count = {name: f"SELECT count(*) FROM j WHERE {cond}" for name, cond in QUERIES}
         # Without an index.
-        scan_n = {name: median(lambda q=q: db.execute(q)) for name, q in count.items()}
+        scan_n = {name: times(lambda q=q: db.execute(q)) for name, q in count.items()}
         expect = {name: db.execute(q).rows[0][0] for name, q in count.items()}
-        scan_pg = {name: pg_time(q + ";") for name, q in count.items()} if pg else {}
-        if pg:
+        scan_pg = {name: pg_times(q + ";") for name, q in count.items()} if use_pg else {}
+        if use_pg:
             for name, q in count.items():
                 assert str(expect[name]) == psql(q + ";"), f"the same count: {name}"
         # The indexes.
@@ -152,36 +153,46 @@ def main():
             db.execute(sql)
             build_n[name] = time.perf_counter() - s
         db.execute("ANALYZE j")
-        if pg:
+        if use_pg:
             for name, sql in INDEXES["pg"]:
-                s = time.perf_counter()
-                psql(sql + ";")
-                build_pg[name] = time.perf_counter() - s
+                build_pg[name] = pg_times(sql + ";", n=0, warm=False)[0]
             psql("ANALYZE j;")
         ix_n, ix_pg = {}, {}
         for name, q in count.items():
             got = db.execute(q).rows[0][0]
             assert got == expect[name], f"{name}: {got} with the index, {expect[name]} without"
-            ix_n[name] = median(lambda q=q: db.execute(q))
-            if pg:
-                ix_pg[name] = pg_time(q + ";")
+            ix_n[name] = times(lambda q=q: db.execute(q))
+            if use_pg:
+                ix_pg[name] = pg_times(q + ";")
+        for name, _ in QUERIES:
+            method.emit(f"{name}, no index", scan_n[name], unit="s")
+            method.emit(f"{name}, indexed", ix_n[name], unit="s")
+            if use_pg:
+                method.emit(f"{name}, no index", scan_pg[name], unit="s", system="postgresql")
+                method.emit(f"{name}, indexed", ix_pg[name], unit="s", system="postgresql")
+        for name, _ in INDEXES["nucleus"]:
+            method.emit(f"build {name} index", build_n[name], unit="s", phase="write")
+            if use_pg:
+                method.emit(f"build {name} index", build_pg[name], unit="s", system="postgresql", phase="write")
+        med = method.median
         print(f"rows {args.rows}")
         print(f"{'query':<10} {'rows':>7} | {'scan s':>8} {'pg':>8} | {'index ms':>9} {'pg':>9}")
         for name, _ in QUERIES:
-            pg_scan = f"{scan_pg[name]:>8.3f}" if pg else f"{'-':>8}"
-            pg_ix = f"{ix_pg[name] * 1000:>9.2f}" if pg else f"{'-':>9}"
-            print(f"{name:<10} {expect[name]:>7} | {scan_n[name]:>8.3f} {pg_scan} | "
-                  f"{ix_n[name] * 1000:>9.2f} {pg_ix}")
+            pg_scan = f"{med(scan_pg[name]):>8.3f}" if use_pg else f"{'-':>8}"
+            pg_ix = f"{med(ix_pg[name]) * 1000:>9.2f}" if use_pg else f"{'-':>9}"
+            print(f"{name:<10} {expect[name]:>7} | {med(scan_n[name]):>8.3f} {pg_scan} | "
+                  f"{med(ix_n[name]) * 1000:>9.2f} {pg_ix}")
         print()
         print(f"{'index':<12} {'build s':>8} {'pg':>8}")
         for name, _ in INDEXES["nucleus"]:
-            pg_b = f"{build_pg[name]:>8.2f}" if pg else f"{'-':>8}"
+            pg_b = f"{build_pg[name]:>8.2f}" if use_pg else f"{'-':>8}"
             print(f"{name:<12} {build_n[name]:>8.2f} {pg_b}")
     finally:
         server.terminate()
         server.wait()
-        if pg:
-            subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+        if CLUSTER:
+            psql("DROP TABLE IF EXISTS j;")
+            CLUSTER.__exit__(None, None, None)
         shutil.rmtree(work, ignore_errors=True)
 
 

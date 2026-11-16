@@ -336,12 +336,30 @@ mod speed {
                 s.read_at(r, &mut buf).unwrap();
                 r += 60_000;
             }
+            let how = if sealed { "sealed" } else { "memory" };
+            metric(&format!("{how}: write"), &[w.as_secs_f64() * 1e3], "ms");
+            metric(
+                &format!("{how}: read"),
+                &[t.elapsed().as_secs_f64() * 1e3],
+                "ms",
+            );
             println!(
                 "{:6} write {:6.1} ms   read {:6.1} ms",
-                if sealed { "sealed" } else { "memory" },
+                how,
                 w.as_secs_f64() * 1e3,
                 t.elapsed().as_secs_f64() * 1e3
             );
         }
+    }
+
+    /// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+    /// §M14.31: the test run again, each number with its spread).
+    fn metric(name: &str, values: &[f64], unit: &str) {
+        let values: Vec<String> = values.iter().map(f64::to_string).collect();
+        println!(
+            "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+             \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+            values.join(", ")
+        );
     }
 }

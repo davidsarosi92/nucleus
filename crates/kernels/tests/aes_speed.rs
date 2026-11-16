@@ -46,6 +46,9 @@ fn aes_gcm_siv_speed() {
             let both = t.elapsed().as_secs_f64() / rounds as f64;
             best = (best.0.min(seal), best.1.min(both - seal));
         }
+        let how = if hw { "instructions" } else { "portable" };
+        metric(&format!("{how}, {len} bytes: seal"), &[best.0 * 1e6], "µs");
+        metric(&format!("{how}, {len} bytes: open"), &[best.1 * 1e6], "µs");
         println!(
             "{:12} {len:6} bytes   seal {:8.3} µs ({:5.0} MB/s)   open {:8.3} µs",
             if hw { "instructions" } else { "portable" },
@@ -54,4 +57,15 @@ fn aes_gcm_siv_speed() {
             best.1 * 1e6
         );
     }
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

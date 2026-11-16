@@ -754,5 +754,19 @@ mod speed {
             mb / one,
             mb / p
         );
+        metric("chacha20", &[mb / c], "MB/s");
+        metric("chacha20, a block at a time", &[mb / one], "MB/s");
+        metric("poly1305", &[mb / p], "MB/s");
+    }
+
+    /// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+    /// §M14.31: the test run again, each number with its spread).
+    fn metric(name: &str, values: &[f64], unit: &str) {
+        let values: Vec<String> = values.iter().map(f64::to_string).collect();
+        println!(
+            "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+             \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+            values.join(", ")
+        );
     }
 }

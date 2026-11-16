@@ -10451,7 +10451,17 @@ needs repeated runs across instances and days).
   `VACUUM ANALYZE` as its documentation has it after a bulk load (its
   first scan otherwise sets hint bits: a cold ClickBench Q0 of 1.4 s
   against 0.14 s), nucleus's in `ANALYZE` as its own has it.
-- **P1c — every other section's script** on the method.
+- **P1c — every other section's script** on the method 🔨: each
+  prints its numbers as `@metric` lines (`method.emit`; a Rust test or
+  binary its own `metric` function) and its systems' versions and
+  settings as `@system` lines, and `method.py run` repeats the whole
+  script — several commands in turn as systems (`--also LABEL=CMD`:
+  history on and off, a build and its base).  PostgreSQL moved from
+  Docker to the native cluster wherever it is compared on this machine
+  (vectors with pgvector 0.8.7, statistics, text search, JSON); ParadeDB
+  stays in Docker (its image is how it ships; recorded `native: false`),
+  and write amplification's ext4 runs stay in Docker's Linux VM, nucleus
+  and PostgreSQL alike.
 - **P1d — one script** (`bench/all.sh`): every benchmark into
   `bench/results/`, `docs/benchmarks.md`'s numbers from those files;
   then a second run, `method.py reproduce` on each.

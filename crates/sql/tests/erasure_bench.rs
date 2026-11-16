@@ -84,6 +84,7 @@ fn erasure() {
         t.elapsed(),
         size(dir) >> 20
     );
+    metric("loaded", &[(size(dir) >> 20) as f64], "MiB");
     // The planted texts: a subject's.
     let planted: Vec<Vec<u8>> = rows(&mut s, "SELECT body FROM m WHERE who = 'user-900'")
         .into_iter()
@@ -95,9 +96,19 @@ fn erasure() {
         planted.len(),
         found(&kv)
     );
+    metric(
+        "planted texts found, before",
+        &[found(&kv) as f64],
+        "places",
+    );
     s.execute("DELETE FROM m WHERE who = 'user-900'").unwrap();
     let planted_found = found(&kv);
     println!("after DELETE: {planted_found}");
+    metric(
+        "planted texts found, after DELETE",
+        &[planted_found as f64],
+        "places",
+    );
     assert!(planted_found >= planted.len() as u64);
     nucleus_sql::hnsw::upkeep_now(&kv).unwrap();
     nucleus_sql::text::index::upkeep_now(&kv).unwrap();
@@ -108,6 +119,17 @@ fn erasure() {
         "after the upkeep and a vacuum: {after} (the search: {:?})",
         t.elapsed()
     );
+    metric(
+        "planted texts found, after the upkeep and a vacuum",
+        &[after as f64],
+        "places",
+    );
+    metric(
+        "the search of the files",
+        &[t.elapsed().as_secs_f64() * 1e3],
+        "ms",
+    );
+    let (mut deletes, mut forgets) = (Vec::new(), Vec::new());
     for round in 0..3 {
         let t = Instant::now();
         s.execute(&format!("DELETE FROM m WHERE who = 'user-{}'", 500 + round))
@@ -121,15 +143,36 @@ fn erasure() {
             "DELETE {delete:?}, FORGET {forget:?} (erasure {}, rows {}, scrubbed {}, found {})",
             r[0], r[1], r[2], r[3]
         );
+        deletes.push(delete.as_secs_f64() * 1e3);
+        forgets.push(forget.as_secs_f64() * 1e3);
         assert_eq!(r[2..], ["t", "0"]);
     }
+    metric("DELETE a subject's rows", &deletes, "ms");
+    metric("FORGET SUBJECT", &forgets, "ms");
     s.execute("FORGET SUBJECT 'user-900'").unwrap();
     let left = found(&kv);
     println!("user-900 forgotten too: {left}; {} MiB", size(dir) >> 20);
+    metric(
+        "planted texts found, after FORGET SUBJECT",
+        &[left as f64],
+        "places",
+    );
+    metric("after the erasures", &[(size(dir) >> 20) as f64], "MiB");
     assert_eq!(left, 0);
     drop(s);
     drop(kv);
     if given.is_none() {
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

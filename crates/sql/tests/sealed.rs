@@ -345,6 +345,21 @@ fn the_cost_of_sealing() {
         }
         let get = t.elapsed() / 20_000;
         println!("{storage:>6}: load {n} rows {load:.2?}, scan {scan:.2?}, lookup {get:.2?}");
+        metric(
+            &format!("{storage}: load {n} rows"),
+            &[load.as_secs_f64() * 1e3],
+            "ms",
+        );
+        metric(
+            &format!("{storage}: scan"),
+            &[scan.as_secs_f64() * 1e3],
+            "ms",
+        );
+        metric(
+            &format!("{storage}: lookup"),
+            &[get.as_secs_f64() * 1e6],
+            "µs",
+        );
     }
 }
 
@@ -399,9 +414,19 @@ fn the_cost_of_a_sealed_memory_store() {
                 assert!(!found.is_empty());
             }
             let recall = t.elapsed() / calls as u32;
+            let how = if sealed { "sealed" } else { "indexed" };
             println!(
-                "{per:>4} memories a subject, {:>7}: load {n} {load:.2?}, recall {recall:.2?}",
-                if sealed { "sealed" } else { "indexed" }
+                "{per:>4} memories a subject, {how:>7}: load {n} {load:.2?}, recall {recall:.2?}"
+            );
+            metric(
+                &format!("{per} memories a subject, {how}: load"),
+                &[load.as_secs_f64()],
+                "s",
+            );
+            metric(
+                &format!("{per} memories a subject, {how}: recall"),
+                &[recall.as_secs_f64() * 1e3],
+                "ms",
             );
         }
     }
@@ -573,5 +598,16 @@ fn a_sealed_memory_store() {
             "SELECT content FROM recall('notes', 'bob', 'tea', 1)"
         ),
         ["drinks tea, black, no sugar"]
+    );
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
     );
 }

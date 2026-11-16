@@ -4,7 +4,7 @@ PostgreSQL clients write for a GIN index, on BEIR's corpora, against
 PostgreSQL with that GIN index.
 
     bench/text/tsearch.py nucleus BINARY [--sets scifact,nfcorpus,fiqa] [--values] [--rank]
-    bench/text/tsearch.py postgres [--container nucleus-paradedb] [--sets …] [--rank]
+    bench/text/tsearch.py postgres [--sets …] [--rank]
 
 Each BEIR query (its words, lower case) counts the documents it matches,
 all its words (`plainto_tsquery`) or any (`websearch_to_tsquery` of the
@@ -15,9 +15,9 @@ words joined by `or`):
 nucleus: through PostgreSQL's protocol (psycopg, the query a literal, so
 `@@` rewrites itself to the text index's `body @@ q` by `english`); with
 `--values`, also over a stored `tsvector` column without an index — the
-values computed as PostgreSQL computes them.  PostgreSQL: `CREATE INDEX
-… USING gin (to_tsvector('english', body))`, timed by `psql`'s `\\timing`
-(the server's time).  The mean and median ms of a query, the second of
+values computed as PostgreSQL computes them.  PostgreSQL (native,
+bench/pg.py's cluster): `CREATE INDEX … USING gin (to_tsvector('english',
+body))`, timed by `psql`'s `\\timing` (the round trip on its socket).  The mean and median ms of a query, the second of
 two rounds, and the documents matched over all queries (the two systems'
 English analyses differ a little: PostgreSQL's parser is its own).
 
@@ -28,6 +28,9 @@ matches by `ts_rank` (`rank`), and with each one's `ts_headline`
     SELECT id[, length(ts_headline('english', body, q))] FROM docs
     WHERE to_tsvector('english', body) @@ q
     ORDER BY ts_rank(to_tsvector('english', body), q) DESC, id LIMIT 10
+
+Every number is printed as an `@metric` line too, for `bench/method.py
+run` (PLAN.md §M14.31).
 """
 
 import argparse
@@ -42,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                                 "drivers", "python"))
 import beir  # noqa: E402
+from beir import method  # noqa: E402
 
 SHAPES = {
     "all": "plainto_tsquery('english', {q})",
@@ -66,8 +70,12 @@ def query_text(shape, q):
     return beir.lit(" ".join(ws) if shape == "all" else " or ".join(ws))
 
 
-def report(name, mode, times, found):
+def report(name, mode, times, found, system):
     times.sort()
+    method.emit(f"{name} {mode}: mean", sum(times) / len(times), system=system)
+    method.emit(f"{name} {mode}: p50", times[len(times) // 2], system=system)
+    method.emit(f"{name} {mode}: " + ("nDCG@10" if isinstance(found, float) else "found"), found,
+                unit="nDCG@10" if isinstance(found, float) else "documents", system=system)
     found = f"{found:10.4f}" if isinstance(found, float) else f"{found:10}"
     print(f"{name:10} {mode:12} {sum(times) / len(times):9.2f} {times[len(times) // 2]:9.2f} "
           f"{found}", flush=True)
@@ -79,9 +87,18 @@ def ranked_modes(a):
 
 
 def postgres(a):
+    import pg
+    with pg.Cluster(pg.DEFAULT) as cluster:
+        method.emit_system("postgresql", cluster.describe())
+        try:
+            postgres_on(a, cluster)
+        finally:
+            cluster.sql("DROP TABLE IF EXISTS docs")
+
+
+def postgres_on(a, cluster):
     def psql(sql=None, stdin=None):
-        cmd = ["docker", "exec", "-i", a.container, "psql", "-U", "postgres", "-d", "postgres",
-               "-At", "-v", "ON_ERROR_STOP=1"]
+        cmd = cluster.tool("psql") + ["-X", "-At", "-v", "ON_ERROR_STOP=1"]
         if sql:
             cmd += ["-c", sql]
         return subprocess.run(cmd, input=stdin, capture_output=True, text=True,
@@ -101,13 +118,11 @@ def postgres(a):
                         + b.replace("\\", "\\\\").replace("\t", "\\t")
                         .replace("\n", "\\n").replace("\r", "\\r") + "\n")
             f.flush()
-            os.chmod(f.name, 0o644)
-            subprocess.run(["docker", "cp", f.name, f"{a.container}:/tmp/docs.tsv"], check=True)
-        psql("COPY docs FROM '/tmp/docs.tsv'")
-        subprocess.run(["docker", "exec", a.container, "rm", "/tmp/docs.tsv"], check=True)
-        t = time.perf_counter()
-        psql("CREATE INDEX docs_gin ON docs USING gin (to_tsvector('english', body))")
-        print(f"{name:10} GIN built in {(time.perf_counter() - t) * 1000:.0f} ms", flush=True)
+            psql(f"COPY docs FROM '{f.name}'")
+        out = psql(stdin="\\timing on\nCREATE INDEX docs_gin ON docs USING gin (to_tsvector('english', body));\n")
+        ms = float(out.split("Time: ")[1].split(" ms")[0])
+        print(f"{name:10} GIN built in {ms:.0f} ms", flush=True)
+        method.emit(f"{name}: index built", ms, system="postgresql")
         psql("ANALYZE docs")
         for shape, maker in SHAPES.items():
             script = ["SET client_min_messages = warning;", "\\timing on"]
@@ -123,7 +138,7 @@ def postgres(a):
                 lines = run.strip().split("\n")
                 found += int(lines[0])
                 times.append(float(lines[-1].split("Time: ")[1].split(" ms")[0]))
-            report(name, shape, times, found)
+            report(name, shape, times, found, "postgresql")
         for label, shape, sql in ranked_modes(a):
             script = ["SET client_min_messages = warning;", "\\timing on"]
             for qid in qrels:
@@ -139,7 +154,7 @@ def postgres(a):
                 ids = [l.split("|")[0] for l in lines[:-1]]
                 scores.append(beir.ndcg10(ids, qrels[qid]))
                 times.append(float(lines[-1].split("Time: ")[1].split(" ms")[0]))
-            report(name, label, times, sum(scores) / len(scores))
+            report(name, label, times, sum(scores) / len(scores), "postgresql")
         psql("DROP TABLE docs")
 
 
@@ -178,6 +193,7 @@ def nucleus_side(a):
                       "WITH (analyzer = 'english')")
             print(f"{name:10} text index built in {(time.perf_counter() - t) * 1000:.0f} ms",
                   flush=True)
+            method.emit(f"{name}: index built", (time.perf_counter() - t) * 1000)
             modes = [("index", "to_tsvector('english', body)")]
             if a.values:
                 pg.execute("ALTER TABLE docs ADD COLUMN tv tsvector")
@@ -194,7 +210,7 @@ def nucleus_side(a):
                             t = time.perf_counter()
                             found += pg.execute(sql).fetchone()[0]
                             times.append((time.perf_counter() - t) * 1000)
-                    report(name, f"{shape} {mode}", times, found)
+                    report(name, f"{shape} {mode}", times, found, "nucleus, pg-compat")
             for label, shape, sql in ranked_modes(a):
                 for _ in range(2):
                     times, scores = [], []
@@ -205,7 +221,7 @@ def nucleus_side(a):
                         ids = [r[0] for r in pg.execute(q).fetchall()]
                         times.append((time.perf_counter() - t) * 1000)
                         scores.append(beir.ndcg10(ids, qrels[qid]))
-                report(name, label, times, sum(scores) / len(scores))
+                report(name, label, times, sum(scores) / len(scores), "nucleus, pg-compat")
         pg.close()
         c.close()
     finally:
@@ -218,7 +234,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("system", choices=["nucleus", "postgres"])
     ap.add_argument("binary", nargs="?")
-    ap.add_argument("--container", default="nucleus-paradedb")
     ap.add_argument("--sets", default="scifact,nfcorpus,fiqa")
     ap.add_argument("--data", default="target/text-data")
     ap.add_argument("--values", action="store_true")

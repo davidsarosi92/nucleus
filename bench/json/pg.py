@@ -26,15 +26,16 @@ timed (the median of five runs, the client's clock):
 - size: each whole file as one value, `pg_column_size` against nucleus's
   binary form (from `bench/json`'s binary: the `form KB` column).
 
-PostgreSQL runs in Docker (postgres:18-alpine, its defaults); nucleus as a
-server of the given binary.  Both on this machine, one at a time.
+PostgreSQL runs native on this machine (bench/pg.py's cluster, tuned for
+it); nucleus as a server of the given binary.  One at a time.  Every
+time is printed as an `@metric` line too, for `bench/method.py run`,
+which repeats the whole script (PLAN.md §M14.31).
 """
 
 import argparse
 import json
 import os
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -42,10 +43,13 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "drivers", "python"))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import method  # noqa: E402
 import nucleus  # noqa: E402
+import pg  # noqa: E402
 
 DATA = os.path.join(ROOT, "target", "bench-data", "json")
-PG = "nucleus-json-bench-pg"
+CLUSTER = None  # the PostgreSQL cluster, while main runs
 
 
 def documents():
@@ -60,29 +64,35 @@ def documents():
     }
 
 
-def median(f, n=5):
+def times(f, n=5):
+    """n timed runs of f() after one untimed, in seconds."""
     f()
     t = []
     for _ in range(n):
         s = time.perf_counter()
         f()
         t.append(time.perf_counter() - s)
-    return statistics.median(t)
+    return t
 
 
 def psql(sql, *, timing=False):
-    cmd = ["docker", "exec", "-i", PG, "psql", "-U", "postgres", "-qAt", "-v", "ON_ERROR_STOP=1"]
     script = ("\\timing on\n" if timing else "") + sql + "\n"
-    out = subprocess.run(cmd, input=script, capture_output=True, text=True, check=True).stdout
+    out = CLUSTER.sql(file=script)
     if timing:
         ms = [float(line.split()[1]) for line in out.splitlines() if line.startswith("Time:")]
         return ms[-1] / 1000
     return out.strip()
 
 
-def pg_time(sql, n=5):
-    psql(sql, timing=True)
-    return statistics.median(psql(sql, timing=True) for _ in range(n))
+def copy_in(table, lines):
+    CLUSTER.sql(file=f"COPY {table} FROM STDIN;\n" + lines + "\\.\n")
+
+
+def pg_times(sql, n=5):
+    """n runs in one session, after one untimed, by psql's clock."""
+    out = CLUSTER.sql(file="\\timing on\n" + (sql + "\n") * (n + 1))
+    ms = [float(line.split()[1]) for line in out.splitlines() if line.startswith("Time:")]
+    return [m / 1000 for m in ms[1:]]
 
 
 def main():
@@ -91,17 +101,16 @@ def main():
     a.add_argument("--rows", type=int, default=50_000)
     args = a.parse_args()
     docs = documents()
+    global CLUSTER
 
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
-    subprocess.run(["docker", "run", "-d", "--name", PG, "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
-                    "postgres:18-alpine"], check=True, capture_output=True)
+    CLUSTER = pg.Cluster(pg.DEFAULT).__enter__()
+    method.emit_system("postgresql", CLUSTER.describe())
     work = tempfile.mkdtemp(prefix="nucleus-json-bench-")
     server = subprocess.Popen([args.nucleus, "server", os.path.join(work, "db"), "--listen",
                                "127.0.0.1:20235"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(60):
             try:
-                psql("SELECT 1")
                 db = nucleus.connect("nucleus://nucleus:nucleus@127.0.0.1:20235/nucleus")
                 break
             except Exception:
@@ -136,19 +145,18 @@ def main():
             # PostgreSQL: COPY the texts in.
             psql(f"DROP TABLE IF EXISTS src; CREATE TABLE src (id int, doc text);")
             copy = "".join(f"{i}\t{t.replace(chr(92), chr(92) * 2)}\n" for i, t in enumerate(rows))
-            subprocess.run(["docker", "exec", "-i", PG, "psql", "-U", "postgres", "-q", "-c",
-                            "COPY src FROM STDIN"], input=copy, text=True, check=True)
+            copy_in("src", copy)
             psql("DROP TABLE IF EXISTS j; CREATE TABLE j AS SELECT id, doc::jsonb AS doc FROM src; "
                  "VACUUM ANALYZE src; VACUUM ANALYZE j;")
-            pg_parse = pg_time("SELECT count(*) FROM src WHERE doc::jsonb IS NOT NULL;")
-            pg_out = pg_time("SELECT sum(length(doc::text)) FROM j;")
-            pg_field = pg_time(f"SELECT sum(length({fields[name]})) FROM j;")
+            pg_parse = pg_times("SELECT count(*) FROM src WHERE doc::jsonb IS NOT NULL;")
+            pg_out = pg_times("SELECT sum(length(doc::text)) FROM j;")
+            pg_field = pg_times(f"SELECT sum(length({fields[name]})) FROM j;")
             path = f"SELECT count(*) FROM j WHERE doc @? '{paths[name]}'"
-            pg_path = pg_time(path + ";")
+            pg_path = pg_times(path + ";")
             value = f"SELECT sum(JSON_VALUE(doc, '{values[name]}' RETURNING bigint)) FROM j"
-            pg_value = pg_time(value + ";")
+            pg_value = pg_times(value + ";")
             table = f"SELECT count(*), {table_sum[name]} FROM j, JSON_TABLE(j.doc, {tables[name]}"
-            pg_table = pg_time(table + ";")
+            pg_table = pg_times(table + ";")
             # nucleus: the same rows.
             db.execute("DROP TABLE IF EXISTS src")
             db.execute("DROP TABLE IF EXISTS j")
@@ -157,36 +165,40 @@ def main():
                 db.execute_many("INSERT INTO src VALUES ($1, $2)",
                                 [(k + i, t) for i, t in enumerate(rows[k:k + 5000])])
             db.execute("CREATE TABLE j AS SELECT id, doc::json AS doc FROM src")
-            n_parse = median(lambda: db.execute("SELECT count(*) FROM src WHERE doc::json IS NOT NULL"))
-            n_out = median(lambda: db.execute("SELECT sum(length(doc::text)) FROM j"))
+            n_parse = times(lambda: db.execute("SELECT count(*) FROM src WHERE doc::json IS NOT NULL"))
+            n_out = times(lambda: db.execute("SELECT sum(length(doc::text)) FROM j"))
             field = f"SELECT sum(length({fields[name]})) FROM j"
             assert str(db.execute(field).rows[0][0]) == psql(field + ";"), "the same field sums"
-            n_field = median(lambda: db.execute(field))
+            n_field = times(lambda: db.execute(field))
             assert str(db.execute(path).rows[0][0]) == psql(path + ";"), "the same path counts"
-            n_path = median(lambda: db.execute(path))
+            n_path = times(lambda: db.execute(path))
             assert str(db.execute(value).rows[0][0]) == psql(value + ";"), "the same value sums"
-            n_value = median(lambda: db.execute(value))
+            n_value = times(lambda: db.execute(value))
             got = "|".join(str(x) for x in db.execute(table).rows[0])
             assert got == psql(table + ";"), f"the same table sums: {got}"
-            n_table = median(lambda: db.execute(table))
-            print(f"{name:<14} {len(rows):>7} {mb:>6.1f} | {n_parse:>8.3f} {pg_parse:>8.3f} | "
-                  f"{n_out:>8.3f} {pg_out:>8.3f} | {n_field:>8.3f} {pg_field:>8.3f} | "
-                  f"{n_path:>8.3f} {pg_path:>8.3f} | {n_value:>8.3f} {pg_value:>8.3f} | "
-                  f"{n_table:>8.3f} {pg_table:>8.3f}", flush=True)
+            n_table = times(lambda: db.execute(table))
+            pairs = {"parse": (n_parse, pg_parse), "output": (n_out, pg_out), "field": (n_field, pg_field),
+                     "path": (n_path, pg_path), "value": (n_value, pg_value), "table": (n_table, pg_table)}
+            for op, (n_t, pg_t) in pairs.items():
+                method.emit(f"{op} ({name})", n_t, unit="s")
+                method.emit(f"{op} ({name})", pg_t, unit="s", system="postgresql")
+            cells = " | ".join(f"{method.median(n_t):>8.3f} {method.median(pg_t):>8.3f}"
+                               for n_t, pg_t in pairs.values())
+            print(f"{name:<14} {len(rows):>7} {mb:>6.1f} | {cells}", flush=True)
         print()
         print(f"{'file':<20} {'text KB':>8} {'jsonb KB':>9}")
         for f in ("canada.json", "citm_catalog.json", "twitter.json"):
             text = open(os.path.join(DATA, f), encoding="utf-8").read()
             psql("DROP TABLE IF EXISTS one; CREATE TABLE one (doc text);")
-            subprocess.run(["docker", "exec", "-i", PG, "psql", "-U", "postgres", "-q", "-c",
-                            "COPY one FROM STDIN"], input=text.replace("\\", "\\\\").replace("\n", " ") + "\n",
-                           text=True, check=True)
+            copy_in("one", text.replace("\\", "\\\\").replace("\n", " ") + "\n")
             size = int(psql("SELECT pg_column_size(doc::jsonb) FROM one;"))
             print(f"{f:<20} {len(text.encode()) / 1024:>8.0f} {size / 1024:>9.0f}")
+            method.emit(f"size ({f})", size / 1024, unit="KB", system="postgresql")
     finally:
         server.terminate()
         server.wait()
-        subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+        psql("DROP TABLE IF EXISTS src; DROP TABLE IF EXISTS j; DROP TABLE IF EXISTS one;")
+        CLUSTER.__exit__(None, None, None)
         shutil.rmtree(work, ignore_errors=True)
 
 

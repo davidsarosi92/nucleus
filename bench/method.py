@@ -447,12 +447,17 @@ def emit_system(name, info):
     print("@system " + json.dumps({name: info}), flush=True)
 
 
-def gather(text, into, systems):
-    """The `@metric` and `@system` lines of a run's output."""
+def gather(text, into, systems, label=None):
+    """The `@metric` and `@system` lines of a run's output; with `label`
+    (one of several commands run in turn), the command's label names the
+    system ("nucleus" alone; another as "system (label)")."""
     for line in text.splitlines():
         if line.startswith(MARK):
             m = json.loads(line[len(MARK):])
-            key = (m["name"], m.get("phase", "warm"), m.get("system", "nucleus"))
+            system = m.get("system", "nucleus")
+            if label:
+                system = label if system == "nucleus" else f"{system} ({label})"
+            key = (m["name"], m.get("phase", "warm"), system)
             into.setdefault(key, {"unit": m.get("unit", "ms"), "values": []})["values"].extend(m["values"])
         elif line.startswith("@system "):
             systems.update(json.loads(line[len("@system "):]))
@@ -478,7 +483,7 @@ def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True
                         sys.stderr.write(line)
                 if p.wait() != 0:
                     raise SystemExit(f"{label}: exit {p.returncode}")
-                gather("".join(lines), got, systems)
+                gather("".join(lines), got, systems, label if len(commands) > 1 else None)
         worst = max((cv(v["values"]) for v in got.values()), default=0)
         if worst <= bound or attempts > retries:
             samples = [Sample(name, system, v["values"], phase, flagged=cv(v["values"]) > bound,

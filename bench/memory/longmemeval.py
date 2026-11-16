@@ -59,6 +59,7 @@ _spec = importlib.util.spec_from_file_location(
 _embed = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_embed)
 Server, jobs, lit = _embed.Server, _embed.jobs, _embed.lit
+method = _embed.method
 
 K_TURN = (5, 10, 50)
 K_SESSION = (5, 10)
@@ -198,6 +199,7 @@ def load(c, a, data):
         print(f"{len(data)} questions, {n} memories: loaded in {load_s:.1f} s; {njobs} jobs "
               f"embedded in {embed_s:.0f} s ({ntokens} tokens, {ntokens / embed_s:.0f} a second)",
               flush=True)
+        method.emit("embedding, tokens/s", ntokens / embed_s, unit="tokens/s")
         return n
 
 
@@ -258,6 +260,8 @@ def rank(c, data, n):
             allrows = [x for rows in scores[r].values() for x in rows]
             mean = np.array(allrows).mean(axis=0)
             print(f"{r:14}" + "".join(f"{v:8.3f}" for v in mean))
+            for h, v in zip(head, mean):
+                method.emit(h, v, unit="score", system=r)
         print("\nrecall() by question type (turn R@10, session R@5):")
         for qt in sorted(scores["recall"]):
             m = np.array(scores["recall"][qt]).mean(axis=0)
@@ -291,20 +295,24 @@ def rank(c, data, n):
             remember.append(time.perf_counter() - t)
         remember.sort()
 
-        def show(r, ts):
+        def show(r, ts, when):
             ts.sort()
             print(f"  {r:13} median {statistics.median(ts) * 1000:7.2f} ms, "
                   f"p95 {ts[int(len(ts) * 0.95)] * 1000:7.2f} ms")
+            method.emit(f"{r}, {when}: median", statistics.median(ts) * 1000)
+            method.emit(f"{r}, {when}: p95", ts[int(len(ts) * 0.95)] * 1000)
         print(f"\nOver ~{n // len(data)} memories of a subject among {n} (client to server, "
               f"TCP), k={DEPTH}.  Not analyzed, the query's vector made in recall's:")
         for r, ts in times.items():
-            show(r, ts)
+            show(r, ts, "not analyzed")
         print("Analyzed, the query's vector made before:")
         for r, ts in analyzed.items():
-            show(r, ts)
+            show(r, ts, "analyzed")
         print(f"REMEMBER ({len(remember)} turns, one at a time, each embedded): median "
               f"{statistics.median(remember) * 1000:.2f} ms, "
               f"p95 {remember[int(len(remember) * 0.95)] * 1000:.2f} ms")
+        method.emit("REMEMBER: median", statistics.median(remember) * 1000)
+        method.emit("REMEMBER: p95", remember[int(len(remember) * 0.95)] * 1000)
 
 
 if __name__ == "__main__":

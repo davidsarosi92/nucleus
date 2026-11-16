@@ -3,7 +3,7 @@
 # corpora (serde-rs/json-benchmark's copies of nativejson-benchmark's
 # canada, citm_catalog and twitter), then runs bench/json against
 # serde_json and, given a nucleus binary, bench/json/pg.py against
-# PostgreSQL in Docker.
+# PostgreSQL native on this machine (bench/pg.py).
 #
 #   bench/json/run.sh [target/release/nucleus]
 set -euo pipefail

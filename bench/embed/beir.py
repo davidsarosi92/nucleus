@@ -29,7 +29,9 @@ For each set, in a new server (`BINARY server DIR --no-auth`):
    bits on any threads and in any batch), and no document without its
    chunks.
 
-Run it under a memory cap (`target/bench-tools/memcap.sh`).
+Run it under a memory cap (`target/bench-tools/memcap.sh`).  Every number
+is printed as an `@metric` line too, for `bench/method.py run`, which
+repeats the script (PLAN.md §M14.31).
 """
 
 import argparse
@@ -46,6 +48,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "text"))
 import beir  # noqa: E402
+from beir import method  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                                 "drivers", "python"))
@@ -192,6 +195,11 @@ def run(a, name):
               f"loaded and chunked in {load_s:.1f} s; {njobs} vectors in {embed_s:.0f} s "
               f"({njobs / embed_s:.0f} a second, {ntokens / embed_s:.0f} tokens a second), "
               f"the server killed once", flush=True)
+        method.emit(f"{name}: documents", len(docs), unit="count")
+        method.emit(f"{name}: chunks", nchunks, unit="count")
+        method.emit(f"{name}: vectors", njobs, unit="count")
+        method.emit(f"{name}: vectors/s", njobs / embed_s, unit="vectors/s")
+        method.emit(f"{name}: tokens/s", ntokens / embed_s, unit="tokens/s")
 
         def rank_all():
             rd = {q: ranked_docs(c, queries[q]) for q in qrels}
@@ -267,6 +275,11 @@ def main():
           f"{'docs after':>11} {'chunks after':>13}")
     for r in results:
         fe = f"{r['fastembed_exact']:10.4f}" if r["fastembed_exact"] is not None else f"{'-':>10}"
+        for key, label in (("docs_hnsw", "documents"), ("chunks_hnsw", "chunks"), ("docs_exact", "documents, exact"),
+                           ("fastembed_exact", "fastembed, exact"), ("docs_hnsw_after", "documents after"),
+                           ("chunks_hnsw_after", "chunks after")):
+            if r[key] is not None:
+                method.emit(f"{r['set']}: nDCG@10, {label}", r[key], unit="nDCG@10")
         print(f"{r['set']:10} {r['docs_hnsw']:8.4f} {r['chunks_hnsw']:8.4f} "
               f"{r['docs_exact']:12.4f} {fe} {r['docs_hnsw_after']:11.4f} "
               f"{r['chunks_hnsw_after']:13.4f}")

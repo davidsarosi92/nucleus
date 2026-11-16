@@ -8,15 +8,15 @@ ten not fitting): loaded into a table without a check and into one with
 `CHECK (json_matches_schema(args, '<schema>'))` (the fitting ones; the
 others refused one by one), and `count(*) … WHERE
 json_matches_schema(args, '<schema>')` against `count(*)` over the
-table.  The client's clock, the median of five; nucleus as a server of
-the given binary.
+table.  The client's clock, the median of five (of three for the loads);
+nucleus as a server of the given binary.  Every time is printed as an
+`@metric` line too, for `bench/method.py run` (PLAN.md §M14.31).
 """
 
 import argparse
 import json
 import os
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -24,6 +24,8 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "drivers", "python"))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import method  # noqa: E402
 import nucleus  # noqa: E402
 
 SCHEMA = {
@@ -53,14 +55,17 @@ def document(i):
             "days": i % 14 + 1, "hours": [(h * 5 + i) % 24 for h in range(i % 6)], "detail": detail}
 
 
-def median(f, n=5):
+def median(name, f, n=5, phase="warm"):
+    """The median of n timed runs of f() after one untimed, in seconds;
+    the runs emitted as `name`."""
     f()
     t = []
     for _ in range(n):
         s = time.perf_counter()
         f()
         t.append(time.perf_counter() - s)
-    return statistics.median(t)
+    method.emit(name, t, unit="s", phase=phase)
+    return method.median(t)
 
 
 def main():
@@ -89,8 +94,8 @@ def main():
             for k in range(0, len(fit), 5000):
                 db.execute_many("INSERT INTO c VALUES ($1, $2)", fit[k:k + 5000])
 
-        plain = median(lambda: load(False), 3)
-        checked = median(lambda: load(True), 3)
+        plain = median("load without a check", lambda: load(False), 3, "write")
+        checked = median("load with the CHECK", lambda: load(True), 3, "write")
         refused = 0
         for i, d in enumerate(docs[:2000]):
             if i % 10 == 7:
@@ -102,12 +107,12 @@ def main():
         assert refused == 200, refused
         n = db.execute("SELECT count(*) FROM c").rows[0][0]
         assert n == len(fit), n
-        count = median(lambda: db.execute("SELECT count(*) FROM c"))
+        count = median("count(*)", lambda: db.execute("SELECT count(*) FROM c"))
         q = f"SELECT count(*) FROM c WHERE json_matches_schema(args, '{schema}')"
         assert db.execute(q).rows[0][0] == len(fit)
-        matches = median(lambda: db.execute(q))
+        matches = median("count matching", lambda: db.execute(q))
         q = f"SELECT sum(cardinality(json_schema_errors(args, '{schema}'))) FROM c"
-        errors = median(lambda: db.execute(q))
+        errors = median("sum of errors", lambda: db.execute(q))
         print(f"rows {len(fit)}")
         print(f"load without a check   {plain:8.3f} s")
         print(f"load with the CHECK    {checked:8.3f} s  (+{(checked - plain) / len(fit) * 1e9:.0f} ns a row)")

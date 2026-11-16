@@ -15,6 +15,8 @@ and — for bge — also its default, Qdrant's optimized export
 the encoder, not loading).  Tokens are counted by the models'
 tokenizers, cut to 512.  Run it under a memory cap; fastembed's
 `parallel` is not used (it copies the model into a process per core).
+Every number is printed as an `@metric` line too, for `bench/method.py
+run`, which repeats the script (PLAN.md §M14.31).
 """
 
 import argparse
@@ -26,7 +28,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import encoder  # noqa: E402
+import method  # noqa: E402
 
 MODELS = {
     "bge-small-en-v1.5": ("BAAI/bge-small-en-v1.5", "cls"),
@@ -80,6 +84,8 @@ def main():
                     "--example", "embed"], check=True)
     texts = encoder.sample(a.data, a.texts)
     from tokenizers import Tokenizer
+    import fastembed
+    method.emit_system("fastembed", {"version": fastembed.__version__})
     print(f"{'model':24} {'runtime':34} {'threads':>7} {'texts/s':>9} {'tokens/s':>10}")
     for name in a.only.split(","):
         d = os.path.join(a.models, name)
@@ -96,6 +102,10 @@ def main():
                 s = run()
                 print(f"{name:24} {what:34} {threads:7} {len(texts) / s:9.1f} {tokens / s:10.0f}",
                       flush=True)
+                method.emit(f"{name}, {threads} thread{'s' if threads > 1 else ''}: tokens/s", tokens / s,
+                            unit="tokens/s", system=what)
+                method.emit(f"{name}, {threads} thread{'s' if threads > 1 else ''}: texts/s", len(texts) / s,
+                            unit="texts/s", system=what)
 
 
 if __name__ == "__main__":

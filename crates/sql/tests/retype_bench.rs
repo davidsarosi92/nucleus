@@ -127,6 +127,7 @@ fn type_change() {
             .unwrap();
             secs.push(at.elapsed().as_secs_f64());
         }
+        metric(&format!("idle, ALTER COLUMN … TYPE{form}"), &secs, "s");
         println!("idle, ALTER COLUMN … TYPE{form}: {} s", spread(secs));
     }
 
@@ -144,6 +145,9 @@ fn type_change() {
     std::thread::sleep(Duration::from_secs(2));
     stop.store(true, Ordering::SeqCst);
     let (lat, _) = handle.join().unwrap();
+    metric("a writer alone", &[lat.len() as f64 / 2.0], "updates/s");
+    metric("a writer alone: p50", &[quantile(&lat, 0.5)], "ms");
+    metric("a writer alone: p99", &[quantile(&lat, 0.99)], "ms");
     println!(
         "a writer alone: {:.0} updates/s, p50 {:.3} ms, p99 {:.3} ms",
         lat.len() as f64 / 2.0,
@@ -189,6 +193,31 @@ fn type_change() {
                     .unwrap();
             }
         }
+        metric(
+            &format!("under writes, ALTER COLUMN … TYPE{form}"),
+            &secs,
+            "s",
+        );
+        metric(
+            &format!("under writes, TYPE{form}: not done in {TRIES} tries"),
+            &[failed as f64],
+            "runs",
+        );
+        metric(
+            &format!("under writes, TYPE{form}: the writer"),
+            &rate,
+            "updates/s",
+        );
+        metric(
+            &format!("under writes, TYPE{form}: the writer's p50"),
+            &p50,
+            "ms",
+        );
+        metric(
+            &format!("under writes, TYPE{form}: the writer's p99"),
+            &p99,
+            "ms",
+        );
         println!(
             "under writes, ALTER COLUMN … TYPE{form}: {} s, {failed} of {RUNS} not done in {TRIES} tries; \
              the writer: {} updates/s, p50 {} ms, p99 {} ms",
@@ -208,4 +237,15 @@ fn type_change() {
     if given.is_none() {
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

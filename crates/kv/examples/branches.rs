@@ -123,6 +123,18 @@ fn main() {
         db.drop_branch("past").unwrap();
         db.checkpoint().unwrap();
 
+        let mibs = |b: i64| b as f64 / (1 << 20) as f64;
+        let msf = |d: Duration| d.as_secs_f64() * 1e3;
+        metric(&format!("{n} rows: in use"), &[mibs(before)], "MiB");
+        metric(&format!("{n} rows: create"), &[msf(create)], "ms");
+        metric(&format!("{n} rows: +space"), &[mibs(space)], "MiB");
+        metric(&format!("{n} rows: drop"), &[msf(dropped)], "ms");
+        metric(
+            &format!("{n} rows: as of 10k commits before"),
+            &[msf(as_of)],
+            "ms",
+        );
+        metric(&format!("{n} rows: reset"), &[msf(reset)], "ms");
         println!(
             "{n:>9}  {:>10}  {:>8}  {:>8}  {:>8}  {:>12}  {:>9}",
             mib(before),
@@ -160,6 +172,23 @@ fn main() {
         let dropped = t.elapsed();
         db.checkpoint().unwrap();
         db.checkpoint().unwrap();
+        let how = if spread { "spread" } else { "together" };
+        let mibs = |b: i64| b as f64 / (1 << 20) as f64;
+        metric(
+            &format!("{k} changed, {how}: +space"),
+            &[mibs(after - before)],
+            "MiB",
+        );
+        metric(
+            &format!("{k} changed, {how}: drop"),
+            &[dropped.as_secs_f64() * 1e3],
+            "ms",
+        );
+        metric(
+            &format!("{k} changed, {how}: freed"),
+            &[mibs(after - used(&db))],
+            "MiB",
+        );
         println!(
             "{k:>9} {:>10}  {:>14}  {:>8}  {:>8}",
             if spread { "spread" } else { "together" },
@@ -170,4 +199,15 @@ fn main() {
     }
     db.close().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the program run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

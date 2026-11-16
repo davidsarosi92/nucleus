@@ -197,6 +197,14 @@ fn what_encryption_costs_through_sql() {
             &mut s,
             "SELECT body FROM t ORDER BY body DESC LIMIT 10 OFFSET 250000",
         );
+        let how = if encrypted {
+            "encrypted"
+        } else {
+            "in the clear"
+        };
+        metric(&format!("{how}: load"), &[load.as_secs_f64() * 1e3], "ms");
+        metric(&format!("{how}: scan"), &[scan], "ms");
+        metric(&format!("{how}: sort past work_mem"), &[sort], "ms");
         println!(
             "{:12} load {:7.0} ms   scan {:6.0} ms   sort past work_mem {:6.0} ms",
             if encrypted {
@@ -212,4 +220,15 @@ fn what_encryption_costs_through_sql() {
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }

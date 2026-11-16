@@ -26,6 +26,15 @@ fn median(mut f: impl FnMut()) -> f64 {
     t[ROUNDS / 2]
 }
 
+/// A figure as an `@metric` line, for `bench/method.py run`, which
+/// repeats the whole binary (PLAN.md §M14.31).
+fn metric(name: &str, value: f64, unit: &str, system: &str) {
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{value}], \"unit\": {unit:?}, \
+         \"system\": {system:?}, \"phase\": \"warm\"}}"
+    );
+}
+
 fn main() {
     // `--profile FILE`: ten seconds of output alone, for a sampler.
     if std::env::args().nth(1).as_deref() == Some("--profile") {
@@ -81,6 +90,28 @@ fn main() {
             let v: serde_json::Value = serde_json::from_str(std::hint::black_box(&text)).unwrap();
             std::hint::black_box(v.get(&key).is_some());
         });
+        for (what, ours, theirs) in [("parse", parse, serde), ("output", out, serde_out)] {
+            metric(&format!("{what} ({name})"), ours * 1e3, "ms", "nucleus");
+            metric(
+                &format!("{what} ({name})"),
+                theirs * 1e3,
+                "ms",
+                "serde_json",
+            );
+        }
+        metric(&format!("field ({name})"), field * 1e6, "µs", "nucleus");
+        metric(
+            &format!("field ({name})"),
+            serde_field * 1e6,
+            "µs",
+            "serde_json",
+        );
+        metric(
+            &format!("size ({name})"),
+            b.len() as f64 / 1024.0,
+            "KB",
+            "nucleus",
+        );
         println!(
             "{:<18} {:>8.0} {:>8.0} | {:>6.0} MB/s {:>6.0} MB/s | {:>6.0} MB/s {:>6.0} MB/s | {:>10.3} {:>10.0}",
             name,

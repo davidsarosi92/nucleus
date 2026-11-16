@@ -17,9 +17,13 @@ file system's journal included (nothing else may run in Docker then).
 
 PHASES: phase numbers, comma-separated (default 0,1,2,3,4); 5 is the
 steady state, 5M rows 100 a transaction into the table phase 1 filled.
-The random keys of phases 3-5 fall among phase 1's."""
+The random keys of phases 3-5 fall among phase 1's.  Each phase's
+figures are printed as `@metric` lines too, for `bench/method.py run`,
+which repeats the whole script (PLAN.md §M14.31)."""
 import ctypes, os, re, subprocess, sys, time, random, socket
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "drivers", "python"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import method  # noqa: E402
 
 N, CH, M = 10_000_000, 1_000_000, 100_000
 ROW = 8 + 100
@@ -58,7 +62,13 @@ def stable(read):
         last = now
     return last
 
+# The system as the results name it: the file system tells the runs apart.
+SYSTEM = {"nucleus": "nucleus", "nucleus-docker": "nucleus (ext4)", "pg": "postgresql (ext4)"}[sys.argv[1]]
+
 def report(name, rows, secs, wrote, files):
+    method.emit(f"{name}: write amplification", wrote / (rows * ROW), unit="x", system=SYSTEM, phase="write")
+    method.emit(f"{name}: time", secs, unit="s", system=SYSTEM, phase="write")
+    method.emit(f"{name}: files", files / 2**20, unit="MiB", system=SYSTEM, phase="write")
     print(f"{name:46} {rows:>9} rows {secs:7.1f} s  written {wrote / 2**20:8.0f} MiB"
           f"  write amp {wrote / (rows * ROW):6.1f}  files {files / 2**20:7.0f} MiB", flush=True)
 

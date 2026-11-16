@@ -25,15 +25,23 @@ const PAGES: usize = 4096; // 32 MiB a pass
 
 fn rate(name: &str, mut f: impl FnMut(&mut [u8], u64)) {
     let mut page: Vec<u8> = (0..PAGE).map(|i| (i * 131 + 17) as u8).collect();
-    let mut best = f64::MAX;
+    let mut times = Vec::new();
     for _ in 0..3 {
         let t = Instant::now();
         for n in 0..PAGES as u64 {
             f(&mut page, n);
         }
-        best = best.min(t.elapsed().as_secs_f64());
+        times.push(t.elapsed().as_secs_f64());
     }
+    times.sort_by(f64::total_cmp);
+    let best = times[1];
     let mb = (PAGE * PAGES) as f64 / 1e6;
+    metric(&format!("{name}: MB/s"), &[mb / best], "MB/s");
+    metric(
+        &format!("{name}: µs a page"),
+        &[best * 1e6 / PAGES as f64],
+        "µs",
+    );
     println!(
         "{name:28} {:8.0} MB/s  {:6.2} µs a page",
         mb / best,
@@ -121,7 +129,7 @@ fn store_load_and_scan_encrypted() {
         }
         let load = t.elapsed();
         let (store, _) = Store::open(Arc::clone(&platform), &dir, &opts).unwrap();
-        let mut best = f64::MAX;
+        let mut times = Vec::new();
         for _ in 0..3 {
             let t = Instant::now();
             let n = store
@@ -131,9 +139,17 @@ fn store_load_and_scan_encrypted() {
                 .unwrap()
                 .count();
             assert_eq!(n as u64, ROWS);
-            best = best.min(t.elapsed().as_secs_f64());
+            times.push(t.elapsed().as_secs_f64());
         }
+        times.sort_by(f64::total_cmp);
+        let best = times[1];
         let size = std::fs::metadata(dir.join("data")).unwrap().len();
+        metric(
+            &format!("{name}: load + checkpoint"),
+            &[load.as_secs_f64() * 1e3],
+            "ms",
+        );
+        metric(&format!("{name}: scan"), &[best * 1e3], "ms");
         println!(
             "{name:14} load + checkpoint {:7.1} ms   scan {:7.1} ms   ({} MB)",
             load.as_secs_f64() * 1e3,
@@ -143,4 +159,15 @@ fn store_load_and_scan_encrypted() {
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Numbers on stdout as `bench/method.py run` gathers them (PLAN.md
+/// §M14.31: the test run again, each number with its spread).
+fn metric(name: &str, values: &[f64], unit: &str) {
+    let values: Vec<String> = values.iter().map(f64::to_string).collect();
+    println!(
+        "@metric {{\"name\": {name:?}, \"values\": [{}], \"unit\": {unit:?}, \
+         \"system\": \"nucleus\", \"phase\": \"warm\"}}",
+        values.join(", ")
+    );
 }
