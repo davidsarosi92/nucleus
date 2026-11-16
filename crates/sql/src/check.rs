@@ -116,7 +116,14 @@ fn check_table(
     // Rows by primary key bytes, for the registered methods' indexes.
     let mut keyed = Vec::new();
     let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); t.indexes.len()];
+    // A sealed table's rows read (one whose key is destroyed does not:
+    // its index entries are not extra).
+    let sealed = table.storage == crate::sealed::SEALED;
+    let mut read_pks = std::collections::HashSet::new();
     for (key, mut row) in crate::storage::of(table)?.check(txn, table, problems)? {
+        if sealed {
+            read_pks.insert(pk_suffix(t, &key).to_vec());
+        }
         if shadow.is_some()
             && let Some(v) = crate::retype::stored_hidden(txn, table, &key)?
         {
@@ -155,9 +162,25 @@ fn check_table(
     }
     for &i in keys.btrees() {
         let want = &expected[i];
-        let got: BTreeMap<Vec<u8>, Vec<u8>> = scan(txn, &t.index_prefix(t.indexes[i].id))?
+        let mut got: BTreeMap<Vec<u8>, Vec<u8>> = scan(txn, &t.index_prefix(t.indexes[i].id))?
             .into_iter()
             .collect();
+        if sealed {
+            let base = t.index_prefix(0);
+            let mut unreadable = Vec::new();
+            for (k, pk) in &got {
+                if !read_pks.contains(pk) {
+                    let mut row_key = base.clone();
+                    row_key.extend_from_slice(pk);
+                    if txn.get(&row_key)?.is_some() {
+                        unreadable.push(k.clone());
+                    }
+                }
+            }
+            for k in unreadable {
+                got.remove(&k);
+            }
+        }
         if &got != want {
             let missing = want.keys().filter(|k| !got.contains_key(*k)).count();
             let extra = got.keys().filter(|k| !want.contains_key(*k)).count();

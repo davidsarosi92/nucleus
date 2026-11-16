@@ -531,6 +531,7 @@ pub fn set_policy(
                 crate::convert::Target::Row => crate::storage::ROW,
                 crate::convert::Target::Column => crate::column_store::COLUMN,
                 crate::convert::Target::Both(_) => crate::column_store::ROW_COLUMN,
+                crate::convert::Target::Sealed => crate::sealed::SEALED,
             };
             let (bound, _) = crate::binder::Binder::new(&*txn, reg)
                 .expr(after, &crate::binder::Scope::default())?;

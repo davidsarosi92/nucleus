@@ -90,6 +90,12 @@ pub enum CopyState {
     /// changed keys: writes go to the delta store, reads see the changed
     /// keys (their rows in the row copy) under it, until they are moved.
     MovingFromChanged,
+    /// A `sealed` table whose rows may be stored plain still (it was
+    /// `row`): they are being sealed ([`crate::sealed`]).
+    Sealing,
+    /// A `sealed` table becoming `row`: its writes stored plain, its
+    /// sealed rows being opened.
+    Unsealing,
 }
 
 /// The index ids of a column copy.
@@ -106,6 +112,8 @@ impl CopyState {
             CopyState::DroppingRows => 4,
             CopyState::MovingFromDelta => 5,
             CopyState::MovingFromChanged => 6,
+            CopyState::Sealing => 7,
+            CopyState::Unsealing => 8,
         }
     }
 
@@ -119,6 +127,8 @@ impl CopyState {
             4 => CopyState::DroppingRows,
             5 => CopyState::MovingFromDelta,
             6 => CopyState::MovingFromChanged,
+            7 => CopyState::Sealing,
+            8 => CopyState::Unsealing,
             _ => return Err(Error::internal("an unknown copy state")),
         })
     }
@@ -2119,7 +2129,9 @@ impl HtapStorage {
             CopyState::BuildingColumns
             | CopyState::DroppingColumns
             | CopyState::DroppingRows
-            | CopyState::MovingFromChanged => false,
+            | CopyState::MovingFromChanged
+            | CopyState::Sealing
+            | CopyState::Unsealing => false,
             CopyState::BuildingRows | CopyState::MovingFromDelta => true,
             CopyState::Ready => {
                 t.columnar.is_empty()

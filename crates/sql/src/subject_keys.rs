@@ -284,6 +284,20 @@ static KEYS: RwLock<Option<Arc<dyn SubjectKeys>>> = RwLock::new(None);
 /// to destroy).
 pub fn set_subject_keys(k: Option<Arc<dyn SubjectKeys>>) {
     *KEYS.write().unwrap_or_else(|e| e.into_inner()) = k;
+    changed();
+}
+
+static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Counts a change of the keys (a store set, keys destroyed): what was
+/// kept of them in memory ([`crate::sealed`]'s keys) is not used again.
+pub fn changed() {
+    EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The count of [`changed`].
+pub fn epoch() -> u64 {
+    EPOCH.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The process's store of subject keys.

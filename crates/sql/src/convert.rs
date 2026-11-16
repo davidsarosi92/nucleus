@@ -47,6 +47,8 @@ pub enum Target {
     Column,
     /// Both; the column copy of these columns (empty: all).
     Both(Vec<usize>),
+    /// Rows, each sealed under its subjects' key (PLAN.md §M14.30 K4a).
+    Sealed,
 }
 
 /// The target of `SET STORAGE kinds (columns)` on `t`.
@@ -72,12 +74,13 @@ pub fn target(t: &Table, kinds: &[String], columns: Option<&[String]>) -> Result
     };
     Ok(match (k.as_slice(), columns) {
         (["row"], None) => Target::Row,
+        (["sealed"], None) => Target::Sealed,
         (["column"], None) => Target::Column,
         (["column"], Some(c)) | (["column", "row"], Some(c)) => Target::Both(cols(c)?),
         (["column", "row"], None) => Target::Both(Vec::new()),
         _ => {
             return Err(Error::invalid_parameter(format!(
-                "SET STORAGE takes row, column or row, column (columns), not {}",
+                "SET STORAGE takes row, column, row, column (columns) or sealed, not {}",
                 kinds.join(", ")
             )));
         }
@@ -89,6 +92,7 @@ fn current(t: &Table) -> Target {
     match t.storage.as_str() {
         COLUMN => Target::Column,
         ROW_COLUMN => Target::Both(t.columnar.clone()),
+        crate::sealed::SEALED => Target::Sealed,
         _ => Target::Row,
     }
 }
@@ -160,6 +164,14 @@ pub fn set_storage(kv: &Arc<dyn Kv>, name: &str, to: Target) -> Result<()> {
                 move_changed(kv, name)?;
                 continue;
             }
+            CopyState::Sealing => {
+                reseal(kv, name, true)?;
+                continue;
+            }
+            CopyState::Unsealing => {
+                reseal(kv, name, false)?;
+                continue;
+            }
             CopyState::Ready => {}
         }
         let now = current(&t);
@@ -167,6 +179,14 @@ pub fn set_storage(kv: &Arc<dyn Kv>, name: &str, to: Target) -> Result<()> {
             return Ok(());
         }
         match (&now, &to) {
+            (Target::Row, Target::Sealed) => {
+                switch(kv, name, crate::sealed::SEALED, CopyState::Sealing, None)?;
+                reseal(kv, name, true)?;
+            }
+            (Target::Sealed, _) => {
+                switch(kv, name, crate::sealed::SEALED, CopyState::Unsealing, None)?;
+                reseal(kv, name, false)?;
+            }
             (Target::Row, Target::Column) => start_columns(kv, name, Vec::new())?,
             (Target::Row, Target::Both(cols)) => start_columns(kv, name, cols.clone())?,
             (Target::Column, _) => start_rows(kv, name)?,
@@ -294,6 +314,38 @@ fn build_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
         }
     }
     switch(kv, name, ROW_COLUMN, CopyState::Ready, Some(Vec::new()))
+}
+
+/// Sealing (`seal`) or opening a `sealed` table's rows, a part at a time,
+/// each part a transaction of its own: the rows stored the other way are
+/// written again ([`crate::sealed::rewrite`]); then the table is `sealed`
+/// (or `row`), ready.  Writes meanwhile store rows the new way already.
+/// Opening them, a row whose key is destroyed is removed, and its index
+/// entries after (always looked for: a conversion cut short and run again
+/// does not know whether it removed any).
+fn reseal(kv: &Arc<dyn Kv>, name: &str, seal: bool) -> Result<()> {
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let (next, _) = attempt(kv, |txn| {
+            let t = fresh(txn, name)?;
+            crate::sealed::rewrite(txn, &t, after.as_deref(), COPY_ROWS, seal)
+        })?;
+        match next {
+            Some(last) => after = Some(last),
+            None => break,
+        }
+    }
+    if !seal {
+        let mut after: Option<Vec<u8>> = None;
+        while let Some(last) = attempt(kv, |txn| {
+            let t = fresh(txn, name)?;
+            crate::sealed::drop_dangling(txn, &t, after.as_deref(), CLEAN_KEYS)
+        })? {
+            after = Some(last);
+        }
+    }
+    let to = if seal { crate::sealed::SEALED } else { ROW };
+    switch(kv, name, to, CopyState::Ready, None)
 }
 
 /// Both → row: the table a row table at once, the column copy removed

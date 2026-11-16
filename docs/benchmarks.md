@@ -1147,7 +1147,12 @@ the file's bytes written); the rows read back the same, none in the
 clear.  `ROTATE KEY data` with the server running does the same in the
 background, paced while transactions run.
 
+Sealed rows (K4a, in memory, release): 200,000 rows of ~60 bytes over
+1,000 subjects — load 436 ms (231 ms stored `row`), a full scan 42 ms
+(11 ms), a lookup by key 17 µs (16 µs).
+
 ```sh
+cargo test --release -p nucleus-sql --test sealed -- --ignored --nocapture
 cargo test --release -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture --test-threads=1
 cargo test --release -p nucleus-sql --test encrypted -- --ignored --nocapture
 cargo test --release -p nucleus-crypto speed -- --ignored --nocapture

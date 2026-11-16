@@ -1308,6 +1308,7 @@ pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
             table.name
         )));
     }
+    crate::sealed::check_table(&*txn, &table)?;
     table.id = u32::try_from(next_sequence(txn, "table_id")?)
         .map_err(|_| Error::out_of_range("too many tables"))?;
     txn.put(&table_key(&table.name), &table.encode())?;
@@ -1324,6 +1325,7 @@ pub fn update_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
         let old = Table::decode(&old)?;
         crate::retype::allows_change(&old, table)?;
     }
+    crate::sealed::check_table(&*txn, table)?;
     txn.put(&table_key(&table.name), &table.encode())?;
     Ok(())
 }

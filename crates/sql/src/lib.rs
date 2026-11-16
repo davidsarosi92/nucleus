@@ -92,6 +92,7 @@ pub mod roles;
 pub mod rules;
 pub mod sample;
 pub mod schema_diff;
+pub mod sealed;
 pub mod secrets;
 pub mod segment;
 pub mod session;

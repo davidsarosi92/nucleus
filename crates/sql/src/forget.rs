@@ -439,7 +439,11 @@ fn destroy_keys(texts: &[String], committed: nucleus_kv::Timestamp) -> Result<()
         .iter()
         .map(|t| crate::subject_keys::id(&pepper, t))
         .collect();
-    store.destroy(&ids, commit).map_err(Error::io)?;
+    crate::subject_keys::changed();
+    let r = store.destroy(&ids, commit).map_err(Error::io);
+    // Before and after: no key kept in memory opens a row once it is gone.
+    crate::subject_keys::changed();
+    r?;
     Ok(())
 }
 

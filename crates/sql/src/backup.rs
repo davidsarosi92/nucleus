@@ -273,7 +273,7 @@ fn subjects(txn: &dyn KvTxn, tables: &[Table], pepper: Option<&Key>) -> Result<S
         ));
     };
     for t in &related {
-        if t.storage != crate::storage::ROW {
+        if t.storage != crate::storage::ROW && t.storage != crate::sealed::SEALED {
             return Err(Error::feature(format!(
                 "a backup of \"{}\", stored as {} with rows of subjects: not yet (only rows \
                  stored as rows are sealed one by one)",

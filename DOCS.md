@@ -3461,7 +3461,7 @@ constants).  Most rows saved first.  Joins do not give candidates yet
 ### 8.15 Table storage (`storage`, §M14.20)
 
 How a table's rows are kept is a module (principle 12): an implementation
-of `TableStorage` among those registered — `row`, `column` and `row,column` built in, others added
+of `TableStorage` among those registered — `row`, `column`, `row,column` and `sealed` (§8.40) built in, others added
 through `Registry::add_storage` (process-wide, so every database's tables
 may name them; `nc_catalog.storages` lists them).  A table names its
 storage: `CREATE TABLE … WITH (storage = name)` (`row` by default; an
@@ -3598,8 +3598,9 @@ reads a changed key's row from the row copy; merges take changed keys
 into segments as the `column` storage's merges its delta store.
 
 **Changing a table's storage** (`convert`): `ALTER TABLE t SET STORAGE
-row | column | row, column | column (a, b, …)` (the last a column copy of
-those columns beside the rows) converts the table online — in transactions
+row | column | row, column | column (a, b, …) | sealed` (`column (a, b,
+…)` a column copy of those columns beside the rows; `sealed`, §8.40)
+converts the table online — in transactions
 of its own, a part at a time, while other sessions read and write it; not
 inside a transaction block (`25001`).  Building a column copy, the table is
 `row,column` with the copy being built (writes note their keys) and
@@ -6287,6 +6288,72 @@ metrics: nucleus does not measure the disk.
 
 Replication lag's alert comes with §M17.5.
 
+### 8.40 Sealed rows (`sealed`, §M14.30 K4a)
+
+A table stored **`sealed`** (`CREATE TABLE … WITH (storage = sealed)`,
+or `ALTER TABLE t SET STORAGE sealed`) keeps each row as `row` does, its
+stored value sealed under the key of the row's subjects (`SET SUBJECT`,
+§8.29) — the keys of §8.30, kept outside the data and its backups.  So
+`FORGET SUBJECT` does more than delete the subject's rows: destroying
+its key leaves *every* copy of them unreadable at once — the versions
+history keeps (`AS OF`), a branch made before, the log, pages not yet
+scrubbed, backups.  A tenant is a subject like a person (`SET SUBJECT
+(tenant)`): its departure is a key destroyed.
+
+*The format.*  The whole row's encoding (every value inline, none out
+of line) sealed by AES-256-GCM-SIV (`nucleus_kernels::aes`, the CPU's
+instructions) under a key derived from the subjects' data key (the
+SHA-256 of their keys in their ids' order, as a backup seals with): a
+tag byte (`0xE5`, which no row encoding begins with), a version, the
+subjects' key ids, a nonce, the sealed length, then the sealed bytes up
+to 32 KiB — the rest in chunks under the table's large-value index,
+column `0xFFFF`.  The row key and the header are the associated data: a
+sealed value opens only under its own key, as written.  A row needs a
+subject (its subject columns all `NULL`: `23502`); a table with no
+subject columns cannot be written (`55000`, `SET SUBJECT` first); no
+store of subject keys set: `55000`.  A write for a subject forgotten
+after the writer's snapshot began fails (`40001`); run again, it finds
+the rows gone and makes a new key.
+
+*What stays in the clear* — said so, not hidden: the primary key (make
+it a `uuid` or a number that says nothing), the subject columns (they
+are indexed, and a sealed table's indexes may cover only them: an index
+on another column, an expression, a `UNIQUE` constraint on one, a text
+or HNSW index — `0A000`, checked whenever the table's definition is
+stored), how many rows and versions each subject has, and when they were
+written.  `ANALYZE` counts a sealed table's rows and keeps no values
+(its statistics and kept sample would hold them in the clear).
+
+*Reading.*  A row whose key is destroyed reads as absent — as forgetting
+it deleted it — in scans, lookups and through the subject index (whose
+entries for it stay where the rows stay: on a branch, in history), and
+the integrity check counts it as no fault.  A backup copies the sealed
+rows (and seals them again: §8.30); a restore after the key is
+destroyed leaves them out.
+
+*Converting.*  `SET STORAGE sealed` on a `row` table (with subject
+columns, and no index the rule refuses — dropped first) switches the
+table at once — state `Sealing`: reads take both forms, writes seal —
+then seals the rows a thousand at a time, each part a transaction of
+its own; `SET STORAGE row` the other way (state `Unsealing`: writes plain,
+the sealed rows opened, a forgotten one removed).  Cut short, running
+it again finishes it, as §8.15's conversions.  The plain rows' bytes
+stay in the pages and log segments they were in until those are reused —
+or zeroed by a scrub (`FORGET SUBJECT` runs one, §8.29) — and in pages
+a branch made before still shares.
+
+Tests: `crates/sql/tests/sealed.rs` (nothing of a sealed table in any
+file, logged or checkpointed, a 100 KB row's chunks included; every way
+of indexing a sealed column refused; a subject forgotten — unreadable on
+a branch made before, `AS OF` before, in a backup restored, with the
+integrity check clean on the branch, the subject's new rows under a new
+key; a `row` table sealed and opened again online, its index rules, a
+`FORGET` between; opened again on a branch where a subject was
+forgotten, its index entries gone with its rows).  The cost
+(`the_cost_of_sealing`, ignored; `docs/benchmarks.md`): ×1.9 to load,
+×4 to scan, lookups alike — each thread keeps the derived key of each
+set of key ids, dropped whenever a key is destroyed.
+
 ## 9. Server (`nucleus-server`)
 
 ```
@@ -7593,6 +7660,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K4a, sealed rows:** the table storage `sealed`
+  (`crates/sql/src/sealed.rs`, §8.40): rows sealed under their subjects'
+  keys, `SET STORAGE sealed | row` online (copy states `Sealing`,
+  `Unsealing`), the index rule (`sealed::check_table`), `Sample::count`,
+  `subject_keys::changed`/`epoch`; index lookups pass over rows whose key
+  is destroyed; the integrity check counts them as no fault.
 - **2026-11-16 — §M14.30 K3f, a new data key online:** `ROTATE KEY
   data`, `nucleus keys <dir> rotate data`; the page cipher's key
   generation, parity bit and previous key (`PageCipher::with_previous`);

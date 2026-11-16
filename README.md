@@ -190,7 +190,10 @@ pages; after the first, only what changed; compressed, and encrypted
 with `--backup-key`; on a schedule with `nucleus server --backup-every`;
 `nucleus restore --at` rebuilds the database as it was at any of them) seals each row of a subject under that subject's
 own key, kept apart (`<dir>.subject-keys`), which `FORGET` destroys, so
-a restore of an older backup leaves the subject out —, and `nucleus mcp
+a restore of an older backup leaves the subject out; a table stored
+`WITH (storage = sealed)` keeps its live rows under those keys too, so
+the key destroyed leaves no copy readable — on a branch, in history —,
+and `nucleus mcp
 --memory` gives an agent remember, recall, forget and cite
 ([`docs/memory.md`](docs/memory.md) walks through an assistant built on
 all of it).  It reads the past (§M14.14): with

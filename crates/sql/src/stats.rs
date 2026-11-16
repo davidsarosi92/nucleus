@@ -362,6 +362,15 @@ impl Sample {
         Ok(())
     }
 
+    /// Counts the next row without offering it: a storage that keeps its
+    /// values out of the statistics (sealed rows) — the row count stays
+    /// exact, the columns have none.
+    pub fn count(&mut self) -> Result<()> {
+        crate::budget::charge_scan()?;
+        self.seen += 1;
+        Ok(())
+    }
+
     /// How many rows were offered.
     pub fn seen(&self) -> u64 {
         self.seen

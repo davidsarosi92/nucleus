@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10169,6 +10169,74 @@ partitions (a partition's indexes under its tenant's key) are the first
 answer, measured before more.  Prior art: Proton's and 1Password's
 user-held keys, Apple's Advanced Data Protection, Signal's PIN-derived
 keys, the crypto-shredding already taken in R6.
+
+**The design (2026-11-16), before building.**  A store is one B-tree
+whose leaves hold neighbouring tables' and tenants' keys side by side,
+so a key per tenant cannot be a page's key: the row is the unit.  Rows
+are kept only through `TableStorage` (§M14.20 V6), which makes the
+place plain:
+- *K4a — sealed rows, the server's keys.*  A storage `sealed`
+  (`CREATE TABLE … WITH (storage = sealed)`, `ALTER TABLE … SET STORAGE
+  sealed`) keeps rows as `row` does, each row's stored value — and each
+  value it stores out of line — sealed (AES-256-GCM-SIV, the CPU's
+  instructions, K2) under the key of its subjects (`SET SUBJECT`, R6:
+  the SHA-256 of their keys, the key ids in the value's header, the row
+  key as associated data).  The keys are R6's own, so a backup copies a
+  sealed row as it is.  `FORGET SUBJECT` then destroys the key and
+  every copy of the subject's rows is unreadable at once — old versions,
+  branches made before, the log, free pages not yet scrubbed — not only
+  the rows it deletes; a tenant is a subject (`SET SUBJECT (tenant)`).
+  A row read under a destroyed key reads as absent, as forgetting it
+  deleted it.  A write for a subject forgotten after the writer's
+  snapshot fails (`40001`).  *What stays in the clear, said so:* the
+  primary key (use a `uuid`), the subject columns (they are indexed —
+  the only secondary indexes a sealed table takes), and how many rows
+  and versions each subject has.  Text, HNSW and B-tree indexes on
+  other columns are refused, as is `ANALYZE`'s sample of them: each
+  would copy the values out of the seal.
+- *K4b — keys the user holds.*  A subject's key wrapped by a key only
+  its user has (32 bytes from a passkey's PRF, or a device): the key
+  file holds the wrapped key alone; a session presents the user's key
+  (a protocol message, never a statement's text, so no log or audit
+  record can hold it) and holds the unwrapped key in memory until it
+  ends.  Rows sealed under a key not presented are refused by name
+  (`28000`), not hidden.
+- *K4c — memories, sealed.*  `CREATE MEMORY STORE … WITH (sealed)`: no
+  HNSW or text index (they would hold the texts and vectors in the
+  clear); `recall` ranks the subject's own current memories — few, a
+  user's — exactly: vector nearness and BM25 over those rows alone.
+  Measured against the indexed store before anything more (a per-subject
+  index sealed under the subject's key is the next answer, if the
+  measure asks for it).
+
+Each step is tested as R6 was: the planted value not found on disk
+(`nucleus_kv::scan`) under any key but the subject's, a key destroyed
+leaving nothing readable on a branch, in history or a backup.
+
+**K4a — sealed rows ✅** (2026-11-16).  The storage `sealed` (DOCS
+§8.40), as designed above.  Built as a storage beside `row`, it needed
+from the rest of the engine only: an index lookup passing over a row
+that reads as absent (`exec::scan_some`), the integrity check not
+counting a forgotten row's index entries as extra, `ANALYZE` counting
+without sampling (`Sample::count`), two conversion states (`Sealing`,
+`Unsealing`: reads take both forms, writes the new one — a part at a
+time, as §M14.20 V8's conversions) and the index rule checked where a
+table's definition is stored, so every way of making an index meets
+it.  Opening a table again, a forgotten row is removed and then the
+index entries left without a row (always looked for: a conversion run
+again cannot know whether it removed any).  Measured (release, 200,000
+rows of ~60 bytes, 1,000 subjects): load 436 ms against 231 for `row`
+(×1.9), a scan 42 ms against 11 (×4), a lookup by key alike (17 µs).
+The first build cost ×5 to load and ×20 to scan: each row looked its
+keys up in the store and derived its AES key again (two SHA-256s, the
+key schedule).  Each thread now keeps the derived key of each set of
+key ids and each subject's id by its text, all dropped when any key is
+destroyed (`subject_keys::changed`, before and after `FORGET`'s
+destroy) — the cache's invariant is that a row never opens after its
+key is gone.  What is left of the scan's cost: AES-GCM-SIV of each row
+and the row-at-a-time read — `row` scans in batches
+(`vector::RowBatches`); a sealed batch reader is the next step if a
+workload asks for it.  Tests: `crates/sql/tests/sealed.rs`.
 
 **K5 — client-side encrypted columns (zero-knowledge where it fits).**
 A column the drivers encrypt and decrypt: the server stores ciphertext

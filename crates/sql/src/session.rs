@@ -2714,6 +2714,8 @@ pub(crate) fn execute_statement(
                 }
             }
             t.indexes.push(ix);
+            // Before it is filled: a sealed table's index on a sealed column.
+            crate::sealed::check_table(&*txn, &t)?;
             t.next_index_id += 1;
             let i = t.indexes.len() - 1;
             if let Some(p) = &t.partition_by {

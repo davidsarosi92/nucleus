@@ -1179,15 +1179,22 @@ pub fn scan_some<'a>(
     };
     let base = table.index_prefix(0);
     let mut labels = crate::enums::Labels::default();
-    Ok(Box::new(entries.map(move |e| {
-        crate::budget::charge_scan()?;
-        let (_, pk) = e?;
-        let mut k = base.clone();
-        k.extend_from_slice(&pk);
-        let row = storage
-            .get(ctx.txn, table, &k, wanted, &mut labels)?
-            .ok_or_else(|| Error::internal("index entry without its row"))?;
-        Ok((k, row))
+    // A sealed row whose key is destroyed reads as absent: its entries
+    // are passed over.
+    let sealed = table.storage == crate::sealed::SEALED;
+    Ok(Box::new(entries.filter_map(move |e| {
+        let found = (|| {
+            crate::budget::charge_scan()?;
+            let (_, pk) = e?;
+            let mut k = base.clone();
+            k.extend_from_slice(&pk);
+            match storage.get(ctx.txn, table, &k, wanted, &mut labels)? {
+                Some(row) => Ok(Some((k, row))),
+                None if sealed => Ok(None),
+                None => Err(Error::internal("index entry without its row")),
+            }
+        })();
+        found.transpose()
     })))
 }
 

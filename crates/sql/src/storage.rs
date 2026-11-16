@@ -398,8 +398,10 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<dyn TableStorage>>> {
         let row: Arc<dyn TableStorage> = row_storage();
         let column: Arc<dyn TableStorage> = Arc::new(crate::column_store::ColumnStorage);
         let both: Arc<dyn TableStorage> = Arc::new(crate::column_store::HtapStorage);
+        let sealed: Arc<dyn TableStorage> = Arc::new(crate::sealed::SealedStorage);
         RwLock::new(HashMap::from([
             (ROW.to_string(), row),
+            (crate::sealed::SEALED.to_string(), sealed),
             (crate::column_store::COLUMN.to_string(), column),
             (crate::column_store::ROW_COLUMN.to_string(), both),
         ]))
@@ -418,6 +420,7 @@ pub fn register(s: Arc<dyn TableStorage>) -> Result<()> {
         ROW,
         crate::column_store::COLUMN,
         crate::column_store::ROW_COLUMN,
+        crate::sealed::SEALED,
     ]
     .contains(&s.name())
     {
