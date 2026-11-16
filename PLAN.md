@@ -289,7 +289,7 @@ are marked ✅.
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
-| | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
+| | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | 🔨 P1a the method, P1b the suite, TPC-H and ClickBench on it (2026-11-16) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -10425,6 +10425,33 @@ Wrong!" (ASPLOS 2009: layout and environment bias — the environment
 varied, not fixed once); Uta et al., "Is Big Data Performance
 Reproducible in Modern Cloud Networks?" (NSDI 2020: cloud variability
 needs repeated runs across instances and days).
+
+**P1's steps** (2026-11-16):
+- **P1a — the method** 🔨: `bench/method.py` — the median, the
+  coefficient of variation, a percentile bootstrap interval of the
+  median (10,000 resamples, seeded), runs again while one spreads past
+  10 % (twice, then flagged), systems interleaved, answers checked, the
+  environment (machine, power, disk, load before and after, systems'
+  versions and settings, data checksums, nucleus's commit), results
+  files with every time and the command that made them, `show`,
+  `reproduce` (intervals that overlap); `run` gathers the `@metric` lines
+  of a script that measures its own way (a Rust test, a long Python
+  benchmark), process by process.  `bench/pg.py`: PostgreSQL native, a
+  cluster of its own, tuned for the machine as PGTune's mixed profile
+  sets it, what it runs with read back from `pg_settings`.  `nucleus
+  sql` gained psql's `\echo` and `\timing on|off`, so a session stays
+  open between statements (`bench/common.py`'s `Session`).
+- **P1b — the suite, TPC-H, ClickBench** 🔨: rounds with the systems in
+  turn; each query restarted and run cold (the server's caches empty —
+  the OS's kept: dropping them needs root on macOS), then warm; loads
+  `--runs` times; every answer checked; PostgreSQL's loads end in
+  `VACUUM ANALYZE` as its documentation has it after a bulk load (its
+  first scan otherwise sets hint bits: a cold ClickBench Q0 of 1.4 s
+  against 0.14 s), nucleus's in `ANALYZE` as its own has it.
+- **P1c — every other section's script** on the method.
+- **P1d — one script** (`bench/all.sh`): every benchmark into
+  `bench/results/`, `docs/benchmarks.md`'s numbers from those files;
+  then a second run, `method.py reproduce` on each.
 
 **Done when:** every number in `docs/benchmarks.md` carries its
 environment, its runs, its spread and the script that made it; and a

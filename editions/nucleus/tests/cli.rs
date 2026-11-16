@@ -58,6 +58,15 @@ fn version() {
 }
 
 #[test]
+fn help_is_not_a_directory() {
+    for cmd in ["server", "init", "kv", "restore", "keys", "branch"] {
+        let (ok, out) = nucleus(&[cmd, "--help"], "");
+        assert!(ok && out.contains("nucleus server"), "{cmd}: {out}");
+        assert!(!std::path::Path::new("--help").exists(), "{cmd}");
+    }
+}
+
+#[test]
 fn one_shot_commands_persist() {
     let dir = temp_dir("oneshot");
     let d = dir.to_str().unwrap();
@@ -711,6 +720,13 @@ fn ncsql_local_and_over_the_network() {
         "{out}"
     );
     assert!(out.contains("on 127.0.0.1:"), "{out}");
+    // A script's markers, and timing set rather than toggled (psql's).
+    let (ok, out) = ncsql(
+        &["-h", &addr],
+        "\\timing on\n\\timing on\nSELECT 1;\n\\echo @@ done 1\n\\timing off\nSELECT 2;\n",
+    );
+    assert!(ok && out.contains("\n@@ done 1\n"), "{out}");
+    assert_eq!(out.matches("Time: ").count(), 1, "{out}");
     server.kill().unwrap();
     server.wait().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();

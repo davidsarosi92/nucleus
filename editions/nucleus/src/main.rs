@@ -236,6 +236,16 @@ fn main() -> ExitCode {
     nucleus_gcp_kms::register();
     nucleus_azure_kv::register();
     nucleus_pkcs11::register();
+    // The commands that take a directory first: their help is this one
+    // (not a database named `--help`).
+    if matches!(
+        args.first().map(String::as_str),
+        Some("init" | "kv" | "server" | "restore" | "keys" | "branch")
+    ) && matches!(args.get(1).map(String::as_str), Some("--help" | "-h"))
+    {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).

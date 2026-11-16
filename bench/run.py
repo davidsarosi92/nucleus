@@ -1,45 +1,57 @@
 #!/usr/bin/env python3
-"""The benchmark suite (PLAN.md §M14.11 L8): one workload on nucleus and on
-PostgreSQL, on the same machine and data, timed statement by statement.
+"""The benchmark suite (PLAN.md §M14.11 L8, by §M14.31 P1's method): one
+workload on nucleus and on PostgreSQL, on the same machine and data, timed
+statement by statement.
 
-    bench/run.py --nucleus target/release/nucleus [--rows 1000000]
-                 [--pg "host=127.0.0.1 user=postgres"] [--json out.json]
+    bench/run.py --nucleus target/release/nucleus [--rows 1000000] [--runs 5]
+                 [--pg-data target/bench-pg | --psql "psql …" | --no-pg]
+                 [--embedded] [--retries 2] [--out bench/results/run.json]
 
-nucleus runs as `nucleus server` on a fresh directory, driven by
-`nucleus sql -h` (--embedded: in-process, no server); PostgreSQL through
-`psql` (PGHOST, PGUSER, PGPASSWORD … or --pg) — client and server both.  Each system's
-times come from its own client's `\\timing`, so neither pays for the
-other's connection.  The output is a Markdown table (the ratio is nucleus
-over PostgreSQL); --json writes the numbers.  No dependencies.
+nucleus runs as `nucleus server` on a fresh directory each round, driven by
+`nucleus sql -h` (--embedded: in-process, no server); PostgreSQL native on
+this machine, a cluster of its own under --pg-data tuned for it
+(bench/pg.py) — or one already running, through --psql (PG* variables),
+which cannot be restarted and so has no cold runs.  Each system's times
+come from its own client's `\\timing`, in one session kept open, so
+neither pays for a connection.
+
+The method (bench/method.py): rounds of the whole workload, the systems in
+turn (A, B, A, B, …), each on a freshly loaded table; a read step is
+timed cold — its server just restarted (its caches empty, not the OS's) —
+and then warm; per step and phase the median of the rounds with its
+interval and spread, rounds run again while one spreads past the bound.
+Every read's answer is checked between the systems.  The output is a
+Markdown table (the ratio is nucleus over PostgreSQL, `≈` where the
+intervals overlap); --out writes every time with the environment.
 """
 
 import argparse
-import json
 import os
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
 
-# (name, SQL with {n} for the row count, repeat) — run in order, so later
-# steps see the table earlier ones built.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import method  # noqa: E402
+from common import COLD, NucleusSystem, PostgresSystem, same  # noqa: E402
+
+# (name, SQL with {n} for the row count, kind) — run in order, so later
+# steps see the table earlier ones built.  A "read" is timed cold and
+# warm; a "write" once a round.
 WORKLOAD = [
-    ("create", "CREATE TABLE b (id INT PRIMARY KEY, g INT, v BIGINT, s TEXT)", 1),
     ("load (INSERT … SELECT)", "INSERT INTO b SELECT i, i % 1000, i::bigint * 7919 % 1000003, "
-                               "'row ' || i FROM generate_series(1, {n}) i", 1),
-    ("count(*)", "SELECT count(*) FROM b", 3),
-    ("filtered count", "SELECT count(*) FROM b WHERE v % 7 = 3", 3),
-    ("sum", "SELECT sum(v) FROM b", 3),
-    ("group by (1000 groups)", "SELECT g, count(*), sum(v) FROM b GROUP BY g", 3),
-    ("sort", "SELECT count(*) FROM (SELECT v FROM b ORDER BY v) x", 3),
-    ("self-join", "SELECT count(*) FROM b x JOIN b y ON x.id = y.v", 3),
-    ("point reads (1000 by key)", None, 1),  # generated below
-    ("update 25%", "UPDATE b SET v = v + 1 WHERE id % 4 = 0", 1),
-    ("delete 10%", "DELETE FROM b WHERE id % 10 = 0", 1),
-    ("count after writes", "SELECT count(*) FROM b", 3),
+                               "'row ' || i FROM generate_series(1, {n}) i", "write"),
+    ("count(*)", "SELECT count(*) FROM b", "read"),
+    ("filtered count", "SELECT count(*) FROM b WHERE v % 7 = 3", "read"),
+    ("sum", "SELECT sum(v) FROM b", "read"),
+    ("group by (1000 groups)", "SELECT g, count(*), sum(v) FROM b GROUP BY g ORDER BY g", "read"),
+    ("sort", "SELECT count(*) FROM (SELECT v FROM b ORDER BY v) x", "read"),
+    ("self-join", "SELECT count(*) FROM b x JOIN b y ON x.id = y.v", "read"),
+    ("point reads (1000 by key)", None, "points"),
+    ("update 25%", "UPDATE b SET v = v + 1 WHERE id % 4 = 0", "write"),
+    ("delete 10%", "DELETE FROM b WHERE id % 10 = 0", "write"),
+    ("count after writes", "SELECT count(*) FROM b", "read"),
 ]
+CREATE = "CREATE TABLE b (id INT PRIMARY KEY, g INT, v BIGINT, s TEXT)"
 
 POINTS = 1000
 
@@ -49,115 +61,100 @@ def point_reads(n):
     return [f"SELECT s FROM b WHERE id = {1 + (i * step) % n}" for i in range(POINTS)]
 
 
-def timings(text):
-    """The `Time: … ms` lines of a client's output, in order."""
-    return [float(m) for m in re.findall(r"^Time: ([0-9.]+) ms", text, re.M)]
-
-
-def run_client(cmd, statements, env=None):
-    """Runs `statements` (one per line) through a client reading stdin with
-    timing on; the time of each, in ms."""
-    script = "\\timing on\n" + "".join(s.rstrip(";") + ";\n" for s in statements)
-    out = subprocess.run(cmd, input=script, capture_output=True, text=True, env=env, check=False)
-    text = out.stdout + out.stderr
-    if out.returncode != 0 or "ERROR" in text:
-        sys.exit(f"{cmd[0]} failed:\n{text[-4000:]}")
-    got = timings(text)
-    if len(got) != len(statements):
-        sys.exit(f"{cmd[0]}: {len(got)} timings for {len(statements)} statements:\n{text[-4000:]}")
-    return got
-
-
-def plan(n):
-    """Statements and, per workload step, which of them it is."""
-    statements, steps = [], []
-    for name, sql, repeat in WORKLOAD:
-        if sql is None:
-            group = point_reads(n)
-        else:
-            group = [sql.format(n=n)] * repeat
-        steps.append((name, len(statements), len(group), repeat))
-        statements.extend(group)
-    return statements, steps
-
-
-def summarize(times, steps):
-    """Per step: the best of its repeats, or the total of a group of
-    different statements (point reads)."""
-    out = {}
-    for name, at, count, repeat in steps:
-        chunk = times[at:at + count]
-        out[name] = min(chunk) if repeat > 1 else sum(chunk)
-    return out
+def one_round(system, n, check):
+    """The workload once on a fresh table: {(step, phase): ms}; with
+    `check`, each read's answer as well."""
+    times, answers = {}, {}
+    system.fresh(["b"])
+    system.session.time(CREATE)
+    for name, sql, kind in WORKLOAD:
+        if kind == "write":
+            times[(name, "write")] = system.session.time(sql.format(n=n))
+            if name.startswith("load"):
+                system.session.time(system.after_load + " b")
+            continue
+        statements = point_reads(n) if kind == "points" else [sql.format(n=n)]
+        cold = name != "count after writes" and system.can_restart
+        if cold:
+            system.restart()
+            times[(name, "cold")] = sum(system.session.time(s) for s in statements)
+        times[(name, "warm")] = sum(system.session.time(s) for s in statements)
+        if check:
+            answers[name] = [system.results(s) for s in statements[:10]]
+    return times, answers
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nucleus", required=True, help="the nucleus binary")
     ap.add_argument("--rows", type=int, default=1_000_000)
-    ap.add_argument("--pg", default=None, help="a libpq connection string (else PG* variables)")
+    ap.add_argument("--runs", type=int, default=method.RUNS)
+    ap.add_argument("--pg-data", default=os.path.join(method.ROOT, "target", "bench-pg"),
+                    help="the PostgreSQL cluster's directory (made on first use)")
+    ap.add_argument("--psql", default=None, help="a running PostgreSQL's psql command instead")
     ap.add_argument("--no-pg", action="store_true", help="nucleus only")
     ap.add_argument("--embedded", action="store_true", help="nucleus in-process, without a server")
-    ap.add_argument("--json", default=None)
+    ap.add_argument("--retries", type=int, default=method.RETRIES,
+                    help="times the rounds run again while one spreads past the bound")
+    ap.add_argument("--out", "--json", dest="out", default=None, help="the results file")
     a = ap.parse_args()
 
-    statements, steps = plan(a.rows)
-    results = {}
-
-    work = tempfile.mkdtemp(prefix="nucleus-bench-")
-    server = None
+    systems = [NucleusSystem(a.nucleus, "nucleus (embedded)" if a.embedded else "nucleus", a.embedded)]
     try:
-        db = os.path.join(work, "db")
-        if a.embedded:
-            client = [a.nucleus, "sql", db]
-        else:
-            server = subprocess.Popen([a.nucleus, "server", db, "--listen", "127.0.0.1:0"],
-                                      stderr=subprocess.PIPE, text=True)
-            line = server.stderr.readline()
-            m = re.search(r"127\.0\.0\.1:(\d+)", line)
-            if not m:
-                sys.exit(f"nucleus server did not start: {line}")
-            client = [a.nucleus, "sql", "-h", f"127.0.0.1:{m.group(1)}"]
-        started = time.time()
-        t = run_client(client, statements)
-        results["nucleus"] = summarize(t, steps)
-        print(f"nucleus: {time.time() - started:.1f} s", file=sys.stderr)
+        if not a.no_pg:
+            systems.append(PostgresSystem(a.pg_data, a.psql))
+        env = method.environment({s.name: s.describe() for s in systems},
+                                 where=systems[0].work)
+        env["cold"] = COLD
+        attempts, checks = 0, {}
+        while True:
+            attempts += 1
+            got = {}
+            for r in range(a.runs):
+                answers = {}
+                for s in systems:
+                    print(f"round {r + 1}/{a.runs} (attempt {attempts}): {s.name}", file=sys.stderr, flush=True)
+                    t, answers[s.name] = one_round(s, a.rows, check=r == 0)
+                    for (name, phase), ms in t.items():
+                        got.setdefault((name, phase, s.name), []).append(ms)
+                if r == 0:
+                    checks = check_answers(systems, answers)
+            worst = max(method.cv(v) for v in got.values())
+            if worst <= method.CV_BOUND or attempts > a.retries:
+                break
+        samples = [method.Sample(name, system, v, phase, flagged=method.cv(v) > method.CV_BOUND,
+                                 attempts=attempts) for (name, phase, system), v in got.items()]
     finally:
-        if server:
-            server.terminate()
-            server.wait()
-        shutil.rmtree(work, ignore_errors=True)
+        for s in systems:
+            s.close()
 
-    if not a.no_pg:
-        psql = ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"] + ([a.pg] if a.pg else [])
-        subprocess.run(psql + ["-c", "DROP TABLE IF EXISTS b"], check=True, capture_output=True)
-        started = time.time()
-        t = run_client(psql, statements)
-        results["postgresql"] = summarize(t, steps)
-        print(f"postgresql: {time.time() - started:.1f} s", file=sys.stderr)
-        subprocess.run(psql + ["-c", "DROP TABLE IF EXISTS b"], check=True, capture_output=True)
+    baseline = "postgresql" if not a.no_pg else None
+    print(method.table(samples, baseline=baseline, title=f"{a.rows:,} rows"))
+    print()
+    print(method.describe(env))
+    if a.out:
+        method.write(a.out, "run", env, samples, {"baseline": baseline, "rows": a.rows, "checks": checks})
+    if any(v == "DIFFERENT" for v in checks.values()):
+        sys.exit("some answers differ")
 
-    rows = []
-    header = f"| {a.rows:,} rows | nucleus (ms) |"
-    rule = "|---|---:|"
-    if "postgresql" in results:
-        header += " PostgreSQL (ms) | ratio |"
-        rule += "---:|---:|"
-    print(header)
-    print(rule)
-    for name, _, _, _ in steps:
-        if name == "create":
+
+def check_answers(systems, answers):
+    """Each read's answer (its first ten statements') on nucleus against
+    PostgreSQL's."""
+    ref = answers.get("postgresql")
+    out = {}
+    for s in systems:
+        if s.name == "postgresql" or ref is None:
             continue
-        nu = results["nucleus"][name]
-        line = f"| {name} | {nu:,.1f} |"
-        if "postgresql" in results:
-            pg = results["postgresql"][name]
-            line += f" {pg:,.1f} | {nu / pg:,.1f}× |" if pg > 0 else f" {pg:,.1f} | — |"
-        print(line)
-        rows.append(name)
-    if a.json:
-        with open(a.json, "w") as f:
-            json.dump({"rows": a.rows, "results": results}, f, indent=2)
+        for name, got in answers[s.name].items():
+            if any(g is None for g in got):
+                out[name] = "unchecked"
+                continue
+            verdicts = {same(g, w) for g, w in zip(got, ref[name])}
+            out[name] = "DIFFERENT" if "DIFFERENT" in verdicts else ", ".join(sorted(verdicts))
+            if out[name] == "DIFFERENT":
+                print(f"DIFFERENT: {name}", file=sys.stderr)
+    return out
 
 
 if __name__ == "__main__":

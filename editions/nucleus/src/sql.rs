@@ -63,7 +63,8 @@ Statements end with ;.  Commands (they read nc_catalog):
                      load a file (text or CSV) into a table: COPY FROM STDIN
   \\schemas           schemas (also \\dn)
   \\types             types (also \\dT)
-  \\timing            show how long each command takes (toggle)
+  \\timing [on|off]   show how long each command takes
+  \\echo TEXT         print TEXT (a script's marker)
   \\conninfo          what this shell is connected to
   \\?                 this help
   \\q                 quit
@@ -527,9 +528,18 @@ impl Shell {
                 out,
             )?,
             ("\\timing", _) => {
-                self.timing = !self.timing;
+                self.timing = match arg.as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => !self.timing,
+                };
                 writeln!(out, "Timing is {}.", if self.timing { "on" } else { "off" })
                     .map_err(|e| e.to_string())?;
+                true
+            }
+            ("\\echo", _) => {
+                let text = line.trim_start().strip_prefix("\\echo").unwrap_or("").trim();
+                writeln!(out, "{text}").map_err(|e| e.to_string())?;
                 true
             }
             ("\\conninfo", _) => {

@@ -8,25 +8,39 @@ of the rows and a delete of a tenth — run statement by statement through
 each system's own client with `\timing`, both as client and server:
 nucleus as `nucleus server` driven by `nucleus sql -h` over its own
 protocol, `ncp`; PostgreSQL, the baseline, through `psql`.  nucleus's
-PostgreSQL protocol (`--pg-compat`) is not used.  A step repeated three
-times reports its best; the point reads their total.
+PostgreSQL protocol (`--pg-compat`) is not used.
 
-CI runs it on every push to `main` with a million rows against the
+Every number goes through one method (PLAN.md §M14.31 P1,
+`bench/method.py`): the systems run in turn on the same machine, each
+read cold (its server just restarted) and warm, five rounds or more; a
+number is the median of its rounds with a 95 % interval and the spread
+(`±` the coefficient of variation), a measurement spreading past 10 %
+is run again and still past it marked ⚠; a ratio is claimed only where
+the two intervals do not overlap (`≈` otherwise); every answer is
+checked against the other system's.  PostgreSQL runs natively in a
+cluster of its own, tuned for the machine (`bench/pg.py`), what it runs
+with recorded beside the results.
+
+CI runs the suite on every push to `main` with a million rows against the
 `postgres:18` image (job **benchmarks against PostgreSQL**; the table is
 in the job summary, the numbers in the `bench` artifact).  It fails only
-when a run fails: shared runners are too noisy for thresholds yet.
+when a run fails or an answer differs: shared runners are too noisy for
+thresholds.
 
 ## Reproduce
 
 ```sh
 cargo build --release -p nucleus-cli
+brew install postgresql@18            # or PG_BIN=…/bin: the baseline's binaries
 # nucleus: --nucleus names the binary; the script starts its server on a
-# fresh directory and drives it with `nucleus sql -h`.
-# PostgreSQL (the baseline): psql, reached through the usual PG* variables
-# (or --pg "…"); they concern only PostgreSQL.
-PGHOST=127.0.0.1 PGUSER=postgres python3 bench/run.py \
-  --nucleus target/release/nucleus --rows 1000000 --json bench.json
+# fresh directory and drives it with `nucleus sql -h`.  PostgreSQL: a
+# cluster of its own under --pg-data (made on first use), or a running
+# one through --psql "psql …" (no cold runs: it cannot be restarted).
+python3 bench/run.py --nucleus target/release/nucleus --rows 1000000 \
+  --out bench/results/run.json
 python3 bench/run.py --nucleus target/release/nucleus --no-pg   # nucleus alone
+python3 bench/method.py show bench/results/run.json             # a results file as a table
+python3 bench/method.py reproduce a.json b.json                 # does b reproduce a?
 ```
 
 ## Local runs
@@ -112,8 +126,8 @@ reaches PostgreSQL, the baseline (here in Docker; `--no-pg` leaves it
 out).
 
 ```sh
-python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
-  --psql "docker exec -i pg psql -U postgres"
+python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 --data target/tpch-sf1 \
+  --out bench/results/tpch.json
 ```
 
 
@@ -201,7 +215,7 @@ through the `--psql` command.
 
 ```sh
 python3 bench/clickbench.py --nucleus target/release/nucleus --rows 1000000 \
-  --psql "docker exec -i pg psql -U postgres"
+  --out bench/results/clickbench.json
 ```
 
 

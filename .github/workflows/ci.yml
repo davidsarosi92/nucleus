@@ -348,6 +348,8 @@ jobs:
         with:
           key: bench
       - run: cargo build --release --locked -p nucleus-cli
+      - name: The method's own tests
+        run: python3 bench/test_method.py
       - name: Run the suite
         env:
           PGHOST: 127.0.0.1
@@ -355,7 +357,7 @@ jobs:
           PGPASSWORD: bench
         run: |
           set -o pipefail
-          python3 bench/run.py --nucleus target/release/nucleus --rows 1000000 --json bench.json | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 bench/run.py --nucleus target/release/nucleus --rows 1000000 --psql psql --retries 0 --out bench.json | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: bench

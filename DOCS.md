@@ -1327,7 +1327,7 @@ work the same locally and remotely:
 | `\statements` | the 20 statements that took the most time (`nc_catalog.statements`) |
 | `\copy <table> [(<columns>)] FROM '<file>' [WITH (…)]` | loads the file (text, or CSV with `FORMAT csv`) through `COPY … FROM STDIN` (§8.7), locally or over the network |
 | `\schemas`, `\dn` · `\types`, `\dT` | schemas, types |
-| `\timing` · `\conninfo` · `\?` · `\q` | timing toggle, connection, help, quit |
+| `\timing [on|off]` · `\echo TEXT` · `\conninfo` · `\?` · `\q` | timing, a printed marker, connection, help, quit |
 
 The network side is `nucleus-client` (`crates/client`), the Rust driver
 (§11).
@@ -7777,6 +7777,15 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.31 P1a–P1b, the measuring method:**
+  `bench/method.py` (medians, bootstrap intervals, spread, runs again,
+  interleaving, the environment, results files, `show`, `reproduce`,
+  `run`), `bench/pg.py` (PostgreSQL native and tuned); `bench/run.py`,
+  `bench/tpch.py` and `bench/clickbench.py` on it — sessions kept open,
+  cold and warm, answers checked.  `nucleus sql`: `\echo TEXT`, `\timing
+  on|off`; `nucleus server --help` (and `init`, `kv`, `restore`, `keys`,
+  `branch`) prints the usage instead of opening a database named
+  `--help`.
 - **2026-11-16 — §M14.30 K5b, encrypted columns and subject keys in
   every driver:** Python (`nucleus.columns`), JavaScript (`columns.ts`),
   Java (`ColumnKey`), C (`nc_column_key_init`, `nc_encrypt`,
