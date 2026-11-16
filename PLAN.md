@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3d Azure Key Vault ✅ (2026-11-16) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3d Azure Key Vault ✅, K3e PKCS#11 ✅ (2026-11-16) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10036,7 +10036,7 @@ key, refused while disabled, another key refused, a file's root moved
 there) and `scripts/kms-test.sh`, CI's **root key in a KMS**, against
 moto's KMS server — moto rather than LocalStack: a pip package, no
 Docker, and its KMS enforces key state and the encryption context.
-Left for K3: PKCS#11; re-wrapping the data keys under a rotated KMS key is
+Left for K3: re-wrapping the data keys under a rotated KMS key is
 `rotate-root` (seconds); the data re-encrypted under a new DEK online
 is K3's last step.
 
@@ -10090,6 +10090,36 @@ endpoint and identity endpoint in the module (`mock`): every kind of
 credentials, another purpose refused, a rotated key, a disabled one.
 Against a real emulator (Lowkey Vault, Maven Central's jar or its
 image) not yet: running it locally waits for the user's permission.
+
+**K3e — PKCS#11 ✅** (2026-11-16).  `modules/pkcs11`: an HSM, a smart
+card, a cloud HSM's client library or SoftHSM2, named by an RFC 7512
+URI (`pkcs11:token=…;object=…?module-path=…&pin-source=…`; unknown
+attributes refused rather than ignored — a misspelt `objet` would
+otherwise surface as "no key").  The root is an AES-256 secret key
+(`CKK_AES`, `CKA_ENCRYPT` and `CKA_DECRYPT`), a data key encrypted
+with `CKM_AES_GCM`: a 12-byte IV from the token's own generator, the
+purpose as AAD, a 128-bit tag — the same binding as Vault's associated
+data and GCP's AAD, done by the token.  Not `C_WrapKey`: it would need
+the data key as a token object, and the keyring holds data keys as
+bytes.  The root's id comes from the token and key labels (and
+`CKA_ID`), not the URI, so the same key named by `id=` or by
+`object=`, with the library anywhere, is the same root.  PKCS#11's
+process-wide state shaped two things: the library is initialized once
+per process and kept (a second `C_Initialize` fails;
+`C_Finalize` would end every other holder's sessions), and a login is
+the process's, not the session's.  A session is kept and opened again
+once on a stale handle (`CKR_SESSION_HANDLE_INVALID`,
+`CKR_DEVICE_REMOVED`, `CKR_OBJECT_HANDLE_INVALID`, …) — a token pulled
+and put back.  Through `cryptoki` (the Parsec project's safe wrapper,
+Apache-2.0): modules forbid `unsafe`.  Tests: the module's own against
+SoftHSM2 (a token made by `softhsm2-util` in a temporary directory;
+the test runs again in a child process with `SOFTHSM2_CONF` set,
+since SoftHSM reads it at initialization and a test cannot `set_var`
+without `unsafe`): another purpose refused, a stale handle, keys not
+AES-256 or unable to decrypt, a wrong PIN, no PIN; and
+`scripts/kms-test.sh pkcs11`, the token's directory moved away and
+back.  CI's kms job installs SoftHSM2 and requires those tests
+(`NUCLEUS_TEST_SOFTHSM_REQUIRED`); elsewhere they skip without it.
 
 **K4 — keys per tenant and per user, released for a session.**  The
 subject keys of §M14.24 extended from backups to live data: a tenant's

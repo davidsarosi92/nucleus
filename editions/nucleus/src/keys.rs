@@ -17,7 +17,8 @@ pub const OPTIONS: &str = "[--root-key <file> | --root-key-env <var> | --root-pa
                       | --root-kms aws-kms:<key id, ARN or alias/…>
                       | --root-kms vault-transit:[<mount>/]<key>
                       | --root-kms gcp-kms:projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>
-                      | --root-kms azure-kv:<vault>/<key>]
+                      | --root-kms azure-kv:<vault>/<key>
+                      | --root-kms 'pkcs11:token=<t>;object=<k>?module-path=<lib>&pin-source=<file>']
                      [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
                      [--encrypt-data yes|no]";
 
@@ -56,7 +57,7 @@ impl KeyOptions {
             "--root-key-env" => Root::Env(value("a variable's name")?),
             "--root-passphrase-env" => Root::Passphrase(value("a variable's name")?),
             "--root-kms" => Root::Kms(value(
-                "a KMS key (aws-kms:, vault-transit:, gcp-kms:, azure-kv:<key>)",
+                "a KMS key (aws-kms:, vault-transit:, gcp-kms:, azure-kv:, pkcs11:<key>)",
             )?),
             "--old-key-files" => {
                 self.old_files = Some(match value("remove, keep or manual")?.as_str() {

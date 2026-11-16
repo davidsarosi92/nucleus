@@ -15,7 +15,9 @@
 #     cargo test --release -p nucleus-sql --test elle   # Java 21 or later
 #
 # (psql for scripts/psql-smoke.sh: the system's package — brew install
-# libpq on macOS, postgresql-client on Debian.)
+# libpq on macOS, postgresql-client on Debian.  SoftHSM2 for
+# scripts/kms-test.sh's pkcs11 and nucleus-pkcs11's tests likewise —
+# brew install softhsm, apt install softhsm2.)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 ci=$root/.github/workflows/ci.yml

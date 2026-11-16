@@ -6,20 +6,23 @@
 # database refused — and given back; a database under a file's root moved
 # under the key by `nucleus keys … rotate-root --to-root-kms`.
 #
-#   scripts/kms-test.sh <nucleus binary> [aws] [vault]   (default: both)
+#   scripts/kms-test.sh <nucleus binary> [aws] [vault] [pkcs11]   (default: all)
 #
 # aws: AWS KMS on moto's server, a Python with moto[server] (MOTO_PYTHON,
 # default python3); the key disabled and enabled.  vault: Vault's Transit
 # engine on `vault server -dev` (VAULT, default vault — or OpenBao's
-# bao); the token's policy emptied and restored.  CI installs both.
+# bao); the token's policy emptied and restored.  pkcs11: an AES key
+# imported into a SoftHSM2 token (softhsm2-util; the library found where
+# Debian, Ubuntu and Homebrew put it, or SOFTHSM2_MODULE); the token
+# taken out (its directory moved away) and put back.  CI installs all.
 set -euo pipefail
-nucleus=$(cd "$(dirname "${1:?usage: scripts/kms-test.sh <nucleus binary> [aws] [vault]}")" && pwd)/$(basename "$1")
+nucleus=$(cd "$(dirname "${1:?usage: scripts/kms-test.sh <nucleus binary> [aws] [vault] [pkcs11]}")" && pwd)/$(basename "$1")
 shift
 services=("$@")
-[ ${#services[@]} -gt 0 ] || services=(aws vault)
+[ ${#services[@]} -gt 0 ] || services=(aws vault pkcs11)
 work=$(mktemp -d)
 pids=()
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null || true; rm -rf "$work"; }
+cleanup() { for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done; wait 2>/dev/null || true; rm -rf "$work"; }
 trap cleanup EXIT
 fail() {
   echo "kms test: $*" >&2
@@ -124,11 +127,38 @@ vault() {
   scenario vault vault-transit:nucleus vault-transit:transit/nucleus deny allow "permission denied"
 }
 
+pkcs11() {
+  local lib=${SOFTHSM2_MODULE:-} hsm=$work/hsm
+  for l in /usr/lib/softhsm/libsofthsm2.so /opt/homebrew/lib/softhsm/libsofthsm2.so \
+    /usr/local/lib/softhsm/libsofthsm2.so; do
+    [ -n "$lib" ] || [ ! -e "$l" ] || lib=$l
+  done
+  [ -n "$lib" ] || fail "pkcs11: no SoftHSM2 library (SOFTHSM2_MODULE)"
+  mkdir -p "$hsm/tokens"
+  printf 'directories.tokendir = %s/tokens\nobjectstore.backend = file\nlog.level = ERROR\n' "$hsm" \
+    >"$hsm/softhsm2.conf"
+  export SOFTHSM2_CONF=$hsm/softhsm2.conf NUCLEUS_PKCS11_MODULE=$lib
+  softhsm2-util --init-token --free --label nucleus --so-pin 1234 --pin 5678 >>"$work/hsm.log" 2>&1 ||
+    fail "pkcs11: no token made"
+  head -c 32 /dev/urandom >"$hsm/aes.key"
+  softhsm2-util --import "$hsm/aes.key" --aes --token nucleus --label root --id 01 --pin 5678 \
+    >>"$work/hsm.log" 2>&1 || fail "pkcs11: no key imported"
+  rm -f "$hsm/aes.key"
+  echo 5678 >"$hsm/pin"
+  take() { mv "$hsm/tokens" "$hsm/away"; mkdir "$hsm/tokens"; }
+  give() { rmdir "$hsm/tokens"; mv "$hsm/away" "$hsm/tokens"; }
+  scenario pkcs11 "pkcs11:token=nucleus;object=root?pin-source=file:$hsm/pin" \
+    "pkcs11:token=nucleus;object=root;id=%01" take give "no token token=nucleus"
+  # The id names the same root as the label.
+  read_back "$work/pkcs11" --root-kms "pkcs11:id=%01?pin-value=5678" || fail "pkcs11: not opened by the id"
+}
+
 for s in "${services[@]}"; do
   case $s in
     aws) aws ;;
     vault) vault ;;
-    *) fail "no such service: $s (aws, vault)" ;;
+    pkcs11) pkcs11 ;;
+    *) fail "no such service: $s (aws, vault, pkcs11)" ;;
   esac
 done
 echo "the kms test passed: ${services[*]}"

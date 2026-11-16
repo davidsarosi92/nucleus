@@ -72,7 +72,7 @@ jobs:
   # a key of moto's AWS KMS emulator and of a dev Vault's Transit engine,
   # refused while the key is taken away.
   kms:
-    name: root key in a KMS (AWS KMS on moto, Vault Transit)
+    name: root key in a KMS (AWS KMS on moto, Vault Transit, PKCS#11 on SoftHSM2)
     runs-on: ubuntu-latest
     env:
       VAULT_VERSION: 1.18.3
@@ -94,6 +94,11 @@ jobs:
           curl -fsSLO "https://releases.hashicorp.com/vault/$VAULT_VERSION/$z"
           curl -fsSL "https://releases.hashicorp.com/vault/$VAULT_VERSION/vault_${VAULT_VERSION}_SHA256SUMS" | grep "  $z\$" | sha256sum -c -
           unzip -q "$z" vault
+      - name: SoftHSM2
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq softhsm2 >/dev/null
+      # The module's own tests against a token (skipped elsewhere: the
+      # build matrix has no SoftHSM2).
+      - run: NUCLEUS_TEST_SOFTHSM_REQUIRED=1 cargo test -p nucleus-pkcs11
       - run: cargo build -p nucleus-cli
       - run: MOTO_PYTHON="$RUNNER_TEMP/moto/bin/python" VAULT="$RUNNER_TEMP/tools/vault" bash scripts/kms-test.sh target/debug/nucleus
 

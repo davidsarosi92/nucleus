@@ -39,6 +39,7 @@ nucleus-aws-kms = { version = "0.1.0", path = "modules/aws-kms" }
 nucleus-vault-transit = { version = "0.1.0", path = "modules/vault-transit" }
 nucleus-gcp-kms = { version = "0.1.0", path = "modules/gcp-kms" }
 nucleus-azure-kv = { version = "0.1.0", path = "modules/azure-kv" }
+nucleus-pkcs11 = { version = "0.1.0", path = "modules/pkcs11" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

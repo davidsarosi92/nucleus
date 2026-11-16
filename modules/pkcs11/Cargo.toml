@@ -1,0 +1,25 @@
+[package]
+name = "nucleus-pkcs11"
+description = "nucleus's root key kept in a hardware security module through PKCS#11: the data keys wrapped and unwrapped by an AES key that never leaves the token"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+# PKCS#11's C interface behind a safe API (the module's library loaded at
+# run time): the unsafe code is cryptoki's, not ours.
+cryptoki = "0.12"
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+
+[dev-dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

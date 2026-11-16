@@ -35,6 +35,7 @@ nucleus-aws-kms.workspace = true
 nucleus-vault-transit.workspace = true
 nucleus-gcp-kms.workspace = true
 nucleus-azure-kv.workspace = true
+nucleus-pkcs11.workspace = true
 nucleus-embeddings.workspace = true
 nucleus-local-models.workspace = true
 

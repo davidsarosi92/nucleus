@@ -50,6 +50,7 @@
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
 | `modules/aws` | `nucleus-aws` | what the AWS modules share: Signature Version 4, credentials, region and endpoint from the AWS SDKs' variables | §M14.18, §M14.30 |
 | `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
+| `modules/pkcs11` | `nucleus-pkcs11` | the keyring's root key in an HSM or any PKCS#11 token (`--root-kms 'pkcs11:token=<t>;object=<k>?module-path=<lib>&pin-source=<file>'`, RFC 7512): data keys encrypted in the token by an AES-256 key with AES-GCM, the purpose as additional authenticated data; through `cryptoki`; tests against SoftHSM2 | §M14.30 |
 | `modules/azure-kv` | `nucleus-azure-kv` | the keyring's root key in Azure Key Vault (`--root-kms azure-kv:<vault>/<key>`): data keys encrypted by the vault's RSA key (RSA-OAEP-256), the purpose bound inside; tokens from a service principal, workload identity or a managed identity; a stand-in Key Vault for tests (`mock`) | §M14.30 |
 | `modules/gcp-kms` | `nucleus-gcp-kms` | the keyring's root key in Google Cloud KMS (`--root-kms gcp-kms:projects/…/cryptoKeys/<k>`): data keys encrypted there, the purpose as additional authenticated data; tokens from application default credentials; a stand-in Cloud KMS for tests (`mock`) | §M14.30 |
 | `modules/vault-transit` | `nucleus-vault-transit` | the keyring's root key in Vault's or OpenBao's Transit engine (`--root-kms vault-transit:[<mount>/]<key>`): data keys encrypted there, the purpose as associated data; a stand-in engine for tests (`mock`) | §M14.30 |
@@ -111,7 +112,7 @@ T=target/ci-tools; PROMTOOL=$T/promtool PROMETHEUS=$T/prometheus OTELCOL=$T/otel
   monitoring/test.sh target/release/nucleus      # the rules' tests, a real Prometheus and collector
 RCLONE=$T/rclone scripts/s3-test.sh target/release/nucleus   # backups in a real S3 server
 MOTO_PYTHON=$T/moto/bin/python VAULT=$T/vault \
-  scripts/kms-test.sh target/release/nucleus      # the root in AWS KMS (moto) and Vault Transit
+  scripts/kms-test.sh target/release/nucleus      # the root in AWS KMS (moto), Vault Transit, SoftHSM2
 ```
 
 A test-kit script whose results claim PostgreSQL's is checked against a
@@ -6523,7 +6524,18 @@ encrypted with the data key and checked when it comes back (OAEP is
 non-malleable), and the key's version is kept beside the ciphertext so
 a rotated key still opens the keyring; tokens from a service
 principal's secret, workload identity's federated token, a managed
-identity's endpoint, or the instance metadata service.  A root that did not wrap the keyring is refused,
+identity's endpoint, or the instance metadata service.  A hardware
+security module, or any PKCS#11 token, is `modules/pkcs11` (an RFC 7512
+URI: `pkcs11:token=<label>;object=<label>?module-path=<library>&pin-source=<file>`,
+or `NUCLEUS_PKCS11_MODULE` and `NUCLEUS_PKCS11_PIN`): opening finds the
+one secret key so named and refuses one not AES-256 or not able to
+both encrypt and decrypt; a data key is encrypted in the token with
+AES-GCM, an IV from the token's generator and the purpose as
+additional authenticated data; the root's id is
+`pkcs11:token=<label>;object=<label>[;id=<id>]`, read from the token;
+the library is loaded once a process (through `cryptoki`, so the
+module has no `unsafe` of its own) and one session is kept, opened
+again once when it goes stale.  A root that did not wrap the keyring is refused,
 naming both ids.  An old key file (`<dir>.secrets-key`, or
 `--secrets-key`'s) is taken in at start — its bytes become the data
 key, so what it sealed still opens — and, by `--old-key-files`,
@@ -7521,6 +7533,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K3b–K3e, the root key in Vault Transit,
+  Google Cloud KMS, Azure Key Vault and a PKCS#11 token:**
+  `modules/vault-transit`, `modules/gcp-kms`, `modules/azure-kv`,
+  `modules/pkcs11` (`--root-kms vault-transit:…`, `gcp-kms:…`,
+  `azure-kv:…`, `pkcs11:…`); `nucleus-http`'s `trust_pem` and plain
+  HTTP to link-local addresses; `scripts/kms-test.sh` against Vault in
+  dev mode and SoftHSM2 as well, CI's kms job running the PKCS#11
+  module's tests against SoftHSM2.
 - **2026-11-16 — §M14.30 K3a, the root key in AWS KMS:**
   `modules/aws` (Signature Version 4, credentials, region and endpoints
   shared by the AWS modules; `modules/s3` uses it), `modules/aws-kms`
