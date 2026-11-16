@@ -194,7 +194,10 @@ a restore of an older backup leaves the subject out; a table stored
 `WITH (storage = sealed)` keeps its live rows under those keys too, so
 the key destroyed leaves no copy readable — on a branch, in history —
 (a memory store `WITH (sealed)` too, recalled exactly without an index
-that would hold its texts), and `nucleus mcp
+that would hold its texts; a subject's key can be its user's alone,
+presented by the driver for a session, and every driver encrypts a
+column itself — the server holds only ciphertext, equal values found by
+a blind index: [`drivers/README.md`](drivers/README.md)), and `nucleus mcp
 --memory` gives an agent remember, recall, forget and cite
 ([`docs/memory.md`](docs/memory.md) walks through an assistant built on
 all of it).  It reads the past (§M14.14): with

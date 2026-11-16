@@ -82,6 +82,75 @@ fn scripts_into(batch: Option<usize>, batches: bool) {
     );
 }
 
+/// The scripts again on an encrypted database (PLAN.md §M14.30 "done
+/// when"): the same results — a custody model (a managed keyring, the
+/// user's key, a KMS) differs only in where the root comes from, and every
+/// one of them opens the database under a data key as this does.  After
+/// each script a row planted in a table of its own is in none of the
+/// database's files.
+#[test]
+fn sqllogictest_scripts_encrypted() {
+    use nucleus_kv::PageCipher;
+    use nucleus_platform::Platform;
+    fn files(p: &SimPlatform, dir: &Path, out: &mut Vec<u8>) {
+        for name in p.fs().list_dir(dir).unwrap() {
+            let path = dir.join(&name);
+            if p.fs().list_dir(&path).is_ok() {
+                files(p, &path, out);
+                continue;
+            }
+            let f = p
+                .fs()
+                .open(&path, nucleus_platform::OpenMode::ReadOnly)
+                .unwrap();
+            let mut bytes = vec![0u8; f.size().unwrap() as usize];
+            f.read_exact_at(&mut bytes, 0).unwrap();
+            out.extend(bytes);
+        }
+    }
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for (i, (name, script)) in nucleus_testkit::core_scripts().iter().enumerate() {
+        if !nucleus_testkit::picked(name) {
+            continue;
+        }
+        let p = Arc::new(SimPlatform::new(1));
+        let db: Arc<dyn Kv> = Arc::new(
+            Database::open_on(
+                p.clone(),
+                Path::new("/db"),
+                Options {
+                    encryption_key: Some(PageCipher::new([9; 32])),
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        let mut connect =
+            || -> Box<dyn Connection> { Box::new(Local(Session::new(Arc::clone(&db)))) };
+        failures.extend(run_script(script, name, &mut connect));
+        let needle = format!("slt-planted-{i}-c41e");
+        let mut s = Session::new(Arc::clone(&db));
+        s.execute(&format!(
+            "CREATE TABLE slt_planted_c41e (t TEXT); INSERT INTO slt_planted_c41e VALUES ('{needle}')"
+        ))
+        .unwrap();
+        let mut all = Vec::new();
+        files(&p, Path::new("/db"), &mut all);
+        if all.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+            failures.push(format!("{name}: a planted value in the clear on disk"));
+        }
+        ran += 1;
+    }
+    assert!(ran > 0 || std::env::var("SLT").is_ok(), "no scripts found");
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
 /// `now()` reads the database's clock — under the simulation, the simulated
 /// one (PLAN.md principle 4) — and stays fixed within a transaction.
 #[test]

@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -9686,7 +9686,7 @@ reporting is on; every listed input has a fuzz target that runs in CI;
 and Elle finds no anomaly the documented isolation level forbids in
 nucleus's own histories.
 
-### §M14.30 — Encryption and key custody ⬜
+### §M14.30 — Encryption and key custody ✅
 
 Planned 2026-11-15, after §M14.18 O5.  The order agreed (2026-11-15):
 §M14.18 O5, §M14.29 S5, this milestone's K1–K5, §M14.31 P1 (the method
@@ -10351,6 +10351,29 @@ re-encrypted online; a KMS revocation makes the database unreadable;
 measured and recorded; a tenant's key destroyed leaves none of its
 live rows readable; a client-side encrypted column round-trips through
 every driver with the server never seeing the plaintext.
+
+**Done ✅** (2026-11-16), each point by what shows it.  *The suite
+encrypted*: `slt.rs`'s `sqllogictest_scripts_encrypted` runs every
+script on an encrypted database, the same results, and after each a
+planted row is in none of its files (74 of them hold it when the
+database is in the clear) — a custody model differs only in where the
+root comes from, and each is run on its own: the managed keyring
+(`a_managed_root_rotated_and_a_crash_in_between`), the user's key
+(`--root-key`, the CLI's tests), a KMS (`kms-test.sh` in CI: AWS KMS on
+moto, Vault Transit, PKCS#11 on SoftHSM2; Google Cloud KMS and Azure
+Key Vault against stand-ins).  *The crash tests encrypted*: the store's
+two and the branch's, odd seeds (K2c), and the sealed rows' (K4a).  *No
+plaintext on disk, in the WAL, scratch or backups*: K2b–K2d's and K4a's
+planted-value searches.  *A root rotated, a DEK re-encrypted online*:
+`rotate-root`, K3f.  *A KMS revocation*: a disabled KMS key refuses the
+database (K3a–K3e).  *Against LocalStack in CI*: moto's KMS instead —
+a pip package, no Docker, its KMS enforcing key state and the
+encryption context (K3a).  *The overhead*: `docs/benchmarks.md` (K2,
+the CPU's AES).  *A tenant's key destroyed*: K4a's crypto-shredding,
+every copy of the subject's rows unreadable at once.  *A column through
+every driver*: K5a–K5b.  Left for later, not this milestone's: a held
+key given back into the server's keeping, and the recall cost at
+100,000 rows and the slow load of 500,000 noted under K4c.
 
 ### §M14.31 — Reliable measurement ⬜
 
