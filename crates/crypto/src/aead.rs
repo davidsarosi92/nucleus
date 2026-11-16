@@ -313,6 +313,72 @@ pub fn open(
     Some(out)
 }
 
+/// An extended nonce's length (XChaCha20-Poly1305).
+pub const XNONCE_LEN: usize = 24;
+
+/// HChaCha20 (draft-irtf-cfrg-xchacha §2.2): a subkey from `key` and the
+/// first 16 bytes of an extended nonce — ChaCha20's rounds without the
+/// final addition, the state's first and last rows.
+pub fn hchacha20(key: &[u8; KEY_LEN], nonce: &[u8; 16]) -> [u8; KEY_LEN] {
+    let mut s = [0u32; 16];
+    s[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
+    for i in 0..8 {
+        s[4 + i] = le32(&key[4 * i..]);
+    }
+    for i in 0..4 {
+        s[12 + i] = le32(&nonce[4 * i..]);
+    }
+    for _ in 0..10 {
+        quarter(&mut s, 0, 4, 8, 12);
+        quarter(&mut s, 1, 5, 9, 13);
+        quarter(&mut s, 2, 6, 10, 14);
+        quarter(&mut s, 3, 7, 11, 15);
+        quarter(&mut s, 0, 5, 10, 15);
+        quarter(&mut s, 1, 6, 11, 12);
+        quarter(&mut s, 2, 7, 8, 13);
+        quarter(&mut s, 3, 4, 9, 14);
+    }
+    let mut out = [0u8; KEY_LEN];
+    for (i, w) in s[..4].iter().chain(&s[12..]).enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    out
+}
+
+/// XChaCha20-Poly1305's subkey and nonce: HChaCha20 of the nonce's first
+/// 16 bytes, and four zero bytes before its last 8.
+fn extended(key: &[u8; KEY_LEN], nonce: &[u8; XNONCE_LEN]) -> ([u8; KEY_LEN], [u8; NONCE_LEN]) {
+    let mut head = [0u8; 16];
+    head.copy_from_slice(&nonce[..16]);
+    let mut n = [0u8; NONCE_LEN];
+    n[4..].copy_from_slice(&nonce[16..]);
+    (hchacha20(key, &head), n)
+}
+
+/// [`seal`] with a 24-byte nonce (XChaCha20-Poly1305): long enough to be
+/// drawn at random for every message under one key (PLAN.md §M14.30
+/// K5's encrypted columns).
+pub fn xseal(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; XNONCE_LEN],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let (k, n) = extended(key, nonce);
+    seal(&k, &n, aad, plaintext)
+}
+
+/// Decrypts what [`xseal`] made.
+pub fn xopen(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; XNONCE_LEN],
+    aad: &[u8],
+    sealed: &[u8],
+) -> Option<Vec<u8>> {
+    let (k, n) = extended(key, nonce);
+    open(&k, &n, aad, sealed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +389,34 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    /// draft-irtf-cfrg-xchacha-03 §2.2.1 and A.3.1.
+    #[test]
+    fn xchacha20_poly1305() {
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let nonce: [u8; 16] = hex("000000090000004a0000000031415927").try_into().unwrap();
+        assert_eq!(
+            hchacha20(&key, &nonce).to_vec(),
+            hex("82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc")
+        );
+        let key: [u8; 32] = std::array::from_fn(|i| 0x80 + i as u8);
+        let nonce: [u8; 24] = std::array::from_fn(|i| 0x40 + i as u8);
+        let aad = hex("50515253c0c1c2c3c4c5c6c7");
+        let plain = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+        let sealed = xseal(&key, &nonce, &aad, plain);
+        let mut want = hex(
+            "bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed2902c21396cbb
+             731c7f1b0b4aa6440bf3a82f4eda7e39ae64c6708c54c216cb96b72e1213b452
+             2f8c9ba40db5d945b11b69b982c1bb9e3f3fac2bc369488f76b2383565d3fff9
+             21f9664c97637da9768812f615c68b13b52e",
+        );
+        want.extend(hex("c0875924c1c7987947deafd8780acf49"));
+        assert_eq!(sealed, want);
+        assert_eq!(xopen(&key, &nonce, &aad, &sealed).unwrap(), plain);
+        let mut bad = sealed.clone();
+        bad[0] ^= 1;
+        assert!(xopen(&key, &nonce, &aad, &bad).is_none());
     }
 
     #[test]

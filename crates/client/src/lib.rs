@@ -23,6 +23,8 @@
 //! # Ok::<(), nucleus_client::Error>(())
 //! ```
 
+pub mod columns;
+
 use std::fmt;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};

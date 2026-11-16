@@ -7706,6 +7706,38 @@ build checks the size budget (9 MiB for arm64, what the engine adds to
 an app: on iOS a program using the C API linked as an app is and
 stripped; on Android the `.so`).
 
+**Client-side encrypted columns** (§M14.30 K5, `columns.rs`).  A
+column the driver encrypts before sending and decrypts after reading:
+the server stores `bytea` ciphertext and never holds the key.  One
+format, every driver's (format 1; `drivers/encrypted-columns.txt` holds
+its test vectors, which each driver's tests check):
+- *keys* — from a 32-byte master key the application keeps (a KMS's, a
+  keychain's: never the database's) and a name it gives the column
+  (`users.email`): `HMAC-SHA-256(master, "nucleus column 1 encrypt\0" ‖
+  name)` encrypts, `HMAC-SHA-256(master, "nucleus column 1 index\0" ‖
+  name)` makes blind indexes;
+- *a value* — a type byte (0 bytes, 1 text in UTF-8, 2 an integer: 8
+  bytes little-endian) and its bytes;
+- *ciphertext* — the byte 1, a random 24-byte nonce, XChaCha20-Poly1305
+  (draft-irtf-cfrg-xchacha: HChaCha20 then RFC 8439's AEAD) of the value
+  with the byte 1 authenticated beside it: 41 bytes more than the value;
+- *blind index* — the first 16 bytes of HMAC-SHA-256 of the value under
+  the index key: stored in a column of its own (`email_index bytea`,
+  indexed), so `WHERE email_index = $1` with the value's index finds its
+  rows.  Equality is all that can be asked; nothing else is, by design.
+
+XChaCha20-Poly1305 because every driver carries it without a library,
+constant-time in plain code, and its nonce is long enough to draw at
+random for every value under one key.  What stays visible: a value's
+length, and through the blind index which rows hold equal values and how
+often — a column of few distinct values (a flag, a country) is given
+away by its frequencies, so such a column gets no index.  A vector the
+server computes from a text (`embed`, §8.26) gives much of the text away
+(inversion attacks): such a column is not zero-knowledge.  Rust:
+`ColumnKey::new(&master, "users.email")`, then `encrypt(v)` (a
+`Value::Bytes` to send), `blind_index(v)`, `decrypt_value(&row[i])` (a
+`Plain`: `Bytes`, `Text`, `Int`).
+
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
@@ -7736,6 +7768,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K5a, client-side encrypted columns (Rust):**
+  `nucleus_crypto::aead::{hchacha20, xseal, xopen}` (XChaCha20-Poly1305);
+  `nucleus_client::columns` (`ColumnKey`, `Plain`), format 1 and its test
+  vectors (`drivers/encrypted-columns.txt`).
 - **2026-11-16 — fix, a JSON path's time:** evaluating a path looks at
   the statement's deadline every 4,096 items (`budget::check_deadline`,
   `57014`) — `$[0,0,…][0,0,…]…` makes exponentially many (the fuzz

@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅ |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10305,6 +10305,28 @@ leaks), order-revealing encryption (not taken: its leakage is too
 large for what it buys).  Embeddings are not hidden by this: a vector
 gives away much of its text (inversion attacks, vec2text) — a column
 whose vector the server computes is not zero-knowledge, and is said so.
+
+**K5a — the format, and Rust's ✅** (2026-11-16).  One format every
+driver writes and reads (DOCS.md §11; `drivers/encrypted-columns.txt`,
+its vectors): keys from a master key the application keeps and the
+column's name (HMAC-SHA-256, one purpose each: encrypt, index); a value
+as a type byte (bytes, text, integer) and its bytes; ciphertext
+XChaCha20-Poly1305 with a random 24-byte nonce (41 bytes added); a blind
+index of 16 bytes (HMAC-SHA-256, truncated: equality alone).  The cipher
+chosen for the drivers' sake: they have no dependencies (§M10), and
+ChaCha20-Poly1305 is plain code, constant-time without the CPU's help,
+where AES in software is neither (tables) — Python's standard library
+has no AES at all; the extended nonce (libsodium's XChaCha, the CFRG
+draft) is long enough to draw at random for every value, where GCM's 96
+bits wear out near 2³² values a key.  Always Encrypted's deterministic
+mode (equal plaintexts, equal ciphertexts) not taken: the blind index
+gives the same equality without making the stored value itself
+comparable, and a column can then have none.  Tested: the vectors, and
+a column through a server whose files are searched for the planted
+plaintext (found for a column in the clear beside it, not for the
+encrypted one).  Next, K5b: the same in Python, JavaScript, Java and C
+(C++ and Swift over it), each checking the vectors and round-tripping
+through the server — and the `k` message in each.
 
 **Done when:** each of the three custody models runs the test suite
 and the crash tests with every file encrypted (no plaintext of a
