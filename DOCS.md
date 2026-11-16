@@ -50,6 +50,7 @@
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
 | `modules/aws` | `nucleus-aws` | what the AWS modules share: Signature Version 4, credentials, region and endpoint from the AWS SDKs' variables | §M14.18, §M14.30 |
 | `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
+| `modules/gcp-kms` | `nucleus-gcp-kms` | the keyring's root key in Google Cloud KMS (`--root-kms gcp-kms:projects/…/cryptoKeys/<k>`): data keys encrypted there, the purpose as additional authenticated data; tokens from application default credentials; a stand-in Cloud KMS for tests (`mock`) | §M14.30 |
 | `modules/vault-transit` | `nucleus-vault-transit` | the keyring's root key in Vault's or OpenBao's Transit engine (`--root-kms vault-transit:[<mount>/]<key>`): data keys encrypted there, the purpose as associated data; a stand-in engine for tests (`mock`) | §M14.30 |
 | `modules/aws-kms` | `nucleus-aws-kms` | the keyring's root key in AWS KMS (`--root-kms aws-kms:<key>`): data keys wrapped by `Encrypt`, unwrapped by `Decrypt`; a stand-in KMS for tests (`mock`) | §M14.30 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
@@ -6505,7 +6506,16 @@ key and refuses one that is not an AEAD key or cannot both encrypt and
 decrypt; a data key is encrypted with its purpose as associated data;
 the root's id is `vault-transit:<mount>/<key>`.  A token whose policy
 loses the key leaves the database unopenable.  (`nucleus-http` trusts
-a private authority beside Mozilla's roots through `trust_pem`.)  A root that did not wrap the keyring is refused,
+a private authority beside Mozilla's roots through `trust_pem`.)
+Google Cloud KMS is `modules/gcp-kms`
+(`gcp-kms:projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`):
+opening reads the key and refuses one not for `ENCRYPT_DECRYPT` or
+whose primary version is not enabled; a data key is encrypted with its
+purpose as additional authenticated data; tokens come as Google's
+client libraries find them (`GOOGLE_OAUTH_ACCESS_TOKEN`, a service
+account's key — a JWT it signs RS256 with `ring` —, gcloud's refresh
+token, the metadata server, which `nucleus-http` reaches over plain
+HTTP as a link-local address).  A root that did not wrap the keyring is refused,
 naming both ids.  An old key file (`<dir>.secrets-key`, or
 `--secrets-key`'s) is taken in at start — its bytes become the data
 key, so what it sealed still opens — and, by `--old-key-files`,

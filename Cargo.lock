@@ -424,6 +424,7 @@ dependencies = [
  "nucleus-console",
  "nucleus-crypto",
  "nucleus-embeddings",
+ "nucleus-gcp-kms",
  "nucleus-kv",
  "nucleus-ldap",
  "nucleus-local-models",
@@ -525,6 +526,18 @@ name = "nucleus-example-migrations"
 version = "0.1.0"
 dependencies = [
  "nucleus-client",
+]
+
+[[package]]
+name = "nucleus-gcp-kms"
+version = "0.1.0"
+dependencies = [
+ "nucleus-http",
+ "nucleus-kv",
+ "nucleus-server",
+ "nucleus-sql",
+ "ring",
+ "serde_json",
 ]
 
 [[package]]

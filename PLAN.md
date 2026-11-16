@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅ (2026-11-16) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅ (2026-11-16) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10036,7 +10036,7 @@ key, refused while disabled, another key refused, a file's root moved
 there) and `scripts/kms-test.sh`, CI's **root key in a KMS**, against
 moto's KMS server — moto rather than LocalStack: a pip package, no
 Docker, and its KMS enforces key state and the encryption context.
-Left for K3: Google Cloud KMS, Azure Key Vault, PKCS#11; re-wrapping the data keys under a rotated KMS key is
+Left for K3: Azure Key Vault, PKCS#11; re-wrapping the data keys under a rotated KMS key is
 `rotate-root` (seconds); the data re-encrypted under a new DEK online
 is K3's last step.
 
@@ -10054,6 +10054,24 @@ Tests: a stand-in engine in the module (`mock`), and
 (refused: `permission denied`) and restored.  Vault rather than OpenBao
 in CI: the API is the same, Vault's releases carry SHA-256 sums on a
 stable URL.
+
+**K3c — Google Cloud KMS ✅** (2026-11-16).  `modules/gcp-kms`:
+`gcp-kms:projects/…/cryptoKeys/<k>`; `encrypt` and `decrypt` with the
+purpose as additional authenticated data; tokens as Google's
+application default credentials find them — a token as it is
+(`GOOGLE_OAUTH_ACCESS_TOKEN`), a service account's key (an RS256 JWT
+signed with `ring`, already in the tree through rustls, exchanged at
+its `token_uri`), gcloud's `authorized_user` refresh token, the
+metadata server (`nucleus-http` now allows plain HTTP to link-local
+addresses too, where clouds put it) — each kept until a minute before
+it expires.  Not yet: workload identity federation (`external_account`)
+and the CRC32C integrity fields (TLS already guards the bytes).
+Tests: a stand-in Cloud KMS, token endpoint (it verifies the JWT's
+signature against the test key) and metadata server in the module
+(`mock`): every kind of credentials, another purpose refused, a
+version disabled.  No emulator exists for Cloud KMS and CI has no
+Google account, so nothing runs against the real service — the
+request shapes follow Google's REST reference.
 
 **K4 — keys per tenant and per user, released for a session.**  The
 subject keys of §M14.24 extended from backups to live data: a tenant's

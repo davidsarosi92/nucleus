@@ -122,7 +122,10 @@ usage:
                                     (aws-kms:<key id, ARN or alias/…>, the
                                     AWS SDKs' variables;
                                     vault-transit:[<mount>/]<key>,
-                                    VAULT_ADDR, VAULT_TOKEN, …) — by default
+                                    VAULT_ADDR, VAULT_TOKEN, …;
+                                    gcp-kms:projects/…/cryptoKeys/<k>,
+                                    Google's application default
+                                    credentials) — by default
                                     <dir>.root-key, made at first use;
                                     --old-key-files: the key files of before
                                     (<dir>.secrets-key, …)
@@ -225,6 +228,7 @@ fn main() -> ExitCode {
     nucleus_s3::register();
     nucleus_aws_kms::register();
     nucleus_vault_transit::register();
+    nucleus_gcp_kms::register();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).

@@ -1,0 +1,33 @@
+[package]
+name = "nucleus-gcp-kms"
+description = "nucleus's root key kept in Google Cloud KMS: the data keys wrapped and unwrapped by Cloud KMS, the root never leaving it"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+nucleus-http = { version = "0.1.0", path = "../http" }
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+# A service account's token request is a JWT signed with its RSA key
+# (RS256); ring is what rustls (nucleus-http) already brings.
+ring = "0.17"
+serde_json = "1"
+
+[dev-dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+
+[features]
+# A stand-in Cloud KMS, token endpoint and metadata server on a loopback
+# port, for tests (this crate's and others').
+mock = []
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

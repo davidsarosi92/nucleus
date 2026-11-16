@@ -1,6 +1,7 @@
 //! Just enough HTTP/1.1 for nucleus's modules that call out (PLAN.md
 //! §M14.22): a request over TLS (rustls, Mozilla's roots) — plain HTTP
-//! only to a loopback address — and its response.  One request a
+//! only to a loopback or link-local address (a cloud's metadata server)
+//! — and its response.  One request a
 //! connection.  A private certificate authority (a Vault's, a company's)
 //! is trusted beside Mozilla's roots once [`trust_pem`] is given it.
 
@@ -14,7 +15,8 @@ use std::time::{Duration, Instant};
 pub struct Request<'a> {
     /// `GET`, `POST`, …
     pub method: &'a str,
-    /// `https://host[:port]/path` (or `http://` to a loopback address).
+    /// `https://host[:port]/path` (or `http://` to a loopback or link-local
+    /// address).
     pub url: &'a str,
     /// Headers besides `Host`, `Content-Length`, `Connection` and
     /// `User-Agent`, which are set.
@@ -162,6 +164,17 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
     .clone()
 }
 
+/// Whether plain HTTP may go to `ip`: a loopback address, or a
+/// link-local one (169.254.0.0/16, fe80::/10) — where clouds put their
+/// metadata servers (169.254.169.254), answering on the host's own link
+/// only.
+fn on_this_host(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => v.is_loopback() || v.is_link_local(),
+        std::net::IpAddr::V6(v) => v.is_loopback() || v.is_unicast_link_local(),
+    }
+}
+
 /// Sends `r` and reads its response.
 pub fn send(r: &Request<'_>) -> Result<Response, Error> {
     let deadline = r.total.map(|t| Instant::now() + t);
@@ -211,9 +224,9 @@ pub fn send(r: &Request<'_>) -> Result<Response, Error> {
         .to_socket_addrs()
         .map_err(|e| fail(&e, true))?
         .collect();
-    if !tls && !addrs.iter().all(|a| a.ip().is_loopback()) {
+    if !tls && !addrs.iter().all(|a| on_this_host(a.ip())) {
         return Err(fail(
-            &"plain HTTP only to a loopback address; use https",
+            &"plain HTTP only to a loopback or link-local address; use https",
             false,
         ));
     }
@@ -425,6 +438,27 @@ mod tests {
         assert!(trust_pem(b"not a pem at all").is_err());
         let junk = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
         assert!(trust_pem(junk).is_err());
+    }
+
+    #[test]
+    fn plain_http_stays_on_this_host() {
+        for (ip, ok) in [
+            ("127.0.0.1", true),
+            ("169.254.169.254", true),
+            ("::1", true),
+            ("fe80::1", true),
+            ("10.0.0.1", false),
+            ("8.8.8.8", false),
+            ("2001:db8::1", false),
+        ] {
+            assert_eq!(on_this_host(ip.parse().unwrap()), ok, "{ip}");
+        }
+        let e = send(&Request {
+            url: "http://10.0.0.1/",
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(e.message.contains("use https"), "{}", e.message);
     }
 
     #[test]
