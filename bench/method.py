@@ -345,10 +345,12 @@ def write(path, name, env, samples, extra=None, script=None):
     if extra:
         doc.update(extra)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    # Paths as the repository and the home directory name them: a results
+    # file is published, the machine's user name is not.
+    text = json.dumps(doc, indent=1).replace(ROOT, ".").replace(os.path.expanduser("~"), "~")
     with open(path, "w") as f:
-        json.dump(doc, f, indent=1)
-        f.write("\n")
-    return doc
+        f.write(text + "\n")
+    return json.loads(text)
 
 
 def read(path):
@@ -450,13 +452,17 @@ def emit_system(name, info):
 def gather(text, into, systems, label=None):
     """The `@metric` and `@system` lines of a run's output; with `label`
     (one of several commands run in turn), the command's label names the
-    system ("nucleus" alone; another as "system (label)")."""
+    system "nucleus"; another system keeps its name under the label
+    "nucleus" or its own name, and is "system (label)" under another)."""
     for line in text.splitlines():
         if line.startswith(MARK):
             m = json.loads(line[len(MARK):])
             system = m.get("system", "nucleus")
             if label:
-                system = label if system == "nucleus" else f"{system} ({label})"
+                if system in ("nucleus", label):
+                    system = label
+                elif label != "nucleus":
+                    system = f"{system} ({label})"
             key = (m["name"], m.get("phase", "warm"), system)
             into.setdefault(key, {"unit": m.get("unit", "ms"), "values": []})["values"].extend(m["values"])
         elif line.startswith("@system "):

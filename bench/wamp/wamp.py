@@ -128,7 +128,11 @@ if sys.argv[1] in ("nucleus", "nucleus-docker"):
             return s
         def stop(s):
             s.terminate(); s.wait()
-        cleanup = lambda: None
+        # A fresh database each run: made here, removed at the end.
+        if os.path.exists(db):
+            sys.exit(f"{db} exists: wamp makes the database itself (and removes it after)")
+        import shutil
+        cleanup = lambda: shutil.rmtree(db, ignore_errors=True)
     else:
         volume, binary, port = sys.argv[2], sys.argv[3], int(sys.argv[4])
         NAME = "nucleus-wamp-nc"

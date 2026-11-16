@@ -9,7 +9,10 @@
 //
 // CHROME names the browser (default: Chrome's usual place on macOS, else
 // google-chrome on the PATH).  No dependencies: the DevTools protocol over
-// Node's WebSocket.
+// Node's WebSocket.  Each visit's time to the first answer (from the
+// page's start: the engine fetched and compiled, the database opened from
+// OPFS, three statements) is printed as an `@metric` line too, for
+// `bench/method.py run` (nucleus PLAN.md §M14.31).
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -114,6 +117,8 @@ async function main() {
   const expect = (got, want, what) => {
     if (got[0] !== want) throw new Error(`${what}: visit ${got[0]}, expected ${want}`);
     console.log(`ok - ${what}: visit ${got[0]} (${got[1]} ms from the page's start)`);
+    console.log("@metric " + JSON.stringify({ name: `first answer, ${what}`, values: [got[1]], unit: "ms",
+      system: "nucleus", phase: want === 1 || want === 5 ? "cold" : "warm" }));
   };
   try {
     let s = await launch(profile);

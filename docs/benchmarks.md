@@ -1356,31 +1356,6 @@ NUCLEUS_HISTORY=3600 cargo run --release -p nucleus-kv --example bench
 cargo run --release -p nucleus-kv --example bench
 ```
 
-## Metrics
-
-The cost of recording the metrics (PLAN.md §M14.18 O1): the build with
-them against the commit before, release, Apple M2 Pro, 2026-11-15,
-three alternating runs each, their medians.
-
-| | without | with |
-|---|---:|---:|
-| one-row commits, one thread (kv bench) | 5,570 /s | 5,410 /s |
-| one-row commits, 8 threads (group commit) | 16,460 /s | 15,660 /s |
-| point reads (kv bench) | 967,600 /s | 956,200 /s |
-| `bench/run.py` 1M rows: load | 974 ms | 979 ms |
-| … 1000 point reads by key | 62.1 ms | 61.6 ms |
-| … update 25% | 614 ms | 615 ms |
-| … sort | 80.0 ms | 81.7 ms |
-
-Within the runs' spread (one-row commits 4,630–5,720 /s without,
-3,500–5,690 /s with; every `run.py` step's ranges overlap): a statement
-adds a few relaxed atomic adds, a commit one.
-
-```sh
-cargo run --release -p nucleus-kv --example bench
-python3 bench/run.py --nucleus target/release/nucleus --rows 1000000 --no-pg
-```
-
 ## Branches
 
 PLAN.md §M14.13 B5 (`crates/kv/examples/branches.rs`): release, real

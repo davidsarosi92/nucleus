@@ -9237,9 +9237,17 @@ Steps (planned 2026-11-14):
     Tests: a server scraped before and after a workload (the numbers
     moving, OpenMetrics, `nc_catalog.metrics` at least as far, `nucleus
     status`), a stand-in collector reading two pushes, the slt file
-    `74_metrics`.  Measured (`docs/benchmarks.md`, Metrics): the kv
-    bench and `bench/run.py` (1M rows) against the commit before, three
-    alternating runs — within the spread.  Not taken: a real Prometheus
+    `74_metrics`.  Measured: the kv bench and `bench/run.py` (1M rows)
+    against the commit before, three alternating runs, their medians
+    (without → with) — one-row commits, one thread 5,570 → 5,410 /s; 8
+    threads 16,460 → 15,660 /s; point reads 967,600 → 956,200 /s;
+    `run.py` load 974 → 979 ms, 1,000 point reads 62.1 → 61.6 ms, update
+    25 % 614 → 615 ms, sort 80.0 → 81.7 ms — within the spread (one-row
+    commits 4,630–5,720 /s without, 3,500–5,690 with; every `run.py`
+    step's ranges overlap): a statement adds a few relaxed atomic adds,
+    a commit one.  (Moved here from docs/benchmarks.md by §M14.31 P1c:
+    a comparison with one base build, not a number a script repeats.)
+    Not taken: a real Prometheus
     and OpenTelemetry Collector in CI (images to pull; the formats are
     checked by the tests, the real ones come with O2's alert-rule tests,
     which need `promtool`); traces (a span per statement) — O2.
@@ -10462,6 +10470,23 @@ needs repeated runs across instances and days).
   stays in Docker (its image is how it ships; recorded `native: false`),
   and write amplification's ext4 runs stay in Docker's Linux VM, nucleus
   and PostgreSQL alike.
+  The numbers that had no script got one: `bench/backup.py` (subjects'
+  sealing, incremental chains, compression and encryption, each restore
+  checked against the database), `bench/keys.py` (a new data key),
+  `bench/inserts.py` (one-row `INSERT`s from 8 sessions, history on and
+  off), `bench/embedded/python.py` and `wasm.mjs`, and
+  `drivers/js/test/browser.mjs` prints its visits' times.  The cost of
+  the metrics (§M14.18 O1) was a build against its base, once: it stays
+  in O1's notes, not in the docs.  Found on the way: a `numeric` column
+  goes into numpy as Python objects (a million rows 1.4 s, against 35 ms
+  as `float8`), and `generate_series` straight into numpy costs 257 ms
+  against 31 ms from a table — both for §M14.15's perf pass.  And a bug
+  (fixed, d4931ee): an incremental `BACKUP TO` after 10,000 adjacent rows
+  were deleted panicked dropping the old backup branch — a removal's
+  rebalance split two merged leaves in even halves by their cells'
+  sizes, and leaves whose keys each shared a long prefix, together
+  sharing a short one, gave a half that outgrew its page; it now packs
+  the pair as batches do (`normalize`).
 - **P1d — one script** (`bench/all.sh`): every benchmark into
   `bench/results/`, `docs/benchmarks.md`'s numbers from those files;
   then a second run, `method.py reproduce` on each.
