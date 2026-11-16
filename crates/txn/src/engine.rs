@@ -198,6 +198,9 @@ struct Inner {
     /// The last commit time recorded (µs since the Unix epoch): the next
     /// is never earlier.  Changed under the commit lock.
     last_time: AtomicU64,
+    /// The log position of the last commit's record.  Changed under the
+    /// commit lock ([`Engine::settle`]).
+    last_lsn: AtomicU64,
     /// With a retention by time, the oldest snapshot it keeps readable —
     /// the last commit at or before now − retention — as last found, and
     /// when (the platform's monotonic µs; `u64::MAX`: never).
@@ -608,6 +611,7 @@ impl Engine {
                 watched_at: AtomicU64::new(recovery.meta),
                 platform,
                 last_time: AtomicU64::new(0),
+                last_lsn: AtomicU64::new(0),
                 time_floor: AtomicU64::new(0),
                 time_floor_found: AtomicU64::new(u64::MAX),
             }),
@@ -821,6 +825,29 @@ impl Engine {
     /// The newest snapshot a transaction would see.
     pub fn visible(&self) -> Timestamp {
         Timestamp(self.inner.visible.load(Ordering::Acquire))
+    }
+
+    /// Returns once every commit that has passed its conflict check is
+    /// visible.  The visible snapshot lags the commits until they are
+    /// durable, so a transaction retried at once after losing to one
+    /// begins before it and loses again — for as long as the log takes to
+    /// sync, which on a slow disk outlasts any short back-off.  Waiting
+    /// here joins that sync (group commit) instead, and the retry sees
+    /// the commit it lost to.
+    pub fn settle(&self) -> Result<()> {
+        let (ts, lsn) = {
+            let last = lock(&self.inner.commit);
+            (*last, self.inner.last_lsn.load(Ordering::Acquire))
+        };
+        if self.inner.visible.load(Ordering::Acquire) >= ts {
+            return Ok(());
+        }
+        // Every commit up to `ts` logged its record at or before `lsn`
+        // (under the commit lock, in order) and was applied there: durable
+        // up to it, they are all visible.
+        self.inner.store.wait_durable(lsn)?;
+        self.inner.visible.fetch_max(ts, Ordering::AcqRel);
+        Ok(())
     }
 
     /// The snapshot of time `time` — that of the last commit at or before
@@ -2785,6 +2812,7 @@ impl Transaction {
                 )?
             };
             *last = ts;
+            engine.last_lsn.store(lsn, Ordering::Release);
             if let Some(time) = time {
                 engine.last_time.store(time, Ordering::Release);
             }

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nucleus_platform::harness;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
@@ -236,6 +237,38 @@ fn lost_updates_cannot_happen() {
         get(&e.begin(), "counter"),
         Some((threads * per).to_string())
     );
+}
+
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn a_retry_after_settling_sees_the_commit_it_lost_to() {
+    let (p, e) = engine();
+    put(&e, "k", "0");
+    let mut loser = e.begin();
+    // A slow disk: the winner's commit is applied, then waits for its log.
+    p.sim_fs().set_sync_delay(Duration::from_secs(2));
+    std::thread::scope(|s| {
+        let winner = s.spawn(|| put(&e, "k", "1"));
+        while p.sim_fs().syncs_waiting() == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        p.sim_fs().set_sync_delay(Duration::ZERO);
+        // (At the write or at the commit.)
+        let lost = loser
+            .put(b"k", b"2")
+            .and_then(|()| loser.commit().map(|_| ()));
+        assert!(lost.unwrap_err().is_retryable());
+        // Retried at once, the loser would begin before the winner's commit
+        // (not visible until durable) and lose again.
+        assert_eq!(get(&e.begin(), "k").as_deref(), Some("0"));
+        e.settle().unwrap();
+        let mut retry = e.begin();
+        assert_eq!(get(&retry, "k").as_deref(), Some("1"));
+        retry.put(b"k", b"2").unwrap();
+        retry.commit().unwrap();
+        winner.join().unwrap();
+    });
+    assert_eq!(get(&e.begin(), "k").as_deref(), Some("2"));
 }
 
 #[test]

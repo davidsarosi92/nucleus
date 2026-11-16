@@ -483,6 +483,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if let Some(a) = metrics_addr {
         shown.push(format!("{a} (metrics and health checks)"));
     }
+    // Recovered, open, listening (connections wait in the listeners'
+    // backlogs until they are served): ready (`/health/ready`,
+    // `nucleus_ready`) — before the line saying so, which whoever started
+    // the server may act on at once.
+    nucleus_platform::metrics::set_ready(true);
     nucleus_platform::log!(
         "nucleus {} listening on {} (database {dir}; index cache {} MB; {}{})",
         env!("CARGO_PKG_VERSION"),
@@ -572,8 +577,6 @@ pub fn run(args: &[String]) -> Result<(), String> {
     nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry));
     let mut listeners = listeners.into_iter();
     let (first, first_listener) = listeners.next().expect("ncp");
-    // Recovered, open, listening: ready (`/health/ready`, `nucleus_ready`).
-    nucleus_platform::metrics::set_ready(true);
     for (front, l) in listeners {
         let (kv, config) = (Arc::clone(&kv), config.clone());
         std::thread::spawn(move || {

@@ -258,7 +258,8 @@ pub trait Kv: Send + Sync {
     fn elapsed(&self) -> Duration;
 
     /// Waits before retrying a transaction for the `attempt`-th time (from
-    /// 1): exponentially longer each time, with jitter, so retries that
+    /// 1): until the commits it may have lost to are visible, then
+    /// exponentially longer each time, with jitter, so retries that
     /// collided once spread out.  Through the implementation's platform, so
     /// a simulation does not wait in real time.
     fn back_off(&self, attempt: u32);
@@ -1360,9 +1361,13 @@ impl Kv for Database {
         Ok(Box::new(sealed))
     }
 
-    /// From 2 µs, doubling up to about 1 ms, plus up to as much again at
-    /// random.
+    /// The commits already past their conflict check made visible first
+    /// ([`nucleus_txn::Engine::settle`]: the retry sees the one it lost
+    /// to); then from 2 µs, doubling up to about 1 ms, plus up to as much
+    /// again at random.
     fn back_off(&self, attempt: u32) {
+        // (A failure here is the next attempt's to report.)
+        let _ = self.engine.settle();
         let base = 1u64 << attempt.clamp(1, 10);
         let jitter = self.platform.rng().below(base);
         self.platform

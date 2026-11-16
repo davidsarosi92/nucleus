@@ -128,6 +128,10 @@ struct State {
     next_lock: u64,
     /// What [`FileSystem::writes_in_place`] answers.
     in_place: bool,
+    /// How long a file sync takes, in real time ([`SimFs::set_sync_delay`]).
+    sync_delay: std::time::Duration,
+    /// File syncs waiting out that delay now.
+    syncs_waiting: usize,
 }
 
 /// The simulated file system.  Cloning gives another handle to the same one.
@@ -157,6 +161,8 @@ impl SimFs {
                 // Both answers, by the seed, so the seeded tests run both
                 // ways of writing the WAL.
                 in_place: seed & 1 == 0,
+                sync_delay: std::time::Duration::ZERO,
+                syncs_waiting: 0,
             })),
         }
     }
@@ -200,6 +206,19 @@ impl SimFs {
     pub fn crash_after_ops(&self, n: u64) {
         let mut s = self.lock();
         s.crash_at = Some(s.ops + n.max(1));
+    }
+
+    /// Makes every file sync from now on take `delay` in real time — a
+    /// slow disk, for tests of what happens while a commit waits for its
+    /// log (the simulated clock does not move).
+    pub fn set_sync_delay(&self, delay: std::time::Duration) {
+        self.lock().sync_delay = delay;
+    }
+
+    /// File syncs waiting out [`set_sync_delay`](Self::set_sync_delay)'s
+    /// delay now.
+    pub fn syncs_waiting(&self) -> usize {
+        self.lock().syncs_waiting
     }
 
     /// Operations performed so far.
@@ -672,6 +691,20 @@ impl File for SimFile {
     }
 
     fn sync(&self) -> io::Result<()> {
+        let delay = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !s.sync_delay.is_zero() {
+                s.syncs_waiting += 1;
+            }
+            s.sync_delay
+        };
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .syncs_waiting -= 1;
+        }
         let mut s = self.begin()?;
         let failed = s.inject(s.faults.sync_error_ppm);
         let d = data(&mut s, self.id);
