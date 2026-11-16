@@ -166,8 +166,9 @@ def pgvector_run(a, train, cosine, dim, op, ops):
              f"CREATE TABLE t (id int PRIMARY KEY, v vector({dim}));\n"
              "COPY t FROM '/data/bulk.copy' (FORMAT binary);\n")
         t = time.perf_counter()
-        psql(f"CREATE INDEX t_v_idx ON t USING hnsw (v {ops}) WITH (m = 16, ef_construction = 64);\n"
-             "VACUUM ANALYZE t;\n")
+        psql(pgvector_ref.parallel_build(
+            "t", f"CREATE INDEX t_v_idx ON t USING hnsw (v {ops}) WITH (m = 16, ef_construction = 64);\n")
+             + "VACUUM ANALYZE t;\n")
         method.emit("index build", time.perf_counter() - t, unit="s", system="pgvector")
         method.emit_system("pgvector", pgvector_ref.describe())
         print(f"pgvector: {a.bulk} rows, dim {dim}, indexed in {time.perf_counter() - t:.1f} s",

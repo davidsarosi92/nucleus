@@ -44,6 +44,7 @@ import pg  # noqa: E402
 # in a script's SQL names a file there.
 CLUSTER = None
 DATA = None
+WORKERS = 0
 # pgvector's documentation on building an index: memory for the graph,
 # parallel workers.
 BUILD = {"maintenance_work_mem": "4GB", "max_parallel_maintenance_workers": "9", "jit": "off"}
@@ -52,9 +53,11 @@ BUILD = {"maintenance_work_mem": "4GB", "max_parallel_maintenance_workers": "9",
 def start(work, settings=None):
     """The cluster started (pgvector's build settings over the machine's
     tuning), an empty schema, `work` the directory `/data/` names."""
-    global CLUSTER, DATA
+    global CLUSTER, DATA, WORKERS
     DATA = work
-    CLUSTER = pg.Cluster(pg.DEFAULT, {**pg.tuning(), **BUILD, **(settings or {})}).__enter__()
+    conf = {**pg.tuning(), **BUILD, **(settings or {})}
+    WORKERS = int(conf["max_parallel_maintenance_workers"])
+    CLUSTER = pg.Cluster(pg.DEFAULT, conf).__enter__()
     CLUSTER.sql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
     return CLUSTER
 
@@ -64,6 +67,16 @@ def stop():
         CLUSTER.sql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
     finally:
         CLUSTER.stop()
+
+
+def parallel_build(table, sql):
+    """`sql`, an index build on `table`, with the table's `parallel_workers`
+    the build's workers (reset after).  A vector past 2 KB is TOASTed, so
+    the heap PostgreSQL sizes a build's workers by is a few pointers —
+    1 MB for 30,000 vectors of 1536 — and it built on one process: 124.5 s
+    there, 17.8 s on 9 workers (PLAN.md §M14.31 P1d)."""
+    return (f"ALTER TABLE {table} SET (parallel_workers = {WORKERS});\n" + sql
+            + f"ALTER TABLE {table} RESET (parallel_workers);\n")
 
 
 def describe():
@@ -234,8 +247,8 @@ def main():
         psql("COPY t FROM '/data/bulk.copy' (FORMAT binary);\n")
         load = time.perf_counter() - t
         t = time.perf_counter()
-        psql(f"CREATE INDEX t_v_idx ON t USING hnsw ({index}) WITH (m = {a.m}, ef_construction = {a.efc});\n"
-             "VACUUM ANALYZE t;\n")
+        psql(parallel_build("t", f"CREATE INDEX t_v_idx ON t USING hnsw ({index}) "
+                            f"WITH (m = {a.m}, ef_construction = {a.efc});\n") + "VACUUM ANALYZE t;\n")
         build = time.perf_counter() - t
         size = psql("SELECT pg_relation_size('t_v_idx') / 1048576, pg_total_relation_size('t') / 1048576;\n").strip()
         print(f"bulk: {bulk} rows loaded in {load:.1f} s, indexed in {build:.1f} s "

@@ -174,8 +174,9 @@ def run_pgvector(a, train, col, test, truth):
              "COPY t FROM '/data/rows.copy' (FORMAT binary);\n"
              "COPY q FROM '/data/queries.copy' (FORMAT binary);\n")
         t = time.perf_counter()
-        psql("CREATE INDEX t_v ON t USING hnsw (v vector_l2_ops) WITH (m = 16, ef_construction = 64);\n"
-             "CREATE INDEX t_a ON t (a);\nVACUUM ANALYZE t; VACUUM ANALYZE q;\n")
+        psql(pgvector_ref.parallel_build(
+            "t", "CREATE INDEX t_v ON t USING hnsw (v vector_l2_ops) WITH (m = 16, ef_construction = 64);\n")
+             + "CREATE INDEX t_a ON t (a);\nVACUUM ANALYZE t; VACUUM ANALYZE q;\n")
         method.emit("index build", time.perf_counter() - t, unit="s", system="pgvector")
         method.emit_system("pgvector", pgvector_ref.describe())
         print(f"pgvector: {len(train)} rows, indexed in {time.perf_counter() - t:.1f} s; "

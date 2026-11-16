@@ -10503,6 +10503,18 @@ needs repeated runs across instances and days).
   ones before; the others' rounds stand.  A metric whose spread is the
   measurement's own stays flagged, its interval narrower for the rounds
   added.  The steps after `stats` ran under the new rule.
+  *And pgvector built on one process* there: its HNSW index on the 99,000
+  OpenAI vectors took 436 s against 137 s in Docker before.  PostgreSQL
+  sizes a build's workers by the heap, and a 1536-dimension vector (6 KB)
+  is TOASTed — the heap of 30,000 such rows is 1 MB, under
+  `min_parallel_table_scan_size` — so `building index serially` whatever
+  `max_parallel_maintenance_workers` said: 124.5 s for 30,000 rows,
+  17.8 s with the table's `parallel_workers` set to 9.  A tuned
+  baseline builds on the cores as nucleus does: `pgvector_ref.py`,
+  `related.py` and `filtered.py` set the table's `parallel_workers` for
+  the build and reset it after (20,000 rows: 11.0 s).  The run was
+  stopped after `stats` (8 hours, 11 of 45 steps); `ann-dbpedia` and
+  `ann-related` measured pgvector's build serially and run again.
 
 **Done when:** every number in `docs/benchmarks.md` carries its
 environment, its runs, its spread and the script that made it; and a
