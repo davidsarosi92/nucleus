@@ -924,7 +924,7 @@ static void subject_key(void) {
     nc_error err;
     nc_config cfg = config();
     nc_conn *admin = nc_connect(&cfg, &err), *other = nc_connect(&cfg, &err);
-    char t[64], who[64], sql[256];
+    char t[64], who[80], sql[256];
     uint8_t secret[32], wrong[32];
     nc_value p;
     nc_result *r;

@@ -140,7 +140,9 @@ pkcs11() {
   export SOFTHSM2_CONF=$hsm/softhsm2.conf NUCLEUS_PKCS11_MODULE=$lib
   softhsm2-util --init-token --free --label nucleus --so-pin 1234 --pin 5678 >>"$work/hsm.log" 2>&1 ||
     fail "pkcs11: no token made"
-  head -c 32 /dev/urandom >"$hsm/aes.key"
+  # softhsm2-util reads the key file as a C string: a NUL or a newline
+  # among the random bytes would cut the key short (an AES-152 key once).
+  LC_ALL=C tr -dc '\001-\011\013-\377' </dev/urandom | head -c 32 >"$hsm/aes.key"
   softhsm2-util --import "$hsm/aes.key" --aes --token nucleus --label root --id 01 --pin 5678 \
     >>"$work/hsm.log" 2>&1 || fail "pkcs11: no key imported"
   rm -f "$hsm/aes.key"

@@ -85,7 +85,10 @@ fn the_format_s_vectors() {
     if std::env::var_os("NUCLEUS_WRITE_VECTORS").is_some() {
         std::fs::write(VECTORS, &want).unwrap();
     }
-    let have = std::fs::read_to_string(VECTORS).expect("the vectors");
+    // A Windows checkout may have turned the newlines into CRLF.
+    let have = std::fs::read_to_string(VECTORS)
+        .expect("the vectors")
+        .replace("\r\n", "\n");
     assert_eq!(have, want, "the format changed: its vectors did");
     // And each decrypts back.
     for l in have
