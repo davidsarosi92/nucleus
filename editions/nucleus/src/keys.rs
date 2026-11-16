@@ -13,7 +13,8 @@ use nucleus_server::keyring::{self, Keyring, OldFiles, Root, SecretsKey, Setting
 use nucleus_server::subject_keyfile::SubjectKeyFile;
 
 /// The options' usage, for the commands' help.
-pub const OPTIONS: &str = "[--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>]
+pub const OPTIONS: &str = "[--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>
+                      | --root-kms aws-kms:<key id, ARN or alias/…>]
                      [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
                      [--encrypt-data yes|no]";
 
@@ -51,6 +52,7 @@ impl KeyOptions {
             "--root-key" => Root::File(value("a file")?.into()),
             "--root-key-env" => Root::Env(value("a variable's name")?),
             "--root-passphrase-env" => Root::Passphrase(value("a variable's name")?),
+            "--root-kms" => Root::Kms(value("a KMS key (aws-kms:<key>)")?),
             "--old-key-files" => {
                 self.old_files = Some(match value("remove, keep or manual")?.as_str() {
                     "remove" => OldFiles::Remove,
@@ -76,7 +78,9 @@ impl KeyOptions {
             _ => return Ok(false),
         };
         if self.root.is_some() {
-            return Err("one of --root-key, --root-key-env and --root-passphrase-env".into());
+            return Err(
+                "one of --root-key, --root-key-env, --root-passphrase-env and --root-kms".into(),
+            );
         }
         self.root = Some(root);
         Ok(true)
@@ -256,7 +260,8 @@ pub fn subject_keys(
 /// The usage of `nucleus keys`.
 pub const USAGE: &str = "usage: nucleus keys <dir> list|import|encrypt [options]
        nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
-                  | --to-root-passphrase-env <var> | --to-managed-root  [options]
+                  | --to-root-passphrase-env <var> | --to-root-kms <scheme>:<key>
+                  | --to-managed-root  [options]
        nucleus keys <dir> rotate secrets|subjects|backup  [options]";
 
 /// `nucleus keys <dir> encrypt` (PLAN.md §M14.30 K2e): the database in
@@ -306,6 +311,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--to-root-key" => Some(Root::File(value()?.into())),
             "--to-root-key-env" => Some(Root::Env(value()?)),
             "--to-root-passphrase-env" => Some(Root::Passphrase(value()?)),
+            "--to-root-kms" => Some(Root::Kms(value()?)),
             "--to-managed-root" => Some(Root::Managed(PathBuf::new())),
             _ => None,
         };

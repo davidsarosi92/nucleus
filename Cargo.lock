@@ -397,9 +397,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-aws"
+version = "0.1.0"
+dependencies = [
+ "nucleus-sql",
+]
+
+[[package]]
+name = "nucleus-aws-kms"
+version = "0.1.0"
+dependencies = [
+ "nucleus-aws",
+ "nucleus-http",
+ "nucleus-kv",
+ "nucleus-server",
+ "nucleus-sql",
+ "serde_json",
+]
+
+[[package]]
 name = "nucleus-cli"
 version = "0.1.0"
 dependencies = [
+ "nucleus-aws-kms",
  "nucleus-client",
  "nucleus-console",
  "nucleus-crypto",
@@ -611,6 +631,7 @@ dependencies = [
 name = "nucleus-s3"
 version = "0.1.0"
 dependencies = [
+ "nucleus-aws",
  "nucleus-http",
  "nucleus-kv",
  "nucleus-sql",

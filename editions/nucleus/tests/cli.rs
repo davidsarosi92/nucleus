@@ -4,8 +4,14 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn nucleus(args: &[&str], stdin: &str) -> (bool, String) {
+    nucleus_with(args, stdin, &[])
+}
+
+/// [`nucleus`] with environment variables `env` set.
+fn nucleus_with(args: &[&str], stdin: &str, env: &[(String, String)]) -> (bool, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nucleus"))
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1661,6 +1667,94 @@ fn keys_encrypt() {
         Vec::<String>::new()
     );
     let (ok, out) = nucleus(&["sql", dbs2, "-c", "SELECT v FROM t"], "");
+    assert!(ok && out.contains(planted), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_root_key_in_kms() {
+    use nucleus_aws_kms::mock::Mock;
+    let kms = Mock::start();
+    let arn = kms.add_key("alias/nucleus-cli");
+    let env = kms.env_vars();
+    let dir = temp_dir("kms");
+    std::fs::create_dir_all(&dir).unwrap();
+    let planted = "planted-kms-5b1d93e0";
+    let db = dir.join("db");
+    let dbs = db.to_str().unwrap();
+    let root = ["--root-kms", "aws-kms:alias/nucleus-cli"];
+    let (ok, out) = nucleus_with(
+        &[&["sql", dbs, "--encrypt-data", "yes"][..], &root].concat(),
+        &format!("CREATE TABLE t (v TEXT);\nINSERT INTO t VALUES ('{planted}');\n"),
+        &env,
+    );
+    assert!(ok, "{out}");
+    assert_eq!(files_holding(&db, planted.as_bytes()), Vec::<String>::new());
+    let ring = std::fs::read_to_string(dir.join("db.keyring")).unwrap();
+    assert!(ring.contains(&format!("root aws-kms:{arn} ")), "{ring}");
+    assert!(!dir.join("db.root-key").exists());
+    let select = [&["sql", dbs, "-c", "SELECT v FROM t"][..], &root].concat();
+    let (ok, out) = nucleus_with(&select, "", &env);
+    assert!(ok && out.contains(planted), "{out}");
+    // The key's ARN names the same root as its alias.
+    let by_arn = format!("aws-kms:{arn}");
+    let (ok, out) = nucleus_with(
+        &["sql", dbs, "-c", "SELECT v FROM t", "--root-kms", &by_arn],
+        "",
+        &env,
+    );
+    assert!(ok && out.contains(planted), "{out}");
+
+    // The key disabled in KMS: the database does not open.
+    kms.set_enabled(&arn, false);
+    let (ok, out) = nucleus_with(&select, "", &env);
+    assert!(!ok && out.contains("not Enabled"), "{out}");
+    kms.set_enabled(&arn, true);
+    let (ok, out) = nucleus_with(&select, "", &env);
+    assert!(ok && out.contains(planted), "{out}");
+    // Another key is another root.
+    kms.add_key("alias/other");
+    let (ok, out) = nucleus_with(
+        &[
+            "sql",
+            dbs,
+            "-c",
+            "SELECT v FROM t",
+            "--root-kms",
+            "aws-kms:alias/other",
+        ],
+        "",
+        &env,
+    );
+    assert!(!ok && out.contains("was wrapped by the root key"), "{out}");
+
+    // A database under a file's root moved under the KMS key.
+    let db2 = dir.join("db2");
+    let dbs2 = db2.to_str().unwrap();
+    let (ok, out) = nucleus(
+        &["sql", dbs2, "--encrypt-data", "yes"],
+        &format!("CREATE TABLE t (v TEXT);\nINSERT INTO t VALUES ('{planted}');\n"),
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = nucleus_with(
+        &[
+            "keys",
+            dbs2,
+            "rotate-root",
+            "--to-root-kms",
+            "aws-kms:alias/nucleus-cli",
+        ],
+        "",
+        &env,
+    );
+    assert!(ok, "{out}");
+    let ring = std::fs::read_to_string(dir.join("db2.keyring")).unwrap();
+    assert!(ring.contains(&format!("root aws-kms:{arn} ")), "{ring}");
+    let (ok, out) = nucleus_with(
+        &[&["sql", dbs2, "-c", "SELECT v FROM t"][..], &root].concat(),
+        "",
+        &env,
+    );
     assert!(ok && out.contains(planted), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }

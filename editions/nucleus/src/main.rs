@@ -70,7 +70,8 @@ usage:
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>] [--subject-keys <file>]
                      [--history <duration>] [--backup-key <file>]
-                     [--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>]
+                     [--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>
+                      | --root-kms <scheme>:<key>]
                      [--old-key-files remove|keep|manual] [--encrypt-backups yes|no]
                      [--encrypt-data yes|no]
                      [--backup-to <repository> --backup-every <duration>
@@ -116,8 +117,11 @@ usage:
                                     digits; or NUCLEUS_ROOT_KEY_FILE),
                                     --root-key-env a variable holding one,
                                     --root-passphrase-env a passphrase's
-                                    variable — by default <dir>.root-key, made
-                                    at first use; --old-key-files: the key
+                                    variable, --root-kms a key management
+                                    service's key that never leaves it
+                                    (aws-kms:<key id, ARN or alias/…>, the
+                                    AWS SDKs' variables) — by default
+                                    <dir>.root-key, made at first use; --old-key-files: the key
                                     files of before (<dir>.secrets-key, …)
                                     taken into the keyring and removed (the
                                     default), kept with a warning, or left for
@@ -170,7 +174,8 @@ usage:
                                     stopped; its pages, logs and scratch
                                     files from then on)
   nucleus keys <dir> rotate-root --to-root-key <file> | --to-root-key-env <var>
-                 | --to-root-passphrase-env <var> | --to-managed-root
+                 | --to-root-passphrase-env <var> | --to-root-kms <scheme>:<key>
+                 | --to-managed-root
                  [the root key's options of nucleus server]
                                     a new root: the data keys wrapped again
                                     (seconds; the server stopped)
@@ -215,6 +220,7 @@ fn main() -> ExitCode {
     sql::registry();
     // Repositories of backups in object storage (BACKUP TO 's3://…').
     nucleus_s3::register();
+    nucleus_aws_kms::register();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).

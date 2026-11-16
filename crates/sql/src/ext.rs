@@ -78,6 +78,9 @@ pub use crate::vector::{Batch, Sel, TimeKind, Vector};
 pub use nucleus_crypto::hmac_sha256;
 /// SHA-256 (`nucleus-crypto`'s), for a module to check what it fetched.
 pub use nucleus_crypto::sha256;
+/// Base64 (RFC 4648, padded; `nucleus-crypto`'s), for a module's
+/// requests and responses (a KMS's keys in JSON).
+pub use nucleus_crypto::{base64_decode, base64_encode};
 
 /// The catalog, read-only, as modules see it: table definitions and their
 /// constraints.

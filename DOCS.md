@@ -48,7 +48,9 @@
 | `modules/console` | `nucleus-console` | the web console: a front end serving a page to browse tables, run SQL, see plans drawn and the linter's findings (§9) | §M14.17 |
 | `modules/prometheus` | `nucleus-prometheus` | Prometheus: the metrics as `GET /metrics` (text format, OpenMetrics) and the health checks `/health/live`, `/health/ready` (§8.38) | §M14.18 |
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
+| `modules/aws` | `nucleus-aws` | what the AWS modules share: Signature Version 4, credentials, region and endpoint from the AWS SDKs' variables | §M14.18, §M14.30 |
 | `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
+| `modules/aws-kms` | `nucleus-aws-kms` | the keyring's root key in AWS KMS (`--root-kms aws-kms:<key>`): data keys wrapped by `Encrypt`, unwrapped by `Decrypt`; a stand-in KMS for tests (`mock`) | §M14.30 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -56,7 +58,7 @@
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `playground` | — | the console's page on the browser edition, the tutorial as its tour; `build.sh` (a static site), `test.mjs` (headless Chrome) | §M14.17 |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
-| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`, `ci-tools.sh` (CI's tools for running its scripts locally), `s3-test.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
+| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`, `ci-tools.sh` (CI's tools for running its scripts locally), `s3-test.sh`, `kms-test.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
 | `packaging` | — | the container image's `Dockerfile` (§6.3) | §M14.17 |
 | `monitoring` | — | Prometheus alert rules and their `promtool` tests, a Grafana dashboard, `test.sh` (the real Prometheus and OpenTelemetry Collector against a server; MIT, to copy from) (§8.39) | §M14.18 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
@@ -105,6 +107,7 @@ scripts/ci-tools.sh                              # CI's tools, pinned and checke
 T=target/ci-tools; PROMTOOL=$T/promtool PROMETHEUS=$T/prometheus OTELCOL=$T/otelcol \
   monitoring/test.sh target/release/nucleus      # the rules' tests, a real Prometheus and collector
 RCLONE=$T/rclone scripts/s3-test.sh target/release/nucleus   # backups in a real S3 server
+MOTO_PYTHON=<python with moto[server]> scripts/kms-test.sh target/release/nucleus  # the root in AWS KMS (moto)
 ```
 
 A test-kit script whose results claim PostgreSQL's is checked against a
@@ -1140,8 +1143,13 @@ distributed implementation will provide (§F3).
   one's platform clock), the only clock layers above read (principle 4);
   `elapsed()` — monotonic time, for measuring how long something took
   (`EXPLAIN ANALYZE`, statement statistics; simulated in a simulation);
-  `back_off(attempt)` — the wait before a retry (exponential with
-  jitter, through the platform, so a simulation does not wait);
+  `back_off(attempt)` — the wait before a retry: first until the
+  commits already past their conflict check are visible
+  (`Engine::settle`, joining their log sync — the visible snapshot lags
+  a commit until it is durable, so a retry begun at once would start
+  before the commit it lost to and lose again for as long as the sync
+  takes), then exponential with jitter, through the platform, so a
+  simulation does not wait;
   `random_bytes(buf)` — unpredictable bytes from the platform;
   `parallelism()` — the threads a statement may split its work across
   (default 1; the local implementation's platform's);
@@ -6476,8 +6484,18 @@ its purpose.  The root's custody is the owner's (`nucleus server`,
 directory or a stolen backup, not a compromised host); *user-managed*
 with `--root-key FILE` (64 hex digits; or `NUCLEUS_ROOT_KEY_FILE`),
 `--root-key-env VAR`, or `--root-passphrase-env VAR` (PBKDF2-HMAC-SHA-256,
-600,000 rounds, its salt in the keyring); a KMS is a module's
-`KeyProvider` (K3).  A root that did not wrap the keyring is refused,
+600,000 rounds, its salt in the keyring); or a KMS's key that never
+leaves it, `--root-kms <scheme>:<key>` — a module's `KeyProvider`
+registered for its scheme (`keyring::register_kms`, K3).  AWS KMS is
+`modules/aws-kms` (`aws-kms:<key id, ARN or alias/…>`, configured by
+the AWS SDKs' variables): at opening `DescribeKey` turns the name into
+the key's ARN — the root's id, so an alias and its ARN are one root and
+an alias moved to another key is refused — and refuses a key not
+`Enabled`, not `ENCRYPT_DECRYPT` or not symmetric; each data key is
+wrapped by `Encrypt` and unwrapped by `Decrypt` once at opening, under
+the encryption context `{"nucleus-purpose": <purpose>}`, so KMS itself
+refuses a wrapped key offered for another purpose.  A key disabled or
+deleted in KMS leaves the database unopenable.  A root that did not wrap the keyring is refused,
 naming both ids.  An old key file (`<dir>.secrets-key`, or
 `--secrets-key`'s) is taken in at start — its bytes become the data
 key, so what it sealed still opens — and, by `--old-key-files`,
@@ -7475,6 +7493,19 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K3a, the root key in AWS KMS:**
+  `modules/aws` (Signature Version 4, credentials, region and endpoints
+  shared by the AWS modules; `modules/s3` uses it), `modules/aws-kms`
+  (`--root-kms aws-kms:<key>`, `rotate-root --to-root-kms`; `Encrypt` and
+  `Decrypt` under the purpose's encryption context), the edition's
+  `a_root_key_in_kms`, `scripts/kms-test.sh` against moto in CI.
+  Fixed: a retry after a conflict began before the commit it lost to
+  while that commit waited for its log, and lost again until the ten
+  attempts ran out (`40001` from a `REMEMBER` racing the embedding
+  worker on a slow disk) — `back_off` now waits for the commits past
+  their conflict check (`Engine::settle`); `/health/ready` answered
+  503 for a moment after the server said it was listening;
+  `scripts/detach-test.sh` took `nucleus-aws-kms` for `nucleus-aws`.
 - **2026-11-15 — §M14.18 O4, restore tests:** `backup::restore_test`
   (the last backup restored into a scratch database, `check::check`
   and the audit chain), its record in the backup, `nucleus server

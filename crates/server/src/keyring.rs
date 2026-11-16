@@ -41,7 +41,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use nucleus_crypto::keys::{self, Key, KeyProvider, LocalRoot};
+use nucleus_crypto::keys::{self, LocalRoot};
+pub use nucleus_crypto::keys::{Key, KeyProvider};
 use nucleus_kv::Kv;
 use nucleus_sql::keys::{Custody, KeyInfo};
 
@@ -62,6 +63,44 @@ pub enum Root {
     Passphrase(String),
     /// A key provider of a module's (a KMS).
     Provider(Arc<dyn ProviderHandle>),
+    /// A KMS's key by its URI — `<scheme>:<key>`, as `aws-kms:alias/db`
+    /// — opened by the module registered for the scheme
+    /// ([`register_kms`]): the root never leaves the KMS.
+    Kms(String),
+}
+
+/// Opens a KMS's key from the part of its URI after the scheme.
+pub type KmsOpener = fn(&str) -> Result<Arc<dyn KeyProvider>, String>;
+
+fn kms_registry() -> &'static Mutex<BTreeMap<String, KmsOpener>> {
+    static R: std::sync::OnceLock<Mutex<BTreeMap<String, KmsOpener>>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Lets roots `<scheme>:…` ([`Root::Kms`]) be opened by `open` (a KMS
+/// module's, PLAN.md §M14.30 K3).
+pub fn register_kms(scheme: &str, open: KmsOpener) {
+    kms_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(scheme.to_string(), open);
+}
+
+/// The root a KMS URI names (`<scheme>:<key>`), by the module registered
+/// for its scheme.
+pub fn open_kms(uri: &str) -> Result<Arc<dyn KeyProvider>, String> {
+    let (scheme, rest) = uri.split_once(':').ok_or_else(|| {
+        format!("{uri}: not a KMS key's URI (<scheme>:<key>, as aws-kms:alias/db)")
+    })?;
+    let open = kms_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(scheme)
+        .copied();
+    let open = open.ok_or_else(|| {
+        format!("{uri}: no KMS module for {scheme}: (this build has none registered for it)")
+    })?;
+    open(rest).map_err(|e| format!("{uri}: {e}"))
 }
 
 /// A module's root (a KMS), comparable for [`Root`]'s sake.
@@ -564,6 +603,7 @@ impl Keyring {
                 ))
             }
             Root::Provider(h) => h.provider(),
+            Root::Kms(uri) => open_kms(uri)?,
         }))
     }
 
@@ -656,6 +696,7 @@ impl Keyring {
             Root::Env(v) => format!("the variable {v}"),
             Root::Passphrase(v) => format!("a passphrase in the variable {v}"),
             Root::Provider(h) => h.provider().describe(),
+            Root::Kms(uri) => format!("the KMS key {uri}"),
         }
     }
 

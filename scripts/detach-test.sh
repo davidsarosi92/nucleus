@@ -34,7 +34,7 @@ CARGO_TARGET_DIR="$pkg" cargo package --allow-dirty "${args[@]}"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 for m in "${modules[@]}"; do
-    crate=$(ls "$pkg"/package/"$m"-*.crate)
+    crate=$(ls "$pkg"/package/"$m"-[0-9]*.crate)
     dir="$work/$m"
     mkdir -p "$dir/.cargo"
     tar -xzf "$crate" -C "$dir" --strip-components=1
@@ -45,7 +45,7 @@ for m in "${modules[@]}"; do
         echo "[patch.crates-io]"
         for p in "${core[@]}" "${modules[@]}"; do
             [ "$p" = "$m" ] && continue
-            echo "$p = { path = \"$(ls -d "$pkg"/package/"$p"-*/ | head -1)\" }"
+            echo "$p = { path = \"$(ls -d "$pkg"/package/"$p"-[0-9]*/ | head -1)\" }"
         done
     } > "$dir/.cargo/config.toml"
     cp rust-toolchain.toml "$dir/"

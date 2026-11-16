@@ -1,0 +1,19 @@
+[package]
+name = "nucleus-aws"
+description = "What nucleus's AWS modules share: requests signed with AWS Signature Version 4, and the credentials, region and endpoints of the environment"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

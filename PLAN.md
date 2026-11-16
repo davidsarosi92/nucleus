@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅ (2026-11-16) |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅ (2026-11-16) |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10019,6 +10019,27 @@ then Google Cloud KMS, Azure Key Vault, Vault Transit, PKCS#11; each
 tested against the provider's local emulator or a real test account in
 CI where one is free (LocalStack's KMS, Vault in dev mode,
 SoftHSM2).
+
+**K3a — AWS KMS ✅** (2026-11-16).  `modules/aws` (`nucleus-aws`)
+holds what the AWS modules share — Signature Version 4, credentials,
+region, endpoints from the SDKs' variables — taken out of
+`modules/s3`, which now uses it.  `modules/aws-kms` is a `KeyProvider`
+registered for `aws-kms:` (`keyring::register_kms`; the edition takes
+`--root-kms` and `nucleus keys … rotate-root --to-root-kms`): its
+JSON API over `nucleus-http` (`TrentService.DescribeKey`, `Encrypt`,
+`Decrypt`), the key's ARN as the root's id, the purpose as the
+encryption context (as the AWS Encryption SDK binds its context), three
+retries on 500/503/throttling.  Tests: a stand-in KMS in the module
+(`mock` feature: every signature checked, the context bound, keys
+disabled), the edition's `a_root_key_in_kms` (encrypted under the KMS
+key, refused while disabled, another key refused, a file's root moved
+there) and `scripts/kms-test.sh`, CI's **root key in a KMS**, against
+moto's KMS server — moto rather than LocalStack: a pip package, no
+Docker, and its KMS enforces key state and the encryption context.
+Left for K3: Google Cloud KMS, Azure Key Vault, Vault Transit,
+PKCS#11; re-wrapping the data keys under a rotated KMS key is
+`rotate-root` (seconds); the data re-encrypted under a new DEK online
+is K3's last step.
 
 **K4 — keys per tenant and per user, released for a session.**  The
 subject keys of §M14.24 extended from backups to live data: a tenant's

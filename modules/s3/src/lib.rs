@@ -15,12 +15,11 @@
 //! manifest, written last, makes a backup.  No multipart uploads: a part
 //! is about 16 MiB, far below a `PUT`'s 5 GiB.
 
-use std::fmt::Write as _;
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use nucleus_sql::ext::backups::{Target, register_target};
-use nucleus_sql::ext::{hmac_sha256, sha256};
+use nucleus_sql::ext::sha256;
 
 /// Lets `BACKUP TO 's3://…'` and `nucleus restore s3://…` use this module.
 pub fn register() {
@@ -62,59 +61,14 @@ impl std::fmt::Debug for S3 {
 }
 
 /// The SHA-256 of nothing, hex: an empty body's.
-const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const EMPTY: &str = nucleus_aws::EMPTY_SHA256;
 
-fn hex(b: &[u8]) -> String {
-    b.iter()
-        .fold(String::with_capacity(b.len() * 2), |mut s, x| {
-            let _ = write!(s, "{x:02x}");
-            s
-        })
-}
+pub use nucleus_aws::{amz_date, hex, uri_encode};
 
-/// `s` URI-encoded as Signature Version 4 wants: every byte but the
-/// unreserved ones (`A-Z a-z 0-9 - _ . ~`) as `%XX`, `/` kept in a path.
-pub fn uri_encode(s: &str, keep_slash: bool) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'_' | b'.' | b'~')
-            || (keep_slash && b == b'/')
-        {
-            out.push(b as char);
-        } else {
-            let _ = write!(out, "%{b:02X}");
-        }
-    }
-    out
-}
-
-/// `YYYYMMDDTHHMMSSZ` of a time.
-pub fn amz_date(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
-    // Days to a civil date (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
-/// A request's `Authorization` by Signature Version 4: `headers` are the
-/// ones signed besides `host` (names in lower case; `x-amz-date` and
-/// `x-amz-content-sha256` among them), `uri` the path as sent (encoded),
-/// `query` its parameters unencoded.
+/// A request's `Authorization` by Signature Version 4 for S3: `headers`
+/// are the ones signed besides `host` (names in lower case; `x-amz-date`
+/// and `x-amz-content-sha256` among them), `uri` the path as sent
+/// (encoded), `query` its parameters unencoded ([`nucleus_aws::Signer`]).
 #[allow(clippy::too_many_arguments)]
 pub fn sign(
     method: &str,
@@ -127,51 +81,13 @@ pub fn sign(
     key_id: &str,
     secret: &str,
 ) -> String {
-    let date = headers
-        .iter()
-        .find(|(k, _)| *k == "x-amz-date")
-        .map_or("", |(_, v)| *v);
-    let mut q: Vec<(String, String)> = query
-        .iter()
-        .map(|(k, v)| (uri_encode(k, false), uri_encode(v, false)))
-        .collect();
-    q.sort();
-    let canonical_query = q
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("&");
-    let mut h: Vec<(String, String)> = std::iter::once(("host".to_string(), host.to_string()))
-        .chain(
-            headers
-                .iter()
-                .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string())),
-        )
-        .collect();
-    h.sort();
-    let signed = h
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
-    let canonical_headers: String = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
-    let request = format!(
-        "{method}\n{uri}\n{canonical_query}\n{canonical_headers}\n{signed}\n{payload_hash}"
-    );
-    let day = &date[..date.len().min(8)];
-    let scope = format!("{day}/{region}/s3/aws4_request");
-    let to_sign = format!(
-        "AWS4-HMAC-SHA256\n{date}\n{scope}\n{}",
-        hex(&sha256(request.as_bytes()))
-    );
-    let mut key = hmac_sha256(format!("AWS4{secret}").as_bytes(), day.as_bytes());
-    for part in [region, "s3", "aws4_request"] {
-        key = hmac_sha256(&key, part.as_bytes());
+    nucleus_aws::Signer {
+        service: "s3",
+        region,
+        key_id,
+        secret,
     }
-    let signature = hex(&hmac_sha256(&key, to_sign.as_bytes()));
-    format!(
-        "AWS4-HMAC-SHA256 Credential={key_id}/{scope}, SignedHeaders={signed}, Signature={signature}"
-    )
+    .authorization(method, host, uri, query, headers, payload_hash)
 }
 
 /// XML's five entities, undone.
@@ -218,36 +134,22 @@ impl S3 {
         } else {
             format!("{prefix}/")
         };
-        let need = |k: &str| {
-            env(k)
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| format!("{url}: {k} is not set (the credentials, as the AWS CLI's)"))
-        };
-        let key_id = need("AWS_ACCESS_KEY_ID")?;
-        let secret = need("AWS_SECRET_ACCESS_KEY")?;
-        let region = env("AWS_REGION")
-            .or_else(|| env("AWS_DEFAULT_REGION"))
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| "us-east-1".into());
-        let (endpoint, path_style) = match env("AWS_ENDPOINT_URL_S3")
-            .or_else(|| env("AWS_ENDPOINT_URL"))
-            .filter(|e| !e.is_empty())
-        {
-            Some(e) => (e.trim_end_matches('/').to_string(), true),
+        let what = url.to_string();
+        let creds = nucleus_aws::Credentials::from_env(&env, &what)?;
+        let region = nucleus_aws::region(&env);
+        let (endpoint, path_style) = match nucleus_aws::endpoint(&env, "S3")? {
+            Some(e) => (e, true),
             None => (format!("https://{bucket}.s3.{region}.amazonaws.com"), false),
         };
-        if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
-            return Err(format!("{endpoint}: not an http(s) endpoint"));
-        }
         Ok(S3 {
             endpoint,
             path_style,
             bucket: bucket.to_string(),
             prefix,
             region,
-            key_id,
-            secret,
-            token: env("AWS_SESSION_TOKEN").filter(|t| !t.is_empty()),
+            key_id: creds.key_id,
+            secret: creds.secret,
+            token: creds.token,
         })
     }
 
@@ -446,101 +348,6 @@ impl Target for S3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
-    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
-
-    fn signature(auth: &str) -> &str {
-        auth.rsplit("Signature=").next().unwrap()
-    }
-
-    /// The examples of AWS's documentation of Signature Version 4 for S3
-    /// ("Signature Calculations for the Authorization Header").
-    #[test]
-    fn the_documentation_s_examples() {
-        let date = ("x-amz-date", "20130524T000000Z");
-        // GET Object, a range.
-        let auth = sign(
-            "GET",
-            "examplebucket.s3.amazonaws.com",
-            "/test.txt",
-            &[],
-            &[
-                ("range", "bytes=0-9"),
-                ("x-amz-content-sha256", EMPTY),
-                date,
-            ],
-            EMPTY,
-            "us-east-1",
-            KEY_ID,
-            SECRET,
-        );
-        assert!(auth.starts_with(
-            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, \
-             SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, "
-        ));
-        assert_eq!(
-            signature(&auth),
-            "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
-        );
-        // GET Bucket (list objects).
-        let auth = sign(
-            "GET",
-            "examplebucket.s3.amazonaws.com",
-            "/",
-            &[("max-keys", "2"), ("prefix", "J")],
-            &[("x-amz-content-sha256", EMPTY), date],
-            EMPTY,
-            "us-east-1",
-            KEY_ID,
-            SECRET,
-        );
-        assert_eq!(
-            signature(&auth),
-            "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
-        );
-        // PUT Object, a body.
-        let payload = hex(&sha256(b"Welcome to Amazon S3."));
-        assert_eq!(
-            payload,
-            "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"
-        );
-        let auth = sign(
-            "PUT",
-            "examplebucket.s3.amazonaws.com",
-            &format!("/{}", uri_encode("test$file.text", true)),
-            &[],
-            &[
-                ("date", "Fri, 24 May 2013 00:00:00 GMT"),
-                ("x-amz-content-sha256", &payload),
-                date,
-                ("x-amz-storage-class", "REDUCED_REDUNDANCY"),
-            ],
-            &payload,
-            "us-east-1",
-            KEY_ID,
-            SECRET,
-        );
-        assert_eq!(
-            signature(&auth),
-            "98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd"
-        );
-    }
-
-    #[test]
-    fn dates_and_encoding() {
-        assert_eq!(amz_date(UNIX_EPOCH), "19700101T000000Z");
-        assert_eq!(
-            amz_date(UNIX_EPOCH + Duration::from_secs(1_369_353_600)),
-            "20130524T000000Z"
-        );
-        assert_eq!(
-            amz_date(UNIX_EPOCH + Duration::from_secs(951_825_599)),
-            "20000229T115959Z"
-        );
-        assert_eq!(uri_encode("a b/c~d", true), "a%20b/c~d");
-        assert_eq!(uri_encode("a b/c", false), "a%20b%2Fc");
-    }
 
     #[test]
     fn urls_and_settings() {

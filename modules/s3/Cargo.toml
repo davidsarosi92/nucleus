@@ -9,6 +9,7 @@ readme = "README.md"
 include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [dependencies]
+nucleus-aws = { version = "0.1.0", path = "../aws" }
 nucleus-http = { version = "0.1.0", path = "../http" }
 nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
 

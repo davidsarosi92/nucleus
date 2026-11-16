@@ -266,6 +266,7 @@ nucleus server ./mydb --backup-to /backups/db --backup-every 1d --backup-keep 4 
 nucleus restore /backups/db ./restored --backup-key backup.key --at '2026-11-15 14:00:00+01'
 nucleus server ./mydb --root-key root.key   # encrypted at rest: pages, log, scratch (a new database;
                                         # an existing one: nucleus keys ./mydb encrypt)
+nucleus server ./mydb --root-kms aws-kms:alias/db   # the root key kept in AWS KMS
 nucleus status                          # a running server's health, for people
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down
