@@ -416,10 +416,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-azure-kv"
+version = "0.1.0"
+dependencies = [
+ "nucleus-http",
+ "nucleus-kv",
+ "nucleus-server",
+ "nucleus-sql",
+ "serde_json",
+]
+
+[[package]]
 name = "nucleus-cli"
 version = "0.1.0"
 dependencies = [
  "nucleus-aws-kms",
+ "nucleus-azure-kv",
  "nucleus-client",
  "nucleus-console",
  "nucleus-crypto",

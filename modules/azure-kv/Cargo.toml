@@ -1,0 +1,30 @@
+[package]
+name = "nucleus-azure-kv"
+description = "nucleus's root key kept in Azure Key Vault: the data keys encrypted and decrypted by a vault's RSA key, the private key never leaving it"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+nucleus-http = { version = "0.1.0", path = "../http" }
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+serde_json = "1"
+
+[dev-dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+
+[features]
+# A stand-in Key Vault, token endpoint and managed identity endpoint on a
+# loopback port, for tests (this crate's and others').
+mock = []
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

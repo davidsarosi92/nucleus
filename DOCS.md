@@ -50,6 +50,7 @@
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
 | `modules/aws` | `nucleus-aws` | what the AWS modules share: Signature Version 4, credentials, region and endpoint from the AWS SDKs' variables | §M14.18, §M14.30 |
 | `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
+| `modules/azure-kv` | `nucleus-azure-kv` | the keyring's root key in Azure Key Vault (`--root-kms azure-kv:<vault>/<key>`): data keys encrypted by the vault's RSA key (RSA-OAEP-256), the purpose bound inside; tokens from a service principal, workload identity or a managed identity; a stand-in Key Vault for tests (`mock`) | §M14.30 |
 | `modules/gcp-kms` | `nucleus-gcp-kms` | the keyring's root key in Google Cloud KMS (`--root-kms gcp-kms:projects/…/cryptoKeys/<k>`): data keys encrypted there, the purpose as additional authenticated data; tokens from application default credentials; a stand-in Cloud KMS for tests (`mock`) | §M14.30 |
 | `modules/vault-transit` | `nucleus-vault-transit` | the keyring's root key in Vault's or OpenBao's Transit engine (`--root-kms vault-transit:[<mount>/]<key>`): data keys encrypted there, the purpose as associated data; a stand-in engine for tests (`mock`) | §M14.30 |
 | `modules/aws-kms` | `nucleus-aws-kms` | the keyring's root key in AWS KMS (`--root-kms aws-kms:<key>`): data keys wrapped by `Encrypt`, unwrapped by `Decrypt`; a stand-in KMS for tests (`mock`) | §M14.30 |
@@ -6515,7 +6516,14 @@ purpose as additional authenticated data; tokens come as Google's
 client libraries find them (`GOOGLE_OAUTH_ACCESS_TOKEN`, a service
 account's key — a JWT it signs RS256 with `ring` —, gcloud's refresh
 token, the metadata server, which `nucleus-http` reaches over plain
-HTTP as a link-local address).  A root that did not wrap the keyring is refused,
+HTTP as a link-local address).  Azure Key Vault is `modules/azure-kv`
+(`azure-kv:<vault>/<key>` or the key's URL): an RSA key's `encrypt` and
+`decrypt` (RSA-OAEP-256); having no associated data, the purpose is
+encrypted with the data key and checked when it comes back (OAEP is
+non-malleable), and the key's version is kept beside the ciphertext so
+a rotated key still opens the keyring; tokens from a service
+principal's secret, workload identity's federated token, a managed
+identity's endpoint, or the instance metadata service.  A root that did not wrap the keyring is refused,
 naming both ids.  An old key file (`<dir>.secrets-key`, or
 `--secrets-key`'s) is taken in at start — its bytes become the data
 key, so what it sealed still opens — and, by `--old-key-files`,

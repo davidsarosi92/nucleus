@@ -125,7 +125,9 @@ usage:
                                     VAULT_ADDR, VAULT_TOKEN, …;
                                     gcp-kms:projects/…/cryptoKeys/<k>,
                                     Google's application default
-                                    credentials) — by default
+                                    credentials; azure-kv:<vault>/<key>,
+                                    AZURE_TENANT_ID, AZURE_CLIENT_ID, … or
+                                    a managed identity) — by default
                                     <dir>.root-key, made at first use;
                                     --old-key-files: the key files of before
                                     (<dir>.secrets-key, …)
@@ -229,6 +231,7 @@ fn main() -> ExitCode {
     nucleus_aws_kms::register();
     nucleus_vault_transit::register();
     nucleus_gcp_kms::register();
+    nucleus_azure_kv::register();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             // The Appropriate Legal Notices (AGPL-3.0 section 0; COPYRIGHT).
