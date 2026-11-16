@@ -34,8 +34,9 @@ extern "C" {
 /* 2: registered types (uuid, modules' types) arrive in their binary form;
  * 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
  * 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
- * a hint; 6: results stream, fetched in batches; 7: columnar results. */
-#define NC_PROTOCOL_VERSION 7
+ * a hint; 6: results stream, fetched in batches; 7: columnar results;
+ * 8: a subject's key presented (nc_present_subject_key). */
+#define NC_PROTOCOL_VERSION 8
 /* Rows a cursor asks the server for at a time. */
 #define NC_DEFAULT_FETCH 1000
 /* Rows a columnar batch holds when none is given. */
@@ -266,6 +267,59 @@ uint32_t nc_session_id(const nc_conn *c);
 
 /* Says Bye and frees the connection. */
 void nc_close(nc_conn *c);
+
+/* Presents secret -- 32 bytes only the user has (a passkey's PRF output, a
+ * device's key) -- for subject: this session then reads and writes the
+ * subject's sealed rows whose key its user holds (nucleus DOCS.md 8.40).
+ * A message of its own, never a statement's text; the server keeps it in
+ * the session's memory only.  0, or -1 with err (28000: the secret does
+ * not open the subject's key).  nc_hold_subject_key gives the subject's
+ * key into its user's keeping, wrapped under secret (an administrator's
+ * call): from then on only a session that presents it opens the rows. */
+int nc_present_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32], nc_error *err);
+int nc_hold_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32], nc_error *err);
+
+/* Client-side encrypted columns (nucleus PLAN.md M14.30 K5, DOCS.md 11): a
+ * value encrypted before it is sent and decrypted after it arrives, so the
+ * server stores bytea ciphertext and never holds the key; equality through
+ * a blind index stored beside it.  Format 1, every driver's
+ * (drivers/encrypted-columns.txt holds its test vectors):
+ *   keys: HMAC-SHA-256(master, "nucleus column 1 encrypt\0" name) and
+ *         HMAC-SHA-256(master, "nucleus column 1 index\0" name);
+ *   a value: a type byte (nc_plain_type) and its bytes (an integer: 8
+ *         bytes little-endian);
+ *   ciphertext: the byte 1, a random 24-byte nonce, XChaCha20-Poly1305 of
+ *         the value (the byte 1 authenticated beside it);
+ *   blind index: the first 16 bytes of HMAC-SHA-256 of the value under the
+ *         index key. */
+typedef enum nc_plain_type { NC_PLAIN_BYTES = 0, NC_PLAIN_TEXT = 1, NC_PLAIN_INT = 2 } nc_plain_type;
+typedef struct nc_column_key {
+    uint8_t encrypt[32];
+    uint8_t index[32];
+} nc_column_key;
+/* What a ciphertext adds to a value's bytes. */
+#define NC_COLUMN_OVERHEAD 42
+#define NC_BLIND_INDEX_LEN 16
+/* The keys of column name under master (32 bytes the application keeps:
+ * a KMS's, a keychain's; never the database's). */
+void nc_column_key_init(nc_column_key *k, const uint8_t master[32], const char *name);
+/* Encrypts a value -- type, and len bytes at data (an integer: data points
+ * to an int64_t, len 8) -- into out (len + NC_COLUMN_OVERHEAD bytes), the
+ * bytea to store.  nonce NULL: a fresh random one (24 bytes of one's own
+ * for test vectors only: one used twice gives both values away).  0, or -1
+ * when there is no randomness. */
+int nc_encrypt(const nc_column_key *k, nc_plain_type type, const void *data, size_t len, const uint8_t *nonce,
+               uint8_t *out);
+/* Decrypts len bytes of ciphertext into out (len - NC_COLUMN_OVERHEAD + 1
+ * bytes: a text is NUL-terminated; an integer is an int64_t, copy it out
+ * with memcpy), its type into *type and its length into *out_len.  0, or
+ * -1 when this key did not make it, or it was changed. */
+int nc_decrypt(const nc_column_key *k, const uint8_t *sealed, size_t len, nc_plain_type *type, uint8_t *out,
+               size_t *out_len);
+/* A value's blind index: equal values have equal ones, so
+ * "WHERE email_index = $1" with it finds a value's rows. */
+void nc_blind_index(const nc_column_key *k, nc_plain_type type, const void *data, size_t len,
+                    uint8_t out[NC_BLIND_INDEX_LEN]);
 
 /* Results. */
 size_t nc_columns(const nc_result *r);

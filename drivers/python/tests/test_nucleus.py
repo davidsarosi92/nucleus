@@ -205,6 +205,60 @@ class Conformance(unittest.TestCase):
             c.execute(f"UPDATE {t} SET v[3] = 9 WHERE id = 2")
             self.assertEqual(c.execute(f"SELECT v FROM {t} WHERE id = 2").rows[0][0], array.array("f", [4, 6, 9]))
 
+    def test_encrypted_columns(self):
+        # The format's vectors, shared by every driver (nucleus PLAN.md
+        # §M14.30 K5), then a column through the database.
+        from nucleus.columns import ColumnKey
+        path = os.path.join(os.path.dirname(__file__), "..", "..", "encrypted-columns.txt")
+        with open(path, encoding="utf-8") as f:
+            lines = [l.split(" ") for l in f.read().splitlines() if not l.startswith("#")]
+        master = bytes.fromhex(lines[0][1])
+        for name, kind, value, nonce, sealed, index in lines[1:]:
+            value = "" if value == "-" else value
+            v = {"bytes": lambda: bytes.fromhex(value), "text": lambda: bytes.fromhex(value).decode(),
+                 "int": lambda: int(value)}[kind]()
+            k = ColumnKey(master, name)
+            self.assertEqual(k.encrypt(v, bytes.fromhex(nonce)).hex(), sealed, name)
+            self.assertEqual(k.blind_index(v).hex(), index, name)
+            self.assertEqual(k.decrypt(bytes.fromhex(sealed)), v)
+        email, balance = ColumnKey(b"\x5a" * 32, "users.email"), ColumnKey(b"\x5a" * 32, "users.balance")
+        with self.assertRaises(ValueError):
+            ColumnKey(b"\x5a" * 32, "users.phone").decrypt(email.encrypt("x"))
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (id BIGINT PRIMARY KEY, email BYTEA, email_index BYTEA, balance BYTEA)")
+            for i, who, money in [(1, "ann@example.com", 100), (2, "bob@example.com", -5), (3, "ann@example.com", 7)]:
+                c.execute(f"INSERT INTO {t} VALUES ($1, $2, $3, $4)",
+                          [i, email.encrypt(who), email.blind_index(who), balance.encrypt(money)])
+            rows = c.execute(f"SELECT id, email, balance FROM {t} WHERE email_index = $1 ORDER BY id",
+                             [email.blind_index("ann@example.com")]).rows
+            self.assertEqual([(r[0], email.decrypt(r[1]), balance.decrypt(r[2])) for r in rows],
+                             [(1, "ann@example.com", 100), (3, "ann@example.com", 7)])
+
+    def test_subject_key(self):
+        # A sealed table's rows of a subject whose key its user holds open
+        # only for a session that presents it (the k message, protocol 8).
+        t, who = table(), "py-" + uuid.uuid4().hex[:8]
+        secret = bytes(range(32))
+        with connect() as admin, connect() as other:
+            try:
+                admin.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, owner TEXT, body TEXT) WITH (storage = sealed)")
+                admin.execute(f"ALTER TABLE {t} SET SUBJECT (owner)")
+                admin.execute(f"INSERT INTO {t} VALUES (1, $1, 'held')", [who])
+                admin.hold_subject_key(who, secret)
+            except nucleus.DatabaseError as e:
+                if e.code == "55000":
+                    self.skipTest("no store of subject keys here")
+                raise
+            with self.assertRaises(nucleus.OperationalError) as e:
+                other.execute(f"SELECT body FROM {t}")
+            self.assertEqual(e.exception.code, "28000")
+            with self.assertRaises(nucleus.OperationalError) as e:
+                other.present_subject_key(who, b"\x01" * 32)
+            self.assertEqual(e.exception.code, "28000")
+            other.present_subject_key(who, secret)
+            self.assertEqual(other.execute(f"SELECT body FROM {t}").rows, [("held",)])
+
     def test_core_types(self):
         import ipaddress
         t = table()

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
+  `nucleus.columns.ColumnKey(master, name)` — `encrypt`, `decrypt`,
+  `blind_index` — format 1, XChaCha20-Poly1305 in plain Python.  Protocol
+  version 8: `present_subject_key(subject, secret)` and
+  `hold_subject_key` (the `k` message, nucleus DOCS.md §8.40).
 - Licence: the driver stays MIT; the embedded edition's library in the
   wheel is AGPL-3.0-only — the wheel is `MIT AND AGPL-3.0-only`, with
   both licences and COPYRIGHT in its `dist-info` (the repository's

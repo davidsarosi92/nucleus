@@ -229,6 +229,32 @@ public final class Connection {
         return n
     }
 
+    /// Presents `secret` — 32 bytes only the user has (a passkey's PRF output,
+    /// a device's key) — for `subject`: this session then reads and writes the
+    /// subject's sealed rows whose key its user holds (nucleus DOCS.md §8.40).
+    /// A message of its own, never a statement's text.  A secret that does
+    /// not open the subject's key throws code 28000.
+    public func presentSubjectKey(_ subject: String, secret: [UInt8]) throws {
+        try subjectKey(subject, secret, nc_present_subject_key)
+    }
+
+    /// Gives `subject`'s key into its user's keeping, wrapped under `secret`
+    /// (an administrator's call): from then on only a session that presents
+    /// it opens the subject's sealed rows.
+    public func holdSubjectKey(_ subject: String, secret: [UInt8]) throws {
+        try subjectKey(subject, secret, nc_hold_subject_key)
+    }
+
+    private func subjectKey(
+        _ subject: String, _ secret: [UInt8],
+        _ send: (OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<UInt8>?, UnsafeMutablePointer<nc_error>?) -> Int32
+    ) throws {
+        guard secret.count == 32 else { throw NucleusError(message: "a subject's secret is 32 bytes") }
+        let c = try handle()
+        var err = nc_error()
+        if send(c, subject, secret, &err) != 0 { throw NucleusError(err) }
+    }
+
     /// `copy` of text.
     @discardableResult
     public func copy(_ sql: String, text: String) throws -> Int64 {

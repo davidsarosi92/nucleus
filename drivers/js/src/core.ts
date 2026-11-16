@@ -32,11 +32,15 @@
 
 import { Buffer } from "./bytes.ts";
 
+export { ColumnKey, COLUMN_FORMAT } from "./columns.ts";
+export type { PlainValue } from "./columns.ts";
+
 // 2: registered types (uuid, modules' types) arrive in their binary form;
 // 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 // 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
-// a hint; 6: results stream, fetched in batches; 7: columnar results.
-export const PROTOCOL_VERSION = 7;
+// a hint; 6: results stream, fetched in batches; 7: columnar results; 8: a
+// subject's key presented (presentSubjectKey).
+export const PROTOCOL_VERSION = 8;
 /** Rows a stream asks the server for at a time. */
 export const DEFAULT_FETCH = 1000;
 /** Rows a columnar batch holds when none is given. */
@@ -1183,6 +1187,50 @@ export class Client {
         }
       }
     }
+  }
+
+  /** Presents `secret` — 32 bytes only the user has (a passkey's PRF
+   * output, a device's key) — for `subject`: this session then reads and
+   * writes the subject's sealed rows whose key its user holds (nucleus
+   * DOCS.md §8.40).  A message of its own, never a statement's text; the
+   * server keeps it in the session's memory only.  A secret that does not
+   * open the subject's key rejects with 28000. */
+  presentSubjectKey(subject: string, secret: Uint8Array): Promise<void> {
+    return this.subjectKey(0, subject, secret);
+  }
+
+  /** Gives `subject`'s key into its user's keeping, wrapped under `secret`
+   * (32 bytes; an administrator's call): from then on only a session that
+   * presents it opens the subject's sealed rows. */
+  holdSubjectKey(subject: string, secret: Uint8Array): Promise<void> {
+    return this.subjectKey(1, subject, secret);
+  }
+
+  private subjectKey(action: number, subject: string, secret: Uint8Array): Promise<void> {
+    if (secret.length !== 32) return Promise.reject(new NucleusError("a subject's secret is 32 bytes"));
+    if (this.version < 8) {
+      return Promise.reject(
+        new NucleusError(`the server speaks version ${this.version} of the protocol; subject keys need 8`, "0A000"),
+      );
+    }
+    void this.active?.close();
+    const run = async (): Promise<void> => {
+      const body = new Writer().u8(action).str(subject).u32(32).bytes();
+      this.socket.write(frame("k", Buffer.concat([body, Buffer.from(secret)])));
+      let error: NucleusError | null = null;
+      for (;;) {
+        const m = await this.read();
+        if (m.kind === "E") error = new Reader(m.body).serverError();
+        else if (m.kind === "R") {
+          this.setStatus(m.body);
+          if (error) throw error;
+          return;
+        } else throw new NucleusError(`unexpected message ${m.kind}`);
+      }
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
   }
 
   /** Sends `Q`: rows `fetch` at a time (0: all at once; from version 6). */

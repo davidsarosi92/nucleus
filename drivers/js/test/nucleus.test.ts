@@ -9,7 +9,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { Cidr, connect as connectNode, Decimal, Inet, Interval, Json, NucleusError, SparseVector, Time } from "../src/index.ts";
+import { readFileSync } from "node:fs";
+import { ColumnKey, Cidr, connect as connectNode, Decimal, Inet, Interval, Json, NucleusError, SparseVector, Time } from "../src/index.ts";
 import type { ConnectOptions, Value } from "../src/index.ts";
 
 const options = {
@@ -212,6 +213,71 @@ test("sparsevec", async () => {
   // A position past the dimensions: the server's check refuses it.
   await assert.rejects(db.query(`INSERT INTO ${t} VALUES (7, $1)`, [new SparseVector(3, [3], [1])]), (e: NucleusError) => e.code === "22000");
   await db.close();
+});
+
+test("encrypted columns", async () => {
+  // The format's vectors, shared by every driver (nucleus PLAN.md §M14.30
+  // K5), then a column through the database.
+  const text = readFileSync(new URL("../../encrypted-columns.txt", import.meta.url), "utf8");
+  const lines = text.split("\n").filter((l) => l !== "" && !l.startsWith("#")).map((l) => l.split(" "));
+  const master = Buffer.from(lines[0][1], "hex");
+  for (const [name, kind, raw, nonce, sealed, index] of lines.slice(1)) {
+    const value = raw === "-" ? "" : raw;
+    const v = kind === "bytes" ? Buffer.from(value, "hex") : kind === "text" ? Buffer.from(value, "hex").toString("utf8") : BigInt(value);
+    const k = await ColumnKey.create(master, name);
+    assert.equal(k.encrypt(v, Buffer.from(nonce, "hex")).toString("hex"), sealed, name);
+    assert.equal((await k.blindIndex(v)).toString("hex"), index, name);
+    const back = k.decrypt(Buffer.from(sealed, "hex"));
+    assert.deepEqual(typeof back === "number" ? BigInt(back) : back, v);
+  }
+  const email = await ColumnKey.create(Buffer.alloc(32, 0x5a), "users.email");
+  const balance = await ColumnKey.create(Buffer.alloc(32, 0x5a), "users.balance");
+  const phone = await ColumnKey.create(Buffer.alloc(32, 0x5a), "users.phone");
+  assert.throws(() => phone.decrypt(email.encrypt("x")), TypeError);
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (id BIGINT PRIMARY KEY, email BYTEA, email_index BYTEA, balance BYTEA)`);
+  for (const [i, who, money] of [[1, "ann@example.com", 100], [2, "bob@example.com", -5], [3, "ann@example.com", 7]] as const) {
+    await db.query(`INSERT INTO ${t} VALUES ($1, $2, $3, $4)`, [i, email.encrypt(who), await email.blindIndex(who), balance.encrypt(money)]);
+  }
+  const { rows } = await db.query(`SELECT id, email, balance FROM ${t} WHERE email_index = $1 ORDER BY id`, [
+    await email.blindIndex("ann@example.com"),
+  ]);
+  assert.deepEqual(
+    rows.map((r) => [r[0], email.decrypt(r[1] as Buffer), balance.decrypt(r[2] as Buffer)]),
+    [[1, "ann@example.com", 100], [3, "ann@example.com", 7]],
+  );
+  await db.close();
+});
+
+test("a subject's key", async (t) => {
+  // A sealed table's rows of a subject whose key its user holds open only
+  // for a session that presents it (the k message, protocol 8).
+  const name = table();
+  const who = `js-${randomBytes(4).toString("hex")}`;
+  const secret = Uint8Array.from({ length: 32 }, (_, i) => i);
+  const admin = await connect(options);
+  const other = await connect(options);
+  try {
+    await admin.query(`CREATE TABLE ${name} (id INT PRIMARY KEY, owner TEXT, body TEXT) WITH (storage = sealed)`);
+    await admin.query(`ALTER TABLE ${name} SET SUBJECT (owner)`);
+    await admin.query(`INSERT INTO ${name} VALUES (1, $1, 'held')`, [who]);
+    await admin.holdSubjectKey(who, secret);
+  } catch (e) {
+    if ((e as NucleusError).code === "55000") {
+      t.skip("no store of subject keys here");
+      await admin.close();
+      await other.close();
+      return;
+    }
+    throw e;
+  }
+  await assert.rejects(other.query(`SELECT body FROM ${name}`), (e: NucleusError) => e.code === "28000");
+  await assert.rejects(other.presentSubjectKey(who, new Uint8Array(32).fill(1)), (e: NucleusError) => e.code === "28000");
+  await other.presentSubjectKey(who, secret);
+  assert.deepEqual((await other.query(`SELECT body FROM ${name}`)).rows, [["held"]]);
+  await admin.close();
+  await other.close();
 });
 
 test("errors", async () => {

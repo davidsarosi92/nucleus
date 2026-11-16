@@ -432,6 +432,81 @@ public final class NucleusTest {
         }
     }
 
+    /** A column the driver encrypts (nucleus PLAN.md §M14.30 K5) through the database. */
+    static void encryptedColumns() {
+        byte[] master = new byte[32];
+        Arrays.fill(master, (byte) 0x5a);
+        ColumnKey email = new ColumnKey(master, "users.email");
+        ColumnKey balance = new ColumnKey(master, "users.balance");
+        try {
+            new ColumnKey(master, "users.phone").decrypt(email.encrypt("x"));
+            throw new AssertionError("another column's key opened it");
+        } catch (IllegalArgumentException expected) {
+            // refused
+        }
+        try (NucleusClient db = db()) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id BIGINT PRIMARY KEY, email BYTEA, email_index BYTEA, balance BYTEA)");
+            Object[][] rows = {{1L, "ann@example.com", 100L}, {2L, "bob@example.com", -5L}, {3L, "ann@example.com", 7L}};
+            for (Object[] r : rows) {
+                db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4)", r[0], email.encrypt(r[1]),
+                        email.blindIndex(r[1]), balance.encrypt(r[2]));
+            }
+            List<List<Object>> got = db.query("SELECT id, email, balance FROM " + t
+                    + " WHERE email_index = $1 ORDER BY id", email.blindIndex("ann@example.com")).rows();
+            equal(got.stream().map(r -> List.of(r.get(0), email.decrypt((byte[]) r.get(1)),
+                    balance.decrypt((byte[]) r.get(2)))).toList(),
+                    List.of(List.of(1L, "ann@example.com", 100L), List.of(3L, "ann@example.com", 7L)), "decrypted");
+        }
+    }
+
+    /** The format's vectors, shared by every driver (drivers/encrypted-columns.txt). */
+    static void encryptedColumnVectors() {
+        try {
+            String path = Objects.requireNonNullElse(System.getenv("NUCLEUS_VECTORS"), "drivers/encrypted-columns.txt");
+            List<String[]> lines = java.nio.file.Files.readAllLines(java.nio.file.Path.of(path)).stream()
+                    .filter(l -> !l.startsWith("#") && !l.isEmpty()).map(l -> l.split(" ", -1)).toList();
+            java.util.HexFormat hex = java.util.HexFormat.of();
+            byte[] master = hex.parseHex(lines.get(0)[1]);
+            for (String[] f : lines.subList(1, lines.size())) {
+                String raw = f[2].equals("-") ? "" : f[2];
+                Object v = switch (f[1]) {
+                    case "bytes" -> hex.parseHex(raw);
+                    case "text" -> new String(hex.parseHex(raw), java.nio.charset.StandardCharsets.UTF_8);
+                    default -> Long.parseLong(raw);
+                };
+                ColumnKey k = new ColumnKey(master, f[0]);
+                equal(hex.formatHex(k.encrypt(v, hex.parseHex(f[3]))), f[4], f[0] + " ciphertext");
+                equal(hex.formatHex(k.blindIndex(v)), f[5], f[0] + " blind index");
+                Object back = k.decrypt(hex.parseHex(f[4]));
+                check(v instanceof byte[] ? Arrays.equals((byte[]) v, (byte[]) back) : v.equals(back), f[0] + " decrypted");
+            }
+        } catch (java.io.IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /** A sealed table's rows of a subject whose key its user holds open only for a session
+     *  that presents it (the k message, protocol 8). */
+    static void subjectKey() {
+        String t = table();
+        String who = "java-" + UUID.randomUUID().toString().substring(0, 8);
+        byte[] secret = new byte[32];
+        for (int i = 0; i < 32; i++) secret[i] = (byte) i;
+        try (NucleusClient admin = db(); NucleusClient other = db()) {
+            admin.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, owner TEXT, body TEXT) WITH (storage = sealed)");
+            admin.query("ALTER TABLE " + t + " SET SUBJECT (owner)");
+            admin.query("INSERT INTO " + t + " VALUES (1, $1, 'held')", who);
+            admin.holdSubjectKey(who, secret);
+            equal(errorCode(() -> other.query("SELECT body FROM " + t)), "28000", "refused without the key");
+            byte[] wrong = new byte[32];
+            Arrays.fill(wrong, (byte) 1);
+            equal(errorCode(() -> other.presentSubjectKey(who, wrong)), "28000", "a wrong key refused");
+            other.presentSubjectKey(who, secret);
+            equal(other.query("SELECT body FROM " + t).rows(), List.of(List.of("held")), "opened");
+        }
+    }
+
     private static void run(String name, Runnable test) {
         test.run();
         passed++;
@@ -467,6 +542,7 @@ public final class NucleusTest {
         run("columnar", NucleusTest::columnar);
         run("copy and load", NucleusTest::copyAndLoad);
         run("pipelines", NucleusTest::pipelines);
+        run("encrypted columns", NucleusTest::encryptedColumns);
         return passed;
     }
 
@@ -477,7 +553,9 @@ public final class NucleusTest {
         run("token", NucleusTest::token);
         run("directory", NucleusTest::directory);
         run("own transport", NucleusTest::ownTransport);
-        check(cases == 12 && passed == 17, "all tests ran");
+        run("encrypted columns' vectors", NucleusTest::encryptedColumnVectors);
+        run("a subject's key", NucleusTest::subjectKey);
+        check(cases == 13 && passed == 20, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

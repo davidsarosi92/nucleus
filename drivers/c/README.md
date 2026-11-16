@@ -51,6 +51,24 @@ make test           # build/test_nucleus (needs a running server)
 
 Or compile `nucleus.c` into your program.  Example: `examples/c/quickstart.c`.
 
+## Encrypted columns
+
+A column's values encrypted here and decrypted here: the server stores
+`bytea` ciphertext and never holds the key; a blind index beside it finds
+equal values (nucleus PLAN.md §M14.30 K5, DOCS.md §11 — what it leaves
+visible is said there).  `master` is 32 bytes the application keeps.
+
+```c
+nc_column_key k;
+uint8_t sealed[15 + NC_COLUMN_OVERHEAD], index[NC_BLIND_INDEX_LEN];
+nc_column_key_init(&k, master, "users.email");
+nc_encrypt(&k, NC_PLAIN_TEXT, "ann@example.com", 15, NULL, sealed);   /* a bytea to send */
+nc_blind_index(&k, NC_PLAIN_TEXT, "ann@example.com", 15, index);     /* WHERE email_index = $1 */
+/* back: nc_decrypt(&k, v->as.bytes.ptr, v->as.bytes.len, &type, out, &len) */
+```
+
+A sealed table's rows whose key their user holds: `nc_present_subject_key(db, subject, secret, &err)`.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

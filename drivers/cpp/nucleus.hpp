@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <istream>
 #include <stdexcept>
@@ -665,6 +666,26 @@ public:
         return static_cast<uint64_t>(n);
     }
 
+    /// Presents `secret` — 32 bytes only the user has (a passkey's PRF output,
+    /// a device's key) — for `subject`: this session then reads and writes the
+    /// subject's sealed rows whose key its user holds (nucleus DOCS.md §8.40).
+    /// A message of its own, never a statement's text.  A secret that does not
+    /// open the subject's key throws Error with code 28000.
+    void present_subject_key(const std::string& subject, const std::array<uint8_t, 32>& secret) {
+        nc_error err;
+        if (nc_present_subject_key(conn_, subject.c_str(), secret.data(), &err) != 0)
+            throw Error(err.message, err.code, err.hint);
+    }
+
+    /// Gives `subject`'s key into its user's keeping, wrapped under `secret`
+    /// (an administrator's call): from then on only a session that presents
+    /// it opens the subject's sealed rows.
+    void hold_subject_key(const std::string& subject, const std::array<uint8_t, 32>& secret) {
+        nc_error err;
+        if (nc_hold_subject_key(conn_, subject.c_str(), secret.data(), &err) != 0)
+            throw Error(err.message, err.code, err.hint);
+    }
+
     /// The same with the data read from `in` (a file, …), 64 KiB at a time.
     uint64_t copy(const std::string& sql, std::istream& in) {
         nc_error err;
@@ -705,6 +726,78 @@ public:
 
 private:
     nc_conn* conn_ = nullptr;
+};
+
+/// A client-side encrypted column's keys (nucleus PLAN.md §M14.30 K5,
+/// DOCS.md §11; the C driver's nc_column_key): from a 32-byte master key the
+/// application keeps and the column's name.  Encrypts values — bytes, a text,
+/// an integer — into the `bytea` to store, decrypts them, and makes their
+/// blind index (equal values, equal indexes: `WHERE email_index = $1`).
+class ColumnKey {
+public:
+    /// A value an encrypted column holds.
+    using Plain = std::variant<Bytes, std::string, int64_t>;
+
+    ColumnKey(const std::array<uint8_t, 32>& master, const std::string& name) {
+        nc_column_key_init(&key_, master.data(), name.c_str());
+    }
+
+    /// `value` encrypted, with a fresh random nonce (or `nonce`, 24 bytes,
+    /// for test vectors only).
+    Bytes encrypt(const Plain& value, const uint8_t* nonce = nullptr) const {
+        nc_plain_type t;
+        const void* data;
+        size_t len;
+        parts(value, t, data, len);
+        Bytes out{std::vector<uint8_t>(len + NC_COLUMN_OVERHEAD)};
+        if (nc_encrypt(&key_, t, data, len, nonce, out.data.data()) != 0)
+            throw Error("no randomness for a nonce", "58000");
+        return out;
+    }
+
+    /// The value in `sealed`; Error (22023) when this key did not make it,
+    /// or it was changed.
+    Plain decrypt(const Bytes& sealed) const {
+        if (sealed.data.size() < NC_COLUMN_OVERHEAD)
+            throw Error("an encrypted value this column's key does not open", "22023");
+        std::vector<uint8_t> out(sealed.data.size() - NC_COLUMN_OVERHEAD + 1);
+        nc_plain_type t;
+        size_t n;
+        if (nc_decrypt(&key_, sealed.data.data(), sealed.data.size(), &t, out.data(), &n) != 0)
+            throw Error("an encrypted value this column's key does not open", "22023");
+        if (t == NC_PLAIN_TEXT) return std::string(reinterpret_cast<const char*>(out.data()), n);
+        if (t == NC_PLAIN_INT) {
+            int64_t i;
+            std::memcpy(&i, out.data(), 8);
+            return i;
+        }
+        out.resize(n);
+        return Bytes{std::move(out)};
+    }
+
+    /// `value`'s blind index (16 bytes).
+    Bytes blind_index(const Plain& value) const {
+        nc_plain_type t;
+        const void* data;
+        size_t len;
+        parts(value, t, data, len);
+        Bytes out{std::vector<uint8_t>(NC_BLIND_INDEX_LEN)};
+        nc_blind_index(&key_, t, data, len, out.data.data());
+        return out;
+    }
+
+private:
+    static void parts(const Plain& v, nc_plain_type& t, const void*& data, size_t& len) {
+        if (auto* b = std::get_if<Bytes>(&v)) {
+            t = NC_PLAIN_BYTES, data = b->data.data(), len = b->data.size();
+        } else if (auto* s = std::get_if<std::string>(&v)) {
+            t = NC_PLAIN_TEXT, data = s->data(), len = s->size();
+        } else {
+            t = NC_PLAIN_INT, data = &std::get<int64_t>(v), len = 8;
+        }
+    }
+
+    nc_column_key key_;
 };
 
 } // namespace nucleus

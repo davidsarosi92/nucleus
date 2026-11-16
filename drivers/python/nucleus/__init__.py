@@ -71,8 +71,9 @@ paramstyle = "numeric"  # $1, $2, ...
 # 2: registered types (uuid, modules' types) arrive in their binary form;
 # 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 # 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
-# a hint; 6: results stream, fetched in batches; 7: columnar results.
-PROTOCOL_VERSION = 7
+# a hint; 6: results stream, fetched in batches; 7: columnar results; 8: a
+# subject's key presented (present_subject_key).
+PROTOCOL_VERSION = 8
 DEFAULT_PORT = 20035
 # Rows a stream asks the server for at a time.
 DEFAULT_FETCH = 1000
@@ -1055,6 +1056,48 @@ class Connection:
         ``None``: not searched)."""
         row = self.execute("FORGET SUBJECT CAST($1 AS text)", (str(subject),)).rows[0]
         return row[0], row[1], row[2], row[3]
+
+    def present_subject_key(self, subject, secret):
+        """Presents ``secret`` — 32 bytes only the user has (a passkey's PRF
+        output, a device's key) — for ``subject``: this session then reads
+        and writes the subject's sealed rows whose key its user holds
+        (nucleus DOCS.md §8.40).  Sent as a message of its own, never as a
+        statement's text; the server keeps it in the session's memory only.
+        A secret that does not open the subject's key: ``OperationalError``
+        (28000)."""
+        self._subject_key(0, subject, secret)
+
+    def hold_subject_key(self, subject, secret):
+        """Gives ``subject``'s key into its user's keeping, wrapped under
+        ``secret`` (32 bytes; an administrator's call): from then on only a
+        session that presents it opens the subject's sealed rows."""
+        self._subject_key(1, subject, secret)
+
+    def _subject_key(self, action, subject, secret):
+        secret = bytes(secret)
+        if len(secret) != 32:
+            raise ValueError("a subject's secret is 32 bytes")
+        if self._version < 8:
+            raise NotSupportedError(
+                f"the server speaks version {self._version} of the protocol; subject keys need 8", "0A000", None)
+        if self._active is not None:
+            self._active.close()
+        body = bytearray([action])
+        _put_str(body, str(subject))
+        body += _struct.pack("<I", 32) + secret
+        self._send(b"k", body)
+        error = None
+        while True:
+            kind, reply = self._read()
+            if kind == b"E":
+                error = _server_error(_Reader(reply))
+            elif kind == b"R":
+                self.status = reply[0]
+                if error is not None:
+                    raise error
+                return
+            else:
+                raise InterfaceError(f"unexpected message {kind!r}")
 
     def cursor(self):
         return Cursor(self)

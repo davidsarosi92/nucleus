@@ -785,6 +785,177 @@ static void custom_transport(void) {
 static void custom_transport(void) {}
 #endif
 
+static size_t unhex(const char *s, uint8_t *out) {
+    size_t n = 0;
+    if (strcmp(s, "-") == 0) return 0;
+    for (; s[0] && s[1]; s += 2) {
+        unsigned v;
+        sscanf(s, "%2x", &v);
+        out[n++] = (uint8_t)v;
+    }
+    return n;
+}
+
+static void hex(const uint8_t *b, size_t n, char *out) {
+    size_t i;
+    for (i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]);
+    out[2 * n] = 0;
+}
+
+/* The format's vectors, shared by every driver (NUCLEUS_VECTORS:
+ * drivers/encrypted-columns.txt), then a column through the database
+ * (nucleus PLAN.md M14.30 K5). */
+static void encrypted_columns(void) {
+    const char *path = getenv("NUCLEUS_VECTORS");
+    static char line[4096], got[2048];
+    static uint8_t master[32], value[512], nonce[24], sealed[600], back[600];
+    FILE *f = fopen(path ? path : "drivers/encrypted-columns.txt", "r");
+    nc_column_key email, balance, phone;
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db;
+    nc_result *r;
+    char t[64], sql[256];
+    int cases = 0;
+    uint8_t m5a[32];
+    CHECK(f != NULL);
+    while (f && fgets(line, sizeof line, f)) {
+        char name[64], kind[8], raw[600], hnonce[64], hsealed[1200], hindex[64];
+        size_t len, blen;
+        nc_column_key k;
+        nc_plain_type type;
+        int64_t i64;
+        if (line[0] == '#') continue;
+        if (strncmp(line, "master ", 7) == 0) {
+            unhex(line + 7, master);
+            continue;
+        }
+        if (sscanf(line, "%63s %7s %599s %63s %1199s %63s", name, kind, raw, hnonce, hsealed, hindex) != 6) continue;
+        nc_column_key_init(&k, master, name);
+        unhex(hnonce, nonce);
+        type = strcmp(kind, "bytes") == 0 ? NC_PLAIN_BYTES : strcmp(kind, "text") == 0 ? NC_PLAIN_TEXT : NC_PLAIN_INT;
+        if (type == NC_PLAIN_INT) {
+            i64 = strtoll(raw, NULL, 10);
+            memcpy(value, &i64, 8);
+            len = 8;
+        } else {
+            len = unhex(raw, value);
+        }
+        CHECK(nc_encrypt(&k, type, value, len, nonce, sealed) == 0);
+        hex(sealed, len + NC_COLUMN_OVERHEAD, got);
+        CHECK(strcmp(got, hsealed) == 0);
+        nc_blind_index(&k, type, value, len, back);
+        hex(back, NC_BLIND_INDEX_LEN, got);
+        CHECK(strcmp(got, hindex) == 0);
+        CHECK(nc_decrypt(&k, sealed, len + NC_COLUMN_OVERHEAD, &type, back, &blen) == 0);
+        CHECK(blen == len && memcmp(back, value, len) == 0);
+        cases++;
+    }
+    if (f) fclose(f);
+    CHECK(cases == 11);
+
+    memset(m5a, 0x5a, 32);
+    nc_column_key_init(&email, m5a, "users.email");
+    nc_column_key_init(&balance, m5a, "users.balance");
+    nc_column_key_init(&phone, m5a, "users.phone");
+    {
+        nc_plain_type type;
+        size_t n;
+        CHECK(nc_encrypt(&email, NC_PLAIN_TEXT, "x", 1, NULL, sealed) == 0);
+        CHECK(nc_decrypt(&phone, sealed, 1 + NC_COLUMN_OVERHEAD, &type, back, &n) == -1);
+        CHECK(nc_decrypt(&email, sealed, 1 + NC_COLUMN_OVERHEAD, &type, back, &n) == 0 && type == NC_PLAIN_TEXT);
+        CHECK(strcmp((char *)back, "x") == 0);
+    }
+    db = nc_connect(&cfg, &err);
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id BIGINT PRIMARY KEY, email BYTEA, email_index BYTEA, balance BYTEA)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    {
+        const char *who[3] = {"ann@example.com", "bob@example.com", "ann@example.com"};
+        int64_t money[3] = {100, -5, 7};
+        int i;
+        snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1, $2, $3, $4)", t);
+        for (i = 0; i < 3; i++) {
+            uint8_t e[64], ix[NC_BLIND_INDEX_LEN], b[64];
+            nc_value p[4];
+            size_t n = strlen(who[i]);
+            nc_encrypt(&email, NC_PLAIN_TEXT, who[i], n, NULL, e);
+            nc_blind_index(&email, NC_PLAIN_TEXT, who[i], n, ix);
+            nc_encrypt(&balance, NC_PLAIN_INT, &money[i], 8, NULL, b);
+            p[0] = nc_int(i + 1);
+            p[1] = nc_bytea(e, n + NC_COLUMN_OVERHEAD);
+            p[2] = nc_bytea(ix, NC_BLIND_INDEX_LEN);
+            p[3] = nc_bytea(b, 8 + NC_COLUMN_OVERHEAD);
+            nc_result_free(must(db, sql, p, 4));
+        }
+    }
+    {
+        uint8_t ix[NC_BLIND_INDEX_LEN];
+        nc_value p;
+        nc_blind_index(&email, NC_PLAIN_TEXT, "ann@example.com", 15, ix);
+        p = nc_bytea(ix, NC_BLIND_INDEX_LEN);
+        snprintf(sql, sizeof sql, "SELECT id, email, balance FROM %s WHERE email_index = $1 ORDER BY id", t);
+        r = must(db, sql, &p, 1);
+        if (r) {
+            nc_plain_type type;
+            size_t n;
+            int64_t money;
+            const nc_value *v;
+            CHECK(nc_rows(r) == 2);
+            CHECK(nc_value_at(r, 0, 0)->as.integer == 1 && nc_value_at(r, 1, 0)->as.integer == 3);
+            v = nc_value_at(r, 1, 1);
+            CHECK(nc_decrypt(&email, v->as.bytes.ptr, v->as.bytes.len, &type, back, &n) == 0);
+            CHECK(type == NC_PLAIN_TEXT && strcmp((char *)back, "ann@example.com") == 0);
+            v = nc_value_at(r, 1, 2);
+            CHECK(nc_decrypt(&balance, v->as.bytes.ptr, v->as.bytes.len, &type, back, &n) == 0);
+            memcpy(&money, back, 8);
+            CHECK(type == NC_PLAIN_INT && money == 7);
+            nc_result_free(r);
+        }
+    }
+    nc_close(db);
+}
+
+/* A sealed table's rows of a subject whose key its user holds open only
+ * for a session that presents it (the k message, protocol 8). */
+static void subject_key(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *admin = nc_connect(&cfg, &err), *other = nc_connect(&cfg, &err);
+    char t[64], who[64], sql[256];
+    uint8_t secret[32], wrong[32];
+    nc_value p;
+    nc_result *r;
+    int i;
+    CHECK(admin != NULL && other != NULL);
+    if (!admin || !other) return;
+    for (i = 0; i < 32; i++) secret[i] = (uint8_t)i;
+    memset(wrong, 1, 32);
+    table(t, sizeof t);
+    snprintf(who, sizeof who, "%s-who", t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY, owner TEXT, body TEXT) WITH (storage = sealed)", t);
+    nc_result_free(must(admin, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "ALTER TABLE %s SET SUBJECT (owner)", t);
+    nc_result_free(must(admin, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (1, $1, 'held')", t);
+    p = nc_text(who);
+    nc_result_free(must(admin, sql, &p, 1));
+    CHECK(nc_hold_subject_key(admin, who, secret, &err) == 0);
+    snprintf(sql, sizeof sql, "SELECT body FROM %s", t);
+    CHECK(nc_query(other, sql, NULL, 0, &err) == NULL && strcmp(err.code, "28000") == 0);
+    CHECK(nc_present_subject_key(other, who, wrong, &err) == -1 && strcmp(err.code, "28000") == 0);
+    CHECK(nc_present_subject_key(other, who, secret, &err) == 0);
+    r = must(other, sql, NULL, 0);
+    if (r) {
+        CHECK(nc_rows(r) == 1 && strcmp(text_of(r, 0, 0), "held") == 0);
+        nc_result_free(r);
+    }
+    nc_close(admin);
+    nc_close(other);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -802,6 +973,8 @@ int main(void) {
     copy_in();
     pipelines();
     custom_transport();
+    encrypted_columns();
+    subject_key();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

@@ -2432,3 +2432,358 @@ size_t nc_format(const nc_value *v, char *buf, size_t size) {
     }
     return 0;
 }
+
+/* ----------------------------------------------------- a subject's key */
+
+static int subject_key(nc_conn *c, int action, const char *subject, const uint8_t secret[32], nc_error *err) {
+    buf m = {0};
+    int failed = 0;
+    if (c->version < 8) {
+        set_error(err, "0A000", "the server speaks version %d of the protocol; subject keys need 8", c->version);
+        return -1;
+    }
+    if (c->active) cursor_drain(c->active);
+    put_le(&m, (uint64_t)action, 1);
+    put_str(&m, subject);
+    put_le(&m, 32, 4);
+    put(&m, secret, 32);
+    if (m.failed || send_frame(c, 'k', &m) != 0) {
+        free(m.b);
+        set_error(err, "08006", "connection lost");
+        return -1;
+    }
+    free(m.b);
+    for (;;) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        if (read_frame(c, &kind, &body, &len) != 0) {
+            set_error(err, "08006", "connection lost");
+            return -1;
+        }
+        if (kind == 'E') {
+            server_error(err, body, len);
+            failed = 1;
+        } else if (kind == 'R') {
+            c->status = len ? body[0] : 0;
+            free(body);
+            return failed ? -1 : 0;
+        }
+        free(body);
+    }
+}
+
+int nc_present_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32], nc_error *err) {
+    return subject_key(c, 0, subject, secret, err);
+}
+
+int nc_hold_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32], nc_error *err) {
+    return subject_key(c, 1, subject, secret, err);
+}
+
+/* ------------------------------------------------ encrypted columns (K5) */
+
+/* ChaCha20 and Poly1305 as RFC 8439 writes them, HChaCha20 as
+ * draft-irtf-cfrg-xchacha does; Poly1305 in 26-bit limbs (poly1305-donna's
+ * 32-bit form).  No table lookups or branches on secret data. */
+
+static uint32_t le32_at(const uint8_t *b) {
+    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+}
+
+static void put32_at(uint8_t *b, uint32_t v) {
+    b[0] = (uint8_t)v;
+    b[1] = (uint8_t)(v >> 8);
+    b[2] = (uint8_t)(v >> 16);
+    b[3] = (uint8_t)(v >> 24);
+}
+
+#define ROTL32(v, n) (((v) << (n)) | ((v) >> (32 - (n))))
+#define QUARTER(a, b, c, d)                                                                                \
+    s[a] += s[b], s[d] = ROTL32(s[d] ^ s[a], 16), s[c] += s[d], s[b] = ROTL32(s[b] ^ s[c], 12),            \
+    s[a] += s[b], s[d] = ROTL32(s[d] ^ s[a], 8), s[c] += s[d], s[b] = ROTL32(s[b] ^ s[c], 7)
+
+static void chacha_rounds(uint32_t s[16]) {
+    int i;
+    for (i = 0; i < 10; i++) {
+        QUARTER(0, 4, 8, 12);
+        QUARTER(1, 5, 9, 13);
+        QUARTER(2, 6, 10, 14);
+        QUARTER(3, 7, 11, 15);
+        QUARTER(0, 5, 10, 15);
+        QUARTER(1, 6, 11, 12);
+        QUARTER(2, 7, 8, 13);
+        QUARTER(3, 4, 9, 14);
+    }
+}
+
+static void chacha_state(uint32_t s[16], const uint8_t key[32], const uint8_t words[16]) {
+    int i;
+    s[0] = 0x61707865;
+    s[1] = 0x3320646e;
+    s[2] = 0x79622d32;
+    s[3] = 0x6b206574;
+    for (i = 0; i < 8; i++) s[4 + i] = le32_at(key + 4 * i);
+    for (i = 0; i < 4; i++) s[12 + i] = le32_at(words + 4 * i);
+}
+
+static void hchacha20(const uint8_t key[32], const uint8_t nonce16[16], uint8_t out[32]) {
+    uint32_t s[16];
+    int i;
+    chacha_state(s, key, nonce16);
+    chacha_rounds(s);
+    for (i = 0; i < 4; i++) {
+        put32_at(out + 4 * i, s[i]);
+        put32_at(out + 16 + 4 * i, s[12 + i]);
+    }
+}
+
+static void chacha20_xor(const uint8_t key[32], uint32_t counter, const uint8_t nonce12[12], uint8_t *data,
+                         size_t len) {
+    uint8_t words[16] = {0}, block[64];
+    uint32_t init[16], s[16];
+    size_t at, i;
+    memcpy(words + 4, nonce12, 12);
+    chacha_state(init, key, words);
+    for (at = 0; at < len; at += 64) {
+        init[12] = counter++;
+        memcpy(s, init, sizeof s);
+        chacha_rounds(s);
+        for (i = 0; i < 16; i++) put32_at(block + 4 * i, s[i] + init[i]);
+        for (i = 0; i < 64 && at + i < len; i++) data[at + i] ^= block[i];
+    }
+}
+
+typedef struct poly1305 {
+    uint32_t r[5], h[5], pad[4];
+} poly1305;
+
+static void poly1305_init(poly1305 *p, const uint8_t key[32]) {
+    int i;
+    p->r[0] = le32_at(key) & 0x3ffffff;
+    p->r[1] = (le32_at(key + 3) >> 2) & 0x3ffff03;
+    p->r[2] = (le32_at(key + 6) >> 4) & 0x3ffc0ff;
+    p->r[3] = (le32_at(key + 9) >> 6) & 0x3f03fff;
+    p->r[4] = (le32_at(key + 12) >> 8) & 0x00fffff;
+    for (i = 0; i < 5; i++) p->h[i] = 0;
+    for (i = 0; i < 4; i++) p->pad[i] = le32_at(key + 16 + 4 * i);
+}
+
+/* One 16-byte block; hibit 1 << 24 (the 2^128 every full block adds). */
+static void poly1305_block(poly1305 *p, const uint8_t m[16], uint32_t hibit) {
+    uint32_t r0 = p->r[0], r1 = p->r[1], r2 = p->r[2], r3 = p->r[3], r4 = p->r[4];
+    uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
+    uint32_t h0 = p->h[0], h1 = p->h[1], h2 = p->h[2], h3 = p->h[3], h4 = p->h[4];
+    uint64_t d0, d1, d2, d3, d4;
+    uint32_t c;
+    h0 += le32_at(m) & 0x3ffffff;
+    h1 += (le32_at(m + 3) >> 2) & 0x3ffffff;
+    h2 += (le32_at(m + 6) >> 4) & 0x3ffffff;
+    h3 += (le32_at(m + 9) >> 6) & 0x3ffffff;
+    h4 += (le32_at(m + 12) >> 8) | hibit;
+    d0 = (uint64_t)h0 * r0 + (uint64_t)h1 * s4 + (uint64_t)h2 * s3 + (uint64_t)h3 * s2 + (uint64_t)h4 * s1;
+    d1 = (uint64_t)h0 * r1 + (uint64_t)h1 * r0 + (uint64_t)h2 * s4 + (uint64_t)h3 * s3 + (uint64_t)h4 * s2;
+    d2 = (uint64_t)h0 * r2 + (uint64_t)h1 * r1 + (uint64_t)h2 * r0 + (uint64_t)h3 * s4 + (uint64_t)h4 * s3;
+    d3 = (uint64_t)h0 * r3 + (uint64_t)h1 * r2 + (uint64_t)h2 * r1 + (uint64_t)h3 * r0 + (uint64_t)h4 * s4;
+    d4 = (uint64_t)h0 * r4 + (uint64_t)h1 * r3 + (uint64_t)h2 * r2 + (uint64_t)h3 * r1 + (uint64_t)h4 * r0;
+    c = (uint32_t)(d0 >> 26);
+    h0 = (uint32_t)d0 & 0x3ffffff;
+    d1 += c;
+    c = (uint32_t)(d1 >> 26);
+    h1 = (uint32_t)d1 & 0x3ffffff;
+    d2 += c;
+    c = (uint32_t)(d2 >> 26);
+    h2 = (uint32_t)d2 & 0x3ffffff;
+    d3 += c;
+    c = (uint32_t)(d3 >> 26);
+    h3 = (uint32_t)d3 & 0x3ffffff;
+    d4 += c;
+    c = (uint32_t)(d4 >> 26);
+    h4 = (uint32_t)d4 & 0x3ffffff;
+    h0 += c * 5;
+    c = h0 >> 26;
+    h0 &= 0x3ffffff;
+    h1 += c;
+    p->h[0] = h0, p->h[1] = h1, p->h[2] = h2, p->h[3] = h3, p->h[4] = h4;
+}
+
+/* AEAD's input: len bytes and zeros to a 16-byte boundary, as full blocks. */
+static void poly1305_padded(poly1305 *p, const uint8_t *m, size_t len) {
+    while (len >= 16) {
+        poly1305_block(p, m, 1u << 24);
+        m += 16;
+        len -= 16;
+    }
+    if (len) {
+        uint8_t last[16] = {0};
+        memcpy(last, m, len);
+        poly1305_block(p, last, 1u << 24);
+    }
+}
+
+static void poly1305_finish(poly1305 *p, uint8_t out[16]) {
+    uint32_t h0 = p->h[0], h1 = p->h[1], h2 = p->h[2], h3 = p->h[3], h4 = p->h[4];
+    uint32_t g0, g1, g2, g3, g4, c, mask;
+    uint64_t f;
+    c = h1 >> 26, h1 &= 0x3ffffff, h2 += c;
+    c = h2 >> 26, h2 &= 0x3ffffff, h3 += c;
+    c = h3 >> 26, h3 &= 0x3ffffff, h4 += c;
+    c = h4 >> 26, h4 &= 0x3ffffff, h0 += c * 5;
+    c = h0 >> 26, h0 &= 0x3ffffff, h1 += c;
+    /* h + -p: kept when it does not go below zero. */
+    g0 = h0 + 5, c = g0 >> 26, g0 &= 0x3ffffff;
+    g1 = h1 + c, c = g1 >> 26, g1 &= 0x3ffffff;
+    g2 = h2 + c, c = g2 >> 26, g2 &= 0x3ffffff;
+    g3 = h3 + c, c = g3 >> 26, g3 &= 0x3ffffff;
+    g4 = h4 + c - (1u << 26);
+    mask = (g4 >> 31) - 1; /* all ones: g; zero: h */
+    h0 = (h0 & ~mask) | (g0 & mask);
+    h1 = (h1 & ~mask) | (g1 & mask);
+    h2 = (h2 & ~mask) | (g2 & mask);
+    h3 = (h3 & ~mask) | (g3 & mask);
+    h4 = (h4 & ~mask) | (g4 & mask);
+    h0 = h0 | (h1 << 26);
+    h1 = (h1 >> 6) | (h2 << 20);
+    h2 = (h2 >> 12) | (h3 << 14);
+    h3 = (h3 >> 18) | (h4 << 8);
+    f = (uint64_t)h0 + p->pad[0];
+    put32_at(out, (uint32_t)f);
+    f = (uint64_t)h1 + p->pad[1] + (f >> 32);
+    put32_at(out + 4, (uint32_t)f);
+    f = (uint64_t)h2 + p->pad[2] + (f >> 32);
+    put32_at(out + 8, (uint32_t)f);
+    f = (uint64_t)h3 + p->pad[3] + (f >> 32);
+    put32_at(out + 12, (uint32_t)f);
+}
+
+static void aead_tag(const uint8_t key[32], const uint8_t nonce12[12], const uint8_t *aad, size_t alen,
+                     const uint8_t *ct, size_t clen, uint8_t tag[16]) {
+    uint8_t otk[64] = {0}, lens[16];
+    poly1305 p;
+    chacha20_xor(key, 0, nonce12, otk, 64);
+    poly1305_init(&p, otk);
+    poly1305_padded(&p, aad, alen);
+    poly1305_padded(&p, ct, clen);
+    put32_at(lens, (uint32_t)alen);
+    put32_at(lens + 4, (uint32_t)((uint64_t)alen >> 32));
+    put32_at(lens + 8, (uint32_t)clen);
+    put32_at(lens + 12, (uint32_t)((uint64_t)clen >> 32));
+    poly1305_padded(&p, lens, 16);
+    poly1305_finish(&p, tag);
+}
+
+static void xkey(const uint8_t key[32], const uint8_t nonce24[24], uint8_t sub[32], uint8_t nonce12[12]) {
+    hchacha20(key, nonce24, sub);
+    memset(nonce12, 0, 4);
+    memcpy(nonce12 + 4, nonce24 + 16, 8);
+}
+
+static void column_hmac(const uint8_t key[32], nc_plain_type type, const void *data, size_t len, uint8_t out[32]) {
+    unsigned char inner[32], pad[64];
+    uint8_t t = (uint8_t)type, le[8];
+    sha256_ctx c;
+    int i;
+    const void *bytes = data;
+    if (type == NC_PLAIN_INT) {
+        int64_t v;
+        memcpy(&v, data, 8);
+        for (i = 0; i < 8; i++) le[i] = (uint8_t)((uint64_t)v >> (8 * i));
+        bytes = le;
+        len = 8;
+    }
+    memset(pad, 0x36, 64);
+    for (i = 0; i < 32; i++) pad[i] ^= key[i];
+    sha256_init(&c);
+    sha256_update(&c, pad, 64);
+    sha256_update(&c, &t, 1);
+    sha256_update(&c, bytes, len);
+    sha256_final(&c, inner);
+    memset(pad, 0x5c, 64);
+    for (i = 0; i < 32; i++) pad[i] ^= key[i];
+    sha256_init(&c);
+    sha256_update(&c, pad, 64);
+    sha256_update(&c, inner, 32);
+    sha256_final(&c, out);
+}
+
+void nc_column_key_init(nc_column_key *k, const uint8_t master[32], const char *name) {
+    static const char enc[] = "nucleus column 1 encrypt", idx[] = "nucleus column 1 index";
+    size_t n = strlen(name);
+    unsigned char *msg = malloc(sizeof enc + n);
+    if (!msg) {
+        memset(k, 0, sizeof *k);
+        return;
+    }
+    memcpy(msg, enc, sizeof enc); /* the NUL included */
+    memcpy(msg + sizeof enc, name, n);
+    hmac_sha256(master, 32, msg, sizeof enc + n, k->encrypt);
+    memcpy(msg, idx, sizeof idx);
+    memcpy(msg + sizeof idx, name, n);
+    hmac_sha256(master, 32, msg, sizeof idx + n, k->index);
+    free(msg);
+}
+
+int nc_encrypt(const nc_column_key *k, nc_plain_type type, const void *data, size_t len, const uint8_t *nonce,
+               uint8_t *out) {
+    uint8_t sub[32], n12[12], *value = out + 25;
+    int i;
+    out[0] = 1;
+    if (nonce) memcpy(out + 1, nonce, 24);
+    else if (random_bytes(out + 1, 24) != 0) return -1;
+    value[0] = (uint8_t)type;
+    if (type == NC_PLAIN_INT) {
+        int64_t v;
+        memcpy(&v, data, 8);
+        for (i = 0; i < 8; i++) value[1 + i] = (uint8_t)((uint64_t)v >> (8 * i));
+        len = 8;
+    } else if (len) {
+        memcpy(value + 1, data, len);
+    }
+    xkey(k->encrypt, out + 1, sub, n12);
+    chacha20_xor(sub, 1, n12, value, len + 1);
+    aead_tag(sub, n12, out, 1, value, len + 1, value + len + 1);
+    return 0;
+}
+
+int nc_decrypt(const nc_column_key *k, const uint8_t *sealed, size_t len, nc_plain_type *type, uint8_t *out,
+               size_t *out_len) {
+    uint8_t sub[32], n12[12], tag[16], diff = 0;
+    size_t clen, i;
+    uint8_t *plain;
+    if (len < NC_COLUMN_OVERHEAD || sealed[0] != 1) return -1;
+    clen = len - 41; /* the type byte and the value */
+    xkey(k->encrypt, sealed + 1, sub, n12);
+    aead_tag(sub, n12, sealed, 1, sealed + 25, clen, tag);
+    for (i = 0; i < 16; i++) diff |= tag[i] ^ sealed[25 + clen + i];
+    if (diff) return -1;
+    plain = malloc(clen);
+    if (!plain) return -1;
+    memcpy(plain, sealed + 25, clen);
+    chacha20_xor(sub, 1, n12, plain, clen);
+    if (plain[0] > NC_PLAIN_INT || (plain[0] == NC_PLAIN_INT && clen != 9)) {
+        free(plain);
+        return -1;
+    }
+    *type = (nc_plain_type)plain[0];
+    if (*type == NC_PLAIN_INT) {
+        uint64_t v = 0;
+        int64_t sv;
+        for (i = 0; i < 8; i++) v |= (uint64_t)plain[1 + i] << (8 * i);
+        sv = (int64_t)v;
+        memcpy(out, &sv, 8);
+        *out_len = 8;
+    } else {
+        memcpy(out, plain + 1, clen - 1);
+        out[clen - 1] = 0;
+        *out_len = clen - 1;
+    }
+    free(plain);
+    return 0;
+}
+
+void nc_blind_index(const nc_column_key *k, nc_plain_type type, const void *data, size_t len,
+                    uint8_t out[NC_BLIND_INDEX_LEN]) {
+    uint8_t full[32];
+    column_hmac(k->index, type, data, len, full);
+    memcpy(out, full, NC_BLIND_INDEX_LEN);
+}

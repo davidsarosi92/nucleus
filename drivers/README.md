@@ -8,9 +8,9 @@ told another, a branch's name (`CREATE BRANCH`, DOCS.md §8.32) for a
 branch —, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
 parameters, errors with their SQLSTATE, transactions, passwords).  They
-speak protocol version 7 (the Rust driver 8: a subject's key presented
-for the rows its user holds the key of, DOCS.md §8.40 — the others with
-§M14.30 K5): large results stream, read a batch at a time
+speak protocol version 8 (a subject's key presented for the rows its
+user holds the key of — `present_subject_key`, DOCS.md §8.40 — a message
+of its own, never a statement): large results stream, read a batch at a time
 through each driver's cursor (Rust `cursor`, Python and JavaScript
 `stream`, Java, C and C++ `cursor`) — or in columnar batches, a buffer
 per column, without a value per cell (`batches` in each; Python into
@@ -34,6 +34,25 @@ with an OpenID Connect identity token instead of a password, and give a
 directory (LDAP) the password it checks, over TLS only (DOCS.md §10,
 §11).  A token (`CREATE TOKEN`, DOCS.md §9) is a
 user and a password to each of them: its `login` and its `secret`.
+
+**Client-side encrypted columns** (PLAN.md §M14.30 K5, DOCS.md §11): each
+driver encrypts a column's values before they are sent and decrypts them
+after they arrive — the server stores `bytea` ciphertext and never holds
+the key — and makes a blind index for equality (`WHERE email_index =
+$1`).  One format for all of them, XChaCha20-Poly1305 written in each
+(no library); [`encrypted-columns.txt`](encrypted-columns.txt) holds its
+test vectors, which every driver's tests check.  A key comes from a
+32-byte master key the application keeps and the column's name:
+
+| Language | The column's key |
+|----------|------------------|
+| Rust | `nucleus_client::columns::ColumnKey::new(&master, "users.email")` — `encrypt`, `blind_index`, `decrypt_value` |
+| C | `nc_column_key_init(&k, master, "users.email")` — `nc_encrypt`, `nc_blind_index`, `nc_decrypt` |
+| C++ | `nucleus::ColumnKey(master, "users.email")` — `encrypt`, `blind_index`, `decrypt` |
+| Python | `nucleus.columns.ColumnKey(master, "users.email")` — `encrypt`, `blind_index`, `decrypt` |
+| JavaScript | `await ColumnKey.create(master, "users.email")` — `encrypt`, `await blindIndex`, `decrypt` |
+| Java | `new ColumnKey(master, "users.email")` — `encrypt`, `blindIndex`, `decrypt` |
+| Swift | `ColumnKey(master: master, name: "users.email")` — `encrypt`, `blindIndex`, `decrypt` |
 
 | Language | Where | Values |
 |----------|-------|--------|

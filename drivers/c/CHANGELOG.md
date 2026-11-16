@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
+  `nc_column_key_init`, `nc_encrypt`, `nc_decrypt`, `nc_blind_index` —
+  format 1, XChaCha20-Poly1305 in C99.  Protocol version 8:
+  `nc_present_subject_key` and `nc_hold_subject_key` (the `k` message,
+  nucleus DOCS.md §8.40).
 - json (nucleus PLAN.md §M14.15): `NC_JSON` (its text in `as.text`),
   `nc_json(text)`.
 - A server's SCRAM first message asking for more than 1 000 000 PBKDF2

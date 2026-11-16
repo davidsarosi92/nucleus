@@ -94,6 +94,26 @@ carries it (`build_wheel.py` makes one from a build: `cargo build
 target/release/libnucleus_embedded.dylib`), or `NUCLEUS_EMBEDDED_LIB`
 names it.  The pure-Python wheel speaks to servers only.
 
+## Encrypted columns
+
+A column's values encrypted here and decrypted here: the server stores
+`bytea` ciphertext and never holds the key; a blind index beside it finds
+equal values (nucleus PLAN.md §M14.30 K5, DOCS.md §11 — what it leaves
+visible is said there).  `master` is 32 bytes the application keeps.
+
+```python
+from nucleus.columns import ColumnKey
+
+key = ColumnKey(master, "users.email")
+db.execute("INSERT INTO users VALUES ($1, $2, $3)",
+           [1, key.encrypt("ann@example.com"), key.blind_index("ann@example.com")])
+row = db.execute("SELECT email FROM users WHERE email_index = $1",
+                 [key.blind_index("ann@example.com")]).rows[0]
+key.decrypt(row[0])                     # 'ann@example.com'
+```
+
+A sealed table's rows whose key their user holds: `db.present_subject_key(subject, secret)`.
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's library in the wheel is the database,

@@ -286,6 +286,55 @@ int main() {
         }
         CHECK(db.query("SELECT count(*) FROM " + t).rows[0][0].str() == "3000");
     }
+    {
+        // A column the driver encrypts (nucleus PLAN.md §M14.30 K5).
+        std::array<uint8_t, 32> master;
+        master.fill(0x5a);
+        ColumnKey email(master, "users.email"), balance(master, "users.balance"), phone(master, "users.phone");
+        try {
+            phone.decrypt(email.encrypt(std::string("x")));
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "22023");
+        }
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id BIGINT PRIMARY KEY, email BYTEA, email_index BYTEA, balance BYTEA)");
+        std::vector<std::pair<std::string, int64_t>> people = {{"ann@example.com", 100}, {"bob@example.com", -5},
+                                                              {"ann@example.com", 7}};
+        for (size_t i = 0; i < people.size(); i++) {
+            db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4)",
+                     {int64_t(i + 1), email.encrypt(people[i].first), email.blind_index(people[i].first),
+                      balance.encrypt(people[i].second)});
+        }
+        auto r = db.query("SELECT id, email, balance FROM " + t + " WHERE email_index = $1 ORDER BY id",
+                          {email.blind_index(std::string("ann@example.com"))});
+        CHECK(r.rows.size() == 2 && r.rows[1][0].as<int64_t>() == 3);
+        CHECK(std::get<std::string>(email.decrypt(r.rows[1][1].as<Bytes>())) == "ann@example.com");
+        CHECK(std::get<int64_t>(balance.decrypt(r.rows[1][2].as<Bytes>())) == 7);
+    }
+    {
+        // A subject's key its user holds (the k message, protocol 8).
+        Connection admin(config()), other(config());
+        auto t = table();
+        auto who = t + "-who";
+        std::array<uint8_t, 32> secret, wrong;
+        for (uint8_t i = 0; i < 32; i++) secret[i] = i;
+        wrong.fill(1);
+        admin.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, owner TEXT, body TEXT) WITH (storage = sealed)");
+        admin.query("ALTER TABLE " + t + " SET SUBJECT (owner)");
+        admin.query("INSERT INTO " + t + " VALUES (1, $1, 'held')", {who});
+        admin.hold_subject_key(who, secret);
+        CHECK(error_code(other, "SELECT body FROM " + t) == "28000");
+        try {
+            other.present_subject_key(who, wrong);
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "28000");
+        }
+        other.present_subject_key(who, secret);
+        CHECK(other.query("SELECT body FROM " + t).rows[0][0].str() == "held");
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

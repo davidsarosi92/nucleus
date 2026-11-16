@@ -6375,8 +6375,8 @@ The store then keeps the key only wrapped (AES-256-GCM-SIV under
 HMAC-SHA256 of the secret and the subject's id, so one secret opens one
 subject's key; the key file's line `h id key-id wrapped`), and the
 subject's sealed rows open only in a session that presented the secret
-(`Session::present_subject_key`, `Client::present_subject_key`) —
-the operator's sessions included.  Kept in the session's memory only,
+(`Session::present_subject_key`; every driver's `present_subject_key`,
+§11 — protocol version 8's `k` message) — the operator's sessions included.  Kept in the session's memory only,
 zeroed when it ends, never written or logged; a statement never carries
 it.  Without it the rows are refused, not hidden (`28000`, naming the
 table — a query that would read them fails rather than answer short); a
@@ -7733,10 +7733,19 @@ length, and through the blind index which rows hold equal values and how
 often — a column of few distinct values (a flag, a country) is given
 away by its frequencies, so such a column gets no index.  A vector the
 server computes from a text (`embed`, §8.26) gives much of the text away
-(inversion attacks): such a column is not zero-knowledge.  Rust:
-`ColumnKey::new(&master, "users.email")`, then `encrypt(v)` (a
-`Value::Bytes` to send), `blind_index(v)`, `decrypt_value(&row[i])` (a
-`Plain`: `Bytes`, `Text`, `Int`).
+(inversion attacks): such a column is not zero-knowledge.  Each driver
+carries it, written in its own language (`drivers/README.md` lists the
+calls): Rust `ColumnKey::new(&master, "users.email")`, then `encrypt(v)`
+(a `Value::Bytes` to send), `blind_index(v)`, `decrypt_value(&row[i])`
+(a `Plain`: `Bytes`, `Text`, `Int`); C `nc_column_key_init`,
+`nc_encrypt`, `nc_blind_index`, `nc_decrypt` (C++ and Swift over them);
+Python `nucleus.columns.ColumnKey`; JavaScript `await
+ColumnKey.create(…)` (`blindIndex` async: WebCrypto's HMAC); Java
+`ColumnKey`.  Each one's tests check the vectors, send a column through
+the server and find it by its blind index; the Rust test also searches
+the server's files for the planted plaintext.  Every driver speaks
+protocol version 8: `present_subject_key` / `hold_subject_key` (§8.40)
+in each, tested with a sealed table on the test server.
 
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
@@ -7768,6 +7777,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K5b, encrypted columns and subject keys in
+  every driver:** Python (`nucleus.columns`), JavaScript (`columns.ts`),
+  Java (`ColumnKey`), C (`nc_column_key_init`, `nc_encrypt`,
+  `nc_decrypt`, `nc_blind_index`), C++ and Swift (over C), each with
+  XChaCha20-Poly1305 of its own and the shared vectors
+  (`NUCLEUS_VECTORS` in `scripts/driver-tests.sh`); protocol version 8 and
+  `present_subject_key` / `hold_subject_key` in each.
 - **2026-11-16 — §M14.30 K5a, client-side encrypted columns (Rust):**
   `nucleus_crypto::aead::{hchacha20, xseal, xopen}` (XChaCha20-Poly1305);
   `nucleus_client::columns` (`ColumnKey`, `Plain`), format 1 and its test

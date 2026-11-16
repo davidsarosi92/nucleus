@@ -31,6 +31,23 @@ c++ -std=c++17 -I../c -I. your.cpp nucleus.o
 
 Example: `examples/cpp/quickstart.cpp`.
 
+## Encrypted columns
+
+A column's values encrypted here and decrypted here: the server stores
+`bytea` ciphertext and never holds the key; a blind index beside it finds
+equal values (nucleus PLAN.md §M14.30 K5, DOCS.md §11 — what it leaves
+visible is said there).  `master` is 32 bytes the application keeps.
+
+```cpp
+nucleus::ColumnKey key(master, "users.email");
+db.query("INSERT INTO users VALUES ($1, $2, $3)",
+         {int64_t(1), key.encrypt(std::string("ann@example.com")), key.blind_index(std::string("ann@example.com"))});
+auto r = db.query("SELECT email FROM users WHERE email_index = $1", {key.blind_index(std::string("ann@example.com"))});
+std::get<std::string>(key.decrypt(r.rows[0][0].as<nucleus::Bytes>()));   // "ann@example.com"
+```
+
+A sealed table's rows whose key their user holds: `db.present_subject_key(subject, secret)`.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

@@ -67,6 +67,24 @@ cd drivers/swift && xcodebuild test -scheme Nucleus-Package \
   -destination "platform=iOS Simulator,name=iPhone 16"
 ```
 
+## Encrypted columns
+
+A column's values encrypted here and decrypted here: the server stores
+`bytea` ciphertext and never holds the key; a blind index beside it finds
+equal values (nucleus PLAN.md §M14.30 K5, DOCS.md §11 — what it leaves
+visible is said there).  `master` is 32 bytes the application keeps.
+
+```swift
+let key = ColumnKey(master: master, name: "users.email")
+try db.query("INSERT INTO users VALUES ($1, $2, $3)",
+             [1, .bytes(try key.encrypt(.text("ann@example.com"))), .bytes(key.blindIndex(.text("ann@example.com")))])
+let row = try db.query("SELECT email FROM users WHERE email_index = $1",
+                       [.bytes(key.blindIndex(.text("ann@example.com")))]).rows[0]
+if case .bytes(let sealed) = row[0] { print(try key.decrypt(sealed)) }   // .text("ann@example.com")
+```
+
+A sealed table's rows whose key their user holds: `try db.presentSubjectKey(subject, secret: secret)`.
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  `NucleusEmbedded` (its XCFramework) is the database,

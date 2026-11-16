@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
+  `nucleus::ColumnKey(master, name)` — `encrypt`, `decrypt`,
+  `blind_index`; `Connection::present_subject_key` and
+  `hold_subject_key` (protocol version 8, the `k` message).
 - json (nucleus PLAN.md §M14.15): `nucleus::Json`, a `json` value's
   text, both ways.
 - Sparse vectors (nucleus PLAN.md §M14.12 V7): `nucleus::SparseVector`

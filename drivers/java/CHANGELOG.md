@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
+  `new ColumnKey(master, name)` — `encrypt`, `decrypt`, `blindIndex` —
+  format 1, XChaCha20-Poly1305 in plain Java (Android 8 too).  Protocol
+  version 8: `presentSubjectKey(subject, secret)` and `holdSubjectKey`
+  (the `k` message, nucleus DOCS.md §8.40).
 - json (nucleus PLAN.md §M14.15): `Json`, a `json` value's text, both
   ways (and in `load`).
 - A server's SCRAM first message asking for more than 1 000 000 PBKDF2

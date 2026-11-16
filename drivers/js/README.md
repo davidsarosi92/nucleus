@@ -115,6 +115,26 @@ the engine has produced whole, at most 256 MB of it.
 `examples/browser/index.html` is a page that keeps its visits;
 `test/browser.mjs` runs it in headless Chrome across reloads.
 
+## Encrypted columns
+
+A column's values encrypted here and decrypted here: the server stores
+`bytea` ciphertext and never holds the key; a blind index beside it finds
+equal values (nucleus PLAN.md §M14.30 K5, DOCS.md §11 — what it leaves
+visible is said there).  `master` is 32 bytes the application keeps.
+
+```ts
+import { ColumnKey } from "nucleus-db";
+
+const key = await ColumnKey.create(master, "users.email");
+await db.query("INSERT INTO users VALUES ($1, $2, $3)",
+  [1, key.encrypt("ann@example.com"), await key.blindIndex("ann@example.com")]);
+const { rows } = await db.query("SELECT email FROM users WHERE email_index = $1",
+  [await key.blindIndex("ann@example.com")]);
+key.decrypt(rows[0][0] as Buffer);      // "ann@example.com"
+```
+
+A sealed table's rows whose key their user holds: `await db.presentSubjectKey(subject, secret)`.
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The edition in WebAssembly (`wasm/nucleus.wasm`)

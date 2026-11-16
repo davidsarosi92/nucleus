@@ -74,9 +74,9 @@ public final class NucleusClient implements AutoCloseable {
      * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
      * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
      * SCRAM-SHA-256, never sent; 5: errors carry a hint; 6: results stream, fetched in batches;
-     * 7: columnar results.
+     * 7: columnar results; 8: a subject's key presented ({@link #presentSubjectKey}).
      */
-    public static final int PROTOCOL_VERSION = 7;
+    public static final int PROTOCOL_VERSION = 8;
     /** Rows a cursor asks the server for at a time. */
     public static final int DEFAULT_FETCH = 1000;
     /** Rows a columnar batch holds when none is given. */
@@ -1095,6 +1095,57 @@ public final class NucleusClient implements AutoCloseable {
     public Result query(String sql, Object... params) {
         List<Result> all = queryAll(sql, params);
         return all.isEmpty() ? new Result(List.of(), List.of(), "", 0) : all.get(all.size() - 1);
+    }
+
+    /**
+     * Presents {@code secret} — 32 bytes only the user has (a passkey's PRF output, a device's
+     * key) — for {@code subject}: this session then reads and writes the subject's sealed rows
+     * whose key its user holds (nucleus DOCS.md §8.40). A message of its own, never a
+     * statement's text; the server keeps it in the session's memory only. A secret that does
+     * not open the subject's key: a {@link NucleusException} with code 28000.
+     */
+    public void presentSubjectKey(String subject, byte[] secret) {
+        subjectKey(0, subject, secret);
+    }
+
+    /**
+     * Gives {@code subject}'s key into its user's keeping, wrapped under {@code secret} (32
+     * bytes; an administrator's call): from then on only a session that presents it opens the
+     * subject's sealed rows.
+     */
+    public void holdSubjectKey(String subject, byte[] secret) {
+        subjectKey(1, subject, secret);
+    }
+
+    private void subjectKey(int action, String subject, byte[] secret) {
+        if (secret.length != 32) throw new IllegalArgumentException("a subject's secret is 32 bytes");
+        if (version < 8) {
+            throw new NucleusException("the server speaks version " + version
+                    + " of the protocol; subject keys need 8", "0A000");
+        }
+        try {
+            if (active != null) active.close();
+            Writer w = new Writer().u8(action).str(subject).i32(32);
+            byte[] head = w.bytes();
+            byte[] body = Arrays.copyOf(head, head.length + 32);
+            System.arraycopy(secret, 0, body, head.length, 32);
+            send('k', body);
+            NucleusException error = null;
+            for (;;) {
+                Message m = read();
+                switch (m.kind) {
+                    case 'E' -> error = new Reader(m.body).serverError();
+                    case 'R' -> {
+                        setStatus(m.body);
+                        if (error != null) throw error;
+                        return;
+                    }
+                    default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
+                }
+            }
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
     }
 
     /** BEGIN, {@code body}, then COMMIT — or ROLLBACK if it throws. */

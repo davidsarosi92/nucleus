@@ -195,8 +195,29 @@ enum Conformance {
         XCTAssertEqual(try db.query("SELECT count(*) FROM \(t)").rows[0][0].intValue, 3)
     }
 
+    /// A column the driver encrypts (nucleus PLAN.md §M14.30 K5).
+    static func encryptedColumns(_ db: Connection) throws {
+        let master = [UInt8](repeating: 0x5a, count: 32)
+        let email = ColumnKey(master: master, name: "users.email")
+        let balance = ColumnKey(master: master, name: "users.balance")
+        assertFails("22023") { _ = try ColumnKey(master: master, name: "users.phone").decrypt(try email.encrypt(.text("x"))) }
+        let t = table()
+        try db.query("CREATE TABLE \(t) (id BIGINT PRIMARY KEY, email BYTEA, email_index BYTEA, balance BYTEA)")
+        for (i, who, money) in [(1, "ann@example.com", 100), (2, "bob@example.com", -5), (3, "ann@example.com", 7)] {
+            try db.query("INSERT INTO \(t) VALUES ($1, $2, $3, $4)",
+                         [.int(Int64(i)), .bytes(try email.encrypt(.text(who))), .bytes(email.blindIndex(.text(who))),
+                          .bytes(try balance.encrypt(.int(Int64(money))))])
+        }
+        let rows = try db.query("SELECT id, email, balance FROM \(t) WHERE email_index = $1 ORDER BY id",
+                                [.bytes(email.blindIndex(.text("ann@example.com")))]).rows
+        XCTAssertEqual(rows.count, 2)
+        guard rows.count == 2, case .bytes(let e) = rows[1][1], case .bytes(let b) = rows[1][2] else { return }
+        XCTAssertEqual(try email.decrypt(e), .text("ann@example.com"))
+        XCTAssertEqual(try balance.decrypt(b), .int(7))
+    }
+
     static func all(_ connect: () throws -> Connection) throws {
-        for test in [typesBothWays, coreTypes, uuid, vectors, json, errors, transactions, cursors, copyAndPipelines] {
+        for test in [typesBothWays, coreTypes, uuid, vectors, json, errors, transactions, cursors, copyAndPipelines, encryptedColumns] {
             let db = try connect()
             try test(db)
             db.close()

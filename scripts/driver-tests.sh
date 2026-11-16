@@ -66,6 +66,8 @@ if [ ${#ldap[@]} -gt 0 ]; then
 fi
 NUCLEUS_TOKEN=$(cat "$root/scripts/fixtures/oidc/token")
 export NUCLEUS_TOKEN
+# The encrypted columns' format's test vectors, which every driver checks.
+export NUCLEUS_VECTORS="$root/drivers/encrypted-columns.txt"
 
 have() { command -v "$1" >/dev/null; }
 langs=("$@")

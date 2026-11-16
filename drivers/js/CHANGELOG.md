@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
+  `await ColumnKey.create(master, name)` — `encrypt`, `decrypt`,
+  `await blindIndex` — format 1, XChaCha20-Poly1305 in TypeScript (in a
+  browser too).  Protocol version 8: `presentSubjectKey(subject, secret)`
+  and `holdSubjectKey` (the `k` message, nucleus DOCS.md §8.40).
 - Licence: the driver stays MIT; the database in the package
   (`wasm/nucleus.wasm`, its licence beside it) is AGPL-3.0-only — the
   package is `MIT AND AGPL-3.0-only` (the repository's COPYRIGHT).
