@@ -10438,7 +10438,8 @@ needs repeated runs across instances and days).
 - **P1a — the method** 🔨: `bench/method.py` — the median, the
   coefficient of variation, a percentile bootstrap interval of the
   median (10,000 resamples, seeded), runs again while one spreads past
-  10 % (twice, then flagged), systems interleaved and counterbalanced
+  10 % (twice, then flagged; under `run`, only the command that spreads,
+  its rounds added to those before — see P1d), systems interleaved and counterbalanced
   (A B, then B A: in a fixed order a build came out 3–5 % apart from
   itself on two TPC-H queries; reversed every other round, an A/A run is
   `≈` on all 12 measurements), answers checked, the
@@ -10490,6 +10491,18 @@ needs repeated runs across instances and days).
 - **P1d — one script** (`bench/all.sh`): every benchmark into
   `bench/results/`, `docs/benchmarks.md`'s numbers from those files;
   then a second run, `method.py reproduce` on each.
+  *The first whole run* showed what a retry cost: a retry ran every
+  command again from the start and threw the rounds before away, so one
+  system's noisy metric — QPS of 10 clients, ±13–19 % however often it
+  is run, the scheduler's — ran every other system's build again too.
+  `ann-dbpedia` took 163 minutes, 24 of its 36 runs retries (each with
+  pgvector's two 7-minute HNSW builds), and the ⚠ stayed; `ann-sift` 49
+  minutes (12 of 18), `ann-related` 86 (12 of 18).  *Taken* (pyperf's
+  way, and Georges et al.'s more samples rather than a restart): only
+  the command whose metric spreads runs again, its rounds added to the
+  ones before; the others' rounds stand.  A metric whose spread is the
+  measurement's own stays flagged, its interval narrower for the rounds
+  added.  The steps after `stats` ran under the new rule.
 
 **Done when:** every number in `docs/benchmarks.md` carries its
 environment, its runs, its spread and the script that made it; and a

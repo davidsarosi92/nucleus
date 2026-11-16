@@ -473,14 +473,22 @@ def gather(text, into, systems, label=None):
 
 def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True):
     """Each command (`{label: argv}`) run in turn, `runs` rounds (A, B, A,
-    B, …); their `@metric` lines as samples, every round run again while
-    one passes `bound`.  Returns (samples, systems)."""
+    B, …); their `@metric` lines as samples.  While a command's metric
+    spreads past `bound` (at most `retries` times), that command — only
+    it — runs `runs` rounds more, added to the ones before: a noisy
+    metric of one system does not run the others' long builds again, and
+    no round is thrown away (more rounds narrow the median's interval
+    even where the spread is the measurement's own).  Returns (samples,
+    systems)."""
+    got, systems, owner, tries = {}, {}, {}, {}
+    todo = list(commands.items())
     attempts = 0
     while True:
         attempts += 1
-        got, systems = {}, {}
+        for label, _ in todo:
+            tries[label] = attempts
         for r in range(runs):
-            for label, argv in turn(list(commands.items()), r):
+            for label, argv in turn(todo, r):
                 if echo:
                     print(f"[{label} run {r + 1}/{runs}, attempt {attempts}]", file=sys.stderr, flush=True)
                 p = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, cwd=ROOT)
@@ -491,13 +499,17 @@ def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True
                         sys.stderr.write(line)
                 if p.wait() != 0:
                     raise SystemExit(f"{label}: exit {p.returncode}")
-                gather("".join(lines), got, systems, label if len(commands) > 1 else None)
-        worst = max((cv(v["values"]) for v in got.values()), default=0)
-        if worst <= bound or attempts > retries:
-            samples = [Sample(name, system, v["values"], phase, flagged=cv(v["values"]) > bound,
-                              attempts=attempts, unit=v["unit"])
-                       for (name, phase, system), v in got.items()]
-            return samples, systems
+                mine = {}
+                gather("".join(lines), mine, systems, label if len(commands) > 1 else None)
+                for key, v in mine.items():
+                    owner[key] = label
+                    got.setdefault(key, {"unit": v["unit"], "values": []})["values"].extend(v["values"])
+        noisy = {owner[k] for k, v in got.items() if cv(v["values"]) > bound}
+        if not noisy or attempts > retries:
+            return [Sample(name, system, v["values"], phase, flagged=cv(v["values"]) > bound,
+                           attempts=tries[owner[(name, phase, system)]], unit=v["unit"])
+                    for (name, phase, system), v in got.items()], systems
+        todo = [(label, argv) for label, argv in todo if label in noisy]
 
 
 def reproduce(first, second):
