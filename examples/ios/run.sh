@@ -15,24 +15,38 @@ derived="$root/target/xcode-notes"
 (cd "$here/Notes.swiftpm" && xcodebuild build -quiet -scheme Notes \
   -destination "platform=iOS Simulator,id=$device,arch=$(uname -m)" -derivedDataPath "$derived")
 app="$derived/Build/Products/Debug-iphonesimulator/Notes.app"
+# Each stage says where it is, and keeps its output for a failure: a CI
+# runner's simulator can fail or be slow without a word of its own.
+step() { echo "ios example: $*" >&2; }
+step "booting $device"
 xcrun simctl boot "$device" 2>/dev/null || true
-xcrun simctl bootstatus "$device" -b >/dev/null
+log=$(mktemp)
+xcrun simctl bootstatus "$device" -b >"$log" 2>&1 || { cat "$log" >&2; rm -f "$log"; exit 1; }
+rm -f "$log"
+step "installing the app"
 xcrun simctl uninstall "$device" io.github.davidsarosi92.nucleus.notes 2>/dev/null || true
 xcrun simctl install "$device" "$app"
 launch() {
+  step "launching the app"
   out=$(mktemp)
   xcrun simctl launch --console-pty --terminate-running-process "$device" \
     io.github.davidsarosi92.nucleus.notes > "$out" 2>&1 &
   pid=$!
-  for _ in $(seq 1 60); do
+  # A first launch on a busy runner can take a while.
+  for _ in $(seq 1 180); do
     grep -q "nucleus notes:" "$out" && break
     sleep 1
   done
   kill "$pid" 2>/dev/null || true
   xcrun simctl terminate "$device" io.github.davidsarosi92.nucleus.notes 2>/dev/null || true
   line=$(grep "nucleus notes:" "$out" || true)
+  [ -n "$line" ] || {
+    echo "the app said nothing in 180 s; its console:" >&2
+    tail -c 2000 "$out" >&2
+    rm -f "$out"
+    exit 1
+  }
   rm -f "$out"
-  [ -n "$line" ] || { echo "the app said nothing" >&2; exit 1; }
   echo "$line"
 }
 first=$(launch)
