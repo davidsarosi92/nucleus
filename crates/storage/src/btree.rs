@@ -1125,45 +1125,15 @@ impl BTree {
         }
     }
 
-    /// Merges child `i` of `node` with a sibling, or evens the pair out if
-    /// they do not fit in one page.
+    /// Merges child `i` of `node` with a sibling, or cuts the pair into
+    /// pieces that each fit a page if they do not fit in one — as
+    /// [`Self::normalize`] does: two leaves whose keys each shared a long
+    /// prefix may share a short one together, and even halves of them
+    /// could each outgrow a page.
     fn rebalance(&mut self, node: &mut Internal, i: usize) -> Result<()> {
-        let a = if i + 1 < node.children.len() {
-            i
-        } else {
-            i - 1
-        };
-        let b = a + 1;
-        let combined = match (self.load(node.children[a])?, self.load(node.children[b])?) {
-            (Node::Leaf(mut x), Node::Leaf(y)) => {
-                x.entries.extend(y.entries);
-                Node::Leaf(x)
-            }
-            (Node::Internal(mut x), Node::Internal(y)) => {
-                x.keys.push(node.keys[a].clone());
-                x.keys.extend(y.keys);
-                x.children.extend(y.children);
-                Node::Internal(x)
-            }
-            _ => {
-                return Err(Error::Corrupt {
-                    page: node.children[a],
-                    reason: "siblings of different kinds",
-                });
-            }
-        };
-        if combined.size() <= PAYLOAD_SIZE {
-            node.children[a] = self.store(node.children[a], &combined)?;
-            self.pool.free_in(node.children[b], self.branch)?;
-            node.keys.remove(a);
-            node.children.remove(b);
-        } else {
-            let (l, sep, r) = combined.split();
-            node.children[a] = self.store(node.children[a], &l)?;
-            node.children[b] = self.store(node.children[b], &r)?;
-            node.keys[a] = sep;
-        }
-        Ok(())
+        let mut small = vec![false; node.children.len()];
+        small[i] = true;
+        self.normalize(node, small)
     }
 
     /// Removes `key`; returns whether it was present.

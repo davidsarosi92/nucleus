@@ -746,3 +746,35 @@ fn a_merge_of_prefixed_leaves_splits_until_it_fits() {
     }
     assert_eq!(tree.get(&key(b'a', 0)).unwrap(), None);
 }
+
+/// The same, one key at a time (`remove`, as dropping a branch's entries
+/// removes them): a leaf left small is merged with its sibling, and the
+/// pair, prefix-less, is cut into pieces that fit — even halves of it
+/// once overflowed a page (a backup's branch drop panicked encoding one).
+#[test]
+fn a_removal_rebalances_prefixed_leaves_into_pieces_that_fit() {
+    let p = platform(8);
+    let mut tree = new_tree(&p, 256);
+    let key = |region: u8, i: u16| {
+        let mut k = vec![region];
+        k.extend(std::iter::repeat_n(region, 300));
+        k.extend(i.to_be_bytes());
+        k
+    };
+    let n = 2000u16;
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for region in *b"ab" {
+        entries.extend((0..n).map(|i| (key(region, i), vec![region])));
+    }
+    tree.insert_sorted(&entries).unwrap();
+    for i in 0..n - 3 {
+        assert!(tree.remove(&key(b'a', i)).unwrap());
+    }
+    tree.check().unwrap();
+    for i in n - 3..n {
+        assert_eq!(tree.get(&key(b'a', i)).unwrap(), Some(vec![b'a']));
+    }
+    for i in 0..n {
+        assert_eq!(tree.get(&key(b'b', i)).unwrap(), Some(vec![b'b']));
+    }
+}
