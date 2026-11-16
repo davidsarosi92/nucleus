@@ -176,25 +176,6 @@ class Postgres:
                 for line in out.split("\n") if line]
 
 
-def measure(system, queries, runs, timeout):
-    """Per query: the best of `runs` times (ms), or None past the timeout
-    (the statement's own, `statement_timeout`, so the server stops it) or
-    on an error (printed)."""
-    out = {}
-    limit = f"SET statement_timeout = {int(timeout * 1000)}"
-    for q, sql in queries.items():
-        try:
-            t = times_of(system.script([limit] + [sql] * runs, timeout=timeout * runs + 60))[1:]
-            out[q] = min(t) if len(t) == runs else None
-        except subprocess.TimeoutExpired:
-            out[q] = None
-        except RuntimeError as e:
-            print(f"  {system.name} {q}: {str(e)[-300:]}", file=sys.stderr)
-            out[q] = None
-        print(f"  {system.name} {q}: {out[q]}", file=sys.stderr, flush=True)
-    return out
-
-
 def report(title, samples, load_samples, checks, env, baseline, load_label="load (COPY, indexes, ANALYZE)"):
     """The Markdown: the queries (cold and warm), the geometric means, the
     loads, the answers' checks, the environment."""
@@ -355,7 +336,7 @@ def loads(systems, load, runs=method.RUNS):
     round's data stays."""
     times = {s.name: [] for s in systems}
     for r in range(runs):
-        for s in systems:
+        for s in method.turn(systems, r):
             started = time.time()
             load(s)
             times[s.name].append(time.time() - started)
@@ -365,7 +346,7 @@ def loads(systems, load, runs=method.RUNS):
 
 
 def queries_by_method(systems, queries, runs=method.RUNS, timeout=600, retries=method.RETRIES):
-    """Each query `runs` rounds, the systems in turn (A, B, A, B, …): each
+    """Each query `runs` rounds, the systems in turn (A, B, then B, A, …): each
     restarted, then the query cold and warm in a session under a
     statement timeout of `timeout` s; the rounds again (at most `retries`
     times) while one spreads past the bound.  A query that fails or times
@@ -378,7 +359,7 @@ def queries_by_method(systems, queries, runs=method.RUNS, timeout=600, retries=m
         for attempt in range(1, retries + 2):
             got = {}
             for r in range(runs):
-                for s in systems:
+                for s in method.turn(systems, r):
                     if s.name in failed:
                         continue
                     try:

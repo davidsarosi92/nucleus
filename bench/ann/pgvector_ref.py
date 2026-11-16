@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""pgvector's HNSW index (image pgvector/pgvector:pg18, in Docker) on a
-dataset in bench/ann/data.py's format, run as `ann model` runs the
+"""pgvector's HNSW index (PostgreSQL native on this machine, bench/pg.py's
+cluster with pgvector installed in it) on a dataset in bench/ann/data.py's format, run as `ann model` runs the
 prototypes (PLAN.md §M14.12 V4): the first rows loaded and indexed, a
 recall curve, rows inserted by concurrent writers while a searcher asks,
 the curve again.
@@ -9,8 +9,7 @@ the curve again.
         [--m 16] [--efc 64] [--threads 10] [--efs 10,40,200]
         [--quantize half|binary] [--rescore 5] [--no-inserts]
 
-The clients run inside the container (psql and pgbench on its socket), so
-Docker's network on macOS does not add to pgvector's latency.  µs/search
+The clients are psql and pgbench on the cluster's Unix socket.  µs/search
 is one client asking the queries one after another; QPS is `--threads`
 clients at once; recall@10 as `ann recall` counts it.  Writers insert one
 row a transaction (autocommit) from a staging table, a sequence handing
@@ -21,44 +20,83 @@ as its documentation gives it: `half` an expression index on
 `v::halfvec(n)`, searched and ordered by the halves' distance; `binary`
 one on `binary_quantize(v)::bit(n)` (`bit_hamming_ops`), the `k ·
 --rescore` nearest by the bits re-ranked by the vectors' distance in a
-subquery.  Needs numpy (bench/ann/data.py's virtual environment).
+subquery.  Needs numpy (bench/ann/data.py's virtual environment).  Every
+number is printed as an `@metric` line too, for `bench/method.py run`,
+which repeats the script (PLAN.md §M14.31).
 """
 
 import argparse
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
 import numpy as np
 
-NAME = "nucleus-ann-pg"
-IMAGE = "pgvector/pgvector:pg18"
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, ".."))
+import method  # noqa: E402
+import pg  # noqa: E402
+
+# The cluster (start) and the directory its files are read from: `/data/…`
+# in a script's SQL names a file there.
+CLUSTER = None
+DATA = None
+# pgvector's documentation on building an index: memory for the graph,
+# parallel workers.
+BUILD = {"maintenance_work_mem": "4GB", "max_parallel_maintenance_workers": "9", "jit": "off"}
 
 
-def sh(*args, **kw):
-    return subprocess.run(list(args), check=True, capture_output=True, text=True, **kw)
+def start(work, settings=None):
+    """The cluster started (pgvector's build settings over the machine's
+    tuning), an empty schema, `work` the directory `/data/` names."""
+    global CLUSTER, DATA
+    DATA = work
+    CLUSTER = pg.Cluster(pg.DEFAULT, {**pg.tuning(), **BUILD, **(settings or {})}).__enter__()
+    CLUSTER.sql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+    return CLUSTER
+
+
+def stop():
+    try:
+        CLUSTER.sql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+    finally:
+        CLUSTER.stop()
+
+
+def describe():
+    version = CLUSTER.sql("SELECT extversion FROM pg_extension WHERE extname = 'vector'").strip()
+    return dict(CLUSTER.describe(), pgvector=version)
+
+
+def local(text):
+    return text.replace("'/data/", f"'{DATA}/").replace(" /data/", f" {DATA}/")
+
+
+def with_env(cmd, env):
+    return cmd[:2] + [f"{k}={v}" for k, v in (env or {}).items()] + cmd[2:]
 
 
 def psql(sql, env=None):
-    cmd = ["docker", "exec", "-i"]
-    for k, v in (env or {}).items():
-        cmd += ["-e", f"{k}={v}"]
-    cmd += [NAME, "psql", "-q", "-At", "-U", "postgres", "-v", "ON_ERROR_STOP=1"]
-    r = subprocess.run(cmd, input=sql, capture_output=True, text=True)
+    cmd = with_env(CLUSTER.tool("psql"), env) + ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1"]
+    r = subprocess.run(cmd, input=local(sql), capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"psql failed ({r.returncode}): {r.stderr.strip()}")
     return r.stdout
 
 
-def pgbench(script, *args, ef=None):
-    """pgbench on `script` (a path in the container); its output."""
-    cmd = ["docker", "exec"]
-    if ef is not None:
-        cmd += ["-e", f"PGOPTIONS=-c hnsw.ef_search={ef}"]
-    cmd += [NAME, "pgbench", "-n", "-U", "postgres", "-f", script, *args, "postgres"]
-    return subprocess.run(cmd, check=True, capture_output=True, text=True)
+def pgbench_cmd(script, *args, ef=None, options=None):
+    opts = options or (f"-c hnsw.ef_search={ef}" if ef is not None else None)
+    cmd = with_env(CLUSTER.tool("pgbench"), {"PGOPTIONS": opts} if opts else None)
+    return cmd + ["-n", "-f", local(" " + script).strip(), *args, "postgres"]
+
+
+def pgbench(script, *args, ef=None, options=None):
+    """pgbench on `script` (`/data/…`); its output."""
+    return subprocess.run(pgbench_cmd(script, *args, ef=ef, options=options), check=True, capture_output=True,
+                          text=True)
 
 
 def copy_binary(path, ids, vecs):
@@ -94,7 +132,7 @@ def exact(train, queries, k):
 SEARCH = "SELECT t.id FROM t ORDER BY t.v <-> {q} LIMIT {k}"
 
 
-def curve(queries, truth, k, threads, efs, n):
+def curve(queries, truth, k, threads, efs, n, after=""):
     print("ef_search  recall@10  µs/search  QPS(%d)" % threads)
     for ef in efs:
         rows = psql(f"SET hnsw.ef_search = {ef};\n"
@@ -110,6 +148,9 @@ def curve(queries, truth, k, threads, efs, n):
         many = pgbench("/data/search.sql", "-c", str(threads), "-j", str(threads), "-t", str(n // threads), ef=ef).stdout
         tps = float(re.search(r"tps = ([\d.]+)", many).group(1))
         print(f"{ef:>9}  {total / len(rows):>9.4f}  {lat:>9.1f}  {tps:>8.0f}", flush=True)
+        method.emit(f"ef {ef}{after}: recall@{k}", total / len(rows), unit="recall", system="pgvector")
+        method.emit(f"ef {ef}{after}: µs a search", lat, unit="µs", system="pgvector")
+        method.emit(f"ef {ef}{after}: QPS, {threads} clients", tps, unit="QPS", system="pgvector")
 
 
 def server_time(n, k, ef=40):
@@ -121,6 +162,7 @@ def server_time(n, k, ef=40):
         for i in range(n))
     times = [float(m.group(1)) for m in re.finditer(r"Execution Time: ([\d.]+) ms", psql(script))]
     print(f"server-side (EXPLAIN ANALYZE, ef {ef}): {sum(times) / len(times) * 1000:.0f} µs a search", flush=True)
+    method.emit(f"ef {ef}: server µs a search", sum(times) / len(times) * 1000, unit="µs", system="pgvector")
 
 
 def main():
@@ -134,7 +176,6 @@ def main():
     ap.add_argument("--threads", type=int, default=10)
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--efs", default="10,40,200")
-    ap.add_argument("--shared-buffers", default="3GB")
     ap.add_argument("--work", default=None, help="the directory for the COPY files (a new temporary one)")
     ap.add_argument("--quantize", default=None, choices=["half", "binary"])
     ap.add_argument("--rescore", type=int, default=5, help="binary: rows re-ranked for each returned")
@@ -176,22 +217,9 @@ def main():
     with open(os.path.join(work, "insert.sql"), "w") as f:
         f.write("WITH n AS MATERIALIZED (SELECT nextval('staged_seq')::int AS id) "
                 "INSERT INTO t SELECT s.id, s.v FROM n JOIN s ON s.id = n.id;\n")
-    os.chmod(work, 0o755)
-
-    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
-    sh("docker", "run", "-d", "--name", NAME, "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
-       "--shm-size=6g", "-v", f"{work}:/data", IMAGE,
-       "-c", f"shared_buffers={a.shared_buffers}", "-c", "maintenance_work_mem=4GB",
-       "-c", f"max_parallel_maintenance_workers={a.threads - 1}", "-c", "max_connections=50",
-       "-c", "jit=off")
+    start(work, {"max_parallel_maintenance_workers": str(a.threads - 1)})
     try:
-        for _ in range(300):
-            if subprocess.run(["docker", "exec", NAME, "pg_isready", "-U", "postgres"],
-                              capture_output=True).returncode == 0:
-                break
-            time.sleep(0.2)
-        time.sleep(1)
-        print(f"pgvector ({IMAGE}, hnsw m {a.m}, ef_construction {a.efc}, shared_buffers {a.shared_buffers}): "
+        print(f"pgvector (hnsw m {a.m}, ef_construction {a.efc}): "
               f"{rows} rows ({bulk} bulk, {rows - bulk} inserted by {a.threads} writers), dim {dim}", flush=True)
         psql("CREATE EXTENSION vector;\n"
              f"CREATE TABLE t (id int PRIMARY KEY, v vector({dim}));\n"
@@ -201,6 +229,7 @@ def main():
              "COPY s FROM '/data/staged.copy' (FORMAT binary);\n"
              "COPY q FROM '/data/queries.copy' (FORMAT binary);\n"
              "VACUUM ANALYZE s; VACUUM ANALYZE q;\n")
+        method.emit_system("pgvector", describe())
         t = time.perf_counter()
         psql("COPY t FROM '/data/bulk.copy' (FORMAT binary);\n")
         load = time.perf_counter() - t
@@ -212,6 +241,9 @@ def main():
         print(f"bulk: {bulk} rows loaded in {load:.1f} s, indexed in {build:.1f} s "
               f"({build * 1e6 / bulk:.1f} µs/row); index {size.split('|')[0]} MB, table with indexes "
               f"{size.split('|')[1]} MB", flush=True)
+        method.emit("load", load, unit="s", system="pgvector")
+        method.emit("index build", build, unit="s", system="pgvector")
+        method.emit("index, on disk", float(size.split("|")[0]), unit="MB", system="pgvector")
         truth = exact(train[:bulk], test, k)
         curve(test, truth, k, a.threads, efs, len(test))
         for ef in a.server_efs.split(","):
@@ -223,17 +255,14 @@ def main():
         n = rows - bulk
         per = n // a.threads
         searcher = subprocess.Popen(
-            ["docker", "exec", "-e", "PGOPTIONS=-c hnsw.ef_search=40", NAME, "pgbench", "-n", "-U", "postgres",
-             "-f", "/data/search.sql", "-c", "1", "-j", "1", "-T", "3600", "-P", "1", "postgres"],
+            pgbench_cmd("/data/search.sql", "-c", "1", "-j", "1", "-T", "3600", "-P", "1", ef=40),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         time.sleep(1)
         t = time.perf_counter()
         pgbench("/data/insert.sql", "-c", str(a.threads), "-j", str(a.threads), "-t", str(per))
         secs = time.perf_counter() - t
-        # The searcher stopped (the image has no pkill).
-        subprocess.run(["docker", "exec", NAME, "sh", "-c",
-                        "for p in /proc/[0-9]*; do grep -qx pgbench $p/comm 2>/dev/null && kill -INT ${p#/proc/}; done"],
-                       capture_output=True)
+        # The searcher stopped (`env` execs pgbench: the same process).
+        searcher.send_signal(2)
         _, err = searcher.communicate(timeout=60)
         prog = [(float(m.group(1)), float(m.group(2)))
                 for m in re.finditer(r"progress: [\d.]+ s, ([\d.]+) tps, lat ([\d.]+) ms", err)]
@@ -243,12 +272,14 @@ def main():
         inserted = int(psql("SELECT count(*) FROM t;\n")) - bulk
         print(f"inserts: {inserted} rows in {secs:.1f} s ({inserted / secs:.0f} rows/s); "
               f"searches meanwhile (ef 40): {searches:.0f}, {lat:.0f} µs each", flush=True)
+        method.emit("inserts, rows/s", inserted / secs, unit="rows/s", system="pgvector")
+        method.emit("ef 40 during inserts: µs a search", lat, unit="µs", system="pgvector")
         psql("VACUUM ANALYZE t;\n")
         truth = exact(train[:rows], test, k)
         print("after the inserts:")
-        curve(test, truth, k, a.threads, efs, len(test))
+        curve(test, truth, k, a.threads, efs, len(test), after=" after inserts")
     finally:
-        subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
+        stop()
 
 
 if __name__ == "__main__":

@@ -132,6 +132,20 @@ class Cluster:
         """The psql command line (a string, as common.Postgres takes it)."""
         return f"env LC_ALL=C {self._tool('psql')} \"{self.conninfo}\""
 
+    def tool(self, name):
+        """A client tool's command line (psql, pgbench, …) reaching this
+        cluster, as a list."""
+        return ["env", "LC_ALL=C", self._tool(name), self.conninfo] if name == "psql" else \
+            ["env", "LC_ALL=C", self._tool(name), "-h", self.sock, "-p", str(self.port), "-U", "postgres"]
+
+    def sql(self, sql=None, file=None):
+        """One command (or a script on stdin), quietly, its rows unaligned;
+        an error raises."""
+        cmd = self.tool("psql") + ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1"]
+        if sql is not None:
+            cmd += ["-c", sql]
+        return subprocess.run(cmd, check=True, capture_output=True, text=True, input=file).stdout
+
     def describe(self):
         """Its version and settings, for the results' environment."""
         build = subprocess.run([self._tool("postgres"), "--version"], capture_output=True,
@@ -147,8 +161,11 @@ class Cluster:
                 "effective": effective, "native": True}
 
 
+DEFAULT = os.path.join(method.ROOT, "target", "bench-pg")
+
+
 def main():
-    data = sys.argv[1] if len(sys.argv) > 1 else os.path.join(method.ROOT, "target", "bench-pg")
+    data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT
     with Cluster(data) as pg:
         print(pg.psql)
         print(pg.describe())

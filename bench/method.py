@@ -13,7 +13,7 @@ A benchmark measures through this module, and its numbers carry:
   the median) and the coefficient of variation — a measurement whose CV
   passes a bound is run again, and still past it is flagged, never shown
   as a point;
-- *comparisons interleaved*: systems run in turn (ABAB…), on one machine
+- *comparisons interleaved*: systems run in turn, counterbalanced (AB BA…), on one machine
   in one session; a difference claimed only when the two intervals do not
   overlap;
 - *checked answers*: a fast wrong answer is no result;
@@ -149,16 +149,23 @@ def repeat(measure, name, system, runs=RUNS, phase="warm", bound=CV_BOUND, retri
             return Sample(name, system, times, phase, flagged=cv(times) > bound, attempts=attempts)
 
 
+def turn(systems, r):
+    """The systems' order in round `r`: A B, then B A, … (counterbalanced:
+    neither always first — the first of a round runs on a machine the
+    last left, and a fixed order shows as a difference)."""
+    return list(systems) if r % 2 == 0 else list(reversed(systems))
+
+
 def interleave(measures, name, runs=RUNS, phase="warm", bound=CV_BOUND, retries=RETRIES):
-    """Each system's `measure()` in turn (A, B, A, B, …), so a drift of the
+    """Each system's `measure()` in turn (A, B, B, A, …), so a drift of the
     machine falls on all of them alike; a sample per system, each run
     again (all of them, interleaved) while one's CV passes `bound`."""
     attempts = 0
     while True:
         attempts += 1
         times = {system: [] for system in measures}
-        for _ in range(runs):
-            for system, measure in measures.items():
+        for r in range(runs):
+            for system, measure in turn(list(measures.items()), r):
                 times[system].append(measure())
         worst = max(cv(t) for t in times.values())
         if worst <= bound or attempts > retries:
@@ -460,7 +467,7 @@ def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True
         attempts += 1
         got, systems = {}, {}
         for r in range(runs):
-            for label, argv in commands.items():
+            for label, argv in turn(list(commands.items()), r):
                 if echo:
                     print(f"[{label} run {r + 1}/{runs}, attempt {attempts}]", file=sys.stderr, flush=True)
                 p = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, cwd=ROOT)

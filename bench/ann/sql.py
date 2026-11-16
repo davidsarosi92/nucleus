@@ -19,7 +19,8 @@ indexed with vector_cosine_ops and searched by `<=>`.  `--quantize` and
 `--rescore` are the index's options (PLAN.md §M14.12 V6a); what the build
 added to the server's resident memory and to its files is printed.  Writers insert one row a transaction
 (autocommit), each its share of the rows.  Needs numpy (bench/ann/data.py's
-virtual environment).
+virtual environment).  Every number is printed as an `@metric` line too,
+for `bench/method.py run`, which repeats the script (PLAN.md §M14.31).
 """
 
 import argparse
@@ -40,7 +41,9 @@ HOST = os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1")
 LISTEN = f"[{HOST}]" if ":" in HOST else HOST
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, ".."))
 
+import method  # noqa: E402
 import nucleus  # noqa: E402
 from pgvector_ref import exact  # noqa: E402
 
@@ -122,9 +125,10 @@ def server_time(c, sql, queries, ef=40):
         out = "\n".join(r[0] for r in c.execute("EXPLAIN ANALYZE " + sql, (q,)).rows)
         times.append(float(re.search(r"Execution: \d+ rows in ([\d.]+) ms", out).group(1)))
     print(f"server-side (EXPLAIN ANALYZE, ef {ef}): {sum(times) / len(times) * 1000:.0f} µs a search", flush=True)
+    method.emit(f"ef {ef}: server µs a search", sum(times) / len(times) * 1000, unit="µs")
 
 
-def curve(pool, port, test, truth, k, threads, efs, sql):
+def curve(pool, port, test, truth, k, threads, efs, sql, after=""):
     print("ef_search  recall@10  µs/search  QPS(%d)" % threads)
     for ef in efs:
         found, secs = searches((port, ef, sql, list(test)))
@@ -135,6 +139,9 @@ def curve(pool, port, test, truth, k, threads, efs, sql):
         pool.map(searches, parts)
         qps = len(test) / (time.perf_counter() - t)
         print(f"{ef:>9}  {rec:>9.4f}  {lat:>9.1f}  {qps:>8.0f}", flush=True)
+        method.emit(f"ef {ef}{after}: recall@{k}", rec, unit="recall")
+        method.emit(f"ef {ef}{after}: µs a search", lat, unit="µs")
+        method.emit(f"ef {ef}{after}: QPS, {threads} clients", qps, unit="QPS")
 
 
 def main():
@@ -198,6 +205,11 @@ def main():
               f"({build * 1e6 / bulk:.1f} µs/row; WITH ({with_})); the index: "
               f"+{(after[0] - before[0]) / 2**20:.0f} MB resident, +{(after[1] - before[1]) / 2**20:.0f} MB on disk",
               flush=True)
+        method.emit("load", load, unit="s")
+        method.emit("index build", build, unit="s")
+        method.emit("index, resident", (after[0] - before[0]) / 2**20, unit="MB")
+        method.emit("index, on disk", (after[1] - before[1]) / 2**20, unit="MB")
+        method.emit_system("nucleus", {"settings": {"cache": a.cache, "index": with_}})
         plan = "\n".join(r[0] for r in c.execute("EXPLAIN " + sql, (test[0],)).rows)
         assert "nearest" in plan, plan
         truth = exact(train[:bulk], test, k)
@@ -221,9 +233,11 @@ def main():
         n, ssecs = busy.get()
         print(f"inserts: {inserted} rows in {secs:.1f} s ({inserted / secs:.0f} rows/s); "
               f"searches meanwhile (ef 40): {n}, {ssecs / max(n, 1) * 1e6:.0f} µs each", flush=True)
+        method.emit("inserts, rows/s", inserted / secs, unit="rows/s")
+        method.emit("ef 40 during inserts: µs a search", ssecs / max(n, 1) * 1e6, unit="µs")
         truth = exact(train[:rows], test, k)
         print("after the inserts:")
-        curve(pool, a.port, test, truth, k, a.threads, efs, sql)
+        curve(pool, a.port, test, truth, k, a.threads, efs, sql, after=" after inserts")
         c.close()
     finally:
         pool.terminate()

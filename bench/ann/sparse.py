@@ -3,8 +3,8 @@
 term weights — a vocabulary of 30,522 (BERT's), a document ~120 terms
 and a query ~20 drawn by a Zipf law, positive log-normal weights — as
 `sparsevec(30522)` rows, `SELECT id FROM t ORDER BY v <#> q LIMIT 10` (the
-largest inner products), through nucleus's SQL or pgvector's (image
-pgvector/pgvector:pg18, in Docker).  Synthetic and seeded: the same rows
+largest inner products), through nucleus's SQL or pgvector's (PostgreSQL native,
+bench/pg.py's cluster with pgvector in it).  Synthetic and seeded: the same rows
 every run.
 
     bench/ann/sparse.py nucleus BINARY [--rows 100000] [--queries 200]
@@ -12,8 +12,10 @@ every run.
     bench/ann/sparse.py pgvector [--rows 100000] [--queries 200]
 
 Prints the load, recall@10 against the exact answer (numpy, through
-posting lists) — an exact search's is 1 — and µs a search on one client.
-Needs numpy (bench/ann/data.py's virtual environment).
+posting lists) — an exact search's is 1 — and µs a search on one client
+(nucleus: with its workers, and on one thread).  Needs numpy
+(bench/ann/data.py's virtual environment).  Every number is printed as an
+`@metric` line too, for `bench/method.py run` (PLAN.md §M14.31).
 """
 
 import argparse
@@ -34,7 +36,8 @@ LISTEN = f"[{HOST}]" if ":" in HOST else HOST
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
 sys.path.insert(0, HERE)
 
-from pgvector_ref import NAME, IMAGE, psql, sh  # noqa: E402
+import pgvector_ref  # noqa: E402
+from pgvector_ref import method, psql  # noqa: E402
 
 VOCAB = 30522
 K = 10
@@ -101,17 +104,24 @@ def nucleus_run(a, rows, queries, truth):
             c.execute(f"INSERT INTO t VALUES {values}")
         load = time.perf_counter() - t
         print(f"nucleus ({os.path.basename(a.binary)}): {len(rows)} rows loaded in {load:.1f} s", flush=True)
+        method.emit("load", load, unit="s")
         sql = f"SELECT id FROM t ORDER BY v <#> $1::sparsevec LIMIT {K}"
         qs = [text(q) for q in queries]
         for q in qs[:20]:
             c.execute(sql, (q,))
-        found = []
-        t = time.perf_counter()
-        for q in qs:
-            found.append([r[0] for r in c.execute(sql, (q,)).rows])
-        lat = (time.perf_counter() - t) / len(qs) * 1e6
-        plan = " / ".join(r[0].strip() for r in c.execute("EXPLAIN " + sql, (qs[0],)).rows)
-        print(f"recall@10 {recall(found, truth):.4f}  {lat:.0f} µs/search  {plan}", flush=True)
+        for workers in ["default", "1"]:
+            c.execute("RESET parallel_workers" if workers == "default" else f"SET parallel_workers = {workers}")
+            found = []
+            t = time.perf_counter()
+            for q in qs:
+                found.append([r[0] for r in c.execute(sql, (q,)).rows])
+            lat = (time.perf_counter() - t) / len(qs) * 1e6
+            plan = " / ".join(r[0].strip() for r in c.execute("EXPLAIN " + sql, (qs[0],)).rows)
+            print(f"parallel_workers {workers}: recall@10 {recall(found, truth):.4f}  {lat:.0f} µs/search  {plan}",
+                  flush=True)
+            system = "nucleus" if workers == "default" else "nucleus, one thread"
+            method.emit("recall@10", recall(found, truth), unit="recall", system=system)
+            method.emit("µs a search", lat, unit="µs", system=system)
         c.close()
     finally:
         server.terminate()
@@ -130,17 +140,8 @@ def pgvector_run(a, rows, queries, truth):
     with open(os.path.join(work, "search.sql"), "w") as f:
         f.write(f"\\set qid random(0, {len(queries) - 1})\n"
                 f"SELECT id FROM t ORDER BY v <#> (SELECT v FROM q WHERE id = :qid) LIMIT {K};\n")
-    os.chmod(work, 0o755)
-    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
-    sh("docker", "run", "-d", "--name", NAME, "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "--shm-size=6g",
-       "-v", f"{work}:/data", IMAGE, "-c", f"shared_buffers={a.cache}", "-c", "jit=off")
+    pgvector_ref.start(work)
     try:
-        for _ in range(300):
-            if subprocess.run(["docker", "exec", NAME, "pg_isready", "-U", "postgres"],
-                              capture_output=True).returncode == 0:
-                break
-            time.sleep(0.2)
-        time.sleep(1)
         t = time.perf_counter()
         psql("CREATE EXTENSION vector;\n"
              f"CREATE TABLE t (id int PRIMARY KEY, v sparsevec({VOCAB}));\n"
@@ -148,20 +149,22 @@ def pgvector_run(a, rows, queries, truth):
              "COPY t FROM '/data/rows.csv' (FORMAT csv);\n"
              "COPY q FROM '/data/queries.csv' (FORMAT csv);\n"
              "VACUUM ANALYZE t; VACUUM ANALYZE q;\n")
-        print(f"pgvector ({IMAGE}): {len(rows)} rows loaded in {time.perf_counter() - t:.1f} s", flush=True)
+        print(f"pgvector: {len(rows)} rows loaded in {time.perf_counter() - t:.1f} s", flush=True)
+        method.emit("load", time.perf_counter() - t, unit="s", system="pgvector")
+        method.emit_system("pgvector", pgvector_ref.describe())
         out = psql(f"SELECT q.id, array_to_string(array(SELECT t.id FROM t ORDER BY t.v <#> q.v LIMIT {K}), ',') "
                    "FROM q ORDER BY q.id;\n").split()
         found = [[int(x) for x in line.split("|")[1].split(",") if x] for line in out]
         plan = psql("EXPLAIN (COSTS OFF) SELECT id FROM t ORDER BY v <#> (SELECT v FROM q WHERE id = 0) "
                     f"LIMIT {K};\n")
         plan = " / ".join(l.strip() for l in plan.splitlines() if l.strip())
-        res = subprocess.run(["docker", "exec", NAME, "pgbench", "-n", "-U", "postgres", "-f", "/data/search.sql",
-                              "-c", "1", "-j", "1", "-t", str(len(queries)), "postgres"],
-                             check=True, capture_output=True, text=True).stdout
+        res = pgvector_ref.pgbench("/data/search.sql", "-c", "1", "-j", "1", "-t", str(len(queries))).stdout
         lat = float(re.search(r"latency average = ([\d.]+) ms", res).group(1)) * 1000
         print(f"recall@10 {recall(found, truth):.4f}  {lat:.0f} µs/search  {plan}", flush=True)
+        method.emit("recall@10", recall(found, truth), unit="recall", system="pgvector")
+        method.emit("µs a search", lat, unit="µs", system="pgvector")
     finally:
-        subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
+        pgvector_ref.stop()
         shutil.rmtree(work)
 
 

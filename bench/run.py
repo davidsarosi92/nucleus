@@ -16,7 +16,7 @@ come from its own client's `\\timing`, in one session kept open, so
 neither pays for a connection.
 
 The method (bench/method.py): rounds of the whole workload, the systems in
-turn (A, B, A, B, …), each on a freshly loaded table; a read step is
+turn (A, B, then B, A, …), each on a freshly loaded table; a read step is
 timed cold — its server just restarted (its caches empty, not the OS's) —
 and then warm; per step and phase the median of the rounds with its
 interval and spread, rounds run again while one spreads past the bound.
@@ -112,7 +112,7 @@ def main():
             got = {}
             for r in range(a.runs):
                 answers = {}
-                for s in systems:
+                for s in method.turn(systems, r):
                     print(f"round {r + 1}/{a.runs} (attempt {attempts}): {s.name}", file=sys.stderr, flush=True)
                     t, answers[s.name] = one_round(s, a.rows, check=r == 0)
                     for (name, phase), ms in t.items():

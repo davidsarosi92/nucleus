@@ -191,17 +191,19 @@ PostgreSQL 18 beside it in the same session):
 | nucleus (`7b5f092`, §M14.20 W7) | 14.5 | 12.9 | 1.8 | 29.3 |
 | PostgreSQL 18 | 18.3 | 5.5 | 5.3 | 29.1 |
 
-How a step is measured: `bench/phases.py` — `load` times each
-table's `COPY`, each index and `ANALYZE`; `reads` loads, then times the
-22 queries right after the load (`first`), as the best of `--runs`
-(`best`) and, with `--vacuum`, after a `VACUUM`.  `clickbench` loads
-`hits` and times its 43 queries the same way, from `bench/clickbench.py`'s
+How a step is measured: `bench/phases.py` — the build, the build before
+it (`--base`, the commit before built in a worktree into `target/base`)
+and with `--pg` PostgreSQL, in turn, round by round, by the method above.
+`load` times `COPY`, the indexes and `ANALYZE` on an empty database each
+round; `reads` loads, then times each of the 22 queries cold and warm
+(and with `--vacuum` again after a `VACUUM`).  `clickbench` loads `hits`
+and times its 43 queries the same way, from `bench/clickbench.py`'s
 cache (`create.sql`, `queries.sql`, `hits-N.tsv`).  The data is
-`bench/tpch.py --data DIR`'s generated `*.tbl` files (SF 1).  A step is
-compared with the commit before it built in a worktree into its own
-target directory (`target/base`), the two binaries run alternating, two
-rounds or more: the machine's load moves a run by 10 % and more.  The
-script's header has the commands.
+`bench/tpch.py --data DIR`'s generated `*.tbl` files (SF 1).  The same
+build against itself shows no difference (every interval overlapping, 12
+of 12 at SF 0.01) — with the systems' order reversed every other round:
+in a fixed order a query came out 3–5 % apart from itself.  The script's
+header has the commands.
 
 ## ClickBench
 

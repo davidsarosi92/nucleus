@@ -2,8 +2,8 @@
 """Searches whose query vector is a row's (PLAN.md §M14.12 V7): "more like
 this row" — `ORDER BY v <=> (SELECT v FROM t WHERE id = $1) LIMIT 10`, the
 client sending an id — and each of many rows' nearest at once through
-`LATERAL`, in nucleus and in pgvector (image pgvector/pgvector:pg18, in
-Docker), on a dataset in bench/ann/data.py's format.
+`LATERAL`, in nucleus and in pgvector (PostgreSQL native, bench/pg.py's
+cluster with pgvector in it), on a dataset in bench/ann/data.py's format.
 
     bench/ann/related.py nucleus BINARY DIR [--bulk N] [--ids 200]
         [--lateral 1000] [--ef 40] [--port 21015] [--host 127.0.0.1]
@@ -18,7 +18,8 @@ clients do the same work) and the server's own (`EXPLAIN ANALYZE`) —,
 recall@10 against the exact answer.  "lateral": the first `--lateral`
 rows' ten nearest others in one statement, its time and recall; nucleus
 with its workers (`parallel_workers` as set) and on one thread.  Needs
-numpy (bench/ann/data.py's virtual environment).
+numpy (bench/ann/data.py's virtual environment).  Every number is printed
+as an `@metric` line too, for `bench/method.py run` (PLAN.md §M14.31).
 """
 
 import argparse
@@ -36,7 +37,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
 sys.path.insert(0, HERE)
 
-from pgvector_ref import IMAGE, NAME, copy_binary, psql, sh  # noqa: E402
+import pgvector_ref  # noqa: E402
+from pgvector_ref import copy_binary, method, psql  # noqa: E402
 
 K = 10
 
@@ -95,6 +97,7 @@ def nucleus_run(a, train, cosine, dim, op, ops):
         with_ = "m = 16, ef_construction = 64" + (f", quantize = '{a.quantize}'" if a.quantize else "")
         t = time.perf_counter()
         c.execute(f"CREATE INDEX t_v ON t USING hnsw (v {ops}) WITH ({with_})")
+        method.emit("index build", time.perf_counter() - t, unit="s")
         print(f"nucleus ({os.path.basename(a.binary)}): {a.bulk} rows, dim {dim}, indexed in "
               f"{time.perf_counter() - t:.1f} s (WITH ({with_}))", flush=True)
         c.execute("ANALYZE")
@@ -114,6 +117,7 @@ def nucleus_run(a, train, cosine, dim, op, ops):
             server_us.append(float(re.search(r"Execution: \d+ rows in ([\d.]+) ms", out).group(1)) * 1000)
         print(f"more like (ef {a.ef}): recall@10 {recall(found, exact):.4f}, {lat:.0f} µs a search, "
               f"server {sum(server_us) / len(server_us):.0f} µs — {plan}", flush=True)
+        emit_like(a.ef, recall(found, exact), lat, sum(server_us) / len(server_us), "nucleus")
 
         sql = lateral_sql(op, a.lateral)
         exact = truth(train, list(range(a.lateral)), cosine)
@@ -131,12 +135,21 @@ def nucleus_run(a, train, cosine, dim, op, ops):
             found = by_row(pairs, a.lateral)
             print(f"lateral, {a.lateral} rows' nearest (parallel_workers {workers}): {secs * 1000:.0f} ms, "
                   f"{secs / a.lateral * 1e6:.0f} µs a row, recall@10 {recall(found, exact):.4f}", flush=True)
+            system = "nucleus" if workers == "default" else "nucleus, one thread"
+            method.emit(f"lateral, {a.lateral} rows' nearest", secs * 1000, system=system)
+            method.emit("lateral: recall@10", recall(found, exact), unit="recall", system=system)
         print(f"  plan: {plan}", flush=True)
         c.close()
     finally:
         server.terminate()
         server.wait()
         shutil.rmtree(work)
+
+
+def emit_like(ef, rec, lat, server, system):
+    method.emit(f"more like (ef {ef}): recall@10", rec, unit="recall", system=system)
+    method.emit(f"more like (ef {ef}): µs a search", lat, unit="µs", system=system)
+    method.emit(f"more like (ef {ef}): server µs", server, unit="µs", system=system)
 
 
 def pgvector_run(a, train, cosine, dim, op, ops):
@@ -147,25 +160,17 @@ def pgvector_run(a, train, cosine, dim, op, ops):
         f.write("\n".join(str(i) for i in ids) + "\n")
     with open(os.path.join(work, "like.sql"), "w") as f:
         f.write(f"\\set i random(0, {len(ids) - 1})\n\\set q :i * {a.bulk // a.ids}\n" + like_sql(op, ":q") + ";\n")
-    os.chmod(work, 0o755)
-    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
-    sh("docker", "run", "-d", "--name", NAME, "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "--shm-size=6g",
-       "-v", f"{work}:/data", IMAGE, "-c", f"shared_buffers={a.cache}", "-c", "maintenance_work_mem=4GB",
-       "-c", "max_parallel_maintenance_workers=9", "-c", "jit=off")
+    pgvector_ref.start(work)
     try:
-        for _ in range(300):
-            if subprocess.run(["docker", "exec", NAME, "pg_isready", "-U", "postgres"],
-                              capture_output=True).returncode == 0:
-                break
-            time.sleep(0.2)
-        time.sleep(1)
         psql("CREATE EXTENSION vector;\n"
              f"CREATE TABLE t (id int PRIMARY KEY, v vector({dim}));\n"
              "COPY t FROM '/data/bulk.copy' (FORMAT binary);\n")
         t = time.perf_counter()
         psql(f"CREATE INDEX t_v_idx ON t USING hnsw (v {ops}) WITH (m = 16, ef_construction = 64);\n"
              "VACUUM ANALYZE t;\n")
-        print(f"pgvector ({IMAGE}): {a.bulk} rows, dim {dim}, indexed in {time.perf_counter() - t:.1f} s",
+        method.emit("index build", time.perf_counter() - t, unit="s", system="pgvector")
+        method.emit_system("pgvector", pgvector_ref.describe())
+        print(f"pgvector: {a.bulk} rows, dim {dim}, indexed in {time.perf_counter() - t:.1f} s",
               flush=True)
         ef = f"SET hnsw.ef_search = {a.ef};\n"
         exact = truth(train, ids, cosine)
@@ -173,14 +178,13 @@ def pgvector_run(a, train, cosine, dim, op, ops):
         found = [[int(x) for x in line.split("|")[1].split(",") if x] for line in out.split()]
         plan = psql("EXPLAIN (COSTS OFF) " + like_sql(op, ids[0]) + ";\n")
         plan = " / ".join(x.strip() for x in plan.splitlines() if x.strip())
-        res = subprocess.run(["docker", "exec", "-e", f"PGOPTIONS=-c hnsw.ef_search={a.ef}", NAME, "pgbench", "-n",
-                              "-U", "postgres", "-f", "/data/like.sql", "-c", "1", "-j", "1", "-t", "1000",
-                              "postgres"], check=True, capture_output=True, text=True).stdout
+        res = pgvector_ref.pgbench("/data/like.sql", "-c", "1", "-j", "1", "-t", "1000", ef=a.ef).stdout
         lat = float(re.search(r"latency average = ([\d.]+) ms", res).group(1)) * 1000
         times = [float(m.group(1)) for m in re.finditer(r"Execution Time: ([\d.]+) ms", psql(ef + "".join(
             f"EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) {like_sql(op, i)};\n" for i in ids)))]
         print(f"more like (ef {a.ef}): recall@10 {recall(found, exact):.4f}, {lat:.0f} µs a search, "
               f"server {sum(times) / len(times) * 1000:.0f} µs — {plan}", flush=True)
+        emit_like(a.ef, recall(found, exact), lat, sum(times) / len(times) * 1000, "pgvector")
 
         sql = lateral_sql(op, a.lateral)
         exact = truth(train, list(range(a.lateral)), cosine)
@@ -194,9 +198,11 @@ def pgvector_run(a, train, cosine, dim, op, ops):
         plan = " / ".join(x.strip() for x in plan.splitlines() if x.strip())
         print(f"lateral, {a.lateral} rows' nearest: {secs * 1000:.0f} ms, {secs / a.lateral * 1e6:.0f} µs a row, "
               f"recall@10 {recall(found, exact):.4f}", flush=True)
+        method.emit(f"lateral, {a.lateral} rows' nearest", secs * 1000, system="pgvector")
+        method.emit("lateral: recall@10", recall(found, exact), unit="recall", system="pgvector")
         print(f"  plan: {plan}", flush=True)
     finally:
-        subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
+        pgvector_ref.stop()
         shutil.rmtree(work)
 
 

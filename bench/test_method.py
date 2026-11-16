@@ -48,7 +48,7 @@ class Running(unittest.TestCase):
         order = []
         out = method.interleave({"a": lambda: order.append("a") or 1.0,
                                  "b": lambda: order.append("b") or 2.0}, "q", runs=3)
-        self.assertEqual(order, ["a", "b"] * 3)
+        self.assertEqual(order, ["a", "b", "b", "a", "a", "b"], "counterbalanced")
         self.assertEqual(out["b"].median, 2.0)
 
     def test_a_wrong_answer_is_refused(self):

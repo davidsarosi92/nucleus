@@ -10430,7 +10430,10 @@ needs repeated runs across instances and days).
 - **P1a — the method** 🔨: `bench/method.py` — the median, the
   coefficient of variation, a percentile bootstrap interval of the
   median (10,000 resamples, seeded), runs again while one spreads past
-  10 % (twice, then flagged), systems interleaved, answers checked, the
+  10 % (twice, then flagged), systems interleaved and counterbalanced
+  (A B, then B A: in a fixed order a build came out 3–5 % apart from
+  itself on two TPC-H queries; reversed every other round, an A/A run is
+  `≈` on all 12 measurements), answers checked, the
   environment (machine, power, disk, load before and after, systems'
   versions and settings, data checksums, nucleus's commit), results
   files with every time and the command that made them, `show`,
