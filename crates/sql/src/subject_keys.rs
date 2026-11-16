@@ -55,6 +55,33 @@ pub trait SubjectKeys: Send + Sync {
     /// durably before this returns; how many there were.
     fn destroy(&self, ids: &[Id], commit: u64) -> Result<u64, String>;
 
+    /// Gives the key of subject `id` (made if it has none, unless an
+    /// erasure after `snapshot` destroyed it) into its user's keeping
+    /// (PLAN.md §M14.30 K4b): `wrap` seals it under the user's key, and
+    /// only that is kept from then on, durably before this returns.  Its
+    /// key id; refused if the user holds it already.
+    fn hold(
+        &self,
+        id: &Id,
+        snapshot: u64,
+        wrap: &mut dyn FnMut(&KeyId, &Key) -> Vec<u8>,
+    ) -> Result<KeyId, String> {
+        let _ = (id, snapshot, wrap);
+        Err(format!("{} keeps no keys for their users", self.describe()))
+    }
+
+    /// For each of the keys `kids`, if its user holds it: whose it is and
+    /// the key as wrapped ([`SubjectKeys::open`] gives `None` for it).
+    fn held(&self, kids: &[KeyId]) -> Result<Vec<Option<(Id, Vec<u8>)>>, String> {
+        Ok(vec![None; kids.len()])
+    }
+
+    /// For each of the subjects `ids`, if its user holds its key: the key
+    /// id and the key as wrapped ([`SubjectKeys::keys`] gives `None`).
+    fn held_of(&self, ids: &[Id]) -> Result<Vec<Option<(KeyId, Vec<u8>)>>, String> {
+        Ok(vec![None; ids.len()])
+    }
+
     /// Where they are, for messages (never a key).
     fn describe(&self) -> String;
 }
@@ -74,6 +101,8 @@ pub struct KeyTable {
     pepper: Option<Key>,
     subjects: BTreeMap<Id, State>,
     keys: BTreeMap<KeyId, Key>,
+    /// The keys their users hold: whose, and only the key as wrapped.
+    held: BTreeMap<KeyId, (Id, Vec<u8>)>,
 }
 
 /// The text form's first line.
@@ -153,6 +182,44 @@ impl KeyTable {
         kids.iter().map(|k| self.keys.get(k).copied()).collect()
     }
 
+    /// [`SubjectKeys::hold`]; whether the table changed comes back too.
+    pub fn hold(
+        &mut self,
+        id: &Id,
+        snapshot: u64,
+        wrap: &mut dyn FnMut(&KeyId, &Key) -> Vec<u8>,
+        random: &mut dyn FnMut(&mut [u8]),
+    ) -> Result<(KeyId, bool), String> {
+        if let Some(State::Key(kid)) = self.subjects.get(id)
+            && self.held.contains_key(kid)
+        {
+            return Err("the subject's key is held by its user already".into());
+        }
+        let (got, _) = self.keys(&[*id], snapshot, random);
+        let Some((kid, key)) = got[0] else {
+            return Err("the subject was forgotten after this began".into());
+        };
+        let w = wrap(&kid, &key);
+        self.keys.remove(&kid);
+        self.held.insert(kid, (*id, w));
+        Ok((kid, true))
+    }
+
+    /// [`SubjectKeys::held`].
+    pub fn held(&self, kids: &[KeyId]) -> Vec<Option<(Id, Vec<u8>)>> {
+        kids.iter().map(|k| self.held.get(k).cloned()).collect()
+    }
+
+    /// [`SubjectKeys::held_of`].
+    pub fn held_of(&self, ids: &[Id]) -> Vec<Option<(KeyId, Vec<u8>)>> {
+        ids.iter()
+            .map(|id| match self.subjects.get(id) {
+                Some(State::Key(kid)) => self.held.get(kid).map(|(_, w)| (*kid, w.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// [`SubjectKeys::destroy`]: every id marked, the latest erasure's
     /// commit kept.
     pub fn destroy(&mut self, ids: &[Id], commit: u64) -> u64 {
@@ -161,6 +228,7 @@ impl KeyTable {
             let at = match self.subjects.get(id) {
                 Some(State::Key(kid)) => {
                     self.keys.remove(kid);
+                    self.held.remove(kid);
                     n += 1;
                     commit
                 }
@@ -181,12 +249,15 @@ impl KeyTable {
         }
         for (id, st) in &self.subjects {
             match st {
-                State::Key(kid) => s.push_str(&format!(
-                    "k {} {} {}\n",
-                    hex(id),
-                    hex(kid),
-                    hex(&self.keys[kid])
-                )),
+                State::Key(kid) => match self.held.get(kid) {
+                    Some((_, w)) => s.push_str(&format!("h {} {} {}\n", hex(id), hex(kid), hex(w))),
+                    None => s.push_str(&format!(
+                        "k {} {} {}\n",
+                        hex(id),
+                        hex(kid),
+                        hex(&self.keys[kid])
+                    )),
+                },
                 State::Destroyed(at) => s.push_str(&format!("d {} {at}\n", hex(id))),
             }
         }
@@ -211,6 +282,13 @@ impl KeyTable {
                     t.subjects
                         .insert(unhex(id).ok_or_else(bad)?, State::Key(kid));
                     t.keys.insert(kid, unhex(k).ok_or_else(bad)?);
+                }
+                ["h", id, kid, w] => {
+                    let id: Id = unhex(id).ok_or_else(bad)?;
+                    let kid: KeyId = unhex(kid).ok_or_else(bad)?;
+                    let w: [u8; WRAPPED_LEN] = unhex(w).ok_or_else(bad)?;
+                    t.subjects.insert(id, State::Key(kid));
+                    t.held.insert(kid, (id, w.to_vec()));
                 }
                 ["d", id, at] => {
                     t.subjects.insert(
@@ -275,6 +353,32 @@ impl SubjectKeys for MemoryKeys {
     fn describe(&self) -> String {
         "keys kept in memory".into()
     }
+
+    fn hold(
+        &self,
+        id: &Id,
+        snapshot: u64,
+        wrap: &mut dyn FnMut(&KeyId, &Key) -> Vec<u8>,
+    ) -> Result<KeyId, String> {
+        let mut t = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(t.hold(id, snapshot, wrap, &mut |b| (self.random)(b))?.0)
+    }
+
+    fn held(&self, kids: &[KeyId]) -> Result<Vec<Option<(Id, Vec<u8>)>>, String> {
+        Ok(self
+            .table
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .held(kids))
+    }
+
+    fn held_of(&self, ids: &[Id]) -> Result<Vec<Option<(KeyId, Vec<u8>)>>, String> {
+        Ok(self
+            .table
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .held_of(ids))
+    }
 }
 
 static KEYS: RwLock<Option<Arc<dyn SubjectKeys>>> = RwLock::new(None);
@@ -308,6 +412,48 @@ pub fn subject_keys() -> Option<Arc<dyn SubjectKeys>> {
 /// The id of the subject `text` under `pepper`.
 pub fn id(pepper: &Key, text: &str) -> Id {
     hmac_sha256(pepper, text.as_bytes())
+}
+
+/// A user's key for subject `id`: what its key is wrapped under, from
+/// the 32 bytes only the user has (a passkey's PRF output, a device's
+/// key) — bound to the subject, so one secret does not open another
+/// subject's key.
+pub fn user_key(secret: &[u8; 32], id: &Id) -> Key {
+    let mut b = Vec::with_capacity(64);
+    b.extend_from_slice(b"nucleus user-held subject key 1\0");
+    b.extend_from_slice(id);
+    hmac_sha256(secret, &b)
+}
+
+/// A wrapped key's length: the key and its tag.
+pub const WRAPPED_LEN: usize = 32 + nucleus_kernels::aes::TAG_LEN;
+
+/// `key` (key id `kid`) wrapped under a user's key (AES-256-GCM-SIV: one
+/// message under each user key, so its fixed nonce repeats nothing).
+pub fn wrap(user: &Key, kid: &KeyId, key: &Key) -> Vec<u8> {
+    use nucleus_kernels::aes;
+    let mut b = key.to_vec();
+    let tag = aes::seal_in_place(&aes::Key::new(user), &[0; aes::NONCE_LEN], kid, &mut b);
+    b.extend_from_slice(&tag);
+    b
+}
+
+/// What [`wrap`] wrapped, if `user` is the key it was wrapped under.
+pub fn unwrap(user: &Key, kid: &KeyId, wrapped: &[u8]) -> Option<Key> {
+    use nucleus_kernels::aes;
+    if wrapped.len() != WRAPPED_LEN {
+        return None;
+    }
+    let mut b: Key = wrapped[..32].try_into().ok()?;
+    let tag: [u8; aes::TAG_LEN] = wrapped[32..].try_into().ok()?;
+    aes::open_in_place(
+        &aes::Key::new(user),
+        &[0; aes::NONCE_LEN],
+        kid,
+        &mut b,
+        &tag,
+    )
+    .then_some(b)
 }
 
 /// The key an entry about the subjects whose keys are `keys` (in their
@@ -364,6 +510,17 @@ mod tests {
         t.pepper(true, &mut r);
         t.keys(&[[3; 32], [4; 32]], 1, &mut r);
         t.destroy(&[[4; 32]], 7);
+        let user = user_key(&[9; 32], &[5; 32]);
+        let (kid, _) = t
+            .hold(&[5; 32], 1, &mut |kid, key| wrap(&user, kid, key), &mut r)
+            .unwrap();
+        assert!(t.open(&[kid])[0].is_none(), "kept in the clear");
+        let (id, w) = t.held(&[kid])[0].clone().unwrap();
+        assert_eq!(id, [5; 32]);
+        assert!(unwrap(&user, &kid, &w).is_some());
+        assert!(unwrap(&user_key(&[8; 32], &[5; 32]), &kid, &w).is_none());
+        assert!(unwrap(&user_key(&[9; 32], &[6; 32]), &kid, &w).is_none());
+        assert!(t.hold(&[5; 32], 1, &mut |_, _| Vec::new(), &mut r).is_err());
         let text = t.to_text();
         assert_eq!(KeyTable::from_text(&text).unwrap(), t);
         assert!(KeyTable::from_text("something else").is_err());

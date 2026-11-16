@@ -1832,3 +1832,73 @@ fn the_data_key_rotated() {
     assert_eq!(files_holding(&db, planted.as_bytes()), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// PLAN.md §M14.30 K4b over the network: a sealed table on a server; the
+/// subject's key given into its user's keeping (`k`, never a statement);
+/// another connection refused its rows until it presents the user's
+/// secret (a wrong one refused, `28000`).
+#[test]
+fn a_key_its_user_holds_over_the_network() {
+    let dir = temp_dir("held-key");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("db");
+    let d = db.to_str().unwrap();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args(["server", d, "--listen", "127.0.0.1:0"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let first = listening_line(server.0.stderr.take().unwrap());
+    let addr = first
+        .split_whitespace()
+        .find(|w| w.starts_with("127.0.0.1:"))
+        .unwrap_or_else(|| panic!("no address in {first:?}"))
+        .to_string();
+    let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+    let connect = || {
+        nucleus_client::Client::connect(nucleus_client::Config {
+            host: "127.0.0.1".into(),
+            port,
+            ..nucleus_client::Config::default()
+        })
+        .unwrap()
+    };
+    let mut admin = connect();
+    for sql in [
+        "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, body TEXT) WITH (storage = sealed)",
+        "ALTER TABLE notes SET SUBJECT (owner)",
+        "INSERT INTO notes VALUES (1, 'ann', 'held-planted-91c2'), (2, 'bob', 'Tisza')",
+    ] {
+        admin.execute(sql, &[]).unwrap();
+    }
+    let secret = [0x42u8; 32];
+    admin.hold_subject_key("ann", &secret).unwrap();
+
+    let mut other = connect();
+    let e = other
+        .execute("SELECT body FROM notes ORDER BY id", &[])
+        .unwrap_err();
+    assert!(e.to_string().contains("28000"), "{e}");
+    let e = other.present_subject_key("ann", &[1; 32]).unwrap_err();
+    assert!(e.to_string().contains("28000"), "{e}");
+    other.present_subject_key("ann", &secret).unwrap();
+    let r = other
+        .execute("SELECT body FROM notes ORDER BY id", &[])
+        .unwrap();
+    let text = format!("{r:?}");
+    assert!(
+        text.contains("held-planted-91c2") && text.contains("Tisza"),
+        "{text}"
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

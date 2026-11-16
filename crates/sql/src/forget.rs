@@ -259,6 +259,20 @@ pub(crate) fn forget(
     subject: &Expr,
     params: &[Value],
 ) -> Result<Erasure> {
+    // A sealed row whose key its user holds, not presented, is read as far
+    // as it can be — its primary key and subjects, from its header — and
+    // deleted as any other (§M14.30 K4b).
+    crate::sealed::with_held(crate::sealed::Held::Who, || {
+        forget_rows(txn, reg, subject, params)
+    })
+}
+
+fn forget_rows(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    subject: &Expr,
+    params: &[Value],
+) -> Result<Erasure> {
     PENDING.with(|p| p.borrow_mut().take());
     let value = subject_text(txn, reg, subject, params)?;
     let who = crate::access::current();

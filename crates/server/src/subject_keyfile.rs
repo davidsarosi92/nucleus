@@ -196,11 +196,11 @@ impl SubjectKeyFile {
             *cached = Some(self.load()?);
         }
         let t = cached.as_mut().expect("loaded");
-        let before = t.clone();
         let (out, changed) = f(t, &|b| self.kv.random_bytes(b));
         if changed && let Err(e) = self.save(t) {
-            // Not kept: not made.
-            *t = before;
+            // Not kept: not made — the file read again next time (no copy
+            // made before each call: a sealed table asks for every row).
+            *cached = None;
             return Err(e);
         }
         Ok(out)
@@ -231,6 +231,28 @@ impl SubjectKeys for SubjectKeyFile {
 
     fn describe(&self) -> String {
         self.path.display().to_string()
+    }
+
+    fn hold(
+        &self,
+        id: &Id,
+        snapshot: u64,
+        wrap: &mut dyn FnMut(&KeyId, &Key) -> Vec<u8>,
+    ) -> Result<KeyId, String> {
+        self.with(
+            |t, random| match t.hold(id, snapshot, wrap, &mut |b| random(b)) {
+                Ok((kid, changed)) => (Ok(kid), changed),
+                Err(e) => (Err(e), false),
+            },
+        )?
+    }
+
+    fn held(&self, kids: &[KeyId]) -> Result<Vec<Option<(Id, Vec<u8>)>>, String> {
+        self.with(|t, _| (t.held(kids), false))
+    }
+
+    fn held_of(&self, ids: &[Id]) -> Result<Vec<Option<(KeyId, Vec<u8>)>>, String> {
+        self.with(|t, _| (t.held_of(ids), false))
     }
 }
 

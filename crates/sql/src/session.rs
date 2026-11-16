@@ -336,6 +336,9 @@ pub struct Session {
     /// Statements' keys in the statistics, by their text
     /// ([`crate::statements::normalize`]).
     normalized: crate::by_text::ByText<String, Arc<(String, String)>>,
+    /// The secrets presented for subjects whose users hold their keys
+    /// ([`Session::present_subject_key`]): in memory, until it ends.
+    presented: Arc<crate::sealed::Presented>,
 }
 
 /// A text's statements, each with its own text.
@@ -444,6 +447,7 @@ impl Session {
             catalog_who: Arc::new(crate::access::Who::system()),
             parsed: Default::default(),
             normalized: Default::default(),
+            presented: Default::default(),
         }
     }
 
@@ -702,6 +706,79 @@ impl Session {
     /// The session's registry.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// The id of subject `subject` (its text, as `FORGET SUBJECT` takes it)
+    /// in the store of subject keys, and the store.
+    fn subject_id(
+        &self,
+        subject: &str,
+    ) -> Result<(
+        crate::subject_keys::Id,
+        Arc<dyn crate::subject_keys::SubjectKeys>,
+    )> {
+        let store = crate::subject_keys::subject_keys().ok_or_else(|| {
+            Error::prerequisite(
+                "no store of subject keys is set (nucleus_sql::subject_keys::set_subject_keys)",
+            )
+        })?;
+        let pepper = store
+            .pepper(true)
+            .map_err(Error::io)?
+            .ok_or_else(|| Error::internal("no pepper made"))?;
+        Ok((crate::subject_keys::id(&pepper, subject), store))
+    }
+
+    /// Presents `secret` — 32 bytes only the user has: a passkey's PRF
+    /// output, a device's key — for subject `subject` (PLAN.md §M14.30
+    /// K4b): the session's statements then read and write the subject's
+    /// sealed rows whose key the user holds.  Kept in the session's memory
+    /// only, never written or logged; it goes with the session.  A secret
+    /// that does not open a held key is refused (`28000`); one for a
+    /// subject whose key the user does not hold (yet) is kept as given.
+    pub fn present_subject_key(&mut self, subject: &str, secret: [u8; 32]) -> Result<()> {
+        let (id, store) = self.subject_id(subject)?;
+        if let Some((kid, w)) = store.held_of(&[id]).map_err(Error::io)?.pop().flatten()
+            && crate::subject_keys::unwrap(&crate::subject_keys::user_key(&secret, &id), &kid, &w)
+                .is_none()
+        {
+            return Err(Error::invalid_authorization(
+                "the key presented does not open the subject's key",
+            ));
+        }
+        Arc::make_mut(&mut self.presented).insert(id, secret);
+        Ok(())
+    }
+
+    /// Gives subject `subject`'s key into its user's keeping, wrapped
+    /// under `secret` (PLAN.md §M14.30 K4b): from then on only the wrapped
+    /// key is kept, and the subject's sealed rows open only in a session
+    /// that presents it — the operator's included.  An administrator's
+    /// (`42501`); the secret is presented in this session too.  A key
+    /// lost is the rows lost: nothing else opens them.
+    pub fn hold_subject_key(&mut self, subject: &str, secret: [u8; 32]) -> Result<()> {
+        if !self.who.superuser {
+            return Err(crate::access::denied(
+                "giving a subject's key into its user's keeping",
+            ));
+        }
+        let (id, store) = self.subject_id(subject)?;
+        let snapshot: u64 = {
+            let txn = self.kv.begin(TxnOptions::read_only())?;
+            txn.read_ts()
+                .to_string()
+                .parse()
+                .map_err(|_| Error::internal("a snapshot's commit"))?
+        };
+        let user = crate::subject_keys::user_key(&secret, &id);
+        let held = store.hold(&id, snapshot, &mut |kid, key| {
+            crate::subject_keys::wrap(&user, kid, key)
+        });
+        // What threads kept of the key in the clear goes either way.
+        crate::subject_keys::changed();
+        held.map_err(Error::invalid_parameter)?;
+        Arc::make_mut(&mut self.presented).insert(id, secret);
+        Ok(())
     }
 
     /// The transaction status.
@@ -1170,8 +1247,11 @@ impl Session {
                 self.charge_rate(&who)?;
                 let budget = self.budget(&who)?;
                 self.wait_for_embeddings(stmt, &budget)?;
+                let presented = Arc::clone(&self.presented);
                 crate::access::with_who(&who, || {
-                    crate::budget::with_budget(budget, || self.run_in_txn(stmt, params, sink))
+                    crate::sealed::with_presented(&presented, || {
+                        crate::budget::with_budget(budget, || self.run_in_txn(stmt, params, sink))
+                    })
                 })
             }
         }

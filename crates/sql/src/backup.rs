@@ -1463,7 +1463,11 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
         }
         _ => None,
     };
-    let subjects = subjects(&*txn, &tables, pepper.as_ref())?;
+    // A sealed row whose key its user holds is not opened: it is copied
+    // as it is, sealed already (§M14.30 K4b).
+    let subjects = crate::sealed::with_held(crate::sealed::Held::Absent, || {
+        subjects(&*txn, &tables, pepper.as_ref())
+    })?;
     // Every subject's key, made now if it has none.
     let mut keys: HashMap<Id, Option<(KeyId, Key)>> = HashMap::new();
     if let Some(store) = &store {
@@ -1477,6 +1481,16 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
             .collect();
         if !ids.is_empty() {
             let got = store.keys(&ids, commit).map_err(Error::io)?;
+            // A subject whose user holds its key, with rows not sealed:
+            // the backup could not seal them, nor should it leave them out.
+            let held = store.held_of(&ids).map_err(Error::io)?;
+            if held.iter().any(Option::is_some) {
+                return Err(Error::prerequisite(
+                    "a subject whose user holds its key has rows in a table not stored sealed: \
+                     a backup could neither seal them nor leave them out (ALTER TABLE … SET \
+                     STORAGE sealed)",
+                ));
+            }
             keys.extend(ids.into_iter().zip(got));
         }
     }

@@ -38,7 +38,7 @@ use nucleus_wire::{
 /// named as such; 4: the password is proved by SCRAM-SHA-256, never
 /// sent; 5: errors carry a hint; 6: results stream, and a [`Cursor`]
 /// fetches them in batches; 7: columnar results, [`Client::batches`]).
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 /// A [`Cursor`]'s batch when none is given: rows the server sends before
 /// it waits for the client.
 pub const DEFAULT_FETCH: u32 = 1000;
@@ -1492,6 +1492,57 @@ impl Client {
                     return match error {
                         Some(e) => Err(Error::Server(e)),
                         None => Ok(count),
+                    };
+                }
+                k => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected message {:?}",
+                        k as char
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Presents `secret` — 32 bytes only the user has (a passkey's PRF
+    /// output, a device's key) — for subject `subject`: the session then
+    /// reads and writes the subject's sealed rows whose key the user holds
+    /// (PLAN.md §M14.30 K4b).  Sent as its own message, never as a
+    /// statement's text; the server keeps it in the session's memory only.
+    pub fn present_subject_key(&mut self, subject: &str, secret: &[u8; 32]) -> Result<(), Error> {
+        self.subject_key(0, subject, secret)
+    }
+
+    /// Gives subject `subject`'s key into its user's keeping, wrapped
+    /// under `secret` (an administrator's): from then on only a session
+    /// that presents it opens the subject's sealed rows.
+    pub fn hold_subject_key(&mut self, subject: &str, secret: &[u8; 32]) -> Result<(), Error> {
+        self.subject_key(1, subject, secret)
+    }
+
+    fn subject_key(&mut self, action: u8, subject: &str, secret: &[u8; 32]) -> Result<(), Error> {
+        if self.version < 8 {
+            return Err(Error::Protocol(format!(
+                "the server speaks version {} of the protocol; subject keys need 8",
+                self.version
+            )));
+        }
+        let mut body = vec![action];
+        put_str(&mut body, subject);
+        body.extend_from_slice(&32u32.to_le_bytes());
+        body.extend_from_slice(secret);
+        self.send(b'k', &body)?;
+        let mut error = None;
+        loop {
+            let (kind, body) = self.read()?;
+            let mut b = Input::new(&body);
+            match kind {
+                b'E' => error = Some(b.server_error()?),
+                b'R' => {
+                    self.set_status(&body);
+                    return match error {
+                        Some(e) => Err(Error::Server(e)),
+                        None => Ok(()),
                     };
                 }
                 k => {

@@ -150,6 +150,9 @@ fn nonce() -> [u8; aes::NONCE_LEN] {
 struct Header<'a> {
     kids: Vec<KeyId>,
     nonce: [u8; aes::NONCE_LEN],
+    /// The subject columns' values, sealed under the store's key for who a
+    /// row is ([`who_key`]; the tag's included).
+    who: &'a [u8],
     /// The sealed length (the tag's included).
     len: usize,
     /// The header's bytes (associated data).
@@ -171,12 +174,18 @@ fn header(stored: &[u8]) -> Result<Header<'_>> {
     }
     let n = stored[2] as usize;
     let at = 3 + 16 * n;
-    let end = at + aes::NONCE_LEN + 4;
-    if n == 0 || stored.len() < end {
+    let who_at = at + aes::NONCE_LEN + 2;
+    if n == 0 || stored.len() < who_at {
+        return Err(bad());
+    }
+    let who_len = u16::from_le_bytes(stored[who_at - 2..who_at].try_into().expect("2")) as usize;
+    let end = who_at + who_len + 4;
+    if who_len < aes::TAG_LEN || stored.len() < end {
         return Err(bad());
     }
     let kids = stored[3..at].as_chunks::<16>().0.to_vec();
     let nonce = stored[at..at + aes::NONCE_LEN].try_into().expect("12");
+    let who = &stored[who_at..who_at + who_len];
     let len = u32::from_le_bytes(stored[end - 4..end].try_into().expect("4")) as usize;
     if len < aes::TAG_LEN || stored.len() - end > len {
         return Err(bad());
@@ -184,6 +193,7 @@ fn header(stored: &[u8]) -> Result<Header<'_>> {
     Ok(Header {
         kids,
         nonce,
+        who,
         len,
         raw: &stored[..end],
         inline: &stored[end..],
@@ -257,18 +267,54 @@ fn keys_for(txn: &dyn KvTxn, t: &Table, row: &Row) -> Result<(Vec<KeyId>, Rc<aes
         .to_string()
         .parse()
         .map_err(|_| Error::internal("a snapshot's commit"))?;
-    let got = store.keys(&ids, snapshot).map_err(Error::io)?;
-    let mut kids = Vec::with_capacity(got.len());
-    let mut keys = Vec::with_capacity(got.len());
-    for k in got {
-        let Some((kid, key)) = k else {
-            return Err(Error::serialization(format!(
-                "a subject of this row of \"{}\" was forgotten after the transaction began",
-                t.name
-            )));
+    // Which subjects' users hold their keys (known not to, kept).
+    let mut held: Vec<Option<(KeyId, Vec<u8>)>> = vec![None; ids.len()];
+    let unknown: Vec<usize> = (0..ids.len())
+        .filter(|&i| !kept(|k| k.plain.contains(&ids[i])))
+        .collect();
+    if !unknown.is_empty() {
+        let asked: Vec<Id> = unknown.iter().map(|&i| ids[i]).collect();
+        let got = store.held_of(&asked).map_err(Error::io)?;
+        for (&i, h) in unknown.iter().zip(got) {
+            match h {
+                Some(h) => held[i] = Some(h),
+                None => {
+                    kept(|k| k.plain.insert(ids[i]));
+                }
+            }
+        }
+    }
+    let plain_ids: Vec<Id> = (0..ids.len())
+        .filter(|&i| held[i].is_none())
+        .map(|i| ids[i])
+        .collect();
+    let mut plain = store
+        .keys(&plain_ids, snapshot)
+        .map_err(Error::io)?
+        .into_iter();
+    let any_held = held.iter().any(Option::is_some);
+    let mut kids = Vec::with_capacity(ids.len());
+    let mut keys = Vec::with_capacity(ids.len());
+    for (id, h) in ids.iter().zip(held) {
+        let (kid, key) = match h {
+            Some((kid, wrapped)) => (kid, held_key(t, id, &kid, &wrapped)?),
+            None => match plain.next().flatten() {
+                Some(k) => k,
+                None => {
+                    return Err(Error::serialization(format!(
+                        "a subject of this row of \"{}\" was forgotten after the transaction \
+                         began",
+                        t.name
+                    )));
+                }
+            },
         };
         kids.push(kid);
         keys.push(key);
+    }
+    if any_held {
+        // Never kept: a thread serves other sessions after this one.
+        return Ok((kids, Rc::new(row_key(&data_key(&keys)))));
     }
     if kids.len() > u8::MAX as usize {
         return Err(Error::program_limit(format!(
@@ -289,6 +335,100 @@ fn keys_for(txn: &dyn KvTxn, t: &Table, row: &Row) -> Result<(Vec<KeyId>, Rc<aes
     Ok((kids, aes))
 }
 
+/// The key of subject `id` (key id `kid`), its user's to hold, opened by
+/// what the session presented — refused (`28000`) when it presented
+/// nothing for the subject, or what does not open it.
+fn held_key(t: &Table, id: &Id, kid: &KeyId, wrapped: &[u8]) -> Result<Key> {
+    let Some(secret) = presented(id) else {
+        return Err(Error::invalid_authorization(format!(
+            "a row of \"{}\" is sealed under a key its subject's user holds, and this session \
+             has not presented it",
+            t.name
+        )));
+    };
+    subject_keys::unwrap(&subject_keys::user_key(&secret, id), kid, wrapped).ok_or_else(|| {
+        Error::invalid_authorization(format!(
+            "the key presented for a subject of a row of \"{}\" does not open its key",
+            t.name
+        ))
+    })
+}
+
+/// The secrets a session has presented for subjects whose users hold
+/// their keys (PLAN.md §M14.30 K4b), by subject id: kept in the session's
+/// memory only, never written, never shown.
+#[derive(Default, Clone)]
+pub struct Presented(HashMap<Id, [u8; 32]>);
+
+impl Presented {
+    /// Presented: `secret` for subject `id`.
+    pub fn insert(&mut self, id: Id, secret: [u8; 32]) {
+        self.0.insert(id, secret);
+    }
+
+    /// Whether nothing is presented.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for Presented {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Presented({} subjects)", self.0.len())
+    }
+}
+
+impl Drop for Presented {
+    fn drop(&mut self) {
+        for s in self.0.values_mut() {
+            s.fill(0);
+            std::hint::black_box(&s);
+        }
+    }
+}
+
+thread_local! {
+    static PRESENTED: RefCell<Option<Arc<Presented>>> = const { RefCell::new(None) };
+    static HELD: std::cell::Cell<Held> = const { std::cell::Cell::new(Held::Refused) };
+}
+
+/// Runs `f` with what a session presented in place (its statements).
+pub fn with_presented<T>(p: &Arc<Presented>, f: impl FnOnce() -> T) -> T {
+    let before = PRESENTED.with(|c| c.replace(Some(Arc::clone(p))));
+    let out = f();
+    PRESENTED.with(|c| *c.borrow_mut() = before);
+    out
+}
+
+/// How a row whose key its user holds reads when the user has not
+/// presented it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Held {
+    /// Refused (`28000`): a statement of a session.
+    Refused,
+    /// Absent: a backup, which copies the row sealed as it is.
+    Absent,
+    /// As far as it can be read without the key — its primary key and
+    /// subject columns, the others `NULL`: the work no user is present
+    /// for, which finds a subject's rows and deletes them (`FORGET`), or
+    /// passes them over (expiry, whose time is sealed; the embedding
+    /// queue, whose text is).
+    Who,
+}
+
+/// Runs `f` with rows whose keys their users hold, not presented, read as
+/// `held` says.
+pub fn with_held<T>(held: Held, f: impl FnOnce() -> T) -> T {
+    let before = HELD.with(|c| c.replace(held));
+    let out = f();
+    HELD.with(|c| c.set(before));
+    out
+}
+
+fn presented(id: &Id) -> Option<[u8; 32]> {
+    PRESENTED.with(|c| c.borrow().as_ref().and_then(|p| p.0.get(id).copied()))
+}
+
 /// The keys kept in memory by this thread: the pepper, and the AES key of
 /// each set of key ids (`None`: one destroyed) — dropped whenever the
 /// keys change ([`subject_keys::changed`]: a key destroyed), so a row
@@ -299,6 +439,10 @@ struct Kept {
     pepper: Option<Key>,
     /// Subjects' ids by their text.
     ids: HashMap<String, Id>,
+    /// The key for who a row is ([`who_key`]).
+    who: Option<Rc<aes::Key>>,
+    /// Subjects whose users do not hold their keys.
+    plain: std::collections::HashSet<Id>,
     by_kids: HashMap<Vec<u8>, Option<Rc<aes::Key>>>,
 }
 
@@ -339,12 +483,21 @@ fn seal(txn: &dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<(Vec<u8>, V
     let mut body = crate::encoding::encode_row(row);
     let nonce = nonce();
     let len = body.len() + aes::TAG_LEN;
-    let mut out = Vec::with_capacity(3 + 16 * kids.len() + aes::NONCE_LEN + 4 + len);
+    // Who the row is: its subject columns' values, sealed apart.
+    let cols = subject_columns(txn, t)?;
+    let subjects: Row = cols.iter().map(|&c| row[c].clone()).collect();
+    let mut who = crate::encoding::encode_row(&subjects);
+    let who_tag = aes::seal_in_place(&*who_key()?, &nonce, key, &mut who);
+    who.extend_from_slice(&who_tag);
+    let who_len = u16::try_from(who.len()).map_err(|_| too_long(t))?;
+    let mut out = Vec::with_capacity(3 + 16 * kids.len() + aes::NONCE_LEN + 6 + who.len() + len);
     out.extend_from_slice(&[TAG, VERSION, kids.len() as u8]);
     for k in &kids {
         out.extend_from_slice(k);
     }
     out.extend_from_slice(&nonce);
+    out.extend_from_slice(&who_len.to_le_bytes());
+    out.extend_from_slice(&who);
     out.extend_from_slice(&(u32::try_from(len).map_err(|_| too_long(t))?).to_le_bytes());
     let tag = aes::seal_in_place(&aes_key, &nonce, &aad(key, &out), &mut body);
     body.extend_from_slice(&tag);
@@ -363,23 +516,69 @@ fn too_long(t: &Table) -> Error {
 
 /// The row encoding sealed in `stored` (row key `key`): `None` when a key
 /// it was sealed under is destroyed.
-fn open(txn: &dyn KvTxn, t: &Table, key: &[u8], stored: &[u8]) -> Result<Option<Vec<u8>>> {
+/// What opening a sealed row gave.
+enum Opened {
+    /// Its row encoding.
+    Body(Vec<u8>),
+    /// A key it was sealed under is destroyed.
+    Gone,
+    /// A key its user holds, not presented ([`Held`] not `Refused`).
+    Held,
+}
+
+fn open(txn: &dyn KvTxn, t: &Table, key: &[u8], stored: &[u8]) -> Result<Opened> {
     let h = header(stored)?;
     let kid_bytes = &h.raw[3..3 + 16 * h.kids.len()];
     let aes_key = match kept(|k| k.by_kids.get(kid_bytes).cloned()) {
         Some(a) => a,
         None => {
-            let got = store()?.open(&h.kids).map_err(Error::io)?;
-            let a = got
-                .into_iter()
-                .collect::<Option<Vec<Key>>>()
-                .map(|keys| Rc::new(row_key(&data_key(&keys))));
-            kept(|k| k.keep(kid_bytes.to_vec(), a.clone()));
-            a
+            let store = store()?;
+            let got = store.open(&h.kids).map_err(Error::io)?;
+            if got.iter().all(Option::is_some) {
+                let keys: Vec<Key> = got.into_iter().flatten().collect();
+                let a = Some(Rc::new(row_key(&data_key(&keys))));
+                kept(|k| k.keep(kid_bytes.to_vec(), a.clone()));
+                a
+            } else {
+                let held = store.held(&h.kids).map_err(Error::io)?;
+                let mut keys = Vec::with_capacity(h.kids.len());
+                let mut gone = false;
+                let mut any_held = false;
+                let mut not_presented = false;
+                let mode = HELD.with(|c| c.get());
+                for ((kid, k), hk) in h.kids.iter().zip(got).zip(held) {
+                    match (k, hk) {
+                        (Some(k), _) => keys.push(k),
+                        (None, Some((id, w))) => {
+                            any_held = true;
+                            if presented(&id).is_none() && mode != Held::Refused {
+                                not_presented = true;
+                            } else {
+                                keys.push(held_key(t, &id, kid, &w)?);
+                            }
+                        }
+                        (None, None) => gone = true,
+                    }
+                }
+                if gone {
+                    if !any_held {
+                        kept(|k| k.keep(kid_bytes.to_vec(), None));
+                    }
+                    return Ok(Opened::Gone);
+                }
+                if not_presented {
+                    return Ok(Opened::Held);
+                }
+                let a = Some(Rc::new(row_key(&data_key(&keys))));
+                if !any_held {
+                    kept(|k| k.keep(kid_bytes.to_vec(), a.clone()));
+                }
+                a
+            }
         }
     };
     let Some(aes_key) = aes_key else {
-        return Ok(None);
+        return Ok(Opened::Gone);
     };
     let mut body = Vec::with_capacity(h.len);
     body.extend_from_slice(h.inline);
@@ -406,7 +605,7 @@ fn open(txn: &dyn KvTxn, t: &Table, key: &[u8], stored: &[u8]) -> Result<Option<
             t.name
         )));
     }
-    Ok(Some(body))
+    Ok(Opened::Body(body))
 }
 
 /// The row stored as `stored` under `key`, the columns `wanted` marks
@@ -423,10 +622,100 @@ fn read(
         // Plain: written before the table was sealed.
         return crate::large::read_some(txn, t, key, stored, labels, wanted).map(Some);
     }
-    match open(txn, t, key, stored)? {
-        None => Ok(None),
-        Some(plain) => crate::large::read_some(txn, t, key, &plain, labels, wanted).map(Some),
+    // Only subject columns wanted (an index on them filled, a subject's
+    // rows found): from the header, whoever holds the row's key.
+    if let Some(w) = wanted
+        && w.iter().any(|&x| x)
+    {
+        let cols = subject_columns(txn, t)?;
+        if w.iter()
+            .enumerate()
+            .all(|(c, &need)| !need || cols.contains(&c))
+        {
+            return who_of(txn, t, key, stored, &cols);
+        }
     }
+    match open(txn, t, key, stored)? {
+        Opened::Gone => Ok(None),
+        Opened::Body(plain) => {
+            crate::large::read_some(txn, t, key, &plain, labels, wanted).map(Some)
+        }
+        Opened::Held => match HELD.with(|c| c.get()) {
+            Held::Who => {
+                let cols = subject_columns(txn, t)?;
+                who_of(txn, t, key, stored, &cols)
+            }
+            _ => Ok(None),
+        },
+    }
+}
+
+/// The store's key for who a row is: what the subject columns' values in
+/// a sealed row's header are sealed with, derived from the pepper — kept
+/// with the subjects' keys, outside the data and its backups, so a backup
+/// alone does not say whose rows it holds, while the database can always
+/// tell (as its subject index does) without the subjects' keys.
+fn who_key() -> Result<Rc<aes::Key>> {
+    if let Some(k) = kept(|k| k.who.clone()) {
+        return Ok(k);
+    }
+    let pepper = store()?
+        .pepper(true)
+        .map_err(Error::io)?
+        .ok_or_else(|| Error::internal("no pepper made"))?;
+    let k = Rc::new(aes::Key::new(&nucleus_crypto::hmac_sha256(
+        &pepper,
+        b"nucleus sealed row subjects 1",
+    )));
+    kept(|kept| kept.who = Some(Rc::clone(&k)));
+    Ok(k)
+}
+
+/// A sealed row's subject columns alone, the others `NULL`, read from its
+/// header: `None` when a key it was sealed under is destroyed (a key its
+/// user holds is not needed).
+fn who_of(
+    txn: &dyn KvTxn,
+    t: &Table,
+    key: &[u8],
+    stored: &[u8],
+    cols: &[usize],
+) -> Result<Option<Row>> {
+    let h = header(stored)?;
+    let store = store()?;
+    let open = store.open(&h.kids).map_err(Error::io)?;
+    if open.iter().any(Option::is_none) {
+        let held = store.held(&h.kids).map_err(Error::io)?;
+        if open
+            .iter()
+            .zip(&held)
+            .any(|(o, h)| o.is_none() && h.is_none())
+        {
+            return Ok(None);
+        }
+    }
+    let _ = txn;
+    let mut who = h.who[..h.who.len() - aes::TAG_LEN].to_vec();
+    let tag: [u8; aes::TAG_LEN] = h.who[h.who.len() - aes::TAG_LEN..].try_into().expect("16");
+    if !aes::open_in_place(&*who_key()?, &h.nonce, key, &mut who, &tag) {
+        return Err(Error::internal(format!(
+            "{}: a sealed row's subjects do not open (altered, or moved)",
+            t.name
+        )));
+    }
+    let values = crate::encoding::decode_row(&who, cols.len())?;
+    let mut row = vec![Value::Null; t.columns.len()];
+    for (&c, v) in cols.iter().zip(values) {
+        row[c] = v;
+    }
+    // The primary key: from the row's key.
+    if !t.primary_key.is_empty() {
+        let (pk, _) = crate::encoding::decode_key(pk_suffix(t, key), t.primary_key.len())?;
+        for (&c, v) in t.primary_key.iter().zip(pk) {
+            row[c] = v;
+        }
+    }
+    Ok(Some(row))
 }
 
 /// Removes what is stored under `key` (a sealed row and its chunks, or a

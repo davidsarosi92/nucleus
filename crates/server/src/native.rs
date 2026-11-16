@@ -443,6 +443,31 @@ fn message<R: Read, W: Write>(
             out.write_all(&ready_msg(session.status()))?;
             Ok(Next::Go)
         }
+        b'k' if version >= 8 => {
+            let parsed = (|| -> Result<(u8, String, [u8; 32]), Error> {
+                let mut b = Body::new(body);
+                let action = b.u8()?;
+                let subject = b.str()?;
+                let secret: [u8; 32] =
+                    b.r.bytes()
+                        .map_err(malformed)?
+                        .try_into()
+                        .map_err(|_| protocol("a subject's secret is 32 bytes"))?;
+                Ok((action, subject, secret))
+            })();
+            // Logged without the subject or the secret.
+            log("subject key", "");
+            let done = parsed.and_then(|(action, subject, secret)| match action {
+                0 => session.present_subject_key(&subject, secret),
+                1 => session.hold_subject_key(&subject, secret),
+                a => Err(protocol(format!("no subject key action {a}"))),
+            });
+            if let Err(e) = done {
+                out.write_all(&error_msg(&e, version))?;
+            }
+            out.write_all(&ready_msg(session.status()))?;
+            Ok(Next::Go)
+        }
         b'X' => Ok(Next::End),
         // Copy data after a COPY that failed before it took any: a client
         // that sends it with the statement (the embedded edition in

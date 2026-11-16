@@ -14,8 +14,9 @@ use std::io::{self, Read};
 /// The newest protocol version.  2 adds registered types (tag 11); 3
 /// tags 12–20; 4 SCRAM-SHA-256 logins; 5 a hint in `E`; 6 streaming
 /// (`S`, `F`, `c`) and a fetch size in `Q`; 7 columnar results (`B`) and
-/// `COPY … FROM STDIN` (`I`, `d`, `e`, `f`).
-pub const VERSION: u16 = 7;
+/// `COPY … FROM STDIN` (`I`, `d`, `e`, `f`); 8 a subject's key presented
+/// or given into its user's keeping (`k`).
+pub const VERSION: u16 = 8;
 /// The oldest still spoken.
 pub const MIN_VERSION: u16 = 1;
 /// The largest body a frame may have.
@@ -61,6 +62,10 @@ pub mod kind {
     pub const CLOSE: u8 = b'c';
     /// Bye (client).
     pub const BYE: u8 = b'X';
+    /// A subject's key (client, from version 8): an action (0 presented,
+    /// 1 given into the user's keeping), the subject, the user's 32-byte
+    /// secret — never a statement's text, so no log holds it.
+    pub const SUBJECT_KEY: u8 = b'k';
 }
 
 /// Value and type tags.

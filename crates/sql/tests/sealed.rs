@@ -347,3 +347,85 @@ fn the_cost_of_sealing() {
         println!("{storage:>6}: load {n} rows {load:.2?}, scan {scan:.2?}, lookup {get:.2?}");
     }
 }
+
+/// What a user presents: 32 bytes only the user has.
+const SECRET: [u8; 32] = [0x5a; 32];
+
+/// A subject's key in its user's keeping (K4b): only the wrapped key is
+/// kept; another session reads the subject's rows only once it presents
+/// the user's secret (a wrong one refused), the others' as before; a
+/// backup copies the rows sealed, a restore opens them for the user only;
+/// `FORGET` needs no secret, and leaves the rows unreadable for good.
+#[test]
+fn a_key_its_user_holds() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(4));
+    let kv = open(&p, "/db");
+    let store = keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv) as Arc<dyn Kv>);
+    schema(&mut s);
+    s.hold_subject_key("alice", SECRET).unwrap();
+    let text = store.table().to_text();
+    assert!(text.contains("\nh "), "{text}");
+    // Held already.
+    assert_eq!(
+        s.hold_subject_key("alice", [1; 32]).unwrap_err().code,
+        "22023"
+    );
+    // The holding session presented it.
+    assert_eq!(
+        texts(&mut s, "SELECT count(*) FROM notes WHERE owner = 'alice'"),
+        ["101"]
+    );
+
+    let mut t = Session::new(Arc::clone(&kv) as Arc<dyn Kv>);
+    assert_eq!(
+        texts(&mut t, "SELECT count(*) FROM notes WHERE owner = 'bob'"),
+        ["100"]
+    );
+    for sql in [
+        "SELECT count(*) FROM notes",
+        "SELECT body FROM notes WHERE owner = 'alice'",
+        "INSERT INTO notes VALUES (7000, 'alice', 'new', 1)",
+    ] {
+        assert_eq!(code(&mut t, sql), "28000", "{sql}");
+    }
+    assert_eq!(
+        t.present_subject_key("alice", [1; 32]).unwrap_err().code,
+        "28000"
+    );
+    t.present_subject_key("alice", SECRET).unwrap();
+    run(&mut t, "INSERT INTO notes VALUES (7000, 'alice', 'new', 1)");
+    assert_eq!(
+        texts(&mut t, "SELECT count(*) FROM notes WHERE owner = 'alice'"),
+        ["102"]
+    );
+
+    // A backup copies her rows sealed; restored, they open for her alone.
+    texts(&mut s, "BACKUP TO '/backups/held'");
+    let restored: Arc<dyn Kv> = open(&p, "/restored");
+    nucleus_sql::backup::restore(&restored, s.registry(), "/backups/held").unwrap();
+    let mut r = Session::new(Arc::clone(&restored));
+    assert_eq!(code(&mut r, "SELECT count(*) FROM notes"), "28000");
+    r.present_subject_key("alice", SECRET).unwrap();
+    assert_eq!(
+        texts(
+            &mut r,
+            "SELECT owner, count(*) FROM notes GROUP BY owner ORDER BY owner"
+        ),
+        ["alice 102", "bob 100"]
+    );
+
+    // Forgotten by a session that never had her secret.
+    let mut admin = Session::new(Arc::clone(&kv) as Arc<dyn Kv>);
+    texts(&mut admin, "FORGET SUBJECT 'alice'");
+    assert_eq!(
+        texts(&mut t, "SELECT owner, count(*) FROM notes GROUP BY owner"),
+        ["bob 100"]
+    );
+    assert_eq!(texts(&mut admin, "SELECT count(*) FROM notes"), ["100"]);
+    assert!(!store.table().to_text().contains("\nh "));
+    let txn = kv.begin(nucleus_kv::TxnOptions::read_only()).unwrap();
+    let problems = nucleus_sql::check::check(&*txn, s.registry()).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+}

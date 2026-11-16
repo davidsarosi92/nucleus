@@ -717,6 +717,13 @@ fn row_key(t: &Table, pk: &[u8]) -> Vec<u8> {
 /// One round of the queue of database `kv`: the due jobs (at most
 /// [`ROUND_TEXTS`]), their texts embedded, their vectors written.
 pub fn work(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
+    // A sealed row whose key its user holds is not read by the queue: its
+    // job is let go as a gone row's — the queue never reads what only the
+    // user can open (§M14.30 K4b).
+    crate::sealed::with_held(crate::sealed::Held::Who, || work_round(kv, reg))
+}
+
+fn work_round(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
     let instance = kv.instance();
     if with_driver(instance, |d| std::mem::replace(&mut d.busy, true)) {
         return Ok(Round {

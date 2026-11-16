@@ -6342,6 +6342,38 @@ stay in the pages and log segments they were in until those are reused —
 or zeroed by a scrub (`FORGET SUBJECT` runs one, §8.29) — and in pages
 a branch made before still shares.
 
+**Keys their users hold** (K4b).  A subject's key can be given into its
+user's keeping: `Session::hold_subject_key(subject, secret)` (an
+administrator's, `42501`; over the protocol the `k` message, Rust
+`Client::hold_subject_key`), `secret` being 32 bytes only the user has
+— a passkey's PRF output (WebAuthn's `prf` extension), a device's key.
+The store then keeps the key only wrapped (AES-256-GCM-SIV under
+HMAC-SHA256 of the secret and the subject's id, so one secret opens one
+subject's key; the key file's line `h id key-id wrapped`), and the
+subject's sealed rows open only in a session that presented the secret
+(`Session::present_subject_key`, `Client::present_subject_key`) —
+the operator's sessions included.  Kept in the session's memory only,
+zeroed when it ends, never written or logged; a statement never carries
+it.  Without it the rows are refused, not hidden (`28000`, naming the
+table — a query that would read them fails rather than answer short); a
+wrong secret is refused when presented.  A thread keeps no such key
+between statements (threads serve several sessions).
+
+Who a row is stays readable without the user: the header holds the
+subject columns' values sealed apart, under a key derived from the
+store's pepper (outside the data and its backups, like the keys — a
+backup alone says nothing of whose its rows are).  So the work no user
+is present for reads such a row as its primary key and subject columns,
+the others `NULL` (`sealed::Held::Who`): `FORGET SUBJECT` finds and
+deletes it as any other, an index on the subject columns is filled
+(`CREATE INDEX`, a restore's rebuild) — while expiry passes it over
+(its time is sealed) and the embedding queue lets its job go (its text
+is sealed: such a table's embedding columns are made only while the user
+is present).  A backup copies the rows sealed (`Held::Absent`), and
+refuses a database where a subject whose user holds its key has rows in
+a table not stored sealed (`55000`: it could neither seal them nor leave
+them out).  A key lost is the rows lost: nothing else opens them.
+
 Tests: `crates/sql/tests/sealed.rs` (nothing of a sealed table in any
 file, logged or checkpointed, a 100 KB row's chunks included; every way
 of indexing a sealed column refused; a subject forgotten — unreadable on
@@ -6349,7 +6381,12 @@ a branch made before, `AS OF` before, in a backup restored, with the
 integrity check clean on the branch, the subject's new rows under a new
 key; a `row` table sealed and opened again online, its index rules, a
 `FORGET` between; opened again on a branch where a subject was
-forgotten, its index entries gone with its rows).  The cost
+forgotten, its index entries gone with its rows; a key its user holds —
+the key file keeping it wrapped, another session refused until it
+presents the secret, a wrong secret refused, a backup restored opening
+for the user alone, `FORGET` by a session without it deleting the rows
+and the key), the CLI's `a_key_its_user_holds_over_the_network` (the
+`k` message against a server).  The cost
 (`the_cost_of_sealing`, ignored; `docs/benchmarks.md`): ×1.9 to load,
 ×4 to scan, lookups alike — each thread keeps the derived key of each
 set of key ids, dropped whenever a key is destroyed.
@@ -7119,7 +7156,7 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (7; 1–6 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `H` Hello | client → server, first | `u16` version (8; 1–7 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
@@ -7138,6 +7175,7 @@ header bytes not included; at most 1 GiB), then the body.
 | `F` Fetch | client → server | `u32` the next batch's size (0: the rest at once), after `S` |
 | `c` Close | client → server | empty, after `S`: no more rows — the statement ends there |
 | `X` Bye | client → server | empty; the server closes |
+| `k` Subject key | client → server | version 8: `u8` action (0 present, 1 give into the user's keeping), string subject, bytes (`u32` 32, then the user's 32-byte secret) — a message of its own so no log or audit record holds the secret (§8.40); answered `E` on failure, then `R` |
 
 **Session.** The client sends Hello.  If the server wants a password and
 the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
@@ -7660,6 +7698,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-16 — §M14.30 K4b, keys users hold:** `SubjectKeys::hold`,
+  `held`, `held_of` (the key file's `h` line), `subject_keys::user_key`,
+  `wrap`, `unwrap`; `Session::hold_subject_key`, `present_subject_key`;
+  `sealed::Held` (`Refused`, `Absent`, `Who`), the subject columns sealed
+  in a sealed row's header; protocol version 8's `k` message, Rust
+  `Client::hold_subject_key`, `present_subject_key`.
 - **2026-11-16 — §M14.30 K4a, sealed rows:** the table storage `sealed`
   (`crates/sql/src/sealed.rs`, §8.40): rows sealed under their subjects'
   keys, `SET STORAGE sealed | row` online (copy states `Sealing`,

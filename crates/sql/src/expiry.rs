@@ -57,6 +57,14 @@ pub(crate) fn set(txn: &mut dyn KvTxn, table: &str, column: Option<&str>) -> Res
 /// hide a row from its expiry), tried again on a conflict.  The rows
 /// deleted, in all.
 pub fn expire(kv: &Arc<dyn Kv>, reg: &Registry, table: Option<&str>, now: i64) -> Result<u64> {
+    // A sealed row whose key its user holds reads without its expiry time
+    // (sealed): it is passed over (§M14.30 K4b).
+    crate::sealed::with_held(crate::sealed::Held::Who, || {
+        expire_rows(kv, reg, table, now)
+    })
+}
+
+fn expire_rows(kv: &Arc<dyn Kv>, reg: &Registry, table: Option<&str>, now: i64) -> Result<u64> {
     let tables = {
         let txn = kv.begin(TxnOptions::read_only())?;
         catalog::tables(&*txn)?

@@ -8,7 +8,9 @@ told another, a branch's name (`CREATE BRANCH`, DOCS.md §8.32) for a
 branch —, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
 parameters, errors with their SQLSTATE, transactions, passwords).  They
-speak protocol version 7: large results stream, read a batch at a time
+speak protocol version 7 (the Rust driver 8: a subject's key presented
+for the rows its user holds the key of, DOCS.md §8.40 — the others with
+§M14.30 K5): large results stream, read a batch at a time
 through each driver's cursor (Rust `cursor`, Python and JavaScript
 `stream`, Java, C and C++ `cursor`) — or in columnar batches, a buffer
 per column, without a value per cell (`batches` in each; Python into

@@ -288,7 +288,7 @@ are marked ✅.
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
-| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅ |
+| | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ◐ K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ⬜ planned (2026-11-15) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10237,6 +10237,36 @@ key is gone.  What is left of the scan's cost: AES-GCM-SIV of each row
 and the row-at-a-time read — `row` scans in batches
 (`vector::RowBatches`); a sealed batch reader is the next step if a
 workload asks for it.  Tests: `crates/sql/tests/sealed.rs`.
+
+**K4b — keys their users hold ✅** (2026-11-16).  As designed, with two
+things the design had not said, found by the tests.  *A restore must
+index rows it cannot open*: it rebuilds the subject index from the rows,
+and a held row would either stop it (`28000`) or be left out of the
+index (lookups then miss it, silently).  The answer: a sealed row's
+header carries its subject columns' values, sealed under a key derived
+from the store's pepper — so the database can always tell whose a row is
+(as its subject index already shows, in the clear) without the user,
+while a backup alone still cannot.  A read wanting only subject columns
+takes them from there.  *`FORGET` must delete what it cannot open*: the
+work no user is present for reads a held row as its primary key (from
+the row key) and its subjects, the rest `NULL` (`Held::Who`) — enough to
+delete it with its index entries and cascades; expiry passes it over
+(its time is sealed), the embedding queue lets its job go.  A backup
+reads such rows as absent and copies them sealed (`Held::Absent`); one
+that would have to seal a held subject's rows in a table not stored
+sealed refuses.  The secret travels as the protocol's own message (`k`,
+version 8), never as a statement — Proton's and 1Password's lesson
+that the server must never see what unlocks the data where logs can
+catch it.  Prior art for the wrapping: Apple's Advanced Data Protection
+(keys wrapped by device keys, the service holding only wrapped ones),
+Signal's PIN-derived keys (KDF of a user secret, one key per purpose:
+here HMAC-SHA256 of the secret and the subject's id, so one secret
+opens one subject's key), WebAuthn's PRF extension as the secret's
+source.  Not yet: drivers but Rust's (with K5's, every language at once),
+and a key given back into the server's keeping.  Also found: the
+server's key file copied the whole table before every call, so a sealed
+table's every write did — now a failed save makes the next call read
+the file again.
 
 **K5 — client-side encrypted columns (zero-knowledge where it fits).**
 A column the drivers encrypt and decrypt: the server stores ciphertext
