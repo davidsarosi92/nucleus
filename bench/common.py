@@ -82,13 +82,18 @@ class Session:
 
     def time(self, sql):
         """Runs `sql`; its time in ms.  Raises on an error."""
+        return self.query(sql)[0]
+
+    def query(self, sql):
+        """Runs `sql`; its time in ms and its output's other lines (with
+        psql's `-At`, the rows).  Raises on an error."""
         text = self.send(one_line(sql).rstrip(";") + ";")
         if re.search(r"^(psql:.*)?ERROR", text, re.M):
             raise RuntimeError(f"{self.cmd[0]}: {text[-3000:]}")
         t = times_of(text)
         if not t:
             raise RuntimeError(f"{self.cmd[0]}: no time in {text[-3000:]!r}")
-        return t[-1]
+        return t[-1], [line for line in text.splitlines() if line and not line.startswith("Time: ")]
 
     def close(self):
         try:

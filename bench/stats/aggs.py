@@ -3,19 +3,24 @@
 same queries over the same table, alternating builds round by round.
 
     python3 bench/stats/aggs.py target/base/release/nucleus target/release/nucleus \
-        [--rows 10000000] [--rounds 2] [--query NAME …] \
-        [--psql "docker exec -i pg psql -U postgres"] [--numpy]
+        [--rows 10000000] [--rounds 1] [--query NAME …] [--work-mem 1GB] \
+        [--pg | --psql "psql …"] [--numpy] [--python]
 
 The table `t (id BIGINT PRIMARY KEY, g INT, x DOUBLE PRECISION, y DOUBLE
 PRECISION)`: `x` uniform on a large offset (1e9 + U(0,1), as timestamps
 and ids are), `y` spread over magnitudes; `g` 1000 groups.  Each query's
-best of five runs, in ms; its result printed once, so builds can be
-compared for the same answer.  `--psql` runs the same queries on
-PostgreSQL (those it has), `--numpy` numpy's counterparts on one core.
+median of five runs, in ms; its result printed once, so builds can be
+compared for the same answer.  `--pg` runs the same queries on
+PostgreSQL (those it has; native, bench/pg.py's cluster), `--psql` on one
+already running; `--numpy` numpy's counterparts on one core, `--python`
+scipy's and scikit-learn's tests; `--work-mem` sets `work_mem` in every
+system's session.  Every number is printed as an `@metric` line too, for
+`bench/method.py run`, which repeats the script (PLAN.md §M14.31).
 """
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,7 +29,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
+sys.path.insert(0, os.path.join(HERE, ".."))
 
+import method  # noqa: E402
 import nucleus  # noqa: E402
 
 QUERIES = {
@@ -119,13 +126,13 @@ def load(c, rows):
     c.execute("ANALYZE t")
 
 
-def best(c, sql, times=5):
+def timed(c, sql, times=5):
     t, out = [], None
     for _ in range(times):
         s = time.perf_counter()
         out = c.execute(sql).rows
         t.append((time.perf_counter() - s) * 1000)
-    return min(t), out
+    return method.median(t), out
 
 
 def generate(rows):
@@ -149,12 +156,33 @@ def numpy_times(rows):
             s = time.perf_counter()
             r = f()
             t.append((time.perf_counter() - s) * 1000)
-        out[name] = (min(t), r)
+        out[name] = (method.median(t), r)
     return out
 
 
-def psql_times(cmd, rows, names):
-    """Each query's best of five through psql's \\timing."""
+def python_times(rows):
+    """scipy's and scikit-learn's tests on the same halves, the values
+    already in numpy arrays."""
+    import numpy as np
+    from scipy.stats import ks_2samp
+    from sklearn.metrics import roc_auc_score
+    i, x = generate(rows)
+    y = (((i * 40503) % 65537) - 32768).astype(np.float64) * np.power(10.0, ((i * 7) % 31) - 15)
+    side = i % 2 == 0
+    out = {}
+    for name, f in [("ks_test", lambda: ks_2samp(x[side], x[~side]).statistic),
+                    ("auc", lambda: roc_auc_score(side, y))]:
+        t = []
+        for _ in range(5):
+            s = time.perf_counter()
+            r = f()
+            t.append((time.perf_counter() - s) * 1000)
+        out[name] = (method.median(t), r)
+    return out
+
+
+def psql_times(cmd, rows, names, work_mem=None):
+    """Each query's median of five through psql's \\timing."""
     import re
     setup = f"""DROP TABLE IF EXISTS t;
 CREATE TABLE t (id BIGINT PRIMARY KEY, g INT, x DOUBLE PRECISION, y DOUBLE PRECISION);
@@ -164,18 +192,19 @@ INSERT INTO t SELECT i, i % 1000,
     FROM generate_series(1, {rows}) AS s(i);
 ANALYZE t;
 """
-    subprocess.run(cmd.split() + ["-q", "-v", "ON_ERROR_STOP=1"], input=setup,
+    subprocess.run(shlex.split(cmd) + ["-q", "-v", "ON_ERROR_STOP=1"], input=setup,
                    text=True, check=True, capture_output=True)
     out = {}
     for n in names:
         if n in NOT_PG:
             continue
-        script = "\\timing on\n" + "\n".join([QUERIES[n] + ";"] * 5) + "\n"
-        r = subprocess.run(cmd.split() + ["-At"], input=script, text=True,
+        script = (f"SET work_mem = '{work_mem}';\n" if work_mem else "") + \
+            "\\timing on\n" + "\n".join([QUERIES[n] + ";"] * 5) + "\n"
+        r = subprocess.run(shlex.split(cmd) + ["-At"], input=script, text=True,
                            check=True, capture_output=True).stdout
         ms = [float(m) for m in re.findall(r"Time: ([0-9.]+) ms", r)]
-        rows = [l for l in r.splitlines() if l and not l.startswith("Time")]
-        out[n] = (min(ms), rows[:3])
+        rows = [l for l in r.splitlines() if l and not l.startswith(("Time", "Timing"))]
+        out[n] = (method.median(ms), rows[:3])
     return out
 
 
@@ -183,23 +212,30 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument("binaries", nargs="+")
     a.add_argument("--rows", type=int, default=10_000_000)
-    a.add_argument("--rounds", type=int, default=2)
+    a.add_argument("--rounds", type=int, default=1)
     a.add_argument("--query", action="append")
     a.add_argument("--port", type=int, default=21090)
-    a.add_argument("--psql")
+    a.add_argument("--pg", action="store_true", help="PostgreSQL native (bench/pg.py's cluster)")
+    a.add_argument("--psql", help="a running PostgreSQL's psql command instead")
     a.add_argument("--numpy", action="store_true")
+    a.add_argument("--python", action="store_true", help="scipy's and scikit-learn's tests")
+    a.add_argument("--work-mem", default=None, help="work_mem in every system's session")
     o = a.parse_args()
     names = o.query or list(QUERIES)
+    suffix = f", work_mem {o.work_mem}" if o.work_mem else ""
     seen = {}
     for r in range(o.rounds):
-        for b in o.binaries:
+        for k, b in enumerate(method.turn(o.binaries, r)):
+            label = "nucleus" + (f" {o.binaries.index(b) + 1}" if len(o.binaries) > 1 else "") + suffix
             s, d, c = start(b, o.port)
             try:
                 load(c, o.rows)
+                if o.work_mem:
+                    c.execute(f"SET work_mem = '{o.work_mem}'")
                 print(f"== {b} round {r + 1}", flush=True)
                 for n in names:
                     try:
-                        ms, out = best(c, QUERIES[n])
+                        ms, out = timed(c, QUERIES[n])
                     except nucleus.Error as e:
                         print(f"{n:<20}  (not run: {e})", flush=True)
                         continue
@@ -208,6 +244,7 @@ def main():
                         note = f"  DIFFERENT: {out[:2]}"
                     seen.setdefault(n, out)
                     print(f"{n:<20} {ms:9.1f} ms{note}", flush=True)
+                    method.emit(n, ms, system=label)
             finally:
                 c.close()
                 s.terminate()
@@ -216,14 +253,44 @@ def main():
     for n in names:
         if n in seen:
             print(f"{n}: {seen[n][:3]}")
-    if o.psql:
+    if o.pg or o.psql:
         print("== PostgreSQL", flush=True)
-        for n, (ms, out) in psql_times(o.psql, o.rows, names).items():
-            print(f"{n:<20} {ms:9.1f} ms  {out[:2]}")
+        cluster = None
+        cmd = o.psql
+        if o.pg:
+            import pg
+            cluster = pg.Cluster(pg.DEFAULT).__enter__()
+        try:
+            if cluster:
+                times = psql_times_cluster(cluster, o.rows, names, o.work_mem)
+                method.emit_system("postgresql" + suffix, cluster.describe())
+            else:
+                times = psql_times(cmd, o.rows, names, o.work_mem)
+            for n, (ms, out) in times.items():
+                print(f"{n:<20} {ms:9.1f} ms  {out[:2]}")
+                method.emit(n, ms, system="postgresql" + suffix)
+        finally:
+            if cluster:
+                cluster.sql("DROP TABLE IF EXISTS t")
+                cluster.stop()
     if o.numpy:
         print("== numpy (one core)", flush=True)
         for n, (ms, r) in numpy_times(o.rows).items():
             print(f"{n:<20} {ms:9.1f} ms  {r!r}")
+            method.emit(n, ms, system="numpy")
+    if o.python:
+        import scipy
+        import sklearn
+        print("== scipy, scikit-learn", flush=True)
+        method.emit_system("python", {"version": f"scipy {scipy.__version__}, scikit-learn {sklearn.__version__}"})
+        for n, (ms, r) in python_times(o.rows).items():
+            print(f"{n:<20} {ms:9.1f} ms  {r!r}")
+            method.emit(n, ms, system="python")
+
+
+def psql_times_cluster(cluster, rows, names, work_mem):
+    """psql_times on bench/pg.py's cluster."""
+    return psql_times(shlex.join(cluster.tool("psql")), rows, names, work_mem)
 
 
 if __name__ == "__main__":
