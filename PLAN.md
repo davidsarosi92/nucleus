@@ -10535,6 +10535,19 @@ needs repeated runs across instances and days).
   the build and reset it after (20,000 rows: 11.0 s).  The run was
   stopped after `stats` (8 hours, 11 of 45 steps); `ann-dbpedia` and
   `ann-related` measured pgvector's build serially and run again.
+  *Then a retry's price once more*: `bm25-filters` (BM25 with filters,
+  ranked and unranked, four BEIR sets) takes 27 minutes a round — the
+  unranked baseline's queries are 0.2–0.4 s each — and ran 5 rounds,
+  not `LONG_RUNS`' 3; a metric of its 40 spread past 10 %, so 5 more
+  rounds began, and a third attempt would have followed: up to 6¾ hours
+  for one step.  Rounds added narrow the median's interval, but they do
+  not lower a spread that is the metric's own — only a passing
+  disturbance is cured by a retry.  *Taken*: a command whose attempt
+  took longer than ten minutes (`RETRY_BUDGET`, `--retry-budget`) is
+  not run again, its noisy metrics flagged (pyperf and hyperfine warn,
+  they do not rerun); the results file is written after each attempt,
+  so a run stopped later keeps what it measured; `bm25-filters` runs
+  `LONG_RUNS`.
 
 **Done when:** every number in `docs/benchmarks.md` carries its
 environment, its runs, its spread and the script that made it; and a

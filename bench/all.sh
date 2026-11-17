@@ -130,7 +130,7 @@ step_bm25() {
   paradedb stop
 }
 step_bm25-filters() {
-  m bm25-filters "$RUNS" -- "$PY" bench/text/beir.py nucleus "$N" --analyzer english --k1 1.2 --b 0.75 \
+  m bm25-filters "$LONG" -- "$PY" bench/text/beir.py nucleus "$N" --analyzer english --k1 1.2 --b 0.75 \
     --filters 50,10,1 --unranked
 }
 step_bm25-snippets() {

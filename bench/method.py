@@ -42,6 +42,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 METHOD = 1
 # Runs per measurement unless asked for more; the plan's floor.
@@ -50,6 +51,12 @@ RUNS = 5
 CV_BOUND = 0.10
 # Times it is run again before it is flagged.
 RETRIES = 2
+# A command whose rounds took longer than this (seconds, all of an
+# attempt's) is not run again: its noisy metrics are flagged instead.  The
+# spread a retry can cure is a passing disturbance; a metric whose own
+# spread passes the bound keeps it however many rounds are added, and a
+# long command's retry costs hours (bm25-filters: 27 minutes a round).
+RETRY_BUDGET = 600
 BOOTSTRAP = 10_000
 LEVEL = 0.95
 
@@ -471,26 +478,32 @@ def gather(text, into, systems, label=None):
             systems.update(json.loads(line[len("@system "):]))
 
 
-def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True):
+def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True,
+                 budget=RETRY_BUDGET, saved=None):
     """Each command (`{label: argv}`) run in turn, `runs` rounds (A, B, A,
     B, …); their `@metric` lines as samples.  While a command's metric
     spreads past `bound` (at most `retries` times), that command — only
     it — runs `runs` rounds more, added to the ones before: a noisy
     metric of one system does not run the others' long builds again, and
     no round is thrown away (more rounds narrow the median's interval
-    even where the spread is the measurement's own).  Returns (samples,
-    systems)."""
-    got, systems, owner, tries = {}, {}, {}, {}
+    even where the spread is the measurement's own).  A command whose
+    attempt took longer than `budget` seconds is not run again (its noisy
+    metrics flagged).  `saved(samples, systems)`, when given, is called
+    after each attempt: a run stopped later keeps what it measured.
+    Returns (samples, systems)."""
+    got, systems, owner, tries, took = {}, {}, {}, {}, {}
     todo = list(commands.items())
     attempts = 0
     while True:
         attempts += 1
         for label, _ in todo:
             tries[label] = attempts
+            took[label] = 0.0
         for r in range(runs):
             for label, argv in turn(todo, r):
                 if echo:
                     print(f"[{label} run {r + 1}/{runs}, attempt {attempts}]", file=sys.stderr, flush=True)
+                began = time.monotonic()
                 p = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, cwd=ROOT)
                 lines = []
                 for line in p.stdout:
@@ -499,16 +512,25 @@ def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True
                         sys.stderr.write(line)
                 if p.wait() != 0:
                     raise SystemExit(f"{label}: exit {p.returncode}")
+                took[label] += time.monotonic() - began
                 mine = {}
                 gather("".join(lines), mine, systems, label if len(commands) > 1 else None)
                 for key, v in mine.items():
                     owner[key] = label
                     got.setdefault(key, {"unit": v["unit"], "values": []})["values"].extend(v["values"])
+        samples = [Sample(name, system, v["values"], phase, flagged=cv(v["values"]) > bound,
+                          attempts=tries[owner[(name, phase, system)]], unit=v["unit"])
+                   for (name, phase, system), v in got.items()]
+        if saved:
+            saved(samples, systems)
         noisy = {owner[k] for k, v in got.items() if cv(v["values"]) > bound}
+        slow = {label for label in noisy if took[label] > budget}
+        if echo and slow:
+            print(f"[not run again, an attempt past {budget} s: {', '.join(sorted(slow))}]",
+                  file=sys.stderr, flush=True)
+        noisy -= slow
         if not noisy or attempts > retries:
-            return [Sample(name, system, v["values"], phase, flagged=cv(v["values"]) > bound,
-                           attempts=tries[owner[(name, phase, system)]], unit=v["unit"])
-                    for (name, phase, system), v in got.items()], systems
+            return samples, systems
         todo = [(label, argv) for label, argv in todo if label in noisy]
 
 
@@ -526,7 +548,7 @@ def reproduce(first, second):
 
 
 def cli_run(argv):
-    """method.py run NAME OUT [--runs N] [--retries K] [--data PATH]…
+    """method.py run NAME OUT [--runs N] [--retries K] [--retry-budget S] [--data PATH]…
     [--where DIR] [--also LABEL=COMMAND]… -- COMMAND…"""
     import argparse
     cut = argv.index("--")
@@ -535,6 +557,8 @@ def cli_run(argv):
     ap.add_argument("out")
     ap.add_argument("--runs", type=int, default=RUNS)
     ap.add_argument("--retries", type=int, default=RETRIES)
+    ap.add_argument("--retry-budget", type=float, default=RETRY_BUDGET,
+                    help="seconds: a command whose attempt took longer is not run again")
     ap.add_argument("--data", action="append", default=[])
     ap.add_argument("--where", default=".")
     ap.add_argument("--label", default="nucleus", help="the command's label (with --also)")
@@ -545,9 +569,14 @@ def cli_run(argv):
         label, cmd = also.split("=", 1)
         commands[label] = shlex.split(cmd)
     env = environment(data=a.data, where=a.where)
-    samples, systems = run_commands(commands, a.runs, retries=a.retries)
-    env["systems"] = systems
     script = invocation([os.path.join(HERE, "method.py"), "run"] + argv)
+
+    def saved(samples, systems):
+        write(a.out, a.name, dict(env, systems=systems), samples, script=script)
+
+    samples, systems = run_commands(commands, a.runs, retries=a.retries, budget=a.retry_budget,
+                                    saved=saved)
+    env["systems"] = systems
     write(a.out, a.name, env, samples, script=script)
     print(table(samples, title=a.name))
     return 0

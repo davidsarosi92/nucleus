@@ -12,10 +12,12 @@ PostgreSQL protocol (`--pg-compat`) is not used.
 
 Every number goes through one method (PLAN.md §M14.31 P1,
 `bench/method.py`): the systems run in turn on the same machine, each
-read cold (its server just restarted) and warm, five rounds or more; a
-number is the median of its rounds with a 95 % interval and the spread
-(`±` the coefficient of variation), a measurement spreading past 10 %
-is run again and still past it marked ⚠; a ratio is claimed only where
+read cold (its server just restarted) and warm, five rounds or more
+(three for a step whose round takes over ten minutes); a number is the
+median of its rounds with a 95 % interval and the spread (`±` the
+coefficient of variation), a measurement spreading past 10 % is run
+again (unless its rounds took over ten minutes) and still past it
+marked ⚠; a ratio is claimed only where
 the two intervals do not overlap (`≈` otherwise); every answer is
 checked against the other system's.  PostgreSQL runs natively in a
 cluster of its own, tuned for the machine (`bench/pg.py`), what it runs

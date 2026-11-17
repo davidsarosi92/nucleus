@@ -67,6 +67,23 @@ class Running(unittest.TestCase):
         self.assertEqual(systems, {"nucleus": {"version": "x"}})
         self.assertIn("build, ms", method.table(samples))
 
+    def test_a_noisy_command_runs_again_unless_its_attempt_was_long(self):
+        # Spreads by far: 1, 10, 1, 10, …
+        emit = ("import sys, os; sys.path.insert(0, 'bench'); import method; "
+                "p = os.environ['NOISE']; n = int(open(p).read() or 0) if os.path.exists(p) else 0; "
+                "open(p, 'w').write(str(n + 1)); method.emit('q', [1.0 if n % 2 else 10.0])")
+        for budget, attempts in ((1e9, 3), (0, 1)):
+            with tempfile.TemporaryDirectory() as d:
+                os.environ["NOISE"] = os.path.join(d, "n")
+                calls = []
+                samples, _ = method.run_commands({"nucleus": [sys.executable, "-c", emit]}, runs=2,
+                                                 retries=2, echo=False, budget=budget,
+                                                 saved=lambda s, _: calls.append(len(s[0].times)))
+            del os.environ["NOISE"]
+            self.assertEqual(samples[0].attempts, attempts, f"budget {budget}")
+            self.assertTrue(samples[0].flagged)
+            self.assertEqual(calls, [2 * (i + 1) for i in range(attempts)], "saved after each attempt")
+
 
 class Results(unittest.TestCase):
     def test_written_read_shown_and_reproduced(self):
