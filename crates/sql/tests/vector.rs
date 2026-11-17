@@ -964,7 +964,7 @@ fn char_text_in_lists_and_substr_agree() {
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_lookups_agree() {
     // (A column table's lookups cost more: fewer left rows look up.)
-    for (storage, few) in [("row", 1500), ("column", 120)] {
+    for (storage, few) in [("row", 1000), ("column", 120)] {
         let db = Database::open_on(
             Arc::new(SimPlatform::new(13)),
             Path::new("/db"),

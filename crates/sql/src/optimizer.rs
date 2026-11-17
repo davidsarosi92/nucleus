@@ -1808,7 +1808,10 @@ fn hashed(plan: Plan) -> Plan {
 /// index).  Measured on TPC-H's row tables, one thread (§M14.12 V3): a
 /// lookup into `orders` by its key 2.9 µs, a row `lineitem`'s index on
 /// `l_partkey` finds 5.8 µs, against 0.07–0.1 µs a hash join's row.
-const LOOKUP_ROWS: f64 = 40.0;
+/// Lookups within pipelines on the workers, and scans that decode less
+/// (§M14.33 R4), moved the crossing: Q3's 147,000 lookups into `lineitem`
+/// beat hashing it, Q5's 227,000 do not — 55 between the two.
+const LOOKUP_ROWS: f64 = 55.0;
 const FETCH_ROWS: f64 = 60.0;
 /// A column table's lookup against a row table's, and its scan's rows.
 const COLUMN_LOOKUP: f64 = 1.2;

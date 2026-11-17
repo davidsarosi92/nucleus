@@ -1571,7 +1571,7 @@ impl<'a> DictFilter<'a> {
         let (step, p) = steps.iter().enumerate().find_map(|(i, (s, _))| match s {
             Step::Keys(_) => None,
             Step::Filter(p) => Some(Some((i, *p))),
-            Step::Project(_) | Step::Probe(_) => Some(None),
+            Step::Project(_) | Step::Probe(_) | Step::Lookup(_) => Some(None),
         })??;
         let mut preds = Vec::new();
         Self::leading(p, &mut preds);
@@ -2400,6 +2400,96 @@ enum Step<'a> {
     /// A hash join's probe of its table (made before the pipeline runs:
     /// [`prepare`]).
     Probe(Box<Probe<'a>>),
+    /// An index nested loop's lookups, a left row at a time.
+    Lookup(Box<Lookup<'a>>),
+}
+
+/// An index nested loop (`JoinAlgo::Lookup`) as a pipeline's step: each
+/// left row's lookup run as the row-at-a-time join runs it
+/// ([`crate::exec::look_up`]), the rows it gives made a batch again — so
+/// the steps above it, and an aggregate over it, run on the workers with
+/// the scan below it (HyPer's index nested loop within a pipeline).
+struct Lookup<'a> {
+    right: &'a Plan,
+    kind: JoinType,
+    on: Option<&'a Expr>,
+    algo: &'a JoinAlgo,
+    widths: (usize, usize),
+}
+
+impl Lookup<'_> {
+    /// A left row's rows, then the error that stopped them.
+    fn rows(&self, l: Row, cx: Cx) -> Vec<Result<Row>> {
+        crate::exec::look_up(
+            l,
+            self.right,
+            self.kind,
+            self.on,
+            self.algo,
+            self.widths,
+            cx.ctx,
+            cx.outer,
+        )
+    }
+
+    /// A batch of left rows' lookups, as a batch (an error sends the batch
+    /// a row at a time, as a pipeline's errors do).  A pipeline on one
+    /// thread — its scan not cut into morsels: few rows, or one key —
+    /// looks the batch's rows up on the workers, as the row-at-a-time
+    /// join does (`exec::OnWorkers`): a lateral item's searches cost
+    /// more than many rows' scan.
+    fn apply(&self, b: Batch, cx: Cx) -> Result<Batch> {
+        let left: Vec<Row> = b.sel.iter().map(|i| b.row(i)).collect();
+        let mut out = Vec::new();
+        let workers = crate::budget::workers();
+        let shared = (workers > 1
+            && left.len() > 1
+            && cx.outer.is_none()
+            && cx.ctx.profile.is_none()
+            && crate::exec::lookups_parallel_safe(self.right, self.on, cx.ctx))
+        .then(|| cx.ctx.txn.shared())
+        .flatten();
+        if let Some(shared) = shared {
+            note_parallel_run();
+            let per = left.len().div_ceil((workers * 4).min(left.len()));
+            let pieces: Vec<&[Row]> = left.chunks(per).collect();
+            let done = on_workers(cx.ctx, shared, workers, pieces.len(), true, &|wctx, m| {
+                let wcx = Cx {
+                    ctx: wctx,
+                    outer: None,
+                };
+                let mut rows = Vec::new();
+                for l in pieces[m] {
+                    for r in self.rows(l.clone(), wcx) {
+                        rows.push(r?);
+                    }
+                }
+                Ok(rows)
+            });
+            for piece in done {
+                out.extend(piece.ok_or_else(|| Error::internal("a piece of rows not run"))??);
+            }
+        } else {
+            for l in left {
+                for r in self.rows(l, cx) {
+                    out.push(r?);
+                }
+            }
+        }
+        Ok(batch_of_rows(out).unwrap_or_else(|| {
+            let width = match self.kind {
+                JoinType::Semi | JoinType::Anti => self.widths.0,
+                _ => self.widths.0 + self.widths.1,
+            };
+            Batch {
+                len: 0,
+                cols: (0..width)
+                    .map(|_| Rc::new(Vector::Const(Value::Null)))
+                    .collect(),
+                sel: Sel::All(0),
+            }
+        }))
+    }
 }
 
 /// What a pipeline produced.
@@ -2524,6 +2614,25 @@ fn chain<'p>(
             steps.push((Step::Probe(Box::new(probe)), plan));
             Some((scan, steps))
         }
+        Plan::Join {
+            left,
+            right,
+            kind,
+            on,
+            algo: algo @ JoinAlgo::Lookup,
+        } if probing(*kind) => {
+            tables?;
+            let (scan, mut steps) = chain(left, tables)?;
+            let lookup = Lookup {
+                right,
+                kind: *kind,
+                on: on.as_ref(),
+                algo,
+                widths: (left.width(), right.width()),
+            };
+            steps.push((Step::Lookup(Box::new(lookup)), plan));
+            Some((scan, steps))
+        }
         Plan::Scan { access, filter, .. } => {
             if access.secondary().is_some() {
                 return None;
@@ -2557,7 +2666,7 @@ fn scan_bounds(steps: &[(Step, &Plan)], ctx: &Ctx) -> Vec<crate::storage::Column
         match step {
             Step::Filter(p) => bounds_of(p, ctx, &mut out),
             Step::Keys(filters) => out.extend(filters.iter().map(|(c, f)| f.bound(*c))),
-            Step::Project(_) | Step::Probe(_) => break,
+            Step::Project(_) | Step::Probe(_) | Step::Lookup(_) => break,
         }
     }
     out
@@ -2635,9 +2744,12 @@ impl<'a> Pipeline<'a> {
         }
         if rows
             && range.is_none()
-            && !steps
-                .iter()
-                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Keys(_) | Step::Probe(_)))
+            && !steps.iter().any(|(s, _)| {
+                matches!(
+                    s,
+                    Step::Filter(_) | Step::Keys(_) | Step::Probe(_) | Step::Lookup(_)
+                )
+            })
         {
             return Ok(None);
         }
@@ -2782,6 +2894,7 @@ impl<'a> Pipeline<'a> {
                 (Step::Project(exprs), _) => project(exprs, b, self.cx)?,
                 (Step::Keys(filters), _) => keep_keys(filters, b),
                 (Step::Probe(p), _) => p.apply(b, self.cx)?,
+                (Step::Lookup(l), _) => l.apply(b, self.cx)?,
             };
             if steps
                 .peek()
@@ -2833,6 +2946,12 @@ impl<'a> Pipeline<'a> {
                     }
                     return r;
                 }
+                Step::Lookup(l) => {
+                    for j in l.rows(row, self.cx) {
+                        self.through(j?, k + 1, out)?;
+                    }
+                    return Ok(());
+                }
             }
         }
         out.push(row);
@@ -2853,7 +2972,7 @@ fn filters_or_probes(plan: &Plan, ctx: &Ctx) -> bool {
         !bounded
             || steps
                 .iter()
-                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Probe(_)))
+                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Probe(_) | Step::Lookup(_)))
     })
 }
 
@@ -2863,6 +2982,9 @@ pub fn rows<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Option<Rows<'a>>> {
+    if outer.is_some() && looks_up(plan) {
+        return Ok(None);
+    }
     let tables = prepare(plan, ctx, outer)?;
     let filters = filters_or_probes(plan, ctx);
     if filters
@@ -2891,6 +3013,25 @@ pub fn rows<'a>(
         err: None,
         done: false,
     })))
+}
+
+/// Whether `plan` is a chain over a scan by key values read from the row
+/// around it — an index nested loop's lookup, a few rows a time: what a
+/// pipeline costs to set up (a builder a column, a batch's room each) is
+/// more than they take, so a row at a time reads them (PLAN.md §M14.33
+/// R4).
+fn looks_up(plan: &Plan) -> bool {
+    let outer = |e: &Expr| {
+        let mut found = false;
+        e.walk(&mut |x| found |= matches!(x, Expr::Outer { .. }));
+        found
+    };
+    chain(plan, None).is_some_and(|(scan, _)| {
+        matches!(
+            scan,
+            Plan::Scan { access: Access::Key { prefix, .. }, .. } if prefix.iter().any(outer)
+        )
+    })
 }
 
 /// A result as batches ([`batches`]).
@@ -3755,6 +3896,11 @@ impl<'a> Morsels<'a> {
                 Step::Filter(p) => all.push(p),
                 Step::Project(es) => all.extend(es.iter()),
                 Step::Probe(p) => all.extend(p.left_keys.iter().chain(p.on)),
+                Step::Lookup(l) => {
+                    if !crate::exec::lookups_parallel_safe(l.right, l.on, ctx) {
+                        return Ok(None);
+                    }
+                }
                 Step::Keys(_) => {}
             }
         }
@@ -5687,6 +5833,12 @@ fn shaped(plan: &Plan) -> bool {
             },
             ..
         } => probing(*kind) && shaped(left),
+        Plan::Join {
+            left,
+            kind,
+            algo: JoinAlgo::Lookup,
+            ..
+        } => probing(*kind) && shaped(left),
         _ => false,
     }
 }
@@ -5726,6 +5878,11 @@ fn make<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, joins: &mut Vec<usize>) -> Result<
         Plan::Filter { input, .. } | Plan::Secure { input, .. } | Plan::Project { input, .. } => {
             make(input, ctx, joins)
         }
+        Plan::Join {
+            left,
+            algo: JoinAlgo::Lookup,
+            ..
+        } => make(left, ctx, joins),
         Plan::Join {
             left,
             right,

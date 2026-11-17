@@ -425,7 +425,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         listeners.push((Arc::clone(front), l));
     }
     // The nucleus protocol on a Unix socket too (PLAN.md §M14.33 R2): a
-    // client on this machine skips loopback TCP.
+    // client on this machine skips loopback TCP.  (Elsewhere a socket
+    // given is refused: `bind_socket`.)
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let local_listener = match &socket {
         Some(path) => Some(bind_socket(path)?),
         None => None,

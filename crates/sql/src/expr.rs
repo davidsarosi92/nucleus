@@ -938,7 +938,10 @@ pub(crate) fn uncorrelated_rows(sub: &SubPlan, env: &Env) -> Result<std::sync::A
     Ok(match cached {
         Some(rows) => rows,
         None => {
-            let rows = std::sync::Arc::new(crate::exec::collect(&sub.plan, env.ctx, Some(env))?);
+            // It reads no enclosing row: run as a statement of its own
+            // would, without one — on workers too, where its plan can
+            // (a row around it keeps a plan serial: PLAN.md §M14.33 R4).
+            let rows = std::sync::Arc::new(crate::exec::collect(&sub.plan, env.ctx, None)?);
             env.ctx.cache.borrow_mut().insert(key, rows.clone());
             rows
         }

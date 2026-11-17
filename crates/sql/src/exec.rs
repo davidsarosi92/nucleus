@@ -2206,11 +2206,23 @@ fn parallel_lookups<'a>(
     if workers < 2
         || spec.outer.is_some()
         || spec.ctx.profile.is_some()
-        || crate::storage::gathered_any()
+        || !lookups_parallel_safe(right, spec.on, spec.ctx)
     {
         return None;
     }
-    let safe = |e: &Expr| crate::vector::parallel_safe_in(e, spec.ctx);
+    Some((spec.ctx.txn.shared()?, workers))
+}
+
+/// Whether an index nested loop's right side `right` and condition `on`
+/// can run on worker threads (see [`parallel_lookups`]; a pipeline's
+/// lookup step too, `crate::vector`): a scan under filters, projections,
+/// a sort and a limit, of expressions [`crate::vector::parallel_safe_in`],
+/// and no rows a statement has written that a thread of its own keeps.
+pub(crate) fn lookups_parallel_safe(right: &Plan, on: Option<&Expr>, ctx: &Ctx) -> bool {
+    if crate::storage::gathered_any() {
+        return false;
+    }
+    let safe = |e: &Expr| crate::vector::parallel_safe_in(e, ctx);
     fn runs(p: &Plan, safe: &dyn Fn(&Expr) -> bool) -> bool {
         let mut ok = true;
         p.for_each_expr(&mut |e| ok &= safe(e));
@@ -2223,10 +2235,33 @@ fn parallel_lookups<'a>(
             _ => false,
         }
     }
-    if !runs(right, &safe) || !spec.on.is_none_or(safe) {
-        return None;
-    }
-    Some((spec.ctx.txn.shared()?, workers))
+    runs(right, &safe) && on.is_none_or(safe)
+}
+
+/// What a left row `l` of an index nested loop (`JoinAlgo::Lookup`) gives
+/// — [`lookup_one`]'s rows, then its error — for a pipeline's lookup step
+/// (`crate::vector`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn look_up<'a>(
+    l: Row,
+    right: &Plan,
+    kind: JoinType,
+    on: Option<&'a Expr>,
+    algo: &'a JoinAlgo,
+    widths: (usize, usize),
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Vec<Result<Row>> {
+    let spec = JoinSpec {
+        kind,
+        on,
+        algo,
+        left_width: widths.0,
+        right_width: widths.1,
+        ctx,
+        outer,
+    };
+    lookup_one(l, right, &spec)
 }
 
 /// Rows made on worker threads, a row of the input at a time: the input

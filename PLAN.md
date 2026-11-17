@@ -7399,7 +7399,15 @@ would use against a server.
   sort and drop instantiations and their unwind tables.  Not taken:
   `panic = "abort"` (unwind tables are ~950 KB, but the C API turns a
   panic into an error rather than ending the app) and `opt-level = "s"`
-  (20 % slower, as measured in step 2).
+  (20 % slower, as measured in step 2).  *Grown on purpose to 10 MiB
+  on Android* (2026-11-17): 9.02 MiB (9,459,776 bytes, +889 KB since
+  2026-11-14) over 93 commits — encryption at rest (§M14.30: the
+  engine's and the store's sealed pages and keys), JSON Schema and the
+  JSON paths' index (§M14.15), backups and `FORGET` (§M14.24), the
+  native protocol's server (§M14.31), the row scan's and the joins'
+  paths (§M14.33); the code's symbols 6.47 → 7.21 MB, no one part
+  above 60 KB of it — nothing to cut without cutting a feature.  iOS
+  keeps its 9 MiB while it fits.
 - **Tested** on the iOS simulator (iOS 18) and an Android emulator
   (API 35, arm64 with 16 KB pages; x86_64 in CI): the Swift suite (19
   tests: the conformance cases on a database in memory and in a
@@ -10970,6 +10978,35 @@ simple parameterization, MySQL's former query cache — what not to do).
   `attcacheoff`, which the tagged encoding cannot) and the value copied
   out of its page into the chunk; both are the encoding's and the
   chunk's design, recorded here for a later step.
+  Then the joins:
+  4. *Q11's subquery a row at a time.*  Its `HAVING … > (SELECT …)` is
+     uncorrelated, yet ran with the group's row as its enclosing row —
+     and a plan with an enclosing row never goes to the workers.  It
+     reads none, so it runs without one (once a statement, cached as
+     before), on the workers: 103 → 37 ms (PostgreSQL 26.6).
+  5. *Index nested loops within pipelines.*  Q5 looks `lineitem` up
+     227,000 times by `orders`' key.  The lookups ran on the workers,
+     but what is above them — the projections, the aggregate — a row
+     at a time on one thread: 1 → 10 workers sped them 2.5×, a hash
+     join's pipeline 5.7×.  The lookup is now a pipeline's step (as a
+     hash join's probe is: HyPer's morsel-driven pipelines, Leis et al.,
+     SIGMOD 2014): each left row's lookup as the row-at-a-time join runs
+     it, the rows it gives a batch again, so the scan below, the lookups
+     and the aggregate above run on the workers morsel by morsel.  A
+     lookup's own scan, by its one key, runs a row at a time (a pipeline
+     made for each lookup cost more than its few rows: `vector::rows`
+     declines a scan by an enclosing row's key).  Q10 382 → 152 ms, Q7
+     274 → 158, Q4 110 → 78, Q21 284 → 253, Q22 42 → 32.  Q2 and Q8
+     (lookups for a few hundred rows of `part`) 19 → 24 ms and 80 →
+     87 ms in some runs, even in others; Q2 is 0.27× PostgreSQL's.
+  6. *A lookup's cost.*  The planner's 40 scan rows a lookup (§M14.12
+     V3) was measured when a hash join's row cost 0.07–0.1 µs; R3 and
+     R4 made a scan's row cheaper, and lookups within pipelines moved
+     the crossing again.  Measured on SF 1, 10 workers: Q3's 147,000
+     lookups into `lineitem` beat hashing it (158 against 187 ms), Q5's
+     227,000 do not (236 against 172 ms) — 55 lies between (swept 40 to
+     200: 80 and above lose Q3, 120 and above Q7, 200 Q4 and Q21).
+     Q5 515 → 172 ms (PostgreSQL 148.5), Q8 98 → 87.
 
 **Done when:** reads by key ≤ 1× PostgreSQL's time and the row tables'
 geometric means ≤ 1× on TPC-H and ClickBench, by §M14.31's method,

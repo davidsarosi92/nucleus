@@ -2725,6 +2725,15 @@ for a lookup or condition with a volatile call or a subquery the workers
 cannot run (`vector::parallel_safe_in`), or while a statement on the
 thread holds rows it inserted into a column table unstored (only that
 thread's reads see them).
+Where its left side is a pipeline (a scan through filters, projections
+and hash joins' probes) the join is that pipeline's step
+(`vector::Lookup`, as a probe is): each left row of a batch looked up as
+above, the rows given made a batch again — so the steps above it, and an
+aggregate over it, run on the workers with the scan, morsel by morsel
+(same conditions; `exec::lookups_parallel_safe`).  A lookup's own scan,
+by its one key value, runs a row at a time (`vector::rows` declines a
+scan by an enclosing row's key: a pipeline made for each lookup cost
+more than its few rows).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -2788,9 +2797,9 @@ above the limit takes the expressions in.
 **Index nested loops** (`lookups`): a hash join whose right side is an
 analyzed table's scan becomes an index nested loop when an index (the
 primary key or a secondary one) leads with the join keys and the lookups
-cost less than hashing the table — each lookup counted as 40 rows of a
+cost less than hashing the table — each lookup counted as 55 rows of a
 scan, each row a secondary index finds 60 more (its fetch; measured on
-TPC-H, §M14.12 V3), against the table's rows read once; a column table's
+TPC-H, §M14.12 V3, the lookup again in §M14.33 R4), against the table's rows read once; a column table's
 lookups count 1.2 times as much and its rows scanned a quarter (its
 scans read batches of the columns wanted, its lookups segments' values);
 the rows a lookup reads are all of its key value's, whatever the filter
@@ -7832,7 +7841,7 @@ the Java driver's sources and Kotlin's `Database`) from them.
 (directory `files/nucleus/<name>` of the app's), `connect(user,
 database)` → the Java driver's `NucleusClient` over the session's
 streams, `close()` (`AutoCloseable`), `Database.engineVersion`.  Each
-build checks the size budget (9 MiB for arm64, what the engine adds to
+build checks the size budget (arm64: 10 MiB on Android, 9 MiB on iOS; what the engine adds to
 an app: on iOS a program using the C API linked as an app is and
 stripped; on Android the `.so`).
 
@@ -7907,6 +7916,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R4, the joins:** an index nested loop a
+  pipeline's step, so what is above it runs on the workers too
+  (`vector::Lookup`); a lookup's own key scan a row at a time; a lookup
+  costed as 55 scan rows (was 40); an uncorrelated subquery run without
+  the enclosing row, on the workers (TPC-H Q11 103 → 37 ms, Q10 382 →
+  152, Q5 515 → 172, Q7 274 → 158).
 - **2026-11-17 — §M14.33 R4, a row table's scan again:** a `numeric`
   column decoded straight into a vector of mantissas; a row scan's keys
   left escaped as the store keeps them (`KvChunks::escaped_keys`,
