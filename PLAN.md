@@ -10878,6 +10878,22 @@ simple parameterization, MySQL's former query cache — what not to do).
   a scan is per row: each entry's key copied out of its page under the
   page's latch, the page's header parsed again (`View::new`), three
   buffer-pool calls a leaf — R3b, visibility a leaf at a time.
+
+  *R3, the worst queries one by one* (the user, 2026-11-17: before F1's
+  whole run, every place nucleus lags PostgreSQL looked at; where no real
+  gain comes, an issue on GitHub and on).  **Q29** (ninety
+  `SUM(ResolutionWidth + k)`, 1.99×): its profile was not the sums but
+  `(#20 + k)::integer` — the planner's cast of each sum's operand, which
+  the vectorized evaluator ran a value at a time (`Value` built, cast,
+  dropped).  Now an integer vector cast to an integer type is the same
+  vector when every row taken fits the type; the first that does not
+  fails as its own cast does (`crates/sql/tests/vector.rs`: NULLs, rows a
+  filter dropped, an error the same at every batch size).  Q29 235 →
+  82 ms (PostgreSQL 126: 0.65×).  Not taken: rewriting `SUM(x + c)` as
+  `SUM(x) + c * COUNT(x)` (ClickHouse's
+  `optimize_arithmetic_operations_in_aggregate_functions`) — with the
+  cast vectorized the sums cost little, and the rewrite would change
+  where an overflow is reported.
 - **R4 — the joins**: TPC-H Q11, Q5, Q10 and Q6 on row tables, plan by
   plan against PostgreSQL's; target: TPC-H's row geomean ≤ 1×.
 

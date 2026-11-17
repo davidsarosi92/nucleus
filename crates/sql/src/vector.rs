@@ -649,6 +649,32 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
                     *ty,
                 )?)));
             }
+            // Integers to an integer type: the same vector when every row
+            // taken fits the type (else the first that does not fails as
+            // its own cast does) — not a value at a time (§M14.33 R3).
+            if let (Vector::Int(xs, nulls), Some((lo, hi))) = (&*x, ty.int_range()) {
+                if let Some(i) = sel
+                    .iter()
+                    .find(|&i| !is_null_at(nulls, i) && !(lo..=hi).contains(&xs[i]))
+                {
+                    crate::enums::cast(cx.ctx.txn, Value::Int(xs[i]), *ty)?;
+                    return Err(Error::internal("an integer out of its type's range cast"));
+                }
+                return Ok(x);
+            }
+            // Integers to an integer type: the same vector when every row
+            // taken fits the type (else the first that does not fails as
+            // its own cast does) — not a value at a time (§M14.33 R3).
+            if let (Vector::Int(xs, nulls), Some((lo, hi))) = (&*x, ty.int_range()) {
+                if let Some(i) = sel
+                    .iter()
+                    .find(|&i| !is_null_at(nulls, i) && !(lo..=hi).contains(&xs[i]))
+                {
+                    crate::enums::cast(cx.ctx.txn, Value::Int(xs[i]), *ty)?;
+                    return Err(Error::internal("an integer out of its type's range cast"));
+                }
+                return Ok(x);
+            }
             each(b.len, sel, |i| {
                 crate::enums::cast(cx.ctx.txn, x.value(i), *ty)
             })?

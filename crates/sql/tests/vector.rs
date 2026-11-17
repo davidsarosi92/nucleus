@@ -112,6 +112,11 @@ fn chosen_queries_agree() {
         "SELECT * FROM t WHERE id > 5000",
         "SELECT count(*), sum(a) FROM t WHERE id > 5000",
         "SELECT a, sum(b) FROM t WHERE id > 5000 GROUP BY a",
+        // Integers cast to integer types: a NULL kept, a row a filter
+        // dropped not checked, one out of range failing as its cast does.
+        "SELECT sum((a + 1)::smallint), sum((a * 2000)::smallint), sum(b::integer),            count((a - 1)::bigint) FROM t",
+        "SELECT id, b::smallint FROM t WHERE b < 30000 ORDER BY id",
+        "SELECT sum(b::smallint) FROM t WHERE b < 30000",
         // Errors: after the rows before them, and none past a LIMIT.
         "SELECT id, 100 / (id - 50) FROM t WHERE id > 0 ORDER BY id",
         "SELECT id, 100 / (id - 50) FROM t WHERE id > 0 LIMIT 10",
@@ -123,11 +128,12 @@ fn chosen_queries_agree() {
         "SELECT id FROM t WHERE s::int > 3",
         "SELECT sum(s) FROM t",
         "SELECT id FROM t WHERE a",
+        "SELECT sum(b::smallint) FROM t",
     ]
     .iter()
     .map(|q| q.to_string())
     .collect();
-    assert_eq!(agree(&db, &queries), 7, "the error cases fail");
+    assert_eq!(agree(&db, &queries), 8, "the error cases fail");
 }
 
 #[test]
