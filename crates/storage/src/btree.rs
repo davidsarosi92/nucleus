@@ -1605,30 +1605,91 @@ impl<'t> Cursor<'t> {
                 self.pos += 1;
                 return Ok(true);
             }
-            // Up to the first ancestor with a child to the right, then down
-            // its leftmost path.  The next leaf, if not cached, is read with
-            // the parent's next leaves after it (a read-ahead, its window
-            // growing with the run of leaves).
-            let window = 1usize << self.run.min(READ_AHEAD.trailing_zeros());
-            self.run = self.run.saturating_add(1);
-            let mut parent = window > 1;
-            loop {
-                let Some((id, i, n)) = self.path.pop() else {
-                    return Ok(false);
-                };
-                if i + 1 < n {
-                    let child = if parent {
-                        self.next_children(id, i + 1, n.min(i + 1 + window))?
-                    } else {
-                        self.child(id, i + 1)?
-                    };
-                    self.path.push((id, i + 1, n));
-                    self.descend(child, |_| Ok(0), |_| Ok(0))?;
-                    break;
-                }
-                parent = false;
+            if !self.next_leaf()? {
+                return Ok(false);
             }
         }
+    }
+
+    /// To the next leaf, at its first entry; false past the last.  Up to
+    /// the first ancestor with a child to the right, then down its
+    /// leftmost path.  The next leaf, if not cached, is read with the
+    /// parent's next leaves after it (a read-ahead, its window growing with
+    /// the run of leaves).
+    fn next_leaf(&mut self) -> Result<bool> {
+        let window = 1usize << self.run.min(READ_AHEAD.trailing_zeros());
+        self.run = self.run.saturating_add(1);
+        let mut parent = window > 1;
+        loop {
+            let Some((id, i, n)) = self.path.pop() else {
+                return Ok(false);
+            };
+            if i + 1 < n {
+                let child = if parent {
+                    self.next_children(id, i + 1, n.min(i + 1 + window))?
+                } else {
+                    self.child(id, i + 1)?
+                };
+                self.path.push((id, i + 1, n));
+                self.descend(child, |_| Ok(0), |_| Ok(0))?;
+                return Ok(true);
+            }
+            parent = false;
+        }
+    }
+
+    /// The entries from the cursor to its leaf's end — the next leaf's
+    /// when this one is used up — under one look at the page: each one's
+    /// key (into `key`), the key before it (`prev`: the two buffers
+    /// swapped, no key copied; empty before the first) and, when its value
+    /// is in the cell and at most `max` bytes long, that value, given to
+    /// `each`.  It stops before an entry `keep` refuses (false: nothing
+    /// follows) or `each` declines (that entry stays the next, `prev` as
+    /// it was).  What a scan that counts reads (PLAN.md §M14.33 R3b): an
+    /// entry at a time, the page was latched and its header read three
+    /// times an entry.
+    pub fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        keep: &dyn Fn(&[u8]) -> bool,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<bool> {
+        if self.pos >= self.leaf_len && !self.next_leaf()? {
+            return Ok(false);
+        }
+        let r = self.leaf.as_ref().expect("a cursor is always in a leaf");
+        let page = r.read();
+        let corrupt = |reason| Error::Corrupt {
+            page: r.id(),
+            reason,
+        };
+        let v = View::new(&page).map_err(corrupt)?;
+        let mut pos = self.pos;
+        let mut more = true;
+        while pos < self.leaf_len {
+            std::mem::swap(key, prev);
+            key.clear();
+            v.key(pos).map_err(corrupt)?.append_to(key);
+            if !keep(key) {
+                std::mem::swap(key, prev);
+                more = false;
+                break;
+            }
+            let small = match v.value(pos).map_err(corrupt)? {
+                ValRef::Inline(b) if b.len() <= max => Some(b),
+                _ => None,
+            };
+            if !each(prev, key, small)? {
+                std::mem::swap(key, prev);
+                break;
+            }
+            pos += 1;
+        }
+        drop(page);
+        self.pos = pos;
+        Ok(more)
     }
 
     /// Child `i` of the leaves' parent `id`; when it is not cached, it and
@@ -1793,6 +1854,45 @@ impl Range<'_> {
             return Ok(true);
         }
         self.cursor.last_small_value_into(val, max)
+    }
+
+    /// [`Cursor::leaf_entries`] within the range: false once it is done;
+    /// `None` for a descending range (an entry at a time there).
+    pub fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<Option<bool>> {
+        if self.reverse {
+            return Ok(None);
+        }
+        if self.done {
+            return Ok(Some(false));
+        }
+        let end = &self.end;
+        let more = self.cursor.leaf_entries(
+            key,
+            prev,
+            max,
+            &|k| match end {
+                Bound::Unbounded => true,
+                Bound::Included(e) => k <= &e[..],
+                Bound::Excluded(e) => k < &e[..],
+            },
+            each,
+        );
+        match more {
+            Ok(more) => {
+                self.done |= !more;
+                Ok(Some(more))
+            }
+            Err(e) => {
+                self.done = true;
+                Err(e)
+            }
+        }
     }
 
     fn inside(&self, k: &[u8]) -> bool {

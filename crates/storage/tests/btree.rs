@@ -127,6 +127,7 @@ fn verify(tree: &BTree, model: &BTreeMap<Vec<u8>, Vec<u8>>, rng: &SplitMix64) {
             .map(|(k, _)| k.clone())
             .collect();
         assert_eq!(got, exp, "range {lo:?}..{hi:?}");
+        leaf_entries_agree(tree, model, &lo, &hi, rng);
         let mut got_rev: Vec<_> = tree
             .range_rev(as_ref(&lo), as_ref(&hi))
             .unwrap()
@@ -147,6 +148,47 @@ fn verify(tree: &BTree, model: &BTreeMap<Vec<u8>, Vec<u8>>, rng: &SplitMix64) {
         assert!(seen.insert(*id), "page {id} is both in the tree and free");
     }
     assert_eq!(seen.len() as u64, acc.page_count - 2, "pages leaked");
+}
+
+/// A range read a leaf at a time (`Range::leaf_entries`, as a scan that
+/// counts reads it) gives the model's entries: each key, the one before it,
+/// a value of at most 3 bytes; an entry declined at random comes again.
+fn leaf_entries_agree(
+    tree: &BTree,
+    model: &BTreeMap<Vec<u8>, Vec<u8>>,
+    lo: &Bound<Vec<u8>>,
+    hi: &Bound<Vec<u8>>,
+    rng: &SplitMix64,
+) {
+    let exp: Vec<_> = model.range((lo.clone(), hi.clone())).collect();
+    let mut range = tree.range(as_ref(lo), as_ref(hi)).unwrap();
+    let (mut key, mut prev) = (Vec::new(), Vec::new());
+    let mut got: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+    let mut prevs: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let more = range
+            .leaf_entries(&mut key, &mut prev, 3, &mut |p, k, small| {
+                if rng.below(7) == 0 {
+                    return Ok(false);
+                }
+                prevs.push(p.to_vec());
+                got.push((k.to_vec(), small.map(<[u8]>::to_vec)));
+                Ok(true)
+            })
+            .unwrap()
+            .expect("an ascending range gives its leaves");
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(got.len(), exp.len(), "leaf_entries {lo:?}..{hi:?}");
+    for (i, ((k, small), (ek, ev))) in got.iter().zip(&exp).enumerate() {
+        assert_eq!(k, *ek);
+        assert_eq!(small, &(ev.len() <= 3).then(|| ev.to_vec()), "{k:?}");
+        if i > 0 {
+            assert_eq!(prevs[i], got[i - 1].0, "the key before {k:?}");
+        }
+    }
 }
 
 fn workload(

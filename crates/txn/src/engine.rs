@@ -2969,7 +2969,7 @@ pub struct Scan<'t> {
     live: Vec<bool>,
     pos: usize,
     /// Buffers reused by refills: a store key and value.
-    bufs: [Vec<u8>; 2],
+    bufs: [Vec<u8>; 3],
     writes: std::iter::Peekable<crate::writes::Range<'t>>,
     /// The requested range, and how far it was read: a serializable
     /// transaction depends on the part it consumed.
@@ -3120,57 +3120,107 @@ impl Scan<'_> {
         };
         let undecodable = || Error::Corrupt("undecodable version key");
         let user_of = |k: &[u8]| decode_key(k).map(|(u, _)| u).ok_or_else(undecodable);
-        let [k, v] = &mut self.bufs;
+        let [k, v, prev] = &mut self.bufs;
         let (buf, live) = (&mut self.buffer, &mut self.live);
-        // The escaped user key of the last entry taken: its older versions
-        // are passed over.
-        let mut last: Option<Vec<u8>> = None;
+        // Whether a version of the previous entry's user key was taken:
+        // the older versions after it are passed over (the entries are in
+        // order, a key's versions together — compared with the entry
+        // before, no key kept).
+        let mut taken = false;
         let mut upper: Option<Vec<u8>> = None;
         let mut passed = 0;
+        // Set when the batch ends (`upper` its first key not taken).
+        let stopped = std::cell::Cell::new(false);
+        // An entry: its key, and its value when that is one byte or less
+        // (a tombstone's); false: the batch ends before it.
+        let mut step = |prev: &[u8], k: &[u8], small: Option<&[u8]>| -> Result<bool> {
+            let n = k.len();
+            if n < 10 || k[n - 10] != 0 || k[n - 9] != 0 {
+                return Err(undecodable());
+            }
+            let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
+            let escaped = &k[..n - 10];
+            let same = prev.len() == n && prev.starts_with(escaped);
+            if !same {
+                taken = false;
+            }
+            let seen = taken;
+            if !seen && buf.ents.len() >= max {
+                upper = Some(user_of(k)?);
+                stopped.set(true);
+                return Ok(false);
+            }
+            if ts > txn.start {
+                // Too new: passed over (many of them end the batch, the
+                // tree's lock let go).
+                if !seen {
+                    passed += 1;
+                    if passed >= PASS_LIMIT {
+                        upper = Some(user_of(k)?);
+                        stopped.set(true);
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            if seen {
+                return Ok(true); // an older version of a key taken
+            }
+            // Live unless its value is the one-byte tombstone.
+            let alive = match small {
+                None => true,
+                Some(v) => decode_value(v)
+                    .ok_or(Error::Corrupt("bad version value"))?
+                    .is_some(),
+            };
+            let at = buf.data.len();
+            buf.ents.push((at, at));
+            live.push(alive);
+            taken = true;
+            Ok(true)
+        };
+        // The storage's entries give its errors: this one's are kept aside.
+        let failed: std::cell::Cell<Option<Error>> = std::cell::Cell::new(None);
+        let mut each = |prev: &[u8], k: &[u8], small: Option<&[u8]>| match step(prev, k, small) {
+            Ok(go) => Ok(go),
+            Err(e) => {
+                failed.set(Some(e));
+                stopped.set(true);
+                Ok(false)
+            }
+        };
         'ranges: for mut range in versions(tree, Bound::Included(seek), end)? {
-            while range.next_key_into(k)? {
-                let n = k.len();
-                if n < 10 || k[n - 10] != 0 || k[n - 9] != 0 {
-                    return Err(undecodable());
-                }
-                let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
-                let escaped = &k[..n - 10];
-                let seen = last.as_deref() == Some(escaped);
-                if !seen && buf.ents.len() >= max {
-                    upper = Some(user_of(k)?);
-                    break 'ranges;
-                }
-                if ts > txn.start {
-                    // Too new: passed over (many of them end the batch, the
-                    // tree's lock let go).
-                    if !seen {
-                        passed += 1;
-                        if passed >= PASS_LIMIT {
-                            upper = Some(user_of(k)?);
+            // A leaf at a time where the engine gives them (PLAN.md §M14.33
+            // R3b); else an entry at a time.
+            loop {
+                match range.leaf_entries(k, prev, 1, &mut each)? {
+                    Some(more) => {
+                        if stopped.get() {
                             break 'ranges;
                         }
+                        if !more {
+                            break;
+                        }
                     }
-                    continue;
-                }
-                if seen {
-                    continue; // an older version of a key taken
-                }
-                // Live unless its value is the one-byte tombstone.
-                let alive = !range.small_value_into(v, 1)?
-                    || decode_value(v)
-                        .ok_or(Error::Corrupt("bad version value"))?
-                        .is_some();
-                let at = buf.data.len();
-                buf.ents.push((at, at));
-                live.push(alive);
-                match &mut last {
-                    Some(l) => {
-                        l.clear();
-                        l.extend_from_slice(escaped);
+                    None => {
+                        loop {
+                            std::mem::swap(k, prev);
+                            if !range.next_key_into(k)? {
+                                break;
+                            }
+                            let small = range.small_value_into(v, 1)?.then_some(&v[..]);
+                            if !each(prev, k, small)? {
+                                break 'ranges;
+                            }
+                        }
+                        break;
                     }
-                    None => last = Some(escaped.to_vec()),
                 }
             }
+        }
+        drop(each);
+        if let Some(e) = failed.take() {
+            return Err(e);
         }
         self.store_end = store_end;
         if let Some(u) = upper {
@@ -3233,7 +3283,7 @@ impl Scan<'_> {
             {
                 return self.refill_counting(&tree, &seek, max);
             }
-            let [k, v] = &mut self.bufs;
+            let [k, v, _] = &mut self.bufs;
             let buf = &mut self.buffer;
             let mut passed = 0;
             'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
@@ -3319,7 +3369,7 @@ impl Scan<'_> {
         // are decoded once into the batch; its entry is pushed at the
         // first version seen and its value replaced by a better ranked one
         // (`best`); a key with none seen is taken out again.
-        let [k, v] = &mut self.bufs;
+        let [k, v, _] = &mut self.bufs;
         let (buf, live) = (&mut self.buffer, &mut self.live);
         let mut key: Option<(usize, usize)> = None;
         let mut best: Option<u64> = None;

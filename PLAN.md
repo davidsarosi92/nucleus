@@ -10921,6 +10921,23 @@ simple parameterization, MySQL's former query cache — what not to do).
   dictionaries ([`DictFilter`]) is chosen for any table; a row table's
   source has none, so this goes first there (a column table's source
   does not test first, and its dictionaries are tested as before).
+  **Q0** (`count(*)`, 1.42×) — R3b, a leaf at a time: the scan that
+  counts took each entry by three calls into its leaf (the key, the
+  value's size, and the next), each latching the page and parsing its
+  header again (`View::new`).  Now `btree::Cursor::leaf_entries` hands a
+  leaf's entries to the counter under one latch and one header — the
+  key, and the value when it is a tombstone's size (PostgreSQL's
+  page-at-a-time `heapgetpage` does the same for its visibility checks);
+  the pieces of an LSM table and a descending range still give an entry
+  at a time.  38 → 31.5 ms.  The profile then showed the counter copying
+  each version's user key aside to know its older versions (a few
+  bytes, but a call a row: 5 ms of the 31): the leaf gives the entry
+  before too — two buffers swapped, nothing copied — and a key's
+  versions, being together, are told by comparing with it.  31.5 →
+  24 ms (PostgreSQL 25.5: 0.94×), on a loaded machine.
+  `crates/storage/tests/btree.rs` checks the leaves' entries against its
+  model, each key with the one before and its small value, declined at
+  random and given again.
 - **R4 — the joins**: TPC-H Q11, Q5, Q10 and Q6 on row tables, plan by
   plan against PostgreSQL's; target: TPC-H's row geomean ≤ 1×.
 

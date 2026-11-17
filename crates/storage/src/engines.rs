@@ -873,6 +873,22 @@ impl Scan<'_> {
             }
         }
     }
+
+    /// A leaf's entries at a time ([`btree::Range::leaf_entries`]): false
+    /// once the scan is done; `None` where the engine gives an entry at a
+    /// time only (the pieces, a descending range).
+    pub fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<Option<bool>> {
+        match self {
+            Scan::Tree(r) => r.leaf_entries(key, prev, max, each),
+            Scan::Pieces(_) => Ok(None),
+        }
+    }
 }
 
 impl Iterator for Scan<'_> {

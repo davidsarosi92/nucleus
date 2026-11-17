@@ -7911,7 +7911,8 @@ checks `psql` with and without TLS.
   integer vector cast to an integer type kept as it is when every row
   fits (Q29 235 → 82 ms); a row table's filter run on its own columns
   before the others are decoded, late materialization (Q23 145 →
-  55 ms).
+  55 ms); `count(*)` a B+tree leaf at a time, a version's older ones
+  told by the entry before, no key copied (Q0 38 → 24 ms).
 - **2026-11-17 — §M14.33 R3a, a row table's scan:** `VACUUM ANALYZE`
   analyzes (PostgreSQL's forms, the tables named); a scan that reads no
   column (`count(*)`) neither decodes keys nor reads values
