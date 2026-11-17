@@ -79,6 +79,8 @@ fn round_trips_tcp() -> f64 {
     us
 }
 
+/// A round trip over a Unix socket (none on Windows or WASI).
+#[cfg(unix)]
 fn round_trips_unix() -> f64 {
     let dir = std::env::temp_dir().join(format!("nucleus-phases-{}", std::process::id()));
     let _ = std::fs::remove_file(&dir);
@@ -180,6 +182,7 @@ fn where_a_read_by_key_spends_its_time() {
     let _ = std::fs::remove_dir_all(&dir);
 
     let tcp = round_trips_tcp();
+    #[cfg(unix)]
     let unix = round_trips_unix();
 
     report("a read by key, literal, in the process", literal);
@@ -189,5 +192,6 @@ fn where_a_read_by_key_spends_its_time() {
     report("EXPLAIN of it (binding and planning), in the process", plan);
     report("SELECT 1, in the process", select1);
     report("a round trip, loopback TCP", tcp);
+    #[cfg(unix)]
     report("a round trip, Unix socket", unix);
 }
