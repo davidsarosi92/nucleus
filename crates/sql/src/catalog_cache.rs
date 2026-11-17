@@ -72,8 +72,9 @@ type ByText = crate::by_text::ByText<String, Box<dyn Any + Send>>;
 pub struct CatalogCache {
     /// The snapshot its entries were read at.
     at: Option<Timestamp>,
-    /// What was read of the catalog.
-    entries: HashMap<(Part, String), Box<dyn Any + Send>>,
+    /// What was read of the catalog, by part and name (a map a part, so
+    /// a name is looked up as it is borrowed: no key built a lookup).
+    entries: HashMap<Part, HashMap<String, Box<dyn Any + Send>>>,
     /// Plans and descriptions, by their statements' texts.
     plans: ByText,
     descriptions: ByText,
@@ -93,7 +94,7 @@ impl CatalogCache {
         match part {
             Part::Plan => self.plans.get(name),
             Part::Describe => self.descriptions.get(name),
-            _ => self.entries.get(&(part, name.to_string())),
+            _ => self.entries.get(&part).and_then(|e| e.get(name)),
         }
         .map(|b| &**b)
     }
@@ -108,7 +109,10 @@ impl CatalogCache {
         match self.by_text(part) {
             Some(t) => t.keep(name.to_string(), v),
             None => {
-                self.entries.insert((part, name.to_string()), v);
+                self.entries
+                    .entry(part)
+                    .or_default()
+                    .insert(name.to_string(), v);
             }
         }
     }

@@ -10795,8 +10795,37 @@ simple parameterization, MySQL's former query cache — what not to do).
   Python and JavaScript drivers take a path as the host too
   (`scripts/driver-tests.sh`'s server listens on a socket, each driver's
   test reaches it), and Java and C (C++ and Swift over C) — every
-  driver.  Next in R2: the session's floor (`SELECT 1` 4.5 µs in the
-  process).
+  driver.
+
+  *Done 2026-11-17 — R2c, the session's floor.*  A profile of a loop
+  of literal reads by key (macOS `sample`, 100k rows) showed what every
+  statement paid besides its read: the catalog cache built a `String`
+  key for each lookup (a statement looks up a dozen entries — its
+  table, its settings, its plan), and each lookup asked the
+  transaction whether it wrote into the catalog, taking the engine's
+  lock of watched ranges even for a transaction that wrote nothing;
+  the statement's budget read four settings so; a read by key's text
+  was normalized twice (its shape's key, then its statistics); the
+  statistics copied the text into a fresh `String` each call; the
+  audit check split its (empty) lists into vectors.  Now the cache is
+  a map a part, looked up by the borrowed name; a transaction with no
+  writes answers without the lock; the shape's normal form is reused
+  for the statistics — and for the same text when it comes next (R2a
+  had made a repeated text pay its normalization each call: 5.0 → 6.3
+  µs; now 5.4, the rest the shape's look at the statement); the sample
+  text reuses its buffer; the audit lists are read in place.
+  `statement_phases` (1M rows, runs of the final build): the literal
+  read 9.2 → 8.0–8.7 µs, `SELECT 1` 4.5 → 4.2–4.4 µs, the same text
+  again 5.4 µs, the Unix round trip 4.2–4.5 µs.  What is left of the floor
+  is spread thin: the allocator is about 28 % of the samples (malloc /
+  free of many small values — the next lever is fewer allocations,
+  not a faster allocator, which would be a dependency of the core),
+  the clock about 3 % (`Instant::now` a few times a statement),
+  SipHash about 2 %.  Seen, not changed: `Session::run` with
+  parameters and no text (the in-process API) plans each call afresh
+  (17.7–18.7 µs) — a front end notes the text and is kept by it; an
+  in-process caller would need a prepared statement of its own (R2
+  leaves it for the embedded API's step).
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.

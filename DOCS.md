@@ -7894,6 +7894,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R2c, the session's floor:** the catalog
+  cache looked up by the borrowed name, a transaction that wrote nothing
+  not asked under the engine's lock, a statement normalized once (and a
+  repeated text not again); a literal read by key 9.2 → about 8.5 µs.
 - **2026-11-17 — §M14.33 R2b, a Unix socket:** `nucleus server
   --socket <path>`, every driver's host a path (Rust and `nucleus sql`,
   Python, JavaScript, Java, C, C++, Swift);

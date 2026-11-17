@@ -1371,8 +1371,10 @@ impl Session {
             }
             return r;
         };
-        let normalized = match self.normalized.get(text) {
-            Some(n) => n.clone(),
+        let normalized = match crate::statements::normalized_again(text)
+            .or_else(|| self.normalized.get(text).cloned())
+        {
+            Some(n) => n,
             None => {
                 let n = Arc::new(crate::statements::normalize(text));
                 if self.normalized.admits(text) {
@@ -2094,7 +2096,7 @@ pub(crate) fn execute_statement(
                 Some(s) => (
                     &s.query,
                     &s.values[..],
-                    text.map(|t| format!("\u{1}{}", crate::statements::normalize(&t).0)),
+                    text.map(|t| format!("\u{1}{}", crate::statements::normalized_once(&t).0)),
                 ),
                 None => (q, params, text),
             };

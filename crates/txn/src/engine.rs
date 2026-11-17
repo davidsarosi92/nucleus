@@ -2241,6 +2241,11 @@ impl Transaction {
 
     /// Whether this transaction wrote into a watched range.
     fn wrote_watched(&self) -> bool {
+        // Nothing written: nothing to look for (and no lock taken — a
+        // read asks this at each catalog lookup).
+        if self.writes.is_empty() && self.spans.ranges.is_empty() && self.fresh.is_empty() {
+            return false;
+        }
         let watched = read(&self.engine.watched);
         watched.iter().any(|(s, e)| {
             let (start, end) = (Bound::Included(s.as_slice()), Bound::Excluded(e.as_slice()));

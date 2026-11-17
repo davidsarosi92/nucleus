@@ -511,19 +511,17 @@ pub fn wanted(
     if crate::dbsettings::get(txn, "audit_statements")? == "all" {
         return Ok(true);
     }
-    let list = |name: &str| -> Result<Vec<String>> {
-        Ok(crate::dbsettings::get(txn, name)?
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect())
-    };
-    for r in list("audit_roles")? {
-        if crate::roles::is_member(txn, &who.user, &r)? {
+    // Each list's names, read in place (an empty list — the usual —
+    // asks for nothing).
+    fn names(list: &str) -> impl Iterator<Item = &str> {
+        list.split(',').map(str::trim).filter(|s| !s.is_empty())
+    }
+    for r in names(&crate::dbsettings::get(txn, "audit_roles")?) {
+        if crate::roles::is_member(txn, &who.user, r)? {
             return Ok(true);
         }
     }
-    Ok(list("audit_tables")?.iter().any(|t| tables.contains(t)))
+    Ok(names(&crate::dbsettings::get(txn, "audit_tables")?).any(|t| tables.contains(t)))
 }
 
 #[cfg(test)]

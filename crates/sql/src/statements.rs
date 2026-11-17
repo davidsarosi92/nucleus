@@ -123,6 +123,36 @@ pub fn redacted(text: &str) -> std::borrow::Cow<'_, str> {
     out.into()
 }
 
+thread_local! {
+    /// The last text [`normalized_once`] normalized, and its normal form:
+    /// a statement normalized while it runs (a read by key, for its
+    /// shape) is not normalized again for its statistics, nor when the
+    /// same text comes next.
+    static LAST: std::cell::RefCell<Option<(String, Arc<(String, String)>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// [`normalize`]`(text)`, kept for [`normalized_again`] (and for the
+/// same text next time).
+pub(crate) fn normalized_once(text: &str) -> Arc<(String, String)> {
+    if let Some(n) = normalized_again(text) {
+        return n;
+    }
+    let n = Arc::new(normalize(text));
+    LAST.with(|l| *l.borrow_mut() = Some((text.to_string(), n.clone())));
+    n
+}
+
+/// The normal form [`normalized_once`] kept, if it was of `text`.
+pub(crate) fn normalized_again(text: &str) -> Option<Arc<(String, String)>> {
+    LAST.with(|l| {
+        l.borrow()
+            .as_ref()
+            .filter(|(t, _)| t == text)
+            .map(|(_, n)| n.clone())
+    })
+}
+
 /// `text` normalized: the key two runs share when they differ only in
 /// constants, case and spacing, and the text shown — the constants
 /// replaced by `$n` (numbered after the statement's own parameters),
@@ -236,7 +266,9 @@ pub fn record(kv: &Arc<dyn Kv>, run: Run) {
     s.models.add(&run.models);
     s.last = run.at;
     if run.ok && s.sample != run.text {
-        s.sample = run.text.to_string();
+        // Its buffer reused: a read by key's text changes every call.
+        s.sample.clear();
+        s.sample.push_str(run.text);
     }
 }
 
