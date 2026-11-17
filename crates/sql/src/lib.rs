@@ -58,6 +58,7 @@ mod keyfilter;
 pub mod keys;
 mod keytable;
 pub(crate) mod object_cache;
+mod shape;
 /// Sizes the decoded index objects kept across transactions
 /// (`--index-cache`; by default a quarter of the machine's memory).
 pub use object_cache::{budget as index_cache, set_budget as set_index_cache};

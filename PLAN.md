@@ -10775,6 +10775,14 @@ simple parameterization, MySQL's former query cache — what not to do).
   key's equality), so `by_text`'s plan serves every key; a Unix socket
   for the server and its clients on one machine (the CLI, the drivers),
   as PostgreSQL's; then the session's floor; target ≤ PostgreSQL's time.
+  *R2a done 2026-11-17* (`src/shape.rs`, `tests/read_by_key.rs`): a
+  `SELECT` of one stored table, not partitioned, whose `WHERE` is only
+  equalities of a column and a literal covering the primary key, runs as
+  its shape — the literals `$1`, `$2`, … where the parameter carries the
+  same value (an integer for an integer column it fits, a string for a
+  text one), its plan kept by the normalized text; anything else as
+  before.  In the process 23.6 → 9.2 µs; the suite's 1,000 reads 54.9 →
+  36.2 ms (2.40× → 1.60× PostgreSQL's 22.7, `nucleus sql` over TCP).
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.

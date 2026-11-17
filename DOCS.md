@@ -1951,6 +1951,20 @@ changes (`SET ROLE`, a login).  Only the statement a session runs is
 kept by its text (`catalog_cache::with_text`), not those a function runs
 inside it.
 
+**A read by key is kept by its shape** (`shape::by_key`, PLAN.md §M14.33
+R2): a key inline makes every text new, so such a read was bound and
+planned each time (16.5 of its 23.6 µs in the process).  A `SELECT` of
+one stored table — not partitioned, no `WITH`, `GROUP BY`, window,
+sample or `AS OF` — whose `WHERE` is only equalities of a column and a
+literal naming every column of the primary key runs as its shape: those
+literals become parameters `$1`, `$2`, … and the plan is kept by the
+normalized text (`statements::normalize`), so one plan serves every key
+(9.2 µs).  Only where the plan cannot depend on the value — at most one
+row, found by the key — as SQL Server's simple parameterization; and only
+where the parameter carries what the literal did: an integer for a
+`smallint`, `integer` or `bigint` column it fits, a string for a `text`
+column.  Anything else is planned as it comes.
+
 A session keeps two more things by a statement's text, with the same
 admission and bound (`by_text::ByText`, the one type every entry by a
 text is kept in): what the text parses to (`Session::parse`, which
@@ -7873,6 +7887,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R2a, a read by key's plan kept by its shape:**
+  its key's literals as parameters, one plan for every key
+  (`shape::by_key`); in the process 23.6 → 9.2 µs.
 - **2026-11-17 — §M14.33 R1, measuring it fairly:** `nucleus sql`'s
   `\timing` stops when the results are in, before they are printed, as
   `psql`'s does; its output is buffered when it is not a terminal.

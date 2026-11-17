@@ -2083,10 +2083,25 @@ pub(crate) fn execute_statement(
         }
         Statement::Query(q) => {
             let ro: &dyn KvTxn = &*txn;
+            let text = crate::catalog_cache::statement_text();
+            // A read by key with its key inline: run as its shape, the key
+            // a parameter, its plan kept by the shape's text (§M14.33 R2).
+            let shaped = text
+                .as_ref()
+                .filter(|_| params.is_empty())
+                .and_then(|_| crate::shape::by_key(ro, q));
+            let (q, params, text) = match &shaped {
+                Some(s) => (
+                    &s.query,
+                    &s.values[..],
+                    text.map(|t| format!("\u{1}{}", crate::statements::normalize(&t).0)),
+                ),
+                None => (q, params, text),
+            };
             // Kept by its text once the text came again; else planned
             // here, as it is run.
-            let text = crate::catalog_cache::statement_text()
-                .filter(|t| crate::catalog_cache::admits(crate::catalog_cache::Part::Plan, t));
+            let text =
+                text.filter(|t| crate::catalog_cache::admits(crate::catalog_cache::Part::Plan, t));
             let (kept, fresh);
             let mut ctx = Ctx::new(ro, reg, params);
             ctx.memoize = true;
