@@ -210,7 +210,7 @@ step_erasure() {
 # --- operations
 step_backup() { m backup "$RUNS" -- python3 bench/backup.py --nucleus "$N"; }
 step_retype() {
-  m retype 1 -- env RETYPE_DIR=$ROOT/target/retype-bench RETYPE_ROWS=1000000 cargo test --release -q \
+  m retype 1 -- env RETYPE_ROWS=1000000 cargo test --release -q \
     -p nucleus-sql --test retype_bench -- --ignored --nocapture
 }
 step_sealing() { m sealing "$RUNS" -- cargo test --release -q -p nucleus-sql --test sealed -- --ignored --nocapture; }
