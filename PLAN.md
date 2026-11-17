@@ -3699,6 +3699,19 @@ GiB of WAL; two runs each where they differ):
 | 100k rows, 100 a transaction, random keys | 27 | 6.6 |
 | 5M rows, 100 a transaction, random keys (steady state) | 29.4 | 29.6 |
 
+*Corrected 2026-11-17* (§M14.31 P1d's whole run, then the binaries of
+this study's commit `774bf6e` and of L0's `743c15b` measured again by
+the same script): nucleus's "100 a transaction" rows do not reproduce —
+75–77× (not 27) for the 100k rows, 124–136× (not 29.4) in the steady
+state, with either binary and today's; the other rows do (4.1, 5.7, 152,
+216).  How the 27 and 29.4 were measured is not recorded.  Where the
+bytes go, by the script's split: the steady state writes ~33 GB while
+it runs and ~31 GB more in the restart's recovery — a GiB of WAL of
+random keys replayed through the 128 MiB cache, nearly every row
+evicting a dirty page —, so nucleus is about 4× PostgreSQL's 29.6 there,
+not level: the case for runs (L2–L5) is stronger than this study said,
+and recovery's replay through a small cache is a cost of its own.
+
 Where the bytes go:
 
 - **Bulk** loads are already cheap in nucleus's B+tree — cheaper than
@@ -10548,6 +10561,24 @@ needs repeated runs across instances and days).
   they do not rerun); the results file is written after each attempt,
   so a run stopped later keeps what it measured; `bm25-filters` runs
   `LONG_RUNS`.
+  *Numbers without a step yet*, moved here from docs/benchmarks.md when
+  its numbers came from the results files (2026-11-17), to be given a
+  step: the per-statement costs of `crates/client/examples/latency.rs`
+  (`SELECT 1` 20.4 µs, a point read by literal 36.5 and by parameter
+  25.8, an insert 172, an update by key 178; pipelined point reads 5.9 µs
+  a statement; `execute_many` 11.3 / 12.4 µs a row; the C driver's point
+  read 25 µs), `bigread.rs` (a million rows of four columns 446 ms as
+  rows, 146 ms as columnar batches; through a cursor 461 / 466 and 165 /
+  166 ms; a Python stream of three columns 2,429 / 2,370 ms) and
+  `pg_latency.rs` (`--pg-compat`, prepared: a point read 39.4 µs, an
+  update by key 197 µs) — medians of one run each, 2026-11-06.
+  And `bench/phases.py load`'s phases at SF 1, row tables (`7b5f092`,
+  §M14.20 W7): nucleus `COPY` 14.5 s, `CREATE INDEX` 12.9, `ANALYZE` 1.8
+  (29.3); PostgreSQL 18 in Docker 18.3, 5.5, 5.3 (29.1).
+  BM25 against Anserini's published "flat" baselines (`porter`, k1 0.9,
+  b 0.4) and the same on a `column` table and a table partitioned into 4
+  (`--layout`) have no step yet either: their tables stay in the git
+  history of docs/benchmarks.md (before 2026-11-17).
 
 **Done when:** every number in `docs/benchmarks.md` carries its
 environment, its runs, its spread and the script that made it; and a
