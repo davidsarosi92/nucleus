@@ -7907,6 +7907,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R4, a row table's scan again:** a `numeric`
+  column decoded straight into a vector of mantissas; a row scan's keys
+  left escaped as the store keeps them (`KvChunks::escaped_keys`,
+  decoded only for a value stored out of line) and read a B+tree leaf at
+  a time (TPC-H Q6 200 → 156 ms; ClickBench's row queries 0.87× of
+  before).
 - **2026-11-17 — §M14.33 R3, ClickBench's worst row queries:** an
   integer vector cast to an integer type kept as it is when every row
   fits (Q29 235 → 82 ms); a row table's filter run on its own columns

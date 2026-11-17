@@ -2688,6 +2688,7 @@ impl Transaction {
             validated: self.isolation == Isolation::Serializable,
             batch: FIRST_BATCH,
             count_only: false,
+            escaped_keys: false,
         })
     }
 
@@ -2983,6 +2984,8 @@ pub struct Scan<'t> {
     /// Counting only ([`Scan::count_only`]): neither the store's keys
     /// decoded nor its values read, where nothing needs them.
     count_only: bool,
+    /// Its chunks' keys may come escaped ([`Scan::escaped_keys`]).
+    escaped_keys: bool,
 }
 
 impl Drop for Scan<'_> {
@@ -3028,6 +3031,10 @@ pub struct Chunk {
     data: Vec<u8>,
     /// Per entry: where its key starts, where its value starts.
     ents: Vec<(usize, usize)>,
+    /// Its keys are user keys escaped, as the store keeps them — not
+    /// decoded ([`Scan::escaped_keys`]; [`Chunk::user_key_into`] decodes
+    /// one).
+    escaped: bool,
 }
 
 impl Chunk {
@@ -3056,6 +3063,41 @@ impl Chunk {
     pub fn clear(&mut self) {
         self.data.clear();
         self.ents.clear();
+        self.escaped = false;
+    }
+
+    /// Whether its keys are escaped ([`Scan::escaped_keys`]).
+    #[inline]
+    pub fn escaped(&self) -> bool {
+        self.escaped
+    }
+
+    /// Entry `i`'s user key into `out` (replacing what it held): decoded
+    /// when the chunk's keys are escaped.
+    pub fn user_key_into(&self, i: usize, out: &mut Vec<u8>) -> Result<()> {
+        out.clear();
+        if self.escaped {
+            crate::mvcc::unescape_onto(self.key(i), out)
+                .ok_or(Error::Corrupt("undecodable escaped key"))
+        } else {
+            out.extend_from_slice(self.key(i));
+            Ok(())
+        }
+    }
+
+    /// `key` (a user key) as this chunk's keys are: escaped when they are.
+    fn push_key_as(&mut self, key: &[u8], escaped: bool, value: &[u8]) -> Result<()> {
+        if self.escaped == escaped {
+            self.push(key, value);
+        } else if self.escaped {
+            self.push(&crate::mvcc::escape(key), value);
+        } else {
+            let mut user = Vec::with_capacity(key.len());
+            crate::mvcc::unescape_onto(key, &mut user)
+                .ok_or(Error::Corrupt("undecodable escaped key"))?;
+            self.push(&user, value);
+        }
+        Ok(())
     }
 
     /// Adds an entry.
@@ -3104,6 +3146,138 @@ impl Scan<'_> {
     /// the tree.
     fn refill(&mut self, max: usize, bytes: usize) -> Result<()> {
         self.refill_where(max, bytes, None, &mut 0, usize::MAX)
+    }
+
+    /// [`refill`](Self::refill) for [`escaped_keys`](Self::escaped_keys),
+    /// the store read alone: each version's key escaped as the store keeps
+    /// it (its last ten bytes, `0 0` and the timestamp, cut), a leaf's
+    /// entries at a time under one latch ([`Tables`]' `leaf_entries`; a
+    /// value not in its cell read on its own, as are the entries of
+    /// engines that give one at a time).  A key's older versions are told
+    /// by the entry before.
+    fn refill_escaped(
+        &mut self,
+        tree: &Tables,
+        seek: &[u8],
+        max: usize,
+        bytes: usize,
+    ) -> Result<()> {
+        let txn = self.txn;
+        let store_end = self.store_end.take();
+        let end = match &store_end {
+            Some(e) => Bound::Excluded(e.as_slice()),
+            None => Bound::Unbounded,
+        };
+        let undecodable = || Error::Corrupt("undecodable version key");
+        let user_of = |k: &[u8]| decode_key(k).map(|(u, _)| u).ok_or_else(undecodable);
+        let [k, v, prev] = &mut self.bufs;
+        let (buf, live) = (&mut self.buffer, &mut self.live);
+        buf.escaped = true;
+        prev.clear();
+        // Whether a version of the previous entry's user key was taken.
+        let mut taken = false;
+        let mut upper: Option<Vec<u8>> = None;
+        let mut passed = 0;
+        let stopped = std::cell::Cell::new(false);
+        // Set when an entry's value is not in its cell: read on its own.
+        let large = std::cell::Cell::new(false);
+        // An entry: its key, the one before, its value when in its cell;
+        // false: the batch ends before it (or its value is to be read).
+        let mut step = |prev: &[u8], k: &[u8], value: Option<&[u8]>| -> Result<bool> {
+            let n = k.len();
+            if n < 10 || k[n - 10] != 0 || k[n - 9] != 0 {
+                return Err(undecodable());
+            }
+            let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
+            let escaped = &k[..n - 10];
+            if !(prev.len() == n && prev.starts_with(escaped)) {
+                taken = false;
+            }
+            let seen = taken;
+            if !seen && buf.ents.len() >= max {
+                upper = Some(user_of(k)?);
+                stopped.set(true);
+                return Ok(false);
+            }
+            if !seen && ts > txn.start {
+                // Too new: passed over (many of them end the batch, the
+                // tree's lock let go).
+                passed += 1;
+                if passed >= PASS_LIMIT {
+                    upper = Some(user_of(k)?);
+                    stopped.set(true);
+                    return Ok(false);
+                }
+            }
+            if ts > txn.start || seen {
+                return Ok(true); // too new, or an older version of a key taken
+            }
+            if buf.data.len() >= bytes {
+                upper = Some(user_of(k)?);
+                stopped.set(true);
+                return Ok(false);
+            }
+            let Some(stored) = value else {
+                large.set(true);
+                return Ok(false);
+            };
+            let value = decode_value(stored).ok_or(Error::Corrupt("bad version value"))?;
+            let at = buf.data.len();
+            buf.data.extend_from_slice(escaped);
+            buf.ents.push((at, buf.data.len()));
+            buf.data.extend_from_slice(value.unwrap_or_default());
+            live.push(value.is_some());
+            taken = true;
+            Ok(true)
+        };
+        let failed: std::cell::Cell<Option<Error>> = std::cell::Cell::new(None);
+        let mut each = |prev: &[u8], k: &[u8], value: Option<&[u8]>| match step(prev, k, value) {
+            Ok(go) => Ok(go),
+            Err(e) => {
+                failed.set(Some(e));
+                stopped.set(true);
+                Ok(false)
+            }
+        };
+        'ranges: for mut range in versions(tree, Bound::Included(seek), end)? {
+            'leaves: loop {
+                let leaf = range.leaf_entries(k, prev, usize::MAX, &mut each)?;
+                if stopped.get() {
+                    break 'ranges;
+                }
+                match leaf {
+                    Some(true) if !large.get() => {}
+                    Some(false) => break,
+                    // An entry at a time: the one whose value is not in its
+                    // cell, or every one where the engine gives no leaves.
+                    Some(true) | None => {
+                        let one = leaf.is_some();
+                        large.set(false);
+                        loop {
+                            std::mem::swap(k, prev);
+                            if !range.next_into(k, v)? {
+                                break 'leaves;
+                            }
+                            if !each(prev, k, Some(v))? {
+                                break 'ranges;
+                            }
+                            if one {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        drop(each);
+        if let Some(e) = failed.take() {
+            return Err(e);
+        }
+        self.store_end = store_end;
+        if let Some(u) = upper {
+            self.from = Some(Bound::Included(u));
+        }
+        Ok(())
     }
 
     /// [`refill`](Self::refill) for [`count_only`](Self::count_only), the
@@ -3282,6 +3456,15 @@ impl Scan<'_> {
             if self.count_only && want.is_none() && !self.validated && self.writes.peek().is_none()
             {
                 return self.refill_counting(&tree, &seek, max);
+            }
+            // The keys left escaped when the reader takes them so and
+            // nothing compares them with user keys: a leaf at a time.
+            if self.escaped_keys
+                && want.is_none()
+                && !self.validated
+                && self.writes.peek().is_none()
+            {
+                return self.refill_escaped(&tree, &seek, max, bytes);
             }
             let [k, v, _] = &mut self.bufs;
             let buf = &mut self.buffer;
@@ -3531,6 +3714,15 @@ impl Scan<'_> {
         self.count_only = true;
     }
 
+    /// From here on its chunks' keys may come escaped, as the store keeps
+    /// them, not decoded ([`Chunk::escaped`], [`Chunk::user_key_into`]):
+    /// for a reader that seldom needs them (a row's out-of-line values are
+    /// found by its key) — where the store is read alone, nothing compares
+    /// them with user keys (PLAN.md §M14.33 R4).
+    pub fn escaped_keys(&mut self) {
+        self.escaped_keys = true;
+    }
+
     /// Replaces `out`'s entries with the next ones — at most `entries` of
     /// them, and no more once they take `bytes` — through buffers reused
     /// from chunk to chunk; false at the end.
@@ -3578,10 +3770,13 @@ impl Scan<'_> {
         while out.len() < entries.max(1) && out.bytes() < bytes {
             match self.advance()? {
                 Some(Next::Store(i)) => {
+                    if out.is_empty() {
+                        out.escaped = self.buffer.escaped;
+                    }
                     let (k, v) = (self.buffer.key(i), self.buffer.value(i));
-                    out.push(k, v);
+                    out.push_key_as(k, self.buffer.escaped, v)?;
                 }
-                Some(Next::Write(k, v)) => out.push(k, v),
+                Some(Next::Write(k, v)) => out.push_key_as(k, false, v)?,
                 None => {
                     self.done = true;
                     break;
@@ -3600,14 +3795,21 @@ impl Iterator for Scan<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = match self.advance() {
-            Ok(Some(Next::Store(i))) => Ok(Some((self.buffer.key(i), self.buffer.value(i)))),
-            Ok(Some(Next::Write(k, v))) => Ok(Some((k, v))),
+            Ok(Some(Next::Store(i))) => {
+                // An entry at a time: its user key, decoded if escaped.
+                let mut k = Vec::new();
+                match self.buffer.user_key_into(i, &mut k) {
+                    Ok(()) => Ok(Some((k, self.buffer.value(i)))),
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(Some(Next::Write(k, v))) => Ok(Some((k.to_vec(), v))),
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
         match next {
             Ok(Some((k, v))) => {
-                let (k, v) = (k.to_vec(), v.to_vec());
+                let v = v.to_vec();
                 if self.validated {
                     self.last = Some(k.clone());
                 }

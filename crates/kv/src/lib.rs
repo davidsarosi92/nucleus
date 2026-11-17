@@ -40,6 +40,7 @@ pub use nucleus_storage::scan;
 /// Pages a background step of sealing again under a new key takes
 /// (PLAN.md §M14.30 K3f).
 pub use nucleus_storage::store::RESEAL_BATCH;
+pub use nucleus_txn::mvcc::unescape_onto;
 pub use nucleus_txn::{Chunk, Isolation, Timestamp};
 
 /// Errors of the KV contract.
@@ -197,6 +198,12 @@ pub trait KvChunks {
     /// decompressed, its overflow pages not visited).  By default they
     /// come whole, as before.
     fn count_only(&mut self) {}
+
+    /// Keys may come escaped from here on, as the store keeps them — not
+    /// decoded where the scan can ([`Chunk::escaped`],
+    /// [`unescape_onto`]): for a reader that seldom needs them.  By
+    /// default they come decoded, as before.
+    fn escaped_keys(&mut self) {}
 }
 
 /// Entries a chunk holds at most.
@@ -253,6 +260,10 @@ impl KvChunks for ScanChunks<'_> {
 
     fn count_only(&mut self) {
         self.0.count_only();
+    }
+
+    fn escaped_keys(&mut self) {
+        self.0.escaped_keys();
     }
 }
 

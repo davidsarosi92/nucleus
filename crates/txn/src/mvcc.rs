@@ -114,6 +114,25 @@ pub fn decode_key_onto(key: &[u8], user: &mut Vec<u8>) -> Option<u64> {
     None
 }
 
+/// An escaped user key (a store key without its last [`OVERHEAD`] bytes)
+/// as the user key, appended to `out`; `None` if it is not one.
+pub fn unescape_onto(escaped: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    out.reserve(escaped.len());
+    let mut i = 0;
+    while i < escaped.len() {
+        let b = escaped[i];
+        out.push(b);
+        if b == 0 {
+            if escaped.get(i + 1) != Some(&0xFF) {
+                return None;
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    Some(())
+}
+
 /// The lowest timestamp of an intent: commit timestamps stay below it.
 pub const INTENT_FLOOR: u64 = 1 << 63;
 

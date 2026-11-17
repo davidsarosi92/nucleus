@@ -1793,6 +1793,10 @@ enum Builder {
     Text(Vec<u32>, Vec<u8>, Vec<bool>),
     Char(Vec<u32>, Vec<u8>, Vec<bool>),
     Time(TimeKind, Vec<i64>, Vec<bool>),
+    /// Decimals of one scale (`None` until the first), mantissas of 64
+    /// bits — no value built for them (PLAN.md §M14.33 R4); a row of
+    /// another scale or a wider one makes it values.
+    Dec(Option<u32>, Vec<i64>, Vec<bool>),
     Values(Vec<Value>),
 }
 
@@ -1815,14 +1819,30 @@ impl Builder {
                 }
             }
             Kind::Time(k) => Builder::Time(k, Vec::with_capacity(cap), nulls()),
-            Kind::Values | Kind::Enum | Kind::Numeric => Builder::Values(Vec::with_capacity(cap)),
+            Kind::Numeric => Builder::Dec(None, Vec::with_capacity(cap), nulls()),
+            Kind::Values | Kind::Enum => Builder::Values(Vec::with_capacity(cap)),
         }
+    }
+
+    /// A decimal: its mantissa where it fits the vector's scale and 64
+    /// bits, else as a value (the builder then values).
+    fn push_decimal(&mut self, d: crate::decimal::Decimal) {
+        if let Builder::Dec(scale, m, n) = self
+            && scale.is_none_or(|s| s == d.scale())
+            && let Ok(x) = i64::try_from(d.mantissa())
+        {
+            *scale = Some(d.scale());
+            m.push(x);
+            n.push(false);
+            return;
+        }
+        self.push(Value::Numeric(d));
     }
 
     fn push_null(&mut self) {
         match self {
             Builder::Skip => {}
-            Builder::Int(d, n) | Builder::Time(_, d, n) => {
+            Builder::Int(d, n) | Builder::Time(_, d, n) | Builder::Dec(_, d, n) => {
                 d.push(0);
                 n.push(true);
             }
@@ -1872,6 +1892,13 @@ impl Builder {
                 n.push(false);
             }
             (Builder::Values(vals), v) => vals.push(v),
+            (Builder::Dec(scale, m, n), Value::Numeric(d))
+                if scale.is_none_or(|s| s == d.scale()) && i64::try_from(d.mantissa()).is_ok() =>
+            {
+                *scale = Some(d.scale());
+                m.push(d.mantissa() as i64);
+                n.push(false);
+            }
             (_, v) => {
                 // Not the column's usual kind: values from here on.
                 let mut vals = std::mem::replace(self, Builder::Skip).into_values();
@@ -1889,7 +1916,8 @@ impl Builder {
             | Builder::Bool(_, n)
             | Builder::Text(_, _, n)
             | Builder::Char(_, _, n)
-            | Builder::Time(_, _, n) => n.len(),
+            | Builder::Time(_, _, n)
+            | Builder::Dec(_, _, n) => n.len(),
             Builder::Values(v) => v.len(),
         }
     }
@@ -1911,6 +1939,9 @@ impl Builder {
             Builder::Text(o, b, n) => Vector::Text(o, b, nulls_from(n)),
             Builder::Char(o, b, n) => Vector::Char(o, b, nulls_from(n)),
             Builder::Time(k, d, n) => Vector::Time(k, d, nulls_from(n)),
+            // Every one NULL: as values were.
+            Builder::Dec(None, _, n) => Vector::Values(vec![Value::Null; n.len()]),
+            Builder::Dec(Some(s), d, n) => Vector::Dec(s, Mantissas::Narrow(d), nulls_from(n)),
             Builder::Values(v) => Vector::Values(v),
         }
     }
@@ -1955,6 +1986,9 @@ impl<'a> RowBatches<'a> {
             // §M14.33 R3).
             entries.count_only();
         }
+        // A row's key is read only to find its values stored out of line:
+        // the keys may stay as the store keeps them (PLAN.md §M14.33 R4).
+        entries.escaped_keys();
         let kinds = scan
             .table
             .columns
@@ -2116,6 +2150,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
                     &mut self.large,
                     self.table,
                     chunk.key(i),
+                    chunk.escaped(),
                     chunk.value(i),
                     &mut firsts[..first_upto],
                 )?;
@@ -2141,6 +2176,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
                     &mut self.large_rest,
                     self.table,
                     chunk.key(i),
+                    chunk.escaped(),
                     chunk.value(i),
                     &mut cols[..upto],
                 )?;
@@ -2173,10 +2209,17 @@ impl crate::storage::BatchSource for RowBatches<'_> {
             .map_or(0, |c| c + 1);
         let mut n = 0;
         while n < max {
-            let Some((key, bytes)) = self.entries.next()? else {
+            let Some((key, bytes, escaped)) = self.entries.next_entry()? else {
                 break;
             };
-            decode_into(&mut self.large, self.table, key, bytes, &mut cols[..upto])?;
+            decode_into(
+                &mut self.large,
+                self.table,
+                key,
+                escaped,
+                bytes,
+                &mut cols[..upto],
+            )?;
             n += 1;
         }
         if n == 0 {
@@ -2220,6 +2263,7 @@ fn decode_into(
     large: &mut crate::large::Chunks,
     t: &Table,
     key: &[u8],
+    escaped: bool,
     b: &[u8],
     cols: &mut [Builder],
 ) -> Result<()> {
@@ -2235,7 +2279,8 @@ fn decode_into(
         let wanted: Vec<bool> = (0..t.columns.len())
             .map(|c| cols.get(c).is_some_and(|b| !matches!(b, Builder::Skip)))
             .collect();
-        let pk = crate::exec::pk_suffix(t, key);
+        let user = crate::exec::user_key(key, escaped)?;
+        let pk = crate::exec::pk_suffix(t, &user);
         let row = crate::retype::read_some(t, cv, b, Some(&wanted), &mut |c, len| {
             large.fetch(t, pk, c, len)
         })?;
@@ -2266,7 +2311,8 @@ fn decode_into(
         if tag == Some(OUT_OF_LINE) {
             r.u8().map_err(bad)?;
             let len = r.u32().map_err(bad)?;
-            let pk = crate::exec::pk_suffix(t, key);
+            let user = crate::exec::user_key(key, escaped)?;
+            let pk = crate::exec::pk_suffix(t, &user);
             col.push(large.fetch(t, pk, c, len)?);
             continue;
         }
@@ -2323,6 +2369,15 @@ fn decode_into(
                     r.u64().map_err(bad)? as i64
                 });
                 nulls.push(false);
+            }
+            (col @ Builder::Dec(..), Some(5)) => {
+                r.u8().map_err(bad)?;
+                let lo = r.u64().map_err(bad)?;
+                let hi = r.u64().map_err(bad)?;
+                let m = (i128::from(hi as i64) << 64) | i128::from(lo);
+                let scale = r.u8().map_err(bad)?;
+                let d = crate::decimal::Decimal::new(m, u32::from(scale)).map_err(bad)?;
+                col.push_decimal(d);
             }
             (col, _) => col.push(crate::encoding::decode_value(&mut r)?),
         }

@@ -1241,6 +1241,13 @@ impl<'a> Entries<'a> {
         self.chunks.count_only();
     }
 
+    /// Keys may come escaped from here on
+    /// ([`nucleus_kv::KvChunks::escaped_keys`]; [`Entries::next_entry`]
+    /// says which, [`user_key`] decodes one).
+    pub fn escaped_keys(&mut self) {
+        self.chunks.escaped_keys();
+    }
+
     /// The next entries — up to `max`, all from one chunk —, as the
     /// chunk and their positions in it: lent until the next call, so a
     /// caller can read them twice (a scan that tests some columns first,
@@ -1269,6 +1276,12 @@ impl<'a> Entries<'a> {
     #[allow(clippy::should_implement_trait)] // it lends from the chunk
     #[inline]
     pub fn next(&mut self) -> Result<Option<(&[u8], &[u8])>> {
+        Ok(self.next_entry()?.map(|(k, v, _)| (k, v)))
+    }
+
+    /// [`next`](Self::next), and whether its key is escaped
+    /// ([`escaped_keys`](Self::escaped_keys)).
+    pub fn next_entry(&mut self) -> Result<Option<(&[u8], &[u8], bool)>> {
         if self.pos == self.chunk.len() {
             if self.done {
                 return Ok(None);
@@ -1282,8 +1295,24 @@ impl<'a> Entries<'a> {
         }
         self.pos += 1;
         let i = self.pos - 1;
-        Ok(Some((self.chunk.key(i), self.chunk.value(i))))
+        Ok(Some((
+            self.chunk.key(i),
+            self.chunk.value(i),
+            self.chunk.escaped(),
+        )))
     }
+}
+
+/// A key as a user key: decoded when `escaped`
+/// ([`Entries::escaped_keys`]).
+pub fn user_key(key: &[u8], escaped: bool) -> Result<std::borrow::Cow<'_, [u8]>> {
+    if !escaped {
+        return Ok(std::borrow::Cow::Borrowed(key));
+    }
+    let mut out = Vec::with_capacity(key.len());
+    nucleus_kv::unescape_onto(key, &mut out)
+        .ok_or_else(|| Error::internal("an undecodable escaped key"))?;
+    Ok(std::borrow::Cow::Owned(out))
 }
 
 /// The entries under `keys` (sorted, each once) of `txn`, below `end`,

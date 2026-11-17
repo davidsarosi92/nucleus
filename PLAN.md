@@ -10940,6 +10940,36 @@ simple parameterization, MySQL's former query cache — what not to do).
   random and given again.
 - **R4 — the joins**: TPC-H Q11, Q5, Q10 and Q6 on row tables, plan by
   plan against PostgreSQL's; target: TPC-H's row geomean ≤ 1×.
+  *Where it starts* (2026-11-17, SF 1, nucleus's row tables after R3
+  against PostgreSQL's last quiet numbers): the geometric mean 1.25× →
+  0.98× from R1–R3 alone, but Q11 5.6×, Q5 3.9×, Q10 3.2×, Q6 2.2×, Q4,
+  Q8, Q12, Q14, Q20 1.6–1.7×.  **Q6** (one scan of `lineitem`, a sum)
+  first, as every other query reads `lineitem` so:
+  1. *Decimals built as values.*  A `numeric` column was decoded into
+     `Value`s and made a vector of mantissas after; now its builder
+     takes the mantissas as the row has them (one scale, 64 bits; a row
+     otherwise makes it values).  200 → 190 ms.
+  2. *Every version's key decoded.*  The engine unescaped each user key
+     into the chunk, though a row table's batch reads a key only to find
+     its values stored out of line.  `KvChunks::escaped_keys`: the keys
+     stay as the store keeps them (escaped, the timestamp cut — a copy,
+     not a decode), the chunk says so, and the reader decodes the rare
+     one it needs (`exec::user_key`).  Only where the store is read alone
+     — nothing compares them with user keys.  190 → 178 ms.
+  3. *An entry at a time.*  As R3b for `count(*)`: the scan takes a
+     leaf's entries under one latch (`leaf_entries`, the value when it is
+     in its cell; one that is not, compressed or in overflow pages, read
+     on its own), a key's older versions told by the entry before.
+     178 → 156 ms.
+  ClickBench's row queries gained as much (all 43, geometric mean 0.87×
+  of before).  Not taken: passing a skipped value by a table of the
+  tags' fixed sizes instead of `skip_value`'s match — no change (the
+  match is a jump table already).  Q6 is still 1.7× PostgreSQL's: what
+  is left is the row's decoding (a value's offset found by walking the
+  ones before — PostgreSQL caches a fixed-width column's offset,
+  `attcacheoff`, which the tagged encoding cannot) and the value copied
+  out of its page into the chunk; both are the encoding's and the
+  chunk's design, recorded here for a later step.
 
 **Done when:** reads by key ≤ 1× PostgreSQL's time and the row tables'
 geometric means ≤ 1× on TPC-H and ClickBench, by §M14.31's method,
