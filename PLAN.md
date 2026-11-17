@@ -10893,7 +10893,34 @@ simple parameterization, MySQL's former query cache — what not to do).
   `SUM(x) + c * COUNT(x)` (ClickHouse's
   `optimize_arithmetic_operations_in_aggregate_functions`) — with the
   cast vectorized the sums cost little, and the rewrite would change
-  where an overflow is reported.
+  where an overflow is reported.  **Q23** (`SELECT * … WHERE URL LIKE
+  '%google%' ORDER BY EventTime LIMIT 10`, 1.93×): all 105 columns of
+  the million rows were decoded for a filter that keeps 95.  Now *late
+  materialization* (as in Velox's lazy vectors, DuckDB's and ClickHouse's
+  `PREWHERE`): when a pipeline's first step is a filter and the scan
+  reads columns it does not, a row table's source decodes the filter's
+  columns of a chunk's rows, runs the filter, and decodes every column
+  wanted of the rows it kept only, into a batch of those rows alone
+  (`BatchSource::next_batch_tested`; a second walker for their
+  out-of-line values; a filter that fails gives its chunk's rows back
+  whole, untested, for the steps to fail on or decide a row at a time
+  as before).  Q23 145 → 55 ms (PostgreSQL 65: 0.85×), on a loaded
+  machine both.  What the A/B over the 43 queries taught, step by step:
+  the first version kept the batch's length and pushed a NULL into
+  every other column for each dropped row — those pushes topped the
+  profile; it decided after 8 192 rows, but a parallel scan builds a
+  pipeline per morsel of about 6 000 rows, so it never decided (Q27
+  1.25×; now after the first two batches, 192 rows); and filters keeping
+  7–41 % of the rows before one or two numbers (Q14, Q22, Q24, Q26, Q40)
+  lost 5–10 % — partly a vector of NULL allocated per unread column per
+  batch, a hundred a batch (now one, shared, for every scan), partly the
+  second look at each kept row costing what it spared.  So it runs only
+  when what it spares costs: a value of variable length (text, decimal,
+  enum, …) or four columns more.  After: Q23 0.36×, no other query
+  beyond ±5 %, the 43's geometric mean 0.96×.  The filter on
+  dictionaries ([`DictFilter`]) is chosen for any table; a row table's
+  source has none, so this goes first there (a column table's source
+  does not test first, and its dictionaries are tested as before).
 - **R4 — the joins**: TPC-H Q11, Q5, Q10 and Q6 on row tables, plan by
   plan against PostgreSQL's; target: TPC-H's row geomean ≤ 1×.
 

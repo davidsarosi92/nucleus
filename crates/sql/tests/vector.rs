@@ -129,11 +129,20 @@ fn chosen_queries_agree() {
         "SELECT sum(s) FROM t",
         "SELECT id FROM t WHERE a",
         "SELECT sum(b::smallint) FROM t",
+        // A filter first, the other columns decoded for its rows only
+        // (§M14.33 R3, late materialization): on an enum, a decimal, a
+        // long value stored out of line, text; failing on some rows.
+        "SELECT * FROM t WHERE m = 'ok' AND id % 7 = 0 ORDER BY id",
+        "SELECT id, big, s FROM t WHERE n > 30 ORDER BY id",
+        "SELECT id, s, m, n FROM t WHERE big IS NOT NULL ORDER BY id",
+        "SELECT id, length(big), f FROM t WHERE s LIKE '%7' ORDER BY id LIMIT 20",
+        "SELECT * FROM t WHERE 100 / a > 40 ORDER BY id",
+        "SELECT * FROM t WHERE 1000 / (id - 2900) > 3 ORDER BY id",
     ]
     .iter()
     .map(|q| q.to_string())
     .collect();
-    assert_eq!(agree(&db, &queries), 8, "the error cases fail");
+    assert_eq!(agree(&db, &queries), 10, "the error cases fail");
 }
 
 #[test]

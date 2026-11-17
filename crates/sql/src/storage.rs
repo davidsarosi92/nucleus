@@ -74,6 +74,28 @@ pub trait BatchSource {
     /// The next batch of at most `max` rows, every position in play;
     /// `None` at the end.
     fn next_batch(&mut self, max: usize) -> Result<Option<Batch>>;
+
+    /// [`next_batch`](Self::next_batch), its rows tested first on the
+    /// columns `first` alone: `test` gets the rows with only those
+    /// decoded and gives the ones that go on, and the source may decode
+    /// its columns for those only (PLAN.md §M14.33 R3, late
+    /// materialization).  With the batch, how many rows were read, and
+    /// whether the batch came so tested — it then holds the rows `test`
+    /// kept, alone; if not (by default, or when `test` failed) the steps
+    /// test its rows again (it may hold some that `test` kept, and the
+    /// rest whole).
+    fn next_batch_tested(
+        &mut self,
+        max: usize,
+        first: &[bool],
+        test: &mut dyn FnMut(&Batch) -> Result<crate::vector::Sel>,
+    ) -> Result<Option<(Batch, usize, bool)>> {
+        let _ = (first, test);
+        Ok(self.next_batch(max)?.map(|b| {
+            let n = b.len;
+            (b, n, false)
+        }))
+    }
 }
 
 /// A new row as [`TableStorage::insert_batch`] takes it.

@@ -1929,6 +1929,10 @@ pub struct RowBatches<'a> {
     txn: &'a dyn nucleus_kv::KvTxn,
     /// The values stored out of line, read beside the rows.
     large: crate::large::Chunks<'a>,
+    /// Those of the columns decoded after a test
+    /// ([`BatchSource::next_batch_tested`]): read beside the rows that
+    /// passed, as `large` is beside every row.
+    large_rest: crate::large::Chunks<'a>,
 }
 
 impl<'a> RowBatches<'a> {
@@ -1988,11 +1992,178 @@ impl<'a> RowBatches<'a> {
                 scan.validated,
                 scan.end.as_deref(),
             ),
+            large_rest: crate::large::Chunks::new(
+                scan.txn,
+                scan.table,
+                scan.validated,
+                scan.end.as_deref(),
+            ),
         })
+    }
+
+    /// The builders' vectors: typed where the values are, enums' labels
+    /// read.
+    fn finish(&mut self, cols: Vec<Builder>) -> Result<Vec<Rc<Vector>>> {
+        finish_columns(&self.kinds, &mut self.labels, self.txn, self.table, cols)
     }
 }
 
+/// [`RowBatches::finish`], its parts apart (for while the rows are lent).
+fn finish_columns(
+    kinds: &[Kind],
+    labels: &mut Labels,
+    txn: &dyn nucleus_kv::KvTxn,
+    table: &Table,
+    cols: Vec<Builder>,
+) -> Result<Vec<Rc<Vector>>> {
+    let mut out: Vec<Rc<Vector>> = Vec::with_capacity(cols.len());
+    // The columns not read: one vector of NULL for all (a hundred columns
+    // a batch, a vector each, were the allocator's work).
+    let mut null: Option<Rc<Vector>> = None;
+    for (c, b) in cols.into_iter().enumerate() {
+        if matches!(b, Builder::Skip) {
+            out.push(
+                null.get_or_insert_with(|| Rc::new(Vector::Const(Value::Null)))
+                    .clone(),
+            );
+            continue;
+        }
+        let mut v = b.finish();
+        if kinds[c] == Kind::Numeric
+            && let Vector::Values(vals) = v
+        {
+            v = Vector::typed(vals);
+        }
+        if kinds[c] == Kind::Enum
+            && let Vector::Values(vals) = &mut v
+        {
+            for x in vals {
+                labels.fill(txn, table.columns[c].ty, x)?;
+            }
+        }
+        out.push(Rc::new(v));
+    }
+    Ok(out)
+}
+
+/// Builders for the columns of `kinds` that `take` holds (the others
+/// skipped), and how far a row is read for them.
+fn builders(kinds: &[Kind], take: impl Fn(usize) -> bool, cap: usize) -> (Vec<Builder>, usize) {
+    let cols: Vec<Builder> = kinds
+        .iter()
+        .enumerate()
+        .map(|(c, &k)| Builder::new(if take(c) { k } else { Kind::Skip }, cap))
+        .collect();
+    let upto = cols
+        .iter()
+        .rposition(|c| !matches!(c, Builder::Skip))
+        .map_or(0, |c| c + 1);
+    (cols, upto)
+}
+
+/// Columns of fixed width a scan reads besides its filter's for late
+/// materialization to pay ([`RowBatches::next_batch_tested`]).
+const LATE_COLUMNS: usize = 4;
+
 impl crate::storage::BatchSource for RowBatches<'_> {
+    fn next_batch_tested(
+        &mut self,
+        max: usize,
+        first: &[bool],
+        test: &mut dyn FnMut(&Batch) -> Result<Sel>,
+    ) -> Result<Option<(Batch, usize, bool)>> {
+        let first_of = |c: usize| first.get(c).copied().unwrap_or(false);
+        // Only when what it spares costs: a value of variable length (or
+        // looked up), or a few columns — a number or two decoded costs
+        // less than a second look at the rows kept.
+        let (rest, costly) = self
+            .kinds
+            .iter()
+            .enumerate()
+            .filter(|&(c, k)| *k != Kind::Skip && !first_of(c))
+            .fold((0, false), |(n, costly), (_, k)| {
+                let varying = matches!(
+                    k,
+                    Kind::Text | Kind::Char | Kind::Values | Kind::Enum | Kind::Numeric
+                );
+                (n + 1, costly || varying)
+            });
+        if !costly && rest < LATE_COLUMNS {
+            return Ok(self.next_batch(max)?.map(|b| {
+                let n = b.len;
+                (b, n, false)
+            }));
+        }
+        // Every column wanted, of the rows that go on.
+        let mut cols: Vec<Builder> = self.kinds.iter().map(|&k| Builder::new(k, max)).collect();
+        let upto = cols
+            .iter()
+            .rposition(|c| !matches!(c, Builder::Skip))
+            .map_or(0, |c| c + 1);
+        let mut read = 0;
+        let mut len = 0;
+        let mut tested = true;
+        // A chunk's rows at a time (they are lent until the next), until
+        // `max` are read.
+        while read < max {
+            let Some((chunk, run)) = self.entries.next_run(max - read)? else {
+                break;
+            };
+            read += run.len();
+            let (mut firsts, first_upto) = builders(&self.kinds, first_of, run.len());
+            for i in run.clone() {
+                decode_into(
+                    &mut self.large,
+                    self.table,
+                    chunk.key(i),
+                    chunk.value(i),
+                    &mut firsts[..first_upto],
+                )?;
+            }
+            let firsts =
+                finish_columns(&self.kinds, &mut self.labels, self.txn, self.table, firsts)?;
+            let probe = Batch {
+                len: run.len(),
+                cols: firsts,
+                sel: Sel::All(run.len()),
+            };
+            // Failed: these rows whole, the batch not tested — its steps
+            // test again the rows kept (they pass as before) and fail, or
+            // decide a row at a time, as they would.
+            let kept = test(&probe).unwrap_or_else(|_| {
+                tested = false;
+                Sel::All(run.len())
+            });
+            len += kept.len();
+            for j in kept.iter() {
+                let i = run.start + j;
+                decode_into(
+                    &mut self.large_rest,
+                    self.table,
+                    chunk.key(i),
+                    chunk.value(i),
+                    &mut cols[..upto],
+                )?;
+            }
+            if !tested {
+                break;
+            }
+        }
+        if read == 0 {
+            return Ok(None);
+        }
+        let cols = self.finish(cols)?;
+        Ok(Some((
+            Batch {
+                len,
+                cols,
+                sel: Sel::All(len),
+            },
+            read,
+            tested,
+        )))
+    }
+
     fn next_batch(&mut self, max: usize) -> Result<Option<Batch>> {
         let mut cols: Vec<Builder> = self.kinds.iter().map(|&k| Builder::new(k, max)).collect();
         // Past the last column wanted, a row is not read at all.
@@ -2011,23 +2182,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
         if n == 0 {
             return Ok(None);
         }
-        let mut out: Vec<Rc<Vector>> = Vec::with_capacity(cols.len());
-        for (c, b) in cols.into_iter().enumerate() {
-            let mut v = b.finish();
-            if self.kinds[c] == Kind::Numeric
-                && let Vector::Values(vals) = v
-            {
-                v = Vector::typed(vals);
-            }
-            if self.kinds[c] == Kind::Enum
-                && let Vector::Values(vals) = &mut v
-            {
-                for x in vals {
-                    self.labels.fill(self.txn, self.table.columns[c].ty, x)?;
-                }
-            }
-            out.push(Rc::new(v));
-        }
+        let out = self.finish(cols)?;
         Ok(Some(Batch {
             len: n,
             cols: out,
@@ -2218,6 +2373,56 @@ pub struct Pipeline<'a> {
     max: usize,
     /// Its first filter's tests of dictionaries' entries.
     dict: Option<DictFilter<'a>>,
+    /// The columns its first step, a filter, reads — when the scan reads
+    /// others too: those are decoded for the rows it keeps only (late
+    /// materialization, [`crate::storage::BatchSource::next_batch_tested`]).
+    late: Option<Late>,
+}
+
+/// A pipeline's filter run on the columns it reads before the others are
+/// decoded — while it keeps few enough rows for that to pay.
+struct Late {
+    first: Vec<bool>,
+    /// Rows tested, and kept.
+    tested: u64,
+    kept: u64,
+}
+
+impl Late {
+    /// Rows tested before the share kept decides: a pipeline's first two
+    /// batches (64 and 128 rows) — a parallel scan's morsel is a few
+    /// thousand rows, and a pipeline is built for each.
+    const TRIAL: u64 = 128;
+
+    /// Whether to go on testing first: off for good once more than half
+    /// the rows tried pass (then the second pass over each row's bytes,
+    /// and the filter's columns gathered, cost more than the columns it
+    /// spares).
+    fn on(&self) -> bool {
+        self.tested < Self::TRIAL || self.kept * 2 <= self.tested
+    }
+
+    /// The columns `p`, the first step, reads — when it can go first: the
+    /// scan reads (`wanted`, of `width`; `None`: every column) others too.
+    fn of(p: &Expr, wanted: Option<&Vec<bool>>, width: usize) -> Option<Self> {
+        if p.has_subquery() {
+            return None;
+        }
+        let mut first = vec![false; width];
+        for c in p.columns() {
+            match first.get_mut(c) {
+                Some(f) if wanted.is_none_or(|w| w.get(c) == Some(&true)) => *f = true,
+                _ => return None,
+            }
+        }
+        let read = wanted.map_or(width, |w| w.iter().filter(|&&x| x).count());
+        let firsts = first.iter().filter(|&&x| x).count();
+        (firsts < read).then_some(Self {
+            first,
+            tested: 0,
+            kept: 0,
+        })
+    }
 }
 
 /// Whether `plan` is a chain the vectorized executor runs as a pipeline
@@ -2387,6 +2592,15 @@ impl<'a> Pipeline<'a> {
         let cx = Cx { ctx, outer };
         let dict = DictFilter::of(&steps);
         let wanted = ctx.needed.get(&(scan as *const Plan as usize));
+        let late = match steps.first() {
+            // (A source that tests first has no dictionaries: a column
+            // table's does not test first, and the filter on dictionaries
+            // runs as before.)
+            Some((Step::Filter(p), _)) if ctx.profile.is_none() => {
+                Late::of(p, wanted, table.columns.len())
+            }
+            _ => None,
+        };
         let range = match range {
             Some(r) => Some(r),
             None => crate::exec::key_range(table, access, &cx.env(&[]))?,
@@ -2428,6 +2642,7 @@ impl<'a> Pipeline<'a> {
             batch: FIRST_BATCH.min(max),
             max,
             dict,
+            late,
         }))
     }
 
@@ -2437,15 +2652,34 @@ impl<'a> Pipeline<'a> {
             let Some(source) = &mut self.source else {
                 return Ok(None);
             };
-            let Some(input) = source.next_batch(self.batch)? else {
+            let next = match (&mut self.late, self.steps.first()) {
+                (Some(late), Some((Step::Filter(p), _))) if late.on() => {
+                    let cx = self.cx;
+                    let got = source.next_batch_tested(self.batch, &late.first, &mut |b| {
+                        filter(p, b.clone(), cx).map(|f| f.sel)
+                    })?;
+                    if let Some((b, read, true)) = &got {
+                        late.tested += *read as u64;
+                        late.kept += b.len as u64;
+                    }
+                    got
+                }
+                _ => source.next_batch(self.batch)?.map(|b| {
+                    let n = b.len;
+                    (b, n, false)
+                }),
+            };
+            let Some((input, read, tested)) = next else {
                 return Ok(None);
             };
-            crate::budget::charge_scans(input.len as u64)?;
+            crate::budget::charge_scans(read as u64)?;
             self.batch = (self.batch * 2).min(self.max);
-            let out = match self.run(&input, started) {
+            // A batch tested by its first step goes on from the next.
+            let from = usize::from(tested);
+            let out = match self.run(&input, started, from) {
                 Ok(b) if b.sel.is_empty() => continue,
                 Ok(b) => Out::Batch(b),
-                Err(_) => self.redo(&input),
+                Err(_) => self.redo(&input, from),
             };
             return Ok(Some(out));
         }
@@ -2453,7 +2687,9 @@ impl<'a> Pipeline<'a> {
 
     /// The steps over `input`, each node's rows (and time, its inputs'
     /// included) recorded under `EXPLAIN ANALYZE`.
-    fn run(&self, input: &Batch, started: Option<Duration>) -> Result<Batch> {
+    /// `from`: the first step to run (those before it ran as the batch was
+    /// read).
+    fn run(&self, input: &Batch, started: Option<Duration>, from: usize) -> Result<Batch> {
         let profile = self.cx.ctx.profile;
         let record = |node: &Plan, b: &Batch| {
             if let Some(p) = profile
@@ -2467,7 +2703,7 @@ impl<'a> Pipeline<'a> {
             }
         };
         let mut b = input.clone();
-        let mut steps = self.steps.iter().enumerate().peekable();
+        let mut steps = self.steps.iter().enumerate().skip(from).peekable();
         if steps
             .peek()
             .is_none_or(|(_, (_, n))| !std::ptr::eq(*n, self.scan))
@@ -2504,10 +2740,10 @@ impl<'a> Pipeline<'a> {
 
     /// `input` through the steps a row at a time (after an error on the
     /// batch: a row at a time decides).
-    fn redo(&self, input: &Batch) -> Out {
+    fn redo(&self, input: &Batch, from: usize) -> Out {
         let mut rows = Vec::new();
         for i in input.sel.iter() {
-            if let Err(e) = self.through(input.row(i), 0, &mut rows) {
+            if let Err(e) = self.through(input.row(i), from, &mut rows) {
                 return Out::Rows(rows, Some(e));
             }
         }

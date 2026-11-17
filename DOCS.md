@@ -2337,7 +2337,15 @@ from the top with the output columns wanted, each node adding what its
 expressions read; a scan then decodes only the columns needed — the rest
 read as NULL, skipped in the encoding without being built (an out-of-line
 value not even fetched), and a row's encoding not read at all past the
-last column wanted (`count(*)` reads none of it).  An expression with a subquery needs every
+last column wanted (`count(*)` reads none of it).  A row table's scan
+whose first step is a filter decodes the filter's columns first and the
+other columns wanted for the rows it keeps only (*late
+materialization*, `BatchSource::next_batch_tested`): `SELECT * … WHERE
+url LIKE '%x%'` builds its hundred columns for the few rows that match.
+It runs when the other columns cost — one of variable length, or four
+or more — and stops once more than half of a scan's first two batches
+pass; a filter that fails has its rows decoded whole, to fail or be
+decided a row at a time as before.  An expression with a subquery needs every
 column (a correlated subquery reads its row), as do `DISTINCT`, set
 operations, CTEs and recursion.  Subqueries' own plans decode only
 their columns too (a correlated index lookup into a column table, say,
@@ -7899,6 +7907,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R3, ClickBench's worst row queries:** an
+  integer vector cast to an integer type kept as it is when every row
+  fits (Q29 235 → 82 ms); a row table's filter run on its own columns
+  before the others are decoded, late materialization (Q23 145 →
+  55 ms).
 - **2026-11-17 — §M14.33 R3a, a row table's scan:** `VACUUM ANALYZE`
   analyzes (PostgreSQL's forms, the tables named); a scan that reads no
   column (`count(*)`) neither decodes keys nor reads values

@@ -1241,6 +1241,30 @@ impl<'a> Entries<'a> {
         self.chunks.count_only();
     }
 
+    /// The next entries — up to `max`, all from one chunk —, as the
+    /// chunk and their positions in it: lent until the next call, so a
+    /// caller can read them twice (a scan that tests some columns first,
+    /// [`crate::storage::BatchSource::next_batch_tested`]).
+    pub fn next_run(
+        &mut self,
+        max: usize,
+    ) -> Result<Option<(&nucleus_kv::Chunk, std::ops::Range<usize>)>> {
+        while self.pos == self.chunk.len() {
+            if self.done {
+                return Ok(None);
+            }
+            self.pos = 0;
+            self.chunk.clear();
+            if !self.chunks.next_chunk(&mut self.chunk)? {
+                self.done = true;
+                return Ok(None);
+            }
+        }
+        let from = self.pos;
+        self.pos = (from + max.max(1)).min(self.chunk.len());
+        Ok(Some((&self.chunk, from..self.pos)))
+    }
+
     /// The next entry.
     #[allow(clippy::should_implement_trait)] // it lends from the chunk
     #[inline]
