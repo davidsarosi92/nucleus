@@ -34,7 +34,7 @@ DBPEDIA=$ANN/dbpedia-openai3-1536-100k
 export NUCLEUS_BENCH_HOST=${NUCLEUS_BENCH_HOST:-::1}
 mkdir -p "$R"
 
-STEPS="suite tpch clickbench knn ann-sift ann-sift-int8 ann-filtered ann-dbpedia ann-related ann-sparse
+STEPS="suite phases tpch clickbench knn ann-sift ann-sift-int8 ann-filtered ann-dbpedia ann-related ann-sparse
 stats analyzers bm25 bm25-filters bm25-snippets msmarco hybrid hybrid-sparse tsearch tsearch-rank
 embed-speed embed-beir longmemeval recall erasure backup retype sealing page-crypto encrypted aead aes
 keys json json-pg json-index json-schema json-schema-pg wamp history branches python wasm browser"
@@ -80,7 +80,7 @@ paradedb_memory() { # paradedb_memory SHARED_BUFFERS MAINTENANCE_WORK_MEM WORKER
 step_build() {
   cargo build --release -p nucleus-cli -p nucleus-embedded
   cargo test --release --no-run -p nucleus-sql --test sealed --test encrypted --test recall_bench \
-    --test erasure_bench --test retype_bench
+    --test erasure_bench --test retype_bench --test statement_phases
   cargo test --release --no-run -p nucleus-storage --test page_crypto_speed
   cargo test --release --no-run -p nucleus-kernels --test aes_speed
   cargo test --release --no-run -p nucleus-crypto --lib
@@ -92,6 +92,10 @@ step_build() {
 
 # --- the suite, TPC-H, ClickBench (in-script method)
 step_suite() { python3 bench/run.py --nucleus "$N" --rows 1000000 --runs "$RUNS" --out "$R/suite.json"; }
+step_phases() {
+  m phases "$RUNS" -- env PHASES_ROWS=1000000 cargo test --release -q -p nucleus-sql \
+    --test statement_phases -- --ignored --nocapture
+}
 step_tpch() {
   python3 bench/tpch.py --nucleus "$N" --sf 1 --data target/tpch-sf1 --runs "$RUNS" --out "$R/tpch.json"
 }

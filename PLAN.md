@@ -10751,10 +10751,30 @@ simple parameterization, MySQL's former query cache — what not to do).
   plans kept (`bench/common.py`'s `plan_of`: PostgreSQL's `EXPLAIN
   (COSTS OFF)`, nucleus's `EXPLAIN` with its estimates and its adaptive
   joins' thresholds masked, hashed; `method.py reproduce` prints "its
-  plan changed").  Next in R1: the per-statement split.
-- **R2 — the point read**: what R1 shows — likely a plan kept for a
-  statement's shape with its literals as parameters, and a short path
-  for a primary key's equality; target ≤ PostgreSQL's time.
+  plan changed").
+  *The split* (`crates/sql/tests/statement_phases.rs`, `bench/all.sh
+  phases`; the suite's read on its million rows, µs a statement): in
+  the process a literal read 23.6 — parsing 1.0, binding and planning
+  16.5 (`EXPLAIN`), the session's own floor 4.5 (`SELECT 1`), the read
+  itself a few; the same text again 5.0 (the session keeps a plan by its
+  text, `by_text`, from its second coming — a literal key is never
+  twice the same); a parameter 18.7 (`Session::run` plans each time).
+  The transport: a round trip on loopback TCP 16.0, on a Unix socket
+  4.4 — and `psql` reaches the bench's PostgreSQL by its socket
+  (`listen_addresses` empty), nucleus has none.  End to end, 100,000
+  rows: the Rust client 41 µs by literal, 26 by parameter; `nucleus sql`
+  50 (its \timing now as psql's: the printing was 2 of the suite's 57);
+  the result's text or typed form no different.  PostgreSQL: 23 µs the
+  read through `psql`, its socket's 4–5 of it.  So the gap of ~32 µs is
+  the plan (~15, every literal text planned again), the transport (~11),
+  and the session's floor and the protocol (the rest).  R1 done
+  2026-11-17.
+- **R2 — the point read**: what R1 shows — a plan kept for a
+  statement's shape, its literals as parameters where the plan does not
+  depend on their values (SQL Server's *simple parameterization*: a
+  key's equality), so `by_text`'s plan serves every key; a Unix socket
+  for the server and its clients on one machine (the CLI, the drivers),
+  as PostgreSQL's; then the session's floor; target ≤ PostgreSQL's time.
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.

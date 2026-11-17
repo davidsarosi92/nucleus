@@ -107,6 +107,31 @@ Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — n
 Against the native, tuned PostgreSQL, reads by key are 2.4× its time and
 the plain scans 1.2–1.3× (Targets, below).
 
+**Where a read by key goes** (`bash bench/all.sh phases`;
+`crates/sql/tests/statement_phases.rs`, PLAN.md §M14.33 R1): the
+suite's `SELECT s FROM b WHERE id = <n>` on its million rows, in the
+process, phase by phase, and the operating system's round trip on
+loopback TCP (how `nucleus sql -h` reaches the server) and on a Unix
+socket (how `psql` reaches PostgreSQL here):
+
+| phases | nucleus (µs) |
+|---|---:|
+| a read by key, literal, in the process | 23.6 [23.3–23.7] ±3% |
+| parsing it | 1.03 [1.02–1.04] ±2% |
+| a read by key, a parameter, in the process | 18.7 [18.7–19.1] ±2% |
+| a read by key, the same text again, in the process | 4.99 [4.97–5.03] ±1% |
+| EXPLAIN of it (binding and planning), in the process | 16.5 [16.3–16.6] ±3% |
+| SELECT 1, in the process | 4.52 [4.45–4.56] ±2% |
+| a round trip, loopback TCP | 16.0 [15.8–16.2] ±2% |
+| a round trip, Unix socket | 4.42 [4.16–4.82] ±11% ⚠ |
+
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus c487ab56b+changes — 2026-11-17T15:45:18+00:00
+
+Binding and planning are two thirds of the statement in the process; a
+text that comes again skips them (the session keeps a plan by its text),
+but a literal key makes every text new.  The transport is the other
+part: loopback TCP's round trip costs 11 µs more than a Unix socket's.
+
 **Results into numpy** (`bash bench/all.sh python`; `bench/embedded/python.py`,
 the embedded edition in the process and the driver over loopback TCP):
 
