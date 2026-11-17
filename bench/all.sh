@@ -160,8 +160,10 @@ step_msmarco() {
   need target/text-data/beir-msmarco "python3 bench/text/data.py msmarco"
   paradedb start
   paradedb_memory 1GB 512MB 2
+  # The server's index cache takes up to a quarter of the machine (8 GB
+  # here), the client's corpus besides: a cap of 8 GB was met.
   m msmarco "$LONG" --also "paradedb=$PY bench/text/beir.py paradedb --sets msmarco --split dev --queries 1000" -- \
-    $CAP 8000 "$PY" bench/text/beir.py nucleus "$N" --sets msmarco --split dev --queries 1000 \
+    $CAP 12000 "$PY" bench/text/beir.py nucleus "$N" --sets msmarco --split dev --queries 1000 \
     --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1
   paradedb_memory reset
   paradedb stop
