@@ -10826,6 +10826,11 @@ simple parameterization, MySQL's former query cache — what not to do).
   (17.7–18.7 µs) — a front end notes the text and is kept by it; an
   in-process caller would need a prepared statement of its own (R2
   leaves it for the embedded API's step).
+
+  *R2 done 2026-11-17.*  The suite again by the method (`bench/all.sh
+  suite phases`, nucleus over its Unix socket): 1,000 reads by key
+  23.7 ms against PostgreSQL's 24.2 (≈ 0.98×; cold 25.8 against 29.6,
+  0.87×) — from 56.8 (2.45×) at R1's start; the target met.
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.

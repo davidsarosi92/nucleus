@@ -83,29 +83,31 @@ each statement cold — the server just restarted — and warm):
 
 | run | nucleus (ms) | postgresql (ms) | nucleus / postgresql |
 |---|---:|---:|---:|
-| load (INSERT … SELECT) | 933 [931–936] ±0% | 987 [923–991] ±3% | ≈ (0.95×) |
-| count(*) (cold) | 17.0 [15.6–18.2] ±6% | 30.1 [29.3–34.6] ±7% | 0.57× |
-| count(*) | 17.0 [14.4–21.1] ±16% ⚠ | 15.8 [15.6–20.7] ±13% ⚠ | ≈ (1.07×) |
-| filtered count (cold) | 30.4 [29.0–33.5] ±5% | 22.8 [21.1–23.2] ±4% | 1.33× |
-| filtered count | 19.7 [19.4–22.1] ±6% | 16.1 [15.8–17.5] ±4% | 1.23× |
-| sum (cold) | 25.1 [23.7–27.9] ±7% | 21.6 [21.2–22.2] ±2% | 1.16× |
-| sum | 20.7 [17.5–23.8] ±11% ⚠ | 15.5 [15.4–16.3] ±2% | 1.34× |
-| group by (1000 groups) (cold) | 28.1 [26.5–29.5] ±4% | 38.9 [38.5–39.4] ±1% | 0.72× |
-| group by (1000 groups) | 22.7 [21.4–23.8] ±4% | 31.7 [31.4–32.1] ±1% | 0.72× |
-| sort (cold) | 86.1 [84.8–131] ±20% ⚠ | 141 [138–148] ±3% | 0.61× |
-| sort | 79.5 [77.6–81.6] ±2% | 126 [126–129] ±1% | 0.63× |
-| self-join (cold) | 92.9 [87.3–94.9] ±3% | 124 [122–136] ±5% | 0.75× |
-| self-join | 83.7 [80.5–90.8] ±5% | 113 [109–118] ±3% | 0.74× |
-| point reads (1000 by key) (cold) | 68.4 [67.3–75.4] ±5% | 32.8 [32.0–35.7] ±4% | 2.08× |
-| point reads (1000 by key) | 56.8 [56.7–57.7] ±1% | 23.1 [22.8–24.2] ±2% | 2.45× |
-| update 25% | 586 [582–591] ±1% | 876 [852–902] ±2% | 0.67× |
-| delete 10% | 105 [103–109] ±3% | 65.4 [64.7–66.0] ±1% | 1.61× |
-| count after writes | 19.7 [19.1–20.1] ±2% | 15.1 [14.5–15.1] ±2% | 1.31× |
+| load (INSERT … SELECT) | 941 [937–960] ±1% | 979 [941–1,001] ±2% | ≈ (0.96×) |
+| count(*) (cold) | 17.5 [15.2–19.3] ±10% | 27.7 [26.1–28.1] ±3% | 0.63× |
+| count(*) | 14.8 [13.9–18.5] ±12% ⚠ | 16.0 [15.9–16.3] ±1% | ≈ (0.92×) |
+| filtered count (cold) | 29.2 [28.1–35.3] ±10% | 20.4 [20.1–26.5] ±13% ⚠ | 1.43× |
+| filtered count | 19.9 [15.9–22.6] ±13% ⚠ | 16.0 [15.4–20.0] ±11% ⚠ | ≈ (1.24×) |
+| sum (cold) | 22.4 [20.5–23.4] ±5% | 19.6 [19.0–20.3] ±3% | 1.14× |
+| sum | 19.0 [16.9–20.6] ±8% | 14.8 [14.7–15.3] ±2% | 1.28× |
+| group by (1000 groups) (cold) | 26.7 [25.3–26.9] ±3% | 37.3 [35.7–38.0] ±2% | 0.72× |
+| group by (1000 groups) | 21.4 [20.1–23.4] ±6% | 31.6 [31.3–32.0] ±1% | 0.68× |
+| sort (cold) | 83.4 [81.1–84.9] ±2% | 139 [138–142] ±1% | 0.60× |
+| sort | 77.0 [74.2–80.4] ±3% | 129 [128–130] ±1% | 0.60× |
+| self-join (cold) | 89.1 [85.8–89.7] ±2% | 120 [118–129] ±4% | 0.74× |
+| self-join | 80.3 [78.2–81.7] ±2% | 115 [112–128] ±6% | 0.70× |
+| point reads (1000 by key) (cold) | 25.8 [24.5–25.9] ±2% | 29.6 [28.6–32.8] ±5% | 0.87× |
+| point reads (1000 by key) | 23.7 [23.2–24.1] ±1% | 24.2 [23.2–26.3] ±5% | ≈ (0.98×) |
+| update 25% | 596 [581–597] ±1% | 868 [840–904] ±3% | 0.69× |
+| delete 10% | 104 [103–107] ±1% | 66.3 [65.1–71.1] ±4% | 1.57× |
+| count after writes | 19.8 [19.4–20.3] ±2% | 15.6 [15.0–19.3] ±11% ⚠ | 1.28× |
 
-Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus 0.1.0, postgresql 18.7 (Homebrew) — nucleus dc9aefb04 — 2026-11-17T13:14:08+00:00
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus 0.1.0, postgresql 18.7 (Homebrew) — nucleus eeb542857 — 2026-11-17T16:45:15+00:00
 
-Against the native, tuned PostgreSQL, reads by key are 2.4× its time and
-the plain scans 1.2–1.3× (Targets, below).
+Against the native, tuned PostgreSQL, reads by key are even with its
+time (0.98×, cold 0.87×; nucleus reached by its Unix socket, as `psql`
+reaches PostgreSQL — `nucleus server --socket`) and the plain scans
+0.9–1.3× (Targets, below).
 
 **Where a read by key goes** (`bash bench/all.sh phases`;
 `crates/sql/tests/statement_phases.rs`, PLAN.md §M14.33 R1): the
@@ -116,21 +118,24 @@ socket (how `psql` reaches PostgreSQL here):
 
 | phases | nucleus (µs) |
 |---|---:|
-| a read by key, literal, in the process | 23.6 [23.3–23.7] ±3% |
-| parsing it | 1.03 [1.02–1.04] ±2% |
-| a read by key, a parameter, in the process | 18.7 [18.7–19.1] ±2% |
-| a read by key, the same text again, in the process | 4.99 [4.97–5.03] ±1% |
-| EXPLAIN of it (binding and planning), in the process | 16.5 [16.3–16.6] ±3% |
-| SELECT 1, in the process | 4.52 [4.45–4.56] ±2% |
-| a round trip, loopback TCP | 16.0 [15.8–16.2] ±2% |
-| a round trip, Unix socket | 4.42 [4.16–4.82] ±11% ⚠ |
+| a read by key, literal, in the process | 8.06 [8.02–8.07] ±1% |
+| parsing it | 1.01 [1.00–1.01] ±1% |
+| a read by key, a parameter, in the process | 17.8 [17.7–17.9] ±1% |
+| a read by key, the same text again, in the process | 5.39 [5.35–5.43] ±1% |
+| EXPLAIN of it (binding and planning), in the process | 15.6 [15.5–15.7] ±1% |
+| SELECT 1, in the process | 4.22 [4.21–4.27] ±1% |
+| a round trip, loopback TCP | 15.7 [15.6–15.9] ±2% |
+| a round trip, Unix socket | 4.18 [3.90–4.71] ±14% ⚠ |
 
-Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus c487ab56b+changes — 2026-11-17T15:45:18+00:00
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus eeb542857+changes — 2026-11-17T16:47:19+00:00
 
-Binding and planning are two thirds of the statement in the process; a
-text that comes again skips them (the session keeps a plan by its text),
-but a literal key makes every text new.  The transport is the other
-part: loopback TCP's round trip costs 11 µs more than a Unix socket's.
+A read by key with its key inline is run as its shape, the key a
+parameter (PLAN.md §M14.33 R2a), so every key shares one plan: binding
+and planning (15.6 µs) are paid once, not by every literal.  A
+parameter through `Session::run` without its text (the in-process API)
+still plans each call.  The transport is the other part: loopback TCP's
+round trip costs 11 µs more than a Unix socket's, which the suite now
+uses (R2b).
 
 **Results into numpy** (`bash bench/all.sh python`; `bench/embedded/python.py`,
 the embedded edition in the process and the driver over loopback TCP):
@@ -1866,14 +1871,16 @@ native, tuned PostgreSQL 18.7:
 | column tables: no TPC-H or ClickBench query above 3× | the highest TPC-H Q20 2.77×, ClickBench Q23 1.80× | yes |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.27×, ClickBench 1.10× | yes |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.96×; TPC-H 1.00× row, 0.91× column; ClickBench 0.96×, 0.85× | yes |
-| updates and deletes ≤ 2× (`bench/run.py`) | update 0.67×, delete 1.51× | yes |
-| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 0.63–1.49× (the filtered count cold 1.49×, sort 0.63×) | yes |
-| reads by key ≤ 1× (`bench/run.py`) | 2.45× (56.8 ms against 23.1 for 1,000 reads) | **no** |
+| updates and deletes ≤ 2× (`bench/run.py`) | update 0.69×, delete 1.57× | yes |
+| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 0.60–1.43× (the filtered count cold 1.43×, sort 0.60×) | yes |
+| reads by key ≤ 1× (`bench/run.py`) | 0.98× (23.7 ms against 24.2 for 1,000 reads; cold 0.87×) | yes |
 
 Against PostgreSQL in Docker with its defaults (the runs before
 §M14.31) every target was met, reads by key at 0.5×; natively, with
-its buffers sized for the machine, PostgreSQL's 1,000 reads by key take
-24 ms, nucleus's 59 as before — the target missed is nucleus's own
-per-statement cost, not a slower nucleus.  Row tables' worst queries:
+its buffers sized for the machine, PostgreSQL's 1,000 reads by key took
+24 ms, nucleus's 59: nucleus's own per-statement cost — planning every
+literal anew and loopback TCP — which §M14.33 R2 took away (a read by
+key's plan kept by its shape, the server on a Unix socket, the
+session's floor lowered).  Row tables' worst queries:
 TPC-H Q11 6.6×, ClickBench Q0 4.6×.  The CI's shared runners are too
 noisy to fail on a ratio, so a target is checked here, by a local run.
