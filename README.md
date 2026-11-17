@@ -45,13 +45,13 @@ compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
 results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  Against a
 native PostgreSQL 18 tuned for the same machine, on TPC-H (SF 1) column
-tables take 0.48× its time in the geometric mean, on ClickBench (a
-million rows) 0.17×; row tables are still behind (1.31× and 1.14×) —
+tables take 0.47× its time in the geometric mean, on ClickBench (a
+million rows) 0.17×; row tables are still behind (1.27× and 1.10×) —
 the next step after the measuring method's —; loads level or faster,
 every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
-768-dimension vectors in 37 ms, faster than numpy's brute force and 5.8×
+768-dimension vectors in 38 ms, faster than numpy's brute force and 5.6×
 pgvector's exact search (`docs/benchmarks.md`) —, a native float
 array in every driver (in Python an `(n, d)` numpy array or Arrow
 `fixed_size_list`), pgvector's own clients over the PostgreSQL

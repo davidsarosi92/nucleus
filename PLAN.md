@@ -289,7 +289,7 @@ are marked ✅.
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ✅ O1–O5 (2026-11-15): metrics, alerts, traces, incremental backups to a directory or S3 (compressed, encrypted, kept, scheduled), restore tests, `ALTER COLUMN … TYPE … CONCURRENTLY` |
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
-| | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | 🔨 P1a the method, P1b the suite, TPC-H and ClickBench on it (2026-11-16) |
+| | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ⬜ planned 2026-11-17 (after §M14.31 P1, before §M14.28 L3b) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
@@ -10417,7 +10417,7 @@ every driver*: K5a–K5b.  Left for later, not this milestone's: a held
 key given back into the server's keeping, and the recall cost at
 100,000 rows and the slow load of 500,000 noted under K4c.
 
-### §M14.31 — Reliable measurement ⬜
+### §M14.31 — Reliable measurement ✅
 
 Planned 2026-11-15.  Asked for: numbers that can be trusted — above the
 public leaderboards and the cloud runs (§M27), which follow this
@@ -10469,7 +10469,7 @@ Reproducible in Modern Cloud Networks?" (NSDI 2020: cloud variability
 needs repeated runs across instances and days).
 
 **P1's steps** (2026-11-16):
-- **P1a — the method** 🔨: `bench/method.py` — the median, the
+- **P1a — the method** ✅: `bench/method.py` — the median, the
   coefficient of variation, a percentile bootstrap interval of the
   median (10,000 resamples, seeded), runs again while one spreads past
   10 % (twice, then flagged; under `run`, only the command that spreads,
@@ -10487,14 +10487,14 @@ needs repeated runs across instances and days).
   sets it, what it runs with read back from `pg_settings`.  `nucleus
   sql` gained psql's `\echo` and `\timing on|off`, so a session stays
   open between statements (`bench/common.py`'s `Session`).
-- **P1b — the suite, TPC-H, ClickBench** 🔨: rounds with the systems in
+- **P1b — the suite, TPC-H, ClickBench** ✅: rounds with the systems in
   turn; each query restarted and run cold (the server's caches empty —
   the OS's kept: dropping them needs root on macOS), then warm; loads
   `--runs` times; every answer checked; PostgreSQL's loads end in
   `VACUUM ANALYZE` as its documentation has it after a bulk load (its
   first scan otherwise sets hint bits: a cold ClickBench Q0 of 1.4 s
   against 0.14 s), nucleus's in `ANALYZE` as its own has it.
-- **P1c — every other section's script** on the method 🔨: each
+- **P1c — every other section's script** on the method ✅: each
   prints its numbers as `@metric` lines (`method.emit`; a Rust test or
   binary its own `metric` function) and its systems' versions and
   settings as `@system` lines, and `method.py run` repeats the whole
@@ -10522,7 +10522,7 @@ needs repeated runs across instances and days).
   sizes, and leaves whose keys each shared a long prefix, together
   sharing a short one, gave a half that outgrew its page; it now packs
   the pair as batches do (`normalize`).
-- **P1d — one script** (`bench/all.sh`): every benchmark into
+- **P1d — one script** (`bench/all.sh`) ✅: every benchmark into
   `bench/results/`, `docs/benchmarks.md`'s numbers from those files;
   then a second run, `method.py reproduce` on each.
   *The first whole run* showed what a retry cost: a retry ran every
@@ -10593,18 +10593,39 @@ went 99 → 167 ms, steady in both: a plan of its own changed (`ANALYZE`
 samples at random).  *Taken*: a difference within 10 % (`NOISE`) is not
 claimed, and a second run within it reproduces (`differ`: the intervals
 apart *and* the medians more than 10 % apart); a round starts when the
-machine's other work is under 1.5 cores (`quiet`: every process's CPU
+machine's other work is under 2.5 cores (`quiet`: every process's CPU
 but the measurement's own tree, its servers' and the kernel's — the
-load average counts the measurement itself), waiting up to 30 minutes,
+load average counts the measurement itself; an open desktop idles at
+1–2 cores, and a first bound of 1.5 made most rounds wait, TPC-H's
+first three queries taking half an hour), waiting up to 30 minutes,
 what it saw kept in the results (`quiet`); the method's version is 2.
 By this criterion the subset reproduces 36 of 36, 128 of 135, 201 of
 261, 7 of 7, 60 of 62 — ClickBench's misses being the first run's
 disturbed rounds.  The strict form, sessions as a level of repetition,
 is §M27 B1b.
+*The third run* (2026-11-17, TPC-H and ClickBench by method 2, the
+quiet gate waiting 1 and 17 minutes in all): against the second, 129 of
+135 and 261 of 261 reproduce; against the first, 129 of 135 and 203 of
+261.  Of TPC-H's six, PostgreSQL's plans are three — Q14 back to 99 ms,
+Q18 2.6 → 4.5 s cold and warm (`ANALYZE`'s sample once more; the plans
+go into the results in §M14.33 R1) — and its load once (27.9 s against
+22–23); nucleus's own one, Q12 on rows 314 → 347 ms, 10.4 % apart.  The
+geometric means held: columns 0.48 / 0.47 / 0.47× on TPC-H, 0.17× on
+ClickBench in all three; rows 1.31 / 1.28 / 1.27× and 1.14 / 1.12 /
+1.10×.  `docs/benchmarks.md`'s TPC-H and ClickBench are this run's, the
+suite, knn and ann-filtered the second's; `bench/results/` holds the
+latest file of each step (the earlier ones in its git history).  The
+steps the second run did not repeat get their second at F1's end, in
+the whole run.  P1 closed 2026-11-17.
 *When the whole run runs* (decided 2026-11-17): `bench/all.sh` whole
 takes ~17 hours, so not at every step — once at the end of each phase
 (F1's before F2 begins, then F2's and F3's), and the subset a change
-touches meanwhile.  Before the first release (§M28) the last phase ends
+touches meanwhile.  The next phase's work goes on beside it, in a git
+worktree: studies and code freely, builds and light tests throttled
+(`taskpolicy -b cargo … -j 1`: the efficiency cores and background I/O,
+about a core, which with a desktop's 1–2 reaches the quiet gate's 2.5
+now and then — a round then waits), the heavy suites after the
+run or in a quiet window.  Before the first release (§M28) the last phase ends
 otherwise: a large round of testing, fixing and testing again, then the
 release.
 
@@ -10651,7 +10672,12 @@ simple parameterization, MySQL's former query cache — what not to do).
 - **R1 — measure it fairly**: `nucleus sql`'s `\timing` as `psql`'s
   (the result in, before printing), its output buffered when not a
   terminal; then the true per-statement gap, split by phase (protocol,
-  parse, bind, plan, execute, encode).
+  parse, bind, plan, execute, encode).  And the baseline's plans kept:
+  PostgreSQL's `ANALYZE` samples at random, and a load's statistics
+  change its plans between runs (TPC-H Q14 99 → 167 → 99 ms, Q18 2.6 →
+  2.6 → 4.5 s in P1's three runs) — each query's plan (`EXPLAIN (COSTS
+  OFF)`, hashed) goes into the results, so a change in its time shows
+  whether its plan changed with it.
 - **R2 — the point read**: what R1 shows — likely a plan kept for a
   statement's shape with its literals as parameters, and a short path
   for a primary key's equality; target ≤ PostgreSQL's time.

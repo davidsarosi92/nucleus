@@ -68,7 +68,11 @@ NOISE = 0.10
 # A round starts when the machine's other work is under this (cores, the
 # CPU of every process but the measurement's own, its servers' and the
 # kernel's), waiting at most QUIET_WAIT seconds; what it saw is recorded.
-QUIET_CORES = 1.5
+# A quarter of a 10-core machine: an open desktop (window server, an
+# editor, a browser, the file indexer) idles at 1-2 cores, which a bound
+# of 1.5 made wait at most rounds (TPC-H's first three queries took half
+# an hour); a build or an indexing storm is 4 cores and more.
+QUIET_CORES = 2.5
 QUIET_WAIT = 1800
 
 HERE = os.path.dirname(os.path.abspath(__file__))

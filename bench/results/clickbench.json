@@ -1,10 +1,10 @@
 {
- "method": 1,
+ "method": 2,
  "name": "clickbench",
- "script": "bench/clickbench.py --nucleus ./target/release/nucleus --rows 1000000 --runs 5 --out bench/results/clickbench.json",
+ "script": "bench/clickbench.py --nucleus ./target/release/nucleus --rows 1000000 --runs 5 --out bench/results-3/clickbench.json",
  "environment": {
-  "method": 1,
-  "at": "2026-11-16T13:44:36+00:00",
+  "method": 2,
+  "at": "2026-11-17T15:00:24+00:00",
   "machine": {
    "arch": "arm64",
    "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
@@ -22,8 +22,8 @@
    "thermal_warning": false
   },
   "disk": {
-   "path": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/nucleus-bench-q83t87c5",
-   "free_bytes": 36846784512,
+   "path": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/nucleus-bench-_zyypqio",
+   "free_bytes": 18586783744,
    "total_bytes": 494384795648,
    "device": "/dev/disk3s5",
    "solid_state": true,
@@ -31,9 +31,9 @@
    "file_system": "apfs"
   },
   "load_before": [
-   9.31591796875,
-   9.8310546875,
-   9.41162109375
+   5.9033203125,
+   4.69140625,
+   4.0927734375
   ],
   "systems": {
    "nucleus (row)": {
@@ -100,11 +100,11 @@
      "max_wal_size": "4GB",
      "max_worker_processes": "10",
      "min_wal_size": "1GB",
-     "port": "49626",
+     "port": "56270",
      "random_page_cost": "1.1",
      "shared_buffers": "8GB",
      "synchronous_commit": "on",
-     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-qlkhiqk4",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-9_d_08nv",
      "wal_buffers": "16MB",
      "wal_sync_method": "open_datasync",
      "work_mem": "81MB"
@@ -116,16 +116,23 @@
    "hits-1000000.tsv": "42252392a38f43b6c14ec58df71127f40cd25b139cda0ac4070d3b0f09bac3e9"
   },
   "nucleus": {
-   "commit": "15d10437821bc2084c874fbbf6e219964ffb9ccd",
+   "commit": "486a1ac9384f211fe9bc2e3a8f3f94d6a91cf426",
    "dirty": true
   },
   "cold": "the server restarted before the query (its caches empty; the OS's page cache kept)",
   "clickbench": "18e5485b36227b160d11f119477bad16bad754c7",
   "load_after": [
-   8.18994140625,
-   9.26611328125,
-   9.2001953125
-  ]
+   2.900390625,
+   3.01025390625,
+   3.27783203125
+  ],
+  "quiet": {
+   "rounds": 780,
+   "waited_s": 996.7,
+   "other_cores_max": 2.5,
+   "over_bound": 0,
+   "bound": 2.5
+  }
  },
  "samples": [
   {
@@ -134,20 +141,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    104.122,
-    128.746,
-    123.327,
-    106.912,
-    148.048
+    79.446,
+    86.856,
+    83.797,
+    88.677,
+    84.87
    ],
-   "median": 123.327,
+   "median": 84.87,
    "ci": [
-    104.122,
-    148.048
+    79.446,
+    88.677
    ],
-   "cv": 0.14593648200018547,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.041269877995618265,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q0",
@@ -155,20 +162,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    109.17,
-    105.367,
-    132.84,
-    134.338,
-    125.449
+    77.59,
+    79.038,
+    81.401,
+    81.262,
+    77.352
    ],
-   "median": 125.449,
+   "median": 79.038,
    "ci": [
-    105.367,
-    134.338
+    77.352,
+    81.401
    ],
-   "cv": 0.11058272339529088,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.024449231973144456,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q0",
@@ -176,20 +183,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    6.627,
-    6.043,
-    7.728,
-    6.065,
-    10.104
+    5.327,
+    5.329,
+    5.39,
+    5.24,
+    5.598
    ],
-   "median": 6.627,
+   "median": 5.329,
    "ci": [
-    6.043,
-    10.104
+    5.24,
+    5.598
    ],
-   "cv": 0.23288099546928456,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.025053187046372504,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q0",
@@ -197,20 +204,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    3.448,
-    3.095,
-    3.558,
-    3.109,
-    4.363
+    2.925,
+    2.891,
+    2.977,
+    2.958,
+    2.973
    ],
-   "median": 3.448,
+   "median": 2.958,
    "ci": [
-    3.095,
-    4.363
+    2.891,
+    2.977
    ],
-   "cv": 0.14693004302113014,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.012352559135441076,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q0",
@@ -218,20 +225,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    141.954,
-    138.895,
-    139.692,
-    138.833,
-    154.693
+    116.906,
+    116.075,
+    117.561,
+    117.879,
+    123.063
    ],
-   "median": 139.692,
+   "median": 117.561,
    "ci": [
-    138.833,
-    154.693
+    116.075,
+    123.063
    ],
-   "cv": 0.047336260535637005,
+   "cv": 0.02326710032666719,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q0",
@@ -239,20 +246,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    27.445,
-    27.187,
-    27.245,
-    28.337,
-    28.952
+    26.279,
+    25.179,
+    25.584,
+    25.25,
+    25.487
    ],
-   "median": 27.445,
+   "median": 25.487,
    "ci": [
-    27.187,
-    28.952
+    25.179,
+    26.279
    ],
-   "cv": 0.027944405664216805,
+   "cv": 0.017101658528585566,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q1",
@@ -260,20 +267,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    139.551,
-    106.983,
-    112.475,
-    108.508,
-    110.686
+    90.604,
+    96.86,
+    88.836,
+    94.586,
+    96.531
    ],
-   "median": 110.686,
+   "median": 94.586,
    "ci": [
-    106.983,
-    139.551
+    88.836,
+    96.86
    ],
-   "cv": 0.1169893038485398,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.038492529570857886,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q1",
@@ -281,20 +288,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    114.216,
-    100.755,
-    138.803,
-    102.764,
-    102.508
+    88.647,
+    91.747,
+    89.611,
+    90.003,
+    88.946
    ],
-   "median": 102.764,
+   "median": 89.611,
    "ci": [
-    100.755,
-    138.803
+    88.647,
+    91.747
    ],
-   "cv": 0.14316947083824544,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.013555654211550668,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q1",
@@ -302,20 +309,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    7.356,
-    6.717,
-    8.372,
-    6.752,
-    6.743
+    6.089,
+    5.968,
+    6.176,
+    5.976,
+    5.726
    ],
-   "median": 6.752,
+   "median": 5.976,
    "ci": [
-    6.717,
-    8.372
+    5.726,
+    6.176
    ],
-   "cv": 0.09935311551014026,
+   "cv": 0.02828755801041557,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q1",
@@ -323,20 +330,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    3.788,
-    3.281,
-    3.692,
-    3.577,
-    3.375
+    3.239,
+    3.245,
+    3.221,
+    3.216,
+    3.132
    ],
-   "median": 3.577,
+   "median": 3.221,
    "ci": [
-    3.281,
-    3.788
+    3.132,
+    3.245
    ],
-   "cv": 0.05992175974581321,
+   "cv": 0.014192498291677853,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q1",
@@ -344,20 +351,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    168.982,
-    160.979,
-    157.764,
-    145.158,
-    154.075
+    128.228,
+    125.902,
+    126.821,
+    127.57,
+    127.183
    ],
-   "median": 157.764,
+   "median": 127.183,
    "ci": [
-    145.158,
-    168.982
+    125.902,
+    128.228
    ],
-   "cv": 0.05575300137365263,
+   "cv": 0.006817100563791641,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q1",
@@ -365,20 +372,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    62.395,
-    69.536,
-    59.462,
-    57.895,
-    72.081
+    56.454,
+    60.162,
+    56.594,
+    56.21,
+    56.498
    ],
-   "median": 62.395,
+   "median": 56.498,
    "ci": [
-    57.895,
-    72.081
+    56.21,
+    60.162
    ],
-   "cv": 0.09716725345743904,
+   "cv": 0.029221391807046283,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q2",
@@ -386,20 +393,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    104.907,
-    109.892,
-    123.141,
-    104.27,
-    101.89
+    98.702,
+    96.709,
+    98.147,
+    98.477,
+    99.325
    ],
-   "median": 104.907,
+   "median": 98.477,
    "ci": [
-    101.89,
-    123.141
+    96.709,
+    99.325
    ],
-   "cv": 0.07828332021679194,
+   "cv": 0.009910775644990271,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q2",
@@ -407,20 +414,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    109.856,
-    101.844,
-    109.638,
-    96.569,
-    97.826
+    90.511,
+    90.755,
+    92.948,
+    91.698,
+    87.013
    ],
-   "median": 101.844,
+   "median": 90.755,
    "ci": [
-    96.569,
-    109.856
+    87.013,
+    92.948
    ],
-   "cv": 0.06139750155233883,
+   "cv": 0.024446687833838156,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q2",
@@ -428,20 +435,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    7.636,
-    7.331,
-    8.838,
-    9.924,
-    7.538
+    7.064,
+    7.193,
+    7.173,
+    8.366,
+    6.707
    ],
-   "median": 7.636,
+   "median": 7.173,
    "ci": [
-    7.331,
-    9.924
+    6.707,
+    8.366
    ],
-   "cv": 0.1337795054931212,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.08584951670332353,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q2",
@@ -449,20 +456,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    3.607,
-    3.668,
-    3.958,
-    13.105,
-    3.801
+    3.767,
+    3.561,
+    4.174,
+    3.986,
+    3.396
    ],
-   "median": 3.801,
+   "median": 3.767,
    "ci": [
-    3.607,
-    13.105
+    3.396,
+    4.174
    ],
-   "cv": 0.7431068755667153,
-   "flagged": true,
-   "attempts": 3
+   "cv": 0.08301499131514987,
+   "flagged": false,
+   "attempts": 2
   },
   {
    "name": "Q2",
@@ -470,20 +477,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    185.078,
-    166.469,
-    161.239,
-    173.3,
-    172.883
+    141.987,
+    125.651,
+    139.83,
+    127.166,
+    129.422
    ],
-   "median": 172.883,
+   "median": 129.422,
    "ci": [
-    161.239,
-    185.078
+    125.651,
+    141.987
    ],
-   "cv": 0.052038142789843714,
+   "cv": 0.056856625346870984,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q2",
@@ -491,20 +498,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    68.667,
-    69.054,
-    65.521,
-    79.412,
-    65.76
+    59.655,
+    58.259,
+    58.796,
+    58.889,
+    58.331
    ],
-   "median": 68.667,
+   "median": 58.796,
    "ci": [
-    65.521,
-    79.412
+    58.259,
+    59.655
    ],
-   "cv": 0.08143130636884906,
+   "cv": 0.009511729112504069,
    "flagged": false,
-   "attempts": 3
+   "attempts": 2
   },
   {
    "name": "Q3",
@@ -512,20 +519,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    98.884,
-    98.189,
-    110.622,
-    102.999,
-    108.014
+    87.568,
+    89.905,
+    96.206,
+    96.692,
+    92.95
    ],
-   "median": 102.999,
+   "median": 92.95,
    "ci": [
-    98.189,
-    110.622
+    87.568,
+    96.692
    ],
-   "cv": 0.052922582027233024,
+   "cv": 0.042635106715953185,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q3",
@@ -533,20 +540,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    94.541,
-    95.976,
-    101.842,
-    100.661,
-    98.888
+    87.861,
+    88.22,
+    92.991,
+    86.189,
+    90.155
    ],
-   "median": 98.888,
+   "median": 88.22,
    "ci": [
-    94.541,
-    101.842
+    86.189,
+    92.991
    ],
-   "cv": 0.03131408878245067,
+   "cv": 0.02918346630483479,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q3",
@@ -554,20 +561,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    7.115,
-    6.821,
-    7.401,
-    6.945,
-    6.765
+    6.401,
+    6.408,
+    6.669,
+    6.491,
+    6.56
    ],
-   "median": 6.945,
+   "median": 6.491,
    "ci": [
-    6.765,
-    7.401
+    6.401,
+    6.669
    ],
-   "cv": 0.03664278275995328,
+   "cv": 0.017243313548691335,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q3",
@@ -575,20 +582,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    3.504,
-    3.373,
-    3.493,
-    3.335,
-    3.356
+    3.238,
+    3.279,
+    3.418,
+    3.233,
+    3.395
    ],
-   "median": 3.373,
+   "median": 3.279,
    "ci": [
-    3.335,
-    3.504
+    3.233,
+    3.418
    ],
-   "cv": 0.023450229535370185,
+   "cv": 0.026545160176006135,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q3",
@@ -596,20 +603,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    138.574,
-    142.365,
-    154.566,
-    141.597,
-    145.79
+    120.102,
+    119.944,
+    121.079,
+    121.389,
+    120.634
    ],
-   "median": 142.365,
+   "median": 120.634,
    "ci": [
-    138.574,
-    154.566
+    119.944,
+    121.389
    ],
-   "cv": 0.042505245410089335,
+   "cv": 0.005122083017027286,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q3",
@@ -617,20 +624,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    53.388,
-    58.817,
-    63.882,
-    57.779,
-    54.481
+    51.688,
+    51.336,
+    51.685,
+    51.339,
+    51.653
    ],
-   "median": 57.779,
+   "median": 51.653,
    "ci": [
-    53.388,
-    63.882
+    51.336,
+    51.688
    ],
-   "cv": 0.0717168868751806,
+   "cv": 0.0036000970852639582,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q4",
@@ -638,20 +645,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    110.044,
-    113.237,
-    112.94,
-    127.895,
-    114.683
+    106.274,
+    110.112,
+    104.13,
+    101.301,
+    106.288
    ],
-   "median": 113.237,
+   "median": 106.274,
    "ci": [
-    110.044,
-    127.895
+    101.301,
+    110.112
    ],
-   "cv": 0.06037876525060574,
+   "cv": 0.030652134266351928,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q4",
@@ -659,20 +666,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    102.794,
-    104.287,
-    98.209,
-    108.733,
-    102.143
+    95.392,
+    94.826,
+    96.0,
+    96.685,
+    104.451
    ],
-   "median": 102.794,
+   "median": 96.0,
    "ci": [
-    98.209,
-    108.733
+    94.826,
+    104.451
    ],
-   "cv": 0.03688063431023954,
+   "cv": 0.04065795084305127,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q4",
@@ -680,20 +687,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    17.427,
-    17.637,
-    17.493,
-    18.143,
-    17.407
+    16.948,
+    17.189,
+    17.071,
+    16.513,
+    16.547
    ],
-   "median": 17.493,
+   "median": 16.948,
    "ci": [
-    17.407,
-    18.143
+    16.513,
+    17.189
    ],
-   "cv": 0.017319083634487017,
+   "cv": 0.01825631193033427,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q4",
@@ -701,20 +708,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    14.297,
-    13.824,
-    13.59,
-    14.182,
-    13.875
+    14.021,
+    14.905,
+    13.873,
+    13.739,
+    13.193
    ],
-   "median": 13.875,
+   "median": 13.873,
    "ci": [
-    13.59,
-    14.297
+    13.193,
+    14.905
    ],
-   "cv": 0.020436438184300524,
+   "cv": 0.04449835451576702,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q4",
@@ -722,20 +729,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    270.317,
-    264.244,
-    256.913,
-    253.683,
-    257.923
+    237.28,
+    237.437,
+    238.829,
+    236.523,
+    237.919
    ],
-   "median": 257.923,
+   "median": 237.437,
    "ci": [
-    253.683,
-    270.317
+    236.523,
+    238.829
    ],
-   "cv": 0.025474076612414808,
+   "cv": 0.003584323079660183,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q4",
@@ -743,3338 +750,3338 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    272.102,
-    265.441,
-    267.222,
-    264.465,
-    273.238
+    241.306,
+    236.391,
+    235.095,
+    237.226,
+    239.905
    ],
-   "median": 267.222,
+   "median": 237.226,
    "ci": [
-    264.465,
-    273.238
+    235.095,
+    241.306
    ],
-   "cv": 0.014745243267768283,
+   "cv": 0.010750853338752229,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q5",
    "system": "nucleus (row)",
    "phase": "cold",
+   "unit": "ms",
+   "times": [
+    107.574,
+    102.129,
+    104.984,
+    101.244,
+    98.788
+   ],
+   "median": 102.129,
+   "ci": [
+    98.788,
+    107.574
+   ],
+   "cv": 0.033093755156277854,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    96.754,
+    93.271,
+    98.861,
+    95.315,
+    98.494
+   ],
+   "median": 96.754,
+   "ci": [
+    93.271,
+    98.861
+   ],
+   "cv": 0.023980524252998705,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    15.881,
+    16.173,
+    15.568,
+    16.095,
+    15.725
+   ],
+   "median": 15.881,
+   "ci": [
+    15.568,
+    16.173
+   ],
+   "cv": 0.01583172953557204,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    12.373,
+    12.08,
+    12.015,
+    11.852,
+    12.157
+   ],
+   "median": 12.08,
+   "ci": [
+    11.852,
+    12.373
+   ],
+   "cv": 0.015838519073259758,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    308.196,
+    312.367,
+    304.941,
+    305.625,
+    306.491
+   ],
+   "median": 306.491,
+   "ci": [
+    304.941,
+    312.367
+   ],
+   "cv": 0.009653376572526802,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    228.067,
+    226.984,
+    226.786,
+    228.291,
+    226.459
+   ],
+   "median": 226.984,
+   "ci": [
+    226.459,
+    228.291
+   ],
+   "cv": 0.003574002478823247,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    91.144,
+    94.699,
+    86.959,
+    93.297,
+    87.59
+   ],
+   "median": 91.144,
+   "ci": [
+    86.959,
+    94.699
+   ],
+   "cv": 0.03761359225905921,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    81.813,
+    89.35,
+    87.6,
+    90.824,
+    85.589
+   ],
+   "median": 87.6,
+   "ci": [
+    81.813,
+    90.824
+   ],
+   "cv": 0.040375444673172424,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    9.429,
+    9.243,
+    9.204,
+    9.586,
+    9.757
+   ],
+   "median": 9.429,
+   "ci": [
+    9.204,
+    9.757
+   ],
+   "cv": 0.024626943005876405,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.69,
+    6.179,
+    6.386,
+    7.031,
+    6.768
+   ],
+   "median": 6.69,
+   "ci": [
+    6.179,
+    7.031
+   ],
+   "cv": 0.05042789296135042,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q6",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    126.414,
+    126.125,
+    124.655,
+    128.83,
+    126.567
+   ],
+   "median": 126.414,
+   "ci": [
+    124.655,
+    128.83
+   ],
+   "cv": 0.011845312561297734,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q6",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    56.015,
+    53.846,
+    53.622,
+    53.839,
+    54.53
+   ],
+   "median": 53.846,
+   "ci": [
+    53.622,
+    56.015
+   ],
+   "cv": 0.018038736469418785,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    89.686,
+    91.086,
+    90.282,
+    91.741,
+    88.357
+   ],
+   "median": 90.282,
+   "ci": [
+    88.357,
+    91.741
+   ],
+   "cv": 0.014474143656674836,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    86.001,
+    88.067,
+    85.55,
+    88.869,
+    85.161
+   ],
+   "median": 86.001,
+   "ci": [
+    85.161,
+    88.869
+   ],
+   "cv": 0.018900635793512446,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    6.274,
+    6.542,
+    6.276,
+    6.9,
+    6.014
+   ],
+   "median": 6.276,
+   "ci": [
+    6.014,
+    6.9
+   ],
+   "cv": 0.0524215807608498,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.275,
+    3.301,
+    3.326,
+    3.792,
+    3.472
+   ],
+   "median": 3.326,
+   "ci": [
+    3.275,
+    3.792
+   ],
+   "cv": 0.06251172000189587,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    121.19,
+    123.023,
+    120.312,
+    124.655,
+    124.701
+   ],
+   "median": 123.023,
+   "ci": [
+    120.312,
+    124.701
+   ],
+   "cv": 0.01623062718148286,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    55.958,
+    55.929,
+    57.009,
+    56.226,
+    57.846
+   ],
+   "median": 56.226,
+   "ci": [
+    55.929,
+    57.846
+   ],
+   "cv": 0.014575941888061399,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    113.237,
+    105.175,
+    113.403,
+    107.142,
+    111.078
+   ],
+   "median": 111.078,
+   "ci": [
+    105.175,
+    113.403
+   ],
+   "cv": 0.03360632834847206,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    99.805,
+    96.856,
+    99.261,
+    98.027,
+    101.966
+   ],
+   "median": 99.261,
+   "ci": [
+    96.856,
+    101.966
+   ],
+   "cv": 0.019452267138390572,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    25.405,
+    29.881,
+    26.447,
+    25.776,
+    26.064
+   ],
+   "median": 26.064,
+   "ci": [
+    25.405,
+    29.881
+   ],
+   "cv": 0.0677857815393603,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    22.099,
+    25.2,
+    22.471,
+    21.918,
+    21.812
+   ],
+   "median": 22.099,
+   "ci": [
+    21.812,
+    25.2
+   ],
+   "cv": 0.06254773643228734,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    377.553,
+    377.122,
+    378.894,
+    386.002,
+    389.572
+   ],
+   "median": 378.894,
+   "ci": [
+    377.122,
+    389.572
+   ],
+   "cv": 0.01472357482513055,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    372.022,
+    369.569,
+    369.967,
+    372.179,
+    376.041
+   ],
+   "median": 372.022,
+   "ci": [
+    369.569,
+    376.041
+   ],
+   "cv": 0.006906235358479421,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    151.27,
+    153.704,
+    155.263,
+    167.61,
+    159.117
+   ],
+   "median": 155.263,
+   "ci": [
+    151.27,
+    167.61
+   ],
+   "cv": 0.04055772964637668,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    150.783,
+    151.191,
+    152.065,
+    148.888,
+    155.241
+   ],
+   "median": 151.191,
+   "ci": [
+    148.888,
+    155.241
+   ],
+   "cv": 0.015345302830328289,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    71.069,
+    75.695,
+    71.187,
+    72.988,
+    69.034
+   ],
+   "median": 71.187,
+   "ci": [
+    69.034,
+    75.695
+   ],
+   "cv": 0.034692801916238275,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    63.305,
+    62.689,
+    72.704,
+    64.944,
+    63.591
+   ],
+   "median": 63.591,
+   "ci": [
+    62.689,
+    72.704
+   ],
+   "cv": 0.06325681200487433,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    461.375,
+    462.068,
+    457.533,
+    458.21,
+    464.067
+   ],
+   "median": 461.375,
+   "ci": [
+    457.533,
+    464.067
+   ],
+   "cv": 0.0059333469402631555,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    398.145,
+    382.022,
+    383.015,
+    379.71,
+    380.227
+   ],
+   "median": 382.022,
+   "ci": [
+    379.71,
+    398.145
+   ],
+   "cv": 0.019956055163731164,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    99.583,
+    93.913,
+    90.345,
+    100.068,
+    90.918
+   ],
+   "median": 93.913,
+   "ci": [
+    90.345,
+    100.068
+   ],
+   "cv": 0.048881865164966495,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    87.526,
+    90.32,
+    82.621,
+    86.415,
+    87.504
+   ],
+   "median": 87.504,
+   "ci": [
+    82.621,
+    90.32
+   ],
+   "cv": 0.03204158005213518,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    9.989,
+    9.801,
+    9.22,
+    9.501,
+    9.478
+   ],
+   "median": 9.501,
+   "ci": [
+    9.22,
+    9.989
+   ],
+   "cv": 0.03129112812846216,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    5.997,
+    5.754,
+    5.756,
+    6.281,
+    5.969
+   ],
+   "median": 5.969,
+   "ci": [
+    5.754,
+    6.281
+   ],
+   "cv": 0.03644431140572869,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    125.891,
+    127.61,
+    127.471,
+    127.081,
+    124.446
+   ],
+   "median": 127.081,
+   "ci": [
+    124.446,
+    127.61
+   ],
+   "cv": 0.010533668219704218,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    57.899,
+    58.296,
+    58.361,
+    58.553,
+    58.222
+   ],
+   "median": 58.296,
+   "ci": [
+    57.899,
+    58.553
+   ],
+   "cv": 0.004105764538848866,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    93.231,
+    92.663,
+    98.235,
+    102.59,
+    91.373
+   ],
+   "median": 93.231,
+   "ci": [
+    91.373,
+    102.59
+   ],
+   "cv": 0.049027639146160366,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    89.274,
+    89.842,
+    88.943,
+    90.977,
+    89.139
+   ],
+   "median": 89.274,
+   "ci": [
+    88.943,
+    90.977
+   ],
+   "cv": 0.00916420826057601,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    10.066,
+    11.762,
+    9.97,
+    10.143,
+    9.858
+   ],
+   "median": 10.066,
+   "ci": [
+    9.858,
+    11.762
+   ],
+   "cv": 0.07636058615659426,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    5.855,
+    6.786,
+    6.266,
+    6.537,
+    6.108
+   ],
+   "median": 6.266,
+   "ci": [
+    5.855,
+    6.786
+   ],
+   "cv": 0.05756735512969144,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q11",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    125.484,
+    125.655,
+    129.304,
+    125.314,
+    124.399
+   ],
+   "median": 125.484,
+   "ci": [
+    124.399,
+    129.304
+   ],
+   "cv": 0.015018429701794966,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q11",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    59.466,
+    58.825,
+    59.029,
+    59.144,
+    62.048
+   ],
+   "median": 59.144,
+   "ci": [
+    58.825,
+    62.048
+   ],
+   "cv": 0.02230427380890613,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    102.787,
+    102.243,
+    110.722,
+    102.395,
+    97.174
+   ],
+   "median": 102.395,
+   "ci": [
+    97.174,
+    110.722
+   ],
+   "cv": 0.04716929539668845,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    92.372,
+    93.515,
+    91.815,
+    92.874,
+    89.839
+   ],
+   "median": 92.372,
+   "ci": [
+    89.839,
+    93.515
+   ],
+   "cv": 0.01523001228047352,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    14.638,
+    16.41,
+    14.756,
+    14.994,
+    14.385
+   ],
+   "median": 14.756,
+   "ci": [
+    14.385,
+    16.41
+   ],
+   "cv": 0.05310203401451744,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    10.603,
+    11.184,
+    10.498,
+    10.565,
+    10.83
+   ],
+   "median": 10.603,
+   "ci": [
+    10.498,
+    11.184
+   ],
+   "cv": 0.026060260021354618,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    129.124,
+    130.549,
+    128.395,
+    130.984,
+    130.302
+   ],
+   "median": 130.302,
+   "ci": [
+    128.395,
+    130.984
+   ],
+   "cv": 0.008275933988571672,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    64.459,
+    63.793,
+    63.951,
+    63.781,
+    64.867
+   ],
+   "median": 63.951,
+   "ci": [
+    63.781,
+    64.867
+   ],
+   "cv": 0.0074359080003668625,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    109.244,
+    107.403,
+    113.329,
+    105.158,
+    113.515
+   ],
+   "median": 109.244,
+   "ci": [
+    105.158,
+    113.515
+   ],
+   "cv": 0.03343266976837693,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    105.235,
+    100.458,
+    101.612,
+    99.515,
+    99.475
+   ],
+   "median": 100.458,
+   "ci": [
+    99.475,
+    105.235
+   ],
+   "cv": 0.023577299480305385,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    27.258,
+    25.856,
+    25.51,
+    25.951,
+    25.073
+   ],
+   "median": 25.856,
+   "ci": [
+    25.073,
+    27.258
+   ],
+   "cv": 0.031569657935822885,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    20.361,
+    20.448,
+    19.853,
+    20.374,
+    19.44
+   ],
+   "median": 20.361,
+   "ci": [
+    19.44,
+    20.448
+   ],
+   "cv": 0.021702583668066863,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    144.615,
+    144.026,
+    145.4,
+    142.815,
+    148.052
+   ],
+   "median": 144.615,
+   "ci": [
+    142.815,
+    148.052
+   ],
+   "cv": 0.013509160224057183,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    72.975,
+    75.768,
+    73.847,
+    72.649,
+    73.309
+   ],
+   "median": 73.309,
+   "ci": [
+    72.649,
+    75.768
+   ],
+   "cv": 0.016727426794371263,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    111.206,
+    99.268,
+    96.712,
+    98.629,
+    97.46
+   ],
+   "median": 98.629,
+   "ci": [
+    96.712,
+    111.206
+   ],
+   "cv": 0.0594245053704721,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    94.864,
+    95.482,
+    90.721,
+    92.829,
+    94.508
+   ],
+   "median": 94.508,
+   "ci": [
+    90.721,
+    95.482
+   ],
+   "cv": 0.02054297070783654,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    16.778,
+    15.665,
+    15.694,
+    16.096,
+    15.804
+   ],
+   "median": 15.804,
+   "ci": [
+    15.665,
+    16.778
+   ],
+   "cv": 0.028941442008735198,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    12.547,
+    11.127,
+    11.258,
+    11.008,
+    11.208
+   ],
+   "median": 11.208,
+   "ci": [
+    11.008,
+    12.547
+   ],
+   "cv": 0.05527344384495373,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    138.429,
+    129.377,
+    129.667,
+    127.861,
+    135.339
+   ],
+   "median": 129.667,
+   "ci": [
+    127.861,
+    138.429
+   ],
+   "cv": 0.034233300385768654,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    59.815,
+    62.517,
+    60.999,
+    59.729,
+    62.779
+   ],
+   "median": 60.999,
+   "ci": [
+    59.729,
+    62.779
+   ],
+   "cv": 0.02361351544934391,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    109.661,
+    102.682,
+    107.407,
+    110.316,
+    104.591
+   ],
+   "median": 107.407,
+   "ci": [
+    102.682,
+    110.316
+   ],
+   "cv": 0.0305430454411968,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    98.297,
+    98.289,
+    103.834,
+    107.439,
+    100.61
+   ],
+   "median": 100.61,
+   "ci": [
+    98.289,
+    107.439
+   ],
+   "cv": 0.0386809738659104,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    21.448,
+    22.287,
+    21.74,
+    20.885,
+    21.507
+   ],
+   "median": 21.507,
+   "ci": [
+    20.885,
+    22.287
+   ],
+   "cv": 0.023533291737358113,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    17.358,
+    17.152,
+    17.077,
+    16.775,
+    17.106
+   ],
+   "median": 17.106,
+   "ci": [
+    16.775,
+    17.358
+   ],
+   "cv": 0.012245300456421306,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    243.465,
+    259.019,
+    264.491,
+    246.511,
+    242.959
+   ],
+   "median": 246.511,
+   "ci": [
+    242.959,
+    264.491
+   ],
+   "cv": 0.03916702048790803,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    245.426,
+    239.647,
+    234.428,
+    239.42,
+    254.803
+   ],
+   "median": 239.647,
+   "ci": [
+    234.428,
+    254.803
+   ],
+   "cv": 0.03206965575779401,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    111.738,
+    112.171,
+    117.418,
+    117.483,
+    117.541
+   ],
+   "median": 117.418,
+   "ci": [
+    111.738,
+    117.541
+   ],
+   "cv": 0.026294631338965188,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.365,
+    111.141,
+    109.197,
+    112.392,
+    109.027
+   ],
+   "median": 109.365,
+   "ci": [
+    109.027,
+    112.392
+   ],
+   "cv": 0.013430932061333826,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    31.528,
+    32.253,
+    31.723,
+    32.22,
+    32.377
+   ],
+   "median": 32.22,
+   "ci": [
+    31.528,
+    32.377
+   ],
+   "cv": 0.011601649786078755,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    26.89,
+    26.916,
+    26.413,
+    27.531,
+    26.448
+   ],
+   "median": 26.89,
+   "ci": [
+    26.413,
+    27.531
+   ],
+   "cv": 0.01688743188082452,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    324.935,
+    327.303,
+    323.185,
+    325.377,
+    324.739
+   ],
+   "median": 324.935,
+   "ci": [
+    323.185,
+    327.303
+   ],
+   "cv": 0.004550466560573625,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    220.381,
+    221.235,
+    222.563,
+    220.248,
+    223.774
+   ],
+   "median": 221.235,
+   "ci": [
+    220.248,
+    223.774
+   ],
+   "cv": 0.006802472938085369,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    132.503,
+    108.668,
+    107.761,
+    115.454,
+    114.523
+   ],
+   "median": 114.523,
+   "ci": [
+    107.761,
+    132.503
+   ],
+   "cv": 0.08596137490481678,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.905,
+    109.541,
+    100.337,
+    105.606,
+    105.62
+   ],
+   "median": 105.62,
+   "ci": [
+    100.337,
+    109.905
+   ],
+   "cv": 0.03645395510148305,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    26.484,
+    28.611,
+    26.946,
+    26.203,
+    26.447
+   ],
+   "median": 26.484,
+   "ci": [
+    26.203,
+    28.611
+   ],
+   "cv": 0.036117320733389364,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    21.129,
+    21.033,
+    20.787,
+    21.346,
+    21.111
+   ],
+   "median": 21.111,
+   "ci": [
+    20.787,
+    21.346
+   ],
+   "cv": 0.009551208537474954,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q17",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    132.971,
+    134.208,
+    135.868,
+    136.239,
+    131.445
+   ],
+   "median": 134.208,
+   "ci": [
+    131.445,
+    136.239
+   ],
+   "cv": 0.014921123560291495,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q17",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    83.187,
+    74.247,
+    71.947,
+    72.833,
+    72.321
+   ],
+   "median": 72.833,
+   "ci": [
+    71.947,
+    83.187
+   ],
+   "cv": 0.0628808284964222,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    213.578,
+    207.39,
+    208.22,
+    203.51,
+    210.187
+   ],
+   "median": 208.22,
+   "ci": [
+    203.51,
+    213.578
+   ],
+   "cv": 0.017747835943759928,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    203.901,
+    198.432,
+    198.845,
+    208.905,
+    210.55
+   ],
+   "median": 203.901,
+   "ci": [
+    198.432,
+    210.55
+   ],
+   "cv": 0.027327441547517192,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    132.817,
+    130.516,
+    128.529,
+    131.896,
+    131.988
+   ],
+   "median": 131.896,
+   "ci": [
+    128.529,
+    132.817
+   ],
+   "cv": 0.01282097704511393,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    122.115,
+    121.919,
+    122.19,
+    122.835,
+    120.92
+   ],
+   "median": 122.115,
+   "ci": [
+    120.92,
+    122.835
+   ],
+   "cv": 0.005678196918622017,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    508.074,
+    494.653,
+    510.601,
+    505.46,
+    500.743
+   ],
+   "median": 505.46,
+   "ci": [
+    494.653,
+    510.601
+   ],
+   "cv": 0.012560182097780792,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    382.733,
+    390.469,
+    380.904,
+    381.367,
+    379.274
+   ],
+   "median": 381.367,
+   "ci": [
+    379.274,
+    390.469
+   ],
+   "cv": 0.011441255255738641,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    94.881,
+    101.01,
+    100.443,
+    98.121,
+    102.393
+   ],
+   "median": 100.443,
+   "ci": [
+    94.881,
+    102.393
+   ],
+   "cv": 0.02963618097695547,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    95.848,
+    95.425,
+    94.849,
+    96.147,
+    92.205
+   ],
+   "median": 95.425,
+   "ci": [
+    92.205,
+    96.147
+   ],
+   "cv": 0.016657708936237404,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    4.044,
+    4.14,
+    4.035,
+    4.714,
+    4.094
+   ],
+   "median": 4.094,
+   "ci": [
+    4.035,
+    4.714
+   ],
+   "cv": 0.06834609912407878,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.084,
+    3.075,
+    2.981,
+    3.182,
+    2.981
+   ],
+   "median": 3.075,
+   "ci": [
+    2.981,
+    3.182
+   ],
+   "cv": 0.027416994830931744,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    131.0,
+    127.854,
+    128.203,
+    129.742,
+    126.06
+   ],
+   "median": 128.203,
+   "ci": [
+    126.06,
+    131.0
+   ],
+   "cv": 0.014667778784682433,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    52.09,
+    52.297,
+    53.277,
+    53.261,
+    51.961
+   ],
+   "median": 52.297,
+   "ci": [
+    51.961,
+    53.277
+   ],
+   "cv": 0.012226251290676038,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    103.216,
+    108.124,
+    105.979,
+    100.243,
+    104.191
+   ],
+   "median": 104.191,
+   "ci": [
+    100.243,
+    108.124
+   ],
+   "cv": 0.02837764669850956,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    88.609,
+    91.138,
+    88.442,
+    91.571,
+    93.944
+   ],
+   "median": 91.138,
+   "ci": [
+    88.442,
+    93.944
+   ],
+   "cv": 0.0252127307032227,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    26.443,
+    25.438,
+    25.604,
+    26.301,
+    25.444
+   ],
+   "median": 25.604,
+   "ci": [
+    25.438,
+    26.443
+   ],
+   "cv": 0.018856172931565607,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.214,
+    7.032,
+    7.348,
+    7.208,
+    6.817
+   ],
+   "median": 7.208,
+   "ci": [
+    6.817,
+    7.348
+   ],
+   "cv": 0.028772051250708496,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    129.686,
+    128.652,
+    134.756,
+    130.017,
+    127.833
+   ],
+   "median": 129.686,
+   "ci": [
+    127.833,
+    134.756
+   ],
+   "cv": 0.020701092626184824,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    64.829,
+    64.947,
+    65.667,
+    66.841,
+    67.016
+   ],
+   "median": 65.667,
+   "ci": [
+    64.829,
+    67.016
+   ],
+   "cv": 0.015618723263434409,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    111.171,
+    105.456,
+    102.115,
+    112.312,
+    108.622
+   ],
+   "median": 108.622,
+   "ci": [
+    102.115,
+    112.312
+   ],
+   "cv": 0.0387906204832323,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    98.81,
+    90.636,
+    94.917,
+    102.941,
+    93.401
+   ],
+   "median": 94.917,
+   "ci": [
+    90.636,
+    102.941
+   ],
+   "cv": 0.05006580133293204,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    27.004,
+    25.768,
+    26.764,
+    26.412,
+    26.226
+   ],
+   "median": 26.412,
+   "ci": [
+    25.768,
+    27.004
+   ],
+   "cv": 0.018152964364816986,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.253,
+    6.825,
+    6.748,
+    6.874,
+    7.029
+   ],
+   "median": 6.874,
+   "ci": [
+    6.748,
+    7.253
+   ],
+   "cv": 0.02880938449768161,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q21",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    126.399,
+    126.177,
+    128.06,
+    127.55,
+    129.37
+   ],
+   "median": 127.55,
+   "ci": [
+    126.177,
+    129.37
+   ],
+   "cv": 0.010206414594535496,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q21",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    65.825,
+    69.798,
+    65.004,
+    65.575,
+    66.848
+   ],
+   "median": 65.825,
+   "ci": [
+    65.004,
+    69.798
+   ],
+   "cv": 0.028570307470301683,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    108.579,
+    112.58,
+    113.549,
+    109.782,
+    113.053
+   ],
+   "median": 112.58,
+   "ci": [
+    108.579,
+    113.549
+   ],
+   "cv": 0.019678402580336596,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    99.823,
+    103.852,
+    97.894,
+    102.303,
+    107.401
+   ],
+   "median": 102.303,
+   "ci": [
+    97.894,
+    107.401
+   ],
+   "cv": 0.03592122846081477,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    36.722,
+    39.196,
+    34.794,
+    37.692,
+    35.219
+   ],
+   "median": 36.722,
+   "ci": [
+    34.794,
+    39.196
+   ],
+   "cv": 0.049160241558240246,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.57,
+    7.586,
+    7.145,
+    7.692,
+    7.216
+   ],
+   "median": 7.57,
+   "ci": [
+    7.145,
+    7.692
+   ],
+   "cv": 0.032840098270202615,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q22",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    135.06,
+    137.321,
+    134.961,
+    136.84,
+    134.208
+   ],
+   "median": 135.06,
+   "ci": [
+    134.208,
+    137.321
+   ],
+   "cv": 0.009824075474666686,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q22",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    71.279,
+    70.242,
+    70.265,
+    71.091,
+    69.847
+   ],
+   "median": 70.265,
+   "ci": [
+    69.847,
+    71.279
+   ],
+   "cv": 0.008664064708153115,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    166.493,
+    162.593,
+    165.022,
+    163.773,
+    158.211
+   ],
+   "median": 163.773,
+   "ci": [
+    158.211,
+    166.493
+   ],
+   "cv": 0.019313570399300664,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    152.856,
+    151.6,
+    153.877,
+    148.19,
+    148.318
+   ],
+   "median": 151.6,
+   "ci": [
+    148.19,
+    153.877
+   ],
+   "cv": 0.017262259370581675,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    127.449,
+    128.705,
+    125.046,
+    133.98,
+    127.475
+   ],
+   "median": 127.475,
+   "ci": [
+    125.046,
+    133.98
+   ],
+   "cv": 0.025848898405685623,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    118.66,
+    116.188,
+    117.214,
+    123.773,
+    121.981
+   ],
+   "median": 118.66,
+   "ci": [
+    116.188,
+    123.773
+   ],
+   "cv": 0.026873201920446545,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q23",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    129.296,
+    128.02,
+    129.521,
+    130.78,
+    127.719
+   ],
+   "median": 129.296,
+   "ci": [
+    127.719,
+    130.78
+   ],
+   "cv": 0.009572844581800096,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q23",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    65.67,
+    64.391,
+    64.297,
+    64.889,
+    64.964
+   ],
+   "median": 64.889,
+   "ci": [
+    64.297,
+    65.67
+   ],
+   "cv": 0.00845792114300674,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    97.521,
+    90.195,
+    94.457,
+    89.39,
+    92.07
+   ],
+   "median": 92.07,
+   "ci": [
+    89.39,
+    97.521
+   ],
+   "cv": 0.035748908118214726,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    91.101,
+    91.75,
+    91.133,
+    90.408,
+    89.946
+   ],
+   "median": 91.101,
+   "ci": [
+    89.946,
+    91.75
+   ],
+   "cv": 0.007711610542448412,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    12.377,
+    13.539,
+    12.847,
+    13.29,
+    13.332
+   ],
+   "median": 13.29,
+   "ci": [
+    12.377,
+    13.539
+   ],
+   "cv": 0.03559637713576162,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.229,
+    6.118,
+    5.933,
+    6.399,
+    5.603
+   ],
+   "median": 6.118,
+   "ci": [
+    5.603,
+    6.399
+   ],
+   "cv": 0.050336882615641676,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    129.768,
+    128.788,
+    133.33,
+    129.752,
+    127.626
+   ],
+   "median": 129.752,
+   "ci": [
+    127.626,
+    133.33
+   ],
+   "cv": 0.016427173204477813,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    58.951,
+    58.475,
+    61.183,
+    59.339,
+    58.174
+   ],
+   "median": 58.951,
+   "ci": [
+    58.174,
+    61.183
+   ],
+   "cv": 0.019958774521784628,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    100.056,
+    98.95,
+    91.577,
+    95.701,
+    97.093
+   ],
+   "median": 97.093,
+   "ci": [
+    91.577,
+    100.056
+   ],
+   "cv": 0.03419739748404965,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    89.985,
+    91.269,
+    89.325,
+    90.785,
+    87.776
+   ],
+   "median": 89.985,
+   "ci": [
+    87.776,
+    91.269
+   ],
+   "cv": 0.015224013522726836,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    13.328,
+    13.106,
+    12.961,
+    12.622,
+    13.453
+   ],
+   "median": 13.106,
+   "ci": [
+    12.622,
+    13.453
+   ],
+   "cv": 0.02487199607998027,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.199,
+    6.911,
+    7.066,
+    7.424,
+    7.128
+   ],
+   "median": 7.128,
+   "ci": [
+    6.911,
+    7.424
+   ],
+   "cv": 0.026371720806340225,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    123.409,
+    123.143,
+    127.593,
+    122.608,
+    121.78
+   ],
+   "median": 123.143,
+   "ci": [
+    121.78,
+    127.593
+   ],
+   "cv": 0.01826841865266472,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    57.109,
+    59.872,
+    57.722,
+    69.545,
+    59.052
+   ],
+   "median": 59.052,
+   "ci": [
+    57.109,
+    69.545
+   ],
+   "cv": 0.08381264569664487,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    96.715,
+    95.551,
+    93.995,
+    98.894,
+    95.152
+   ],
+   "median": 95.551,
+   "ci": [
+    93.995,
+    98.894
+   ],
+   "cv": 0.01934157550475566,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    90.202,
+    92.387,
+    91.185,
+    90.233,
+    84.634
+   ],
+   "median": 90.233,
+   "ci": [
+    84.634,
+    92.387
+   ],
+   "cv": 0.03325815608613357,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    14.37,
+    13.644,
+    14.735,
+    14.838,
+    14.807
+   ],
+   "median": 14.735,
+   "ci": [
+    13.644,
+    14.838
+   ],
+   "cv": 0.03472449598442132,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.293,
+    7.912,
+    6.841,
+    7.332,
+    7.486
+   ],
+   "median": 7.332,
+   "ci": [
+    6.841,
+    7.912
+   ],
+   "cv": 0.05228475194826514,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q26",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    129.021,
+    128.525,
+    127.262,
+    129.573,
+    131.132
+   ],
+   "median": 129.021,
+   "ci": [
+    127.262,
+    131.132
+   ],
+   "cv": 0.011000523760461718,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q26",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    58.538,
+    59.753,
+    58.344,
+    62.472,
+    59.744
+   ],
+   "median": 59.744,
+   "ci": [
+    58.344,
+    62.472
+   ],
+   "cv": 0.02755888060824502,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    124.806,
+    120.98,
+    119.815,
+    149.478,
+    122.835
+   ],
+   "median": 122.835,
+   "ci": [
+    119.815,
+    149.478
+   ],
+   "cv": 0.09707696596638718,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    117.495,
+    116.149,
+    117.877,
+    122.523,
+    120.564
+   ],
+   "median": 117.877,
+   "ci": [
+    116.149,
+    122.523
+   ],
+   "cv": 0.02163607500736587,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    53.033,
+    58.559,
+    49.175,
+    58.267,
+    51.816
+   ],
+   "median": 53.033,
+   "ci": [
+    49.175,
+    58.559
+   ],
+   "cv": 0.0760205782803865,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    35.411,
+    41.715,
+    35.725,
+    42.741,
+    36.249
+   ],
+   "median": 36.249,
+   "ci": [
+    35.411,
+    42.741
+   ],
+   "cv": 0.09264834499209275,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    136.928,
+    140.867,
+    138.096,
+    137.565,
+    134.756
+   ],
+   "median": 137.565,
+   "ci": [
+    134.756,
+    140.867
+   ],
+   "cv": 0.016021157259576212,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    78.582,
+    77.845,
+    77.168,
+    77.726,
+    77.686
+   ],
+   "median": 77.726,
+   "ci": [
+    77.168,
+    78.582
+   ],
+   "cv": 0.006526849019827326,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    311.565,
+    290.478,
+    291.256,
+    290.167,
+    289.014
+   ],
+   "median": 290.478,
+   "ci": [
+    289.014,
+    311.565
+   ],
+   "cv": 0.03251595660233257,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    292.693,
+    288.377,
+    320.19,
+    295.625,
+    306.583
+   ],
+   "median": 295.625,
+   "ci": [
+    288.377,
+    320.19
+   ],
+   "cv": 0.0425953126806203,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    229.943,
+    233.057,
+    223.987,
+    234.109,
+    231.129
+   ],
+   "median": 231.129,
+   "ci": [
+    223.987,
+    234.109
+   ],
+   "cv": 0.01717683636487078,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    217.168,
+    218.384,
+    213.779,
+    227.905,
+    223.174
+   ],
+   "median": 218.384,
+   "ci": [
+    213.779,
+    227.905
+   ],
+   "cv": 0.02507956450875794,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    626.593,
+    631.017,
+    622.348,
+    646.013,
+    622.866
+   ],
+   "median": 626.593,
+   "ci": [
+    622.348,
+    646.013
+   ],
+   "cv": 0.015440824491801562,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    601.134,
+    598.073,
+    596.591,
+    597.133,
+    603.289
+   ],
+   "median": 598.073,
+   "ci": [
+    596.591,
+    603.289
+   ],
+   "cv": 0.004778635085597803,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    282.227,
+    268.715,
+    267.854,
+    282.623,
+    268.641
+   ],
+   "median": 268.715,
+   "ci": [
+    267.854,
+    282.623
+   ],
+   "cv": 0.028059597150077754,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    271.238,
+    264.72,
+    279.589,
+    266.788,
+    269.0
+   ],
+   "median": 269.0,
+   "ci": [
+    264.72,
+    279.589
+   ],
+   "cv": 0.0212809245009512,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    206.378,
+    210.759,
+    209.415,
+    204.623,
+    199.689
+   ],
+   "median": 206.378,
+   "ci": [
+    199.689,
+    210.759
+   ],
+   "cv": 0.021145966221535528,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    194.557,
+    203.358,
+    195.717,
+    201.044,
+    201.23
+   ],
+   "median": 201.044,
+   "ci": [
+    194.557,
+    203.358
+   ],
+   "cv": 0.019199463397055343,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    167.875,
+    170.395,
+    170.438,
+    171.62,
+    167.19
+   ],
+   "median": 170.395,
+   "ci": [
+    167.19,
+    171.62
+   ],
+   "cv": 0.011096829200507394,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    125.114,
+    127.193,
+    125.622,
+    125.19,
+    128.138
+   ],
+   "median": 125.622,
+   "ci": [
+    125.114,
+    128.138
+   ],
+   "cv": 0.010672589216779655,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    104.312,
+    101.913,
+    103.576,
+    108.633,
+    115.232
+   ],
+   "median": 104.312,
+   "ci": [
+    101.913,
+    115.232
+   ],
+   "cv": 0.05021537467575925,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    100.347,
+    98.843,
+    97.818,
+    100.93,
+    103.712
+   ],
+   "median": 100.347,
+   "ci": [
+    97.818,
+    103.712
+   ],
+   "cv": 0.02246445974112463,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    21.094,
+    23.443,
+    24.243,
+    22.869,
+    20.902
+   ],
+   "median": 22.869,
+   "ci": [
+    20.902,
+    24.243
+   ],
+   "cv": 0.06511373815250908,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    15.065,
+    15.882,
+    16.985,
+    16.675,
+    14.627
+   ],
+   "median": 15.882,
+   "ci": [
+    14.627,
+    16.985
+   ],
+   "cv": 0.06374601696672892,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    134.359,
+    132.451,
+    132.062,
+    132.512,
+    134.272
+   ],
+   "median": 132.512,
+   "ci": [
+    132.062,
+    134.359
+   ],
+   "cv": 0.008226758214988038,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    63.456,
+    65.751,
+    63.554,
+    63.83,
+    63.267
+   ],
+   "median": 63.554,
+   "ci": [
+    63.267,
+    65.751
+   ],
+   "cv": 0.01587047565584816,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q31",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    127.03,
+    111.353,
+    116.87,
+    117.174,
+    116.347
+   ],
+   "median": 116.87,
+   "ci": [
+    111.353,
+    127.03
+   ],
+   "cv": 0.048434430586888906,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q31",
+   "system": "nucleus (row)",
+   "phase": "warm",
    "unit": "ms",
    "times": [
     110.845,
-    107.925,
-    116.956,
-    110.355,
-    108.748
+    107.752,
+    106.422,
+    105.879,
+    105.28
    ],
-   "median": 110.355,
+   "median": 106.422,
    "ci": [
-    107.925,
-    116.956
+    105.28,
+    110.845
    ],
-   "cv": 0.031999855492431804,
+   "cv": 0.020653463154156605,
    "flagged": false,
    "attempts": 1
-  },
-  {
-   "name": "Q5",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    99.209,
-    97.04,
-    98.432,
-    103.942,
-    103.519
-   ],
-   "median": 99.209,
-   "ci": [
-    97.04,
-    103.942
-   ],
-   "cv": 0.031032341500341162,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q5",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    16.977,
-    16.511,
-    16.853,
-    16.589,
-    16.29
-   ],
-   "median": 16.589,
-   "ci": [
-    16.29,
-    16.977
-   ],
-   "cv": 0.016470500074348526,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q5",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    12.471,
-    12.449,
-    12.565,
-    13.308,
-    12.185
-   ],
-   "median": 12.471,
-   "ci": [
-    12.185,
-    13.308
-   ],
-   "cv": 0.03354426293483733,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q5",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    338.221,
-    327.17,
-    337.441,
-    328.884,
-    330.432
-   ],
-   "median": 330.432,
-   "ci": [
-    327.17,
-    338.221
-   ],
-   "cv": 0.015255792901596768,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q5",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    286.962,
-    279.949,
-    290.155,
-    265.814,
-    291.614
-   ],
-   "median": 286.962,
-   "ci": [
-    265.814,
-    291.614
-   ],
-   "cv": 0.037313358029234106,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q6",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    98.734,
-    94.012,
-    96.945,
-    113.055,
-    105.944
-   ],
-   "median": 98.734,
-   "ci": [
-    94.012,
-    113.055
-   ],
-   "cv": 0.07573131820288347,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q6",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    101.34,
-    91.54,
-    99.536,
-    118.308,
-    103.934
-   ],
-   "median": 101.34,
-   "ci": [
-    91.54,
-    118.308
-   ],
-   "cv": 0.09485009757282965,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q6",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    9.985,
-    9.536,
-    10.562,
-    10.752,
-    9.821
-   ],
-   "median": 9.985,
-   "ci": [
-    9.536,
-    10.752
-   ],
-   "cv": 0.05039860771269255,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q6",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    6.516,
-    6.737,
-    7.161,
-    7.289,
-    6.694
-   ],
-   "median": 6.737,
-   "ci": [
-    6.516,
-    7.289
-   ],
-   "cv": 0.04786904961959762,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q6",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    144.087,
-    139.332,
-    141.585,
-    157.675,
-    138.717
-   ],
-   "median": 141.585,
-   "ci": [
-    138.717,
-    157.675
-   ],
-   "cv": 0.053927944588472415,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q6",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    54.752,
-    62.767,
-    55.172,
-    58.437,
-    55.958
-   ],
-   "median": 55.958,
-   "ci": [
-    54.752,
-    62.767
-   ],
-   "cv": 0.05772016062264376,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q7",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    99.67,
-    96.969,
-    103.256,
-    102.006,
-    106.212
-   ],
-   "median": 102.006,
-   "ci": [
-    96.969,
-    106.212
-   ],
-   "cv": 0.03456262040943638,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q7",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    110.049,
-    96.677,
-    94.774,
-    100.008,
-    94.026
-   ],
-   "median": 96.677,
-   "ci": [
-    94.026,
-    110.049
-   ],
-   "cv": 0.06597960332913336,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q7",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    6.744,
-    6.742,
-    6.676,
-    7.019,
-    6.398
-   ],
-   "median": 6.742,
-   "ci": [
-    6.398,
-    7.019
-   ],
-   "cv": 0.03296038750243963,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q7",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    3.68,
-    3.303,
-    3.63,
-    3.493,
-    3.494
-   ],
-   "median": 3.494,
-   "ci": [
-    3.303,
-    3.68
-   ],
-   "cv": 0.04170286177552562,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q7",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    137.58,
-    144.147,
-    136.351,
-    144.403,
-    135.261
-   ],
-   "median": 137.58,
-   "ci": [
-    135.261,
-    144.403
-   ],
-   "cv": 0.03148016443501264,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q7",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    57.323,
-    69.434,
-    58.96,
-    57.395,
-    57.055
-   ],
-   "median": 57.395,
-   "ci": [
-    57.055,
-    69.434
-   ],
-   "cv": 0.08841835031014984,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q8",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    133.08,
-    125.586,
-    123.23,
-    115.984,
-    115.539
-   ],
-   "median": 123.23,
-   "ci": [
-    115.539,
-    133.08
-   ],
-   "cv": 0.05944356846338935,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q8",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    107.231,
-    107.952,
-    111.867,
-    105.165,
-    104.236
-   ],
-   "median": 107.231,
-   "ci": [
-    104.236,
-    111.867
-   ],
-   "cv": 0.027662151909746864,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q8",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    26.69,
-    28.746,
-    26.462,
-    26.536,
-    26.65
-   ],
-   "median": 26.65,
-   "ci": [
-    26.462,
-    28.746
-   ],
-   "cv": 0.03593621972890745,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q8",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    22.581,
-    22.895,
-    22.696,
-    22.072,
-    22.883
-   ],
-   "median": 22.696,
-   "ci": [
-    22.072,
-    22.895
-   ],
-   "cv": 0.014861499870585387,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q8",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    387.919,
-    399.743,
-    387.657,
-    393.258,
-    386.254
-   ],
-   "median": 387.919,
-   "ci": [
-    386.254,
-    399.743
-   ],
-   "cv": 0.014282644899053504,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q8",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    412.932,
-    397.729,
-    401.157,
-    391.969,
-    416.373
-   ],
-   "median": 401.157,
-   "ci": [
-    391.969,
-    416.373
-   ],
-   "cv": 0.025512837510005337,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q9",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    169.994,
-    202.233,
-    165.405,
-    166.39,
-    165.355
-   ],
-   "median": 166.39,
-   "ci": [
-    165.355,
-    202.233
-   ],
-   "cv": 0.0918217739069068,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q9",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    161.883,
-    162.312,
-    158.61,
-    157.155,
-    159.575
-   ],
-   "median": 159.575,
-   "ci": [
-    157.155,
-    162.312
-   ],
-   "cv": 0.013649028492578064,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q9",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    75.029,
-    77.176,
-    76.969,
-    76.956,
-    75.898
-   ],
-   "median": 76.956,
-   "ci": [
-    75.029,
-    77.176
-   ],
-   "cv": 0.012007098427016112,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q9",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    68.209,
-    68.023,
-    72.704,
-    70.182,
-    70.731
-   ],
-   "median": 70.182,
-   "ci": [
-    68.023,
-    72.704
-   ],
-   "cv": 0.027667572977883113,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q9",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    471.704,
-    468.729,
-    465.464,
-    466.202,
-    468.486
-   ],
-   "median": 468.486,
-   "ci": [
-    465.464,
-    471.704
-   ],
-   "cv": 0.005241674573545201,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q9",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    447.913,
-    454.988,
-    444.312,
-    417.228,
-    417.68
-   ],
-   "median": 444.312,
-   "ci": [
-    417.228,
-    454.988
-   ],
-   "cv": 0.040645833677181324,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q10",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    106.397,
-    101.048,
-    99.725,
-    99.702,
-    116.77
-   ],
-   "median": 101.048,
-   "ci": [
-    99.702,
-    116.77
-   ],
-   "cv": 0.06945324143973018,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q10",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    97.092,
-    109.312,
-    97.49,
-    94.006,
-    91.868
-   ],
-   "median": 97.092,
-   "ci": [
-    91.868,
-    109.312
-   ],
-   "cv": 0.06897416245922842,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q10",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    9.808,
-    9.832,
-    10.312,
-    9.888,
-    9.52
-   ],
-   "median": 9.832,
-   "ci": [
-    9.52,
-    10.312
-   ],
-   "cv": 0.02880530403107976,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q10",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    5.743,
-    6.005,
-    5.984,
-    5.77,
-    5.784
-   ],
-   "median": 5.784,
-   "ci": [
-    5.743,
-    6.005
-   ],
-   "cv": 0.02158347821647405,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q10",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    144.968,
-    142.456,
-    143.734,
-    138.804,
-    136.48
-   ],
-   "median": 142.456,
-   "ci": [
-    136.48,
-    144.968
-   ],
-   "cv": 0.02506769306355421,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q10",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    59.542,
-    59.569,
-    70.915,
-    59.259,
-    59.325
-   ],
-   "median": 59.542,
-   "ci": [
-    59.259,
-    70.915
-   ],
-   "cv": 0.08328948536625001,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q11",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    101.514,
-    97.451,
-    109.223,
-    104.872,
-    95.657
-   ],
-   "median": 101.514,
-   "ci": [
-    95.657,
-    109.223
-   ],
-   "cv": 0.05411430035448215,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q11",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    107.073,
-    93.716,
-    106.091,
-    93.855,
-    132.25
-   ],
-   "median": 106.091,
-   "ci": [
-    93.716,
-    132.25
-   ],
-   "cv": 0.14734923936796027,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q11",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    12.538,
-    11.105,
-    10.526,
-    10.436,
-    12.658
-   ],
-   "median": 11.105,
-   "ci": [
-    10.436,
-    12.658
-   ],
-   "cv": 0.09408289459883519,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q11",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    7.258,
-    5.934,
-    6.274,
-    6.694,
-    6.635
-   ],
-   "median": 6.635,
-   "ci": [
-    5.934,
-    7.258
-   ],
-   "cv": 0.07563619036766066,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q11",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    135.444,
-    138.117,
-    138.629,
-    138.654,
-    143.351
-   ],
-   "median": 138.629,
-   "ci": [
-    135.444,
-    143.351
-   ],
-   "cv": 0.02052540779029472,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q11",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    70.442,
-    61.264,
-    60.138,
-    60.357,
-    64.287
-   ],
-   "median": 61.264,
-   "ci": [
-    60.138,
-    70.442
-   ],
-   "cv": 0.06831185638935836,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q12",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    105.771,
-    104.831,
-    108.669,
-    105.428,
-    108.721
-   ],
-   "median": 105.771,
-   "ci": [
-    104.831,
-    108.721
-   ],
-   "cv": 0.017494978637973512,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q12",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    97.245,
-    98.358,
-    97.706,
-    99.164,
-    97.052
-   ],
-   "median": 97.706,
-   "ci": [
-    97.052,
-    99.164
-   ],
-   "cv": 0.008835390442278539,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q12",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    15.291,
-    15.552,
-    15.465,
-    14.668,
-    17.891
-   ],
-   "median": 15.465,
-   "ci": [
-    14.668,
-    17.891
-   ],
-   "cv": 0.07818128096415337,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q12",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    11.392,
-    11.316,
-    11.241,
-    11.338,
-    13.403
-   ],
-   "median": 11.338,
-   "ci": [
-    11.241,
-    13.403
-   ],
-   "cv": 0.0794292328212918,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q12",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    154.94,
-    148.97,
-    147.676,
-    144.874,
-    148.905
-   ],
-   "median": 148.905,
-   "ci": [
-    144.874,
-    154.94
-   ],
-   "cv": 0.024657195507750862,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q12",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    66.577,
-    66.261,
-    65.754,
-    65.711,
-    65.953
-   ],
-   "median": 65.953,
-   "ci": [
-    65.711,
-    66.577
-   ],
-   "cv": 0.005532694384444612,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q13",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    119.622,
-    126.676,
-    116.132,
-    115.283,
-    144.922
-   ],
-   "median": 119.622,
-   "ci": [
-    115.283,
-    144.922
-   ],
-   "cv": 0.09839770604419941,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q13",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    115.105,
-    106.982,
-    105.941,
-    106.092,
-    111.462
-   ],
-   "median": 106.982,
-   "ci": [
-    105.941,
-    115.105
-   ],
-   "cv": 0.036986266579333724,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q13",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    26.317,
-    27.082,
-    26.419,
-    26.883,
-    27.507
-   ],
-   "median": 26.883,
-   "ci": [
-    26.317,
-    27.507
-   ],
-   "cv": 0.018213943989309714,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q13",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    21.506,
-    20.79,
-    20.723,
-    20.635,
-    24.728
-   ],
-   "median": 20.79,
-   "ci": [
-    20.635,
-    24.728
-   ],
-   "cv": 0.08030506209313161,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q13",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    150.94,
-    153.006,
-    154.821,
-    150.626,
-    152.088
-   ],
-   "median": 152.088,
-   "ci": [
-    150.626,
-    154.821
-   ],
-   "cv": 0.011157931105537843,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q13",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    74.183,
-    74.761,
-    77.883,
-    76.029,
-    74.745
-   ],
-   "median": 74.761,
-   "ci": [
-    74.183,
-    77.883
-   ],
-   "cv": 0.019648253292904594,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q14",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    118.95,
-    119.553,
-    107.722,
-    108.018,
-    124.937
-   ],
-   "median": 118.95,
-   "ci": [
-    107.722,
-    124.937
-   ],
-   "cv": 0.06593002928054612,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q14",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    108.74,
-    105.138,
-    96.182,
-    120.062,
-    98.912
-   ],
-   "median": 105.138,
-   "ci": [
-    96.182,
-    120.062
-   ],
-   "cv": 0.08871498895401866,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q14",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    17.31,
-    17.079,
-    16.812,
-    16.595,
-    16.854
-   ],
-   "median": 16.854,
-   "ci": [
-    16.595,
-    17.31
-   ],
-   "cv": 0.016136306227761743,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q14",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    12.099,
-    11.985,
-    11.912,
-    11.913,
-    11.842
-   ],
-   "median": 11.913,
-   "ci": [
-    11.842,
-    12.099
-   ],
-   "cv": 0.008145738754307805,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q14",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    145.304,
-    148.586,
-    144.276,
-    151.582,
-    141.949
-   ],
-   "median": 145.304,
-   "ci": [
-    141.949,
-    151.582
-   ],
-   "cv": 0.02582669215373011,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q14",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    66.374,
-    67.088,
-    72.479,
-    66.796,
-    65.209
-   ],
-   "median": 66.796,
-   "ci": [
-    65.209,
-    72.479
-   ],
-   "cv": 0.04180321341935279,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q15",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    116.178,
-    117.319,
-    135.971,
-    112.026,
-    111.435
-   ],
-   "median": 116.178,
-   "ci": [
-    111.435,
-    135.971
-   ],
-   "cv": 0.08472803425218617,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q15",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    107.417,
-    107.026,
-    109.765,
-    109.308,
-    108.447
-   ],
-   "median": 108.447,
-   "ci": [
-    107.026,
-    109.765
-   ],
-   "cv": 0.010861097805591259,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q15",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    23.01,
-    22.713,
-    22.86,
-    22.184,
-    23.129
-   ],
-   "median": 22.86,
-   "ci": [
-    22.184,
-    23.129
-   ],
-   "cv": 0.016141764332824937,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q15",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    17.528,
-    17.719,
-    18.086,
-    18.074,
-    18.163
-   ],
-   "median": 18.074,
-   "ci": [
-    17.528,
-    18.163
-   ],
-   "cv": 0.015394348793726118,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q15",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    254.566,
-    270.599,
-    268.09,
-    258.483,
-    253.36
-   ],
-   "median": 258.483,
-   "ci": [
-    253.36,
-    270.599
-   ],
-   "cv": 0.03019724123356597,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q15",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    271.436,
-    277.79,
-    273.009,
-    277.501,
-    263.873
-   ],
-   "median": 273.009,
-   "ci": [
-    263.873,
-    277.79
-   ],
-   "cv": 0.02078789743497312,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q16",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    125.477,
-    133.844,
-    137.887,
-    132.715,
-    129.387
-   ],
-   "median": 132.715,
-   "ci": [
-    125.477,
-    137.887
-   ],
-   "cv": 0.03554039392664502,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q16",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    126.375,
-    129.457,
-    129.568,
-    136.607,
-    123.687
-   ],
-   "median": 129.457,
-   "ci": [
-    123.687,
-    136.607
-   ],
-   "cv": 0.037422571616516735,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q16",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    37.451,
-    54.574,
-    34.43,
-    40.457,
-    34.247
-   ],
-   "median": 37.451,
-   "ci": [
-    34.247,
-    54.574
-   ],
-   "cv": 0.20905656739808753,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q16",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    30.069,
-    33.099,
-    28.773,
-    34.267,
-    28.195
-   ],
-   "median": 30.069,
-   "ci": [
-    28.195,
-    34.267
-   ],
-   "cv": 0.08674436786424514,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q16",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    394.087,
-    357.11,
-    359.424,
-    340.3,
-    361.736
-   ],
-   "median": 359.424,
-   "ci": [
-    340.3,
-    394.087
-   ],
-   "cv": 0.05394155013942019,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q16",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    341.728,
-    274.905,
-    300.585,
-    287.351,
-    263.675
-   ],
-   "median": 287.351,
-   "ci": [
-    263.675,
-    341.728
-   ],
-   "cv": 0.10285777301866614,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q17",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    129.401,
-    118.37,
-    149.922,
-    115.398,
-    117.065
-   ],
-   "median": 118.37,
-   "ci": [
-    115.398,
-    149.922
-   ],
-   "cv": 0.11459012961276886,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q17",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    109.991,
-    108.808,
-    124.581,
-    111.116,
-    105.781
-   ],
-   "median": 109.991,
-   "ci": [
-    105.781,
-    124.581
-   ],
-   "cv": 0.06496096486766277,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q17",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    38.234,
-    27.973,
-    28.313,
-    27.791,
-    27.756
-   ],
-   "median": 27.973,
-   "ci": [
-    27.756,
-    38.234
-   ],
-   "cv": 0.1532900186123803,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q17",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    21.937,
-    21.958,
-    22.133,
-    21.655,
-    21.748
-   ],
-   "median": 21.937,
-   "ci": [
-    21.655,
-    22.133
-   ],
-   "cv": 0.008584502741883885,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q17",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    150.871,
-    152.125,
-    151.125,
-    151.452,
-    151.236
-   ],
-   "median": 151.236,
-   "ci": [
-    150.871,
-    152.125
-   ],
-   "cv": 0.003139731526362403,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q17",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    76.459,
-    77.245,
-    76.077,
-    76.73,
-    74.857
-   ],
-   "median": 76.459,
-   "ci": [
-    74.857,
-    77.245
-   ],
-   "cv": 0.011784501737763456,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q18",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    233.229,
-    241.87,
-    221.817,
-    214.797,
-    239.329
-   ],
-   "median": 233.229,
-   "ci": [
-    214.797,
-    241.87
-   ],
-   "cv": 0.050294910330599275,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q18",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    208.946,
-    214.398,
-    207.285,
-    209.026,
-    215.516
-   ],
-   "median": 209.026,
-   "ci": [
-    207.285,
-    215.516
-   ],
-   "cv": 0.017386676905431598,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q18",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    138.133,
-    136.801,
-    141.419,
-    146.516,
-    135.933
-   ],
-   "median": 138.133,
-   "ci": [
-    135.933,
-    146.516
-   ],
-   "cv": 0.030867562707264536,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q18",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    124.599,
-    127.366,
-    126.848,
-    126.138,
-    128.436
-   ],
-   "median": 126.848,
-   "ci": [
-    124.599,
-    128.436
-   ],
-   "cv": 0.011307165402037545,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q18",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    527.287,
-    520.749,
-    553.656,
-    528.019,
-    512.889
-   ],
-   "median": 527.287,
-   "ci": [
-    512.889,
-    553.656
-   ],
-   "cv": 0.028978834495614336,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q18",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    466.011,
-    479.691,
-    467.203,
-    485.905,
-    442.879
-   ],
-   "median": 467.203,
-   "ci": [
-    442.879,
-    485.905
-   ],
-   "cv": 0.03528519168935408,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q19",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    105.56,
-    109.017,
-    102.152,
-    129.251,
-    105.694
-   ],
-   "median": 105.694,
-   "ci": [
-    102.152,
-    129.251
-   ],
-   "cv": 0.09833321615889946,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q19",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    109.946,
-    102.827,
-    99.945,
-    112.576,
-    101.981
-   ],
-   "median": 102.827,
-   "ci": [
-    99.945,
-    112.576
-   ],
-   "cv": 0.05198503406185828,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q19",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    4.487,
-    4.516,
-    4.172,
-    4.28,
-    4.456
-   ],
-   "median": 4.456,
-   "ci": [
-    4.172,
-    4.516
-   ],
-   "cv": 0.03403119109332677,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q19",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    3.122,
-    3.237,
-    3.061,
-    3.108,
-    3.326
-   ],
-   "median": 3.122,
-   "ci": [
-    3.061,
-    3.326
-   ],
-   "cv": 0.03413183679591515,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q19",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    140.585,
-    141.006,
-    150.689,
-    139.743,
-    147.208
-   ],
-   "median": 141.006,
-   "ci": [
-    139.743,
-    150.689
-   ],
-   "cv": 0.03364015699963091,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q19",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    52.819,
-    53.132,
-    52.864,
-    52.74,
-    53.08
-   ],
-   "median": 52.864,
-   "ci": [
-    52.74,
-    53.132
-   ],
-   "cv": 0.0032180226825486045,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q20",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    114.533,
-    109.782,
-    108.902,
-    122.065,
-    108.677
-   ],
-   "median": 109.782,
-   "ci": [
-    108.677,
-    122.065
-   ],
-   "cv": 0.050571551632118336,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q20",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    107.733,
-    104.574,
-    120.661,
-    108.583,
-    109.622
-   ],
-   "median": 108.583,
-   "ci": [
-    104.574,
-    120.661
-   ],
-   "cv": 0.05557271582717374,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q20",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    26.75,
-    26.396,
-    28.372,
-    32.219,
-    33.132
-   ],
-   "median": 28.372,
-   "ci": [
-    26.396,
-    33.132
-   ],
-   "cv": 0.10626735816166065,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q20",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    7.307,
-    7.269,
-    7.789,
-    9.543,
-    10.736
-   ],
-   "median": 7.789,
-   "ci": [
-    7.269,
-    10.736
-   ],
-   "cv": 0.1809556755954007,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q20",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    148.93,
-    145.642,
-    142.501,
-    139.7,
-    170.69
-   ],
-   "median": 145.642,
-   "ci": [
-    139.7,
-    170.69
-   ],
-   "cv": 0.08255595309502452,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q20",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    66.979,
-    67.911,
-    67.123,
-    74.306,
-    86.069
-   ],
-   "median": 67.911,
-   "ci": [
-    66.979,
-    86.069
-   ],
-   "cv": 0.1129003550889039,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q21",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    111.279,
-    164.726,
-    133.446,
-    130.242,
-    113.514
-   ],
-   "median": 130.242,
-   "ci": [
-    111.279,
-    164.726
-   ],
-   "cv": 0.16408396449885113,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q21",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    113.461,
-    197.584,
-    116.015,
-    126.441,
-    100.774
-   ],
-   "median": 116.015,
-   "ci": [
-    100.774,
-    197.584
-   ],
-   "cv": 0.2934955367449995,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q21",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    32.938,
-    30.592,
-    31.875,
-    34.881,
-    28.73
-   ],
-   "median": 31.875,
-   "ci": [
-    28.73,
-    34.881
-   ],
-   "cv": 0.07319850424961527,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q21",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    8.867,
-    10.13,
-    8.531,
-    11.506,
-    7.526
-   ],
-   "median": 8.867,
-   "ci": [
-    7.526,
-    11.506
-   ],
-   "cv": 0.1653269372378842,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q21",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    146.64,
-    143.72,
-    148.325,
-    155.064,
-    141.138
-   ],
-   "median": 146.64,
-   "ci": [
-    141.138,
-    155.064
-   ],
-   "cv": 0.036007328238927175,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q21",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    71.085,
-    97.742,
-    70.02,
-    77.843,
-    66.229
-   ],
-   "median": 71.085,
-   "ci": [
-    66.229,
-    97.742
-   ],
-   "cv": 0.163845094763452,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q22",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    120.31,
-    112.482,
-    110.454,
-    128.873,
-    118.844
-   ],
-   "median": 118.844,
-   "ci": [
-    110.454,
-    128.873
-   ],
-   "cv": 0.06151907265447672,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q22",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    106.757,
-    105.427,
-    101.764,
-    107.006,
-    102.648
-   ],
-   "median": 105.427,
-   "ci": [
-    101.764,
-    107.006
-   ],
-   "cv": 0.022851494205608256,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q22",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    39.312,
-    38.432,
-    39.669,
-    40.692,
-    38.656
-   ],
-   "median": 39.312,
-   "ci": [
-    38.432,
-    40.692
-   ],
-   "cv": 0.022829778915064523,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q22",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    7.9,
-    7.778,
-    7.789,
-    7.841,
-    7.883
-   ],
-   "median": 7.841,
-   "ci": [
-    7.778,
-    7.9
-   ],
-   "cv": 0.0069524832097718255,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q22",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    147.413,
-    146.026,
-    156.063,
-    200.183,
-    145.191
-   ],
-   "median": 147.413,
-   "ci": [
-    145.191,
-    200.183
-   ],
-   "cv": 0.14745108026790893,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q22",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    71.861,
-    70.421,
-    73.974,
-    76.035,
-    77.262
-   ],
-   "median": 73.974,
-   "ci": [
-    70.421,
-    77.262
-   ],
-   "cv": 0.038344170272258914,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q23",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    174.032,
-    170.154,
-    183.341,
-    212.265,
-    178.588
-   ],
-   "median": 178.588,
-   "ci": [
-    170.154,
-    212.265
-   ],
-   "cv": 0.09106845548845419,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q23",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    198.558,
-    155.621,
-    165.221,
-    179.513,
-    171.559
-   ],
-   "median": 171.559,
-   "ci": [
-    155.621,
-    198.558
-   ],
-   "cv": 0.09325223742008819,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q23",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    132.884,
-    148.734,
-    142.757,
-    133.83,
-    143.933
-   ],
-   "median": 142.757,
-   "ci": [
-    132.884,
-    148.734
-   ],
-   "cv": 0.048708639202905024,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q23",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    119.101,
-    120.777,
-    118.663,
-    118.023,
-    125.486
-   ],
-   "median": 119.101,
-   "ci": [
-    118.023,
-    125.486
-   ],
-   "cv": 0.025040420886862823,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q23",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    143.454,
-    139.58,
-    146.293,
-    145.617,
-    142.677
-   ],
-   "median": 143.454,
-   "ci": [
-    139.58,
-    146.293
-   ],
-   "cv": 0.018541006894403786,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q23",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    66.448,
-    65.994,
-    67.692,
-    66.26,
-    66.151
-   ],
-   "median": 66.26,
-   "ci": [
-    65.994,
-    67.692
-   ],
-   "cv": 0.010249025005469448,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q24",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    96.13,
-    97.631,
-    98.612,
-    100.363,
-    98.373
-   ],
-   "median": 98.373,
-   "ci": [
-    96.13,
-    100.363
-   ],
-   "cv": 0.015677252372069427,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q24",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    92.602,
-    97.32,
-    95.885,
-    92.265,
-    92.914
-   ],
-   "median": 92.914,
-   "ci": [
-    92.265,
-    97.32
-   ],
-   "cv": 0.02404782616019454,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q24",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    12.864,
-    13.23,
-    13.122,
-    13.474,
-    11.442
-   ],
-   "median": 13.122,
-   "ci": [
-    11.442,
-    13.474
-   ],
-   "cv": 0.06270710482087534,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q24",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    6.028,
-    6.393,
-    5.874,
-    6.185,
-    5.661
-   ],
-   "median": 6.028,
-   "ci": [
-    5.661,
-    6.393
-   ],
-   "cv": 0.046646320601546234,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q24",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    138.963,
-    138.045,
-    143.63,
-    137.509,
-    137.122
-   ],
-   "median": 138.045,
-   "ci": [
-    137.122,
-    143.63
-   ],
-   "cv": 0.019055942784003885,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q24",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    71.397,
-    58.603,
-    59.232,
-    58.989,
-    59.0
-   ],
-   "median": 59.0,
-   "ci": [
-    58.603,
-    71.397
-   ],
-   "cv": 0.09062468714223923,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q25",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    113.308,
-    101.136,
-    114.741,
-    109.072,
-    111.982
-   ],
-   "median": 111.982,
-   "ci": [
-    101.136,
-    114.741
-   ],
-   "cv": 0.04909661339889401,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q25",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    97.228,
-    96.315,
-    107.286,
-    113.056,
-    99.873
-   ],
-   "median": 99.873,
-   "ci": [
-    96.315,
-    113.056
-   ],
-   "cv": 0.07000559607608546,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q25",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    13.941,
-    13.509,
-    13.869,
-    13.902,
-    11.774
-   ],
-   "median": 13.869,
-   "ci": [
-    11.774,
-    13.941
-   ],
-   "cv": 0.06901379971028526,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q25",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    6.998,
-    6.776,
-    7.255,
-    6.974,
-    7.073
-   ],
-   "median": 6.998,
-   "ci": [
-    6.776,
-    7.255
-   ],
-   "cv": 0.024695607357771446,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q25",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    160.669,
-    142.651,
-    141.585,
-    143.047,
-    140.834
-   ],
-   "median": 142.651,
-   "ci": [
-    140.834,
-    160.669
-   ],
-   "cv": 0.05750341079539289,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q25",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    60.359,
-    59.032,
-    59.772,
-    59.779,
-    59.181
-   ],
-   "median": 59.772,
-   "ci": [
-    59.032,
-    60.359
-   ],
-   "cv": 0.00892552239165488,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q26",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    96.278,
-    106.495,
-    103.62,
-    98.824,
-    99.116
-   ],
-   "median": 99.116,
-   "ci": [
-    96.278,
-    106.495
-   ],
-   "cv": 0.04074199140625992,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q26",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    96.013,
-    111.77,
-    100.587,
-    104.413,
-    93.634
-   ],
-   "median": 100.587,
-   "ci": [
-    93.634,
-    111.77
-   ],
-   "cv": 0.07094672153237419,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q26",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    15.387,
-    14.101,
-    15.87,
-    14.372,
-    14.008
-   ],
-   "median": 14.372,
-   "ci": [
-    14.008,
-    15.87
-   ],
-   "cv": 0.05647596395516546,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q26",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    7.695,
-    7.614,
-    7.393,
-    7.312,
-    7.53
-   ],
-   "median": 7.53,
-   "ci": [
-    7.312,
-    7.695
-   ],
-   "cv": 0.020880236827562782,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q26",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    137.81,
-    139.303,
-    140.456,
-    137.472,
-    134.821
-   ],
-   "median": 137.81,
-   "ci": [
-    134.821,
-    140.456
-   ],
-   "cv": 0.015437555936920755,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q26",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    60.587,
-    58.823,
-    58.942,
-    58.673,
-    58.523
-   ],
-   "median": 58.823,
-   "ci": [
-    58.523,
-    60.587
-   ],
-   "cv": 0.014224123573970826,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q27",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    128.048,
-    122.144,
-    132.587,
-    129.988,
-    130.518
-   ],
-   "median": 129.988,
-   "ci": [
-    122.144,
-    132.587
-   ],
-   "cv": 0.030961376340596897,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q27",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    119.551,
-    118.469,
-    122.502,
-    119.805,
-    129.886
-   ],
-   "median": 119.805,
-   "ci": [
-    118.469,
-    129.886
-   ],
-   "cv": 0.037930473823457496,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q27",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    52.689,
-    52.756,
-    52.961,
-    57.684,
-    56.203
-   ],
-   "median": 52.961,
-   "ci": [
-    52.689,
-    57.684
-   ],
-   "cv": 0.04278841269796412,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q27",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    35.588,
-    36.064,
-    36.464,
-    40.301,
-    38.65
-   ],
-   "median": 36.464,
-   "ci": [
-    35.588,
-    40.301
-   ],
-   "cv": 0.0533258860227425,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q27",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    152.685,
-    147.259,
-    146.707,
-    146.502,
-    170.855
-   ],
-   "median": 147.259,
-   "ci": [
-    146.502,
-    170.855
-   ],
-   "cv": 0.06812881393500395,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q27",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    81.082,
-    77.964,
-    77.543,
-    79.864,
-    77.844
-   ],
-   "median": 77.964,
-   "ci": [
-    77.543,
-    81.082
-   ],
-   "cv": 0.019557697244639013,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q28",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    301.512,
-    294.848,
-    298.972,
-    303.406,
-    336.56
-   ],
-   "median": 301.512,
-   "ci": [
-    294.848,
-    336.56
-   ],
-   "cv": 0.05471179551528513,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q28",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    289.55,
-    299.105,
-    296.896,
-    350.221,
-    297.811
-   ],
-   "median": 297.811,
-   "ci": [
-    289.55,
-    350.221
-   ],
-   "cv": 0.08021054962895106,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q28",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    235.454,
-    234.886,
-    234.871,
-    250.644,
-    238.99
-   ],
-   "median": 235.454,
-   "ci": [
-    234.871,
-    250.644
-   ],
-   "cv": 0.028236714015697675,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q28",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    232.784,
-    217.665,
-    273.374,
-    243.708,
-    231.893
-   ],
-   "median": 232.784,
-   "ci": [
-    217.665,
-    273.374
-   ],
-   "cv": 0.08704815647481268,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q28",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    636.976,
-    642.878,
-    672.087,
-    667.615,
-    646.28
-   ],
-   "median": 646.28,
-   "ci": [
-    636.976,
-    672.087
-   ],
-   "cv": 0.023990284805257934,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q28",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    633.933,
-    645.27,
-    608.923,
-    626.685,
-    612.308
-   ],
-   "median": 626.685,
-   "ci": [
-    608.923,
-    645.27
-   ],
-   "cv": 0.0241453410398934,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q29",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    310.319,
-    286.894,
-    298.433,
-    306.307,
-    302.808
-   ],
-   "median": 302.808,
-   "ci": [
-    286.894,
-    310.319
-   ],
-   "cv": 0.029897427490006838,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q29",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    289.443,
-    285.241,
-    290.087,
-    289.097,
-    294.84
-   ],
-   "median": 289.443,
-   "ci": [
-    285.241,
-    294.84
-   ],
-   "cv": 0.011814647843510807,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q29",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    216.315,
-    221.118,
-    254.91,
-    217.913,
-    211.882
-   ],
-   "median": 217.913,
-   "ci": [
-    211.882,
-    254.91
-   ],
-   "cv": 0.07736190452385218,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q29",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    246.326,
-    217.855,
-    220.35,
-    220.225,
-    219.202
-   ],
-   "median": 220.225,
-   "ci": [
-    217.855,
-    246.326
-   ],
-   "cv": 0.05373711967769813,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q29",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    182.654,
-    184.632,
-    205.355,
-    183.595,
-    190.733
-   ],
-   "median": 184.632,
-   "ci": [
-    182.654,
-    205.355
-   ],
-   "cv": 0.049970647374638716,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q29",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    127.817,
-    128.802,
-    128.328,
-    127.519,
-    156.837
-   ],
-   "median": 128.328,
-   "ci": [
-    127.519,
-    156.837
-   ],
-   "cv": 0.09602191035173482,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q30",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    110.717,
-    117.601,
-    109.872,
-    115.461,
-    140.674
-   ],
-   "median": 115.461,
-   "ci": [
-    109.872,
-    140.674
-   ],
-   "cv": 0.10608948455654577,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q30",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    109.29,
-    106.016,
-    112.755,
-    104.215,
-    142.615
-   ],
-   "median": 109.29,
-   "ci": [
-    104.215,
-    142.615
-   ],
-   "cv": 0.1373277682869937,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q30",
-   "system": "nucleus (column)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    21.575,
-    21.651,
-    21.455,
-    22.475,
-    22.679
-   ],
-   "median": 21.651,
-   "ci": [
-    21.455,
-    22.679
-   ],
-   "cv": 0.025758360171565135,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q30",
-   "system": "nucleus (column)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    15.509,
-    14.977,
-    15.479,
-    15.45,
-    15.835
-   ],
-   "median": 15.479,
-   "ci": [
-    14.977,
-    15.835
-   ],
-   "cv": 0.019851566361518986,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q30",
-   "system": "postgresql",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    142.397,
-    150.338,
-    149.797,
-    147.952,
-    185.294
-   ],
-   "median": 149.797,
-   "ci": [
-    142.397,
-    185.294
-   ],
-   "cv": 0.11046045689758413,
-   "flagged": true,
-   "attempts": 3
-  },
-  {
-   "name": "Q30",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    64.011,
-    64.307,
-    69.078,
-    63.397,
-    69.397
-   ],
-   "median": 64.307,
-   "ci": [
-    63.397,
-    69.397
-   ],
-   "cv": 0.04453916598868649,
-   "flagged": false,
-   "attempts": 3
-  },
-  {
-   "name": "Q31",
-   "system": "nucleus (row)",
-   "phase": "cold",
-   "unit": "ms",
-   "times": [
-    134.224,
-    131.473,
-    130.804,
-    126.963,
-    144.493
-   ],
-   "median": 131.473,
-   "ci": [
-    126.963,
-    144.493
-   ],
-   "cv": 0.04957392426048643,
-   "flagged": false,
-   "attempts": 2
-  },
-  {
-   "name": "Q31",
-   "system": "nucleus (row)",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    119.014,
-    116.326,
-    117.098,
-    134.027,
-    116.908
-   ],
-   "median": 117.098,
-   "ci": [
-    116.326,
-    134.027
-   ],
-   "cv": 0.062417126399481555,
-   "flagged": false,
-   "attempts": 2
   },
   {
    "name": "Q31",
@@ -4082,20 +4089,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    35.287,
-    36.425,
-    35.338,
-    34.641,
-    37.62
+    34.224,
+    35.793,
+    39.045,
+    36.08,
+    33.144
    ],
-   "median": 35.338,
+   "median": 35.793,
    "ci": [
-    34.641,
-    37.62
+    33.144,
+    39.045
    ],
-   "cv": 0.03270811475634983,
+   "cv": 0.06278006409286017,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q31",
@@ -4103,20 +4110,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    28.573,
-    28.75,
-    28.665,
-    29.096,
-    27.883
+    26.107,
+    27.264,
+    30.807,
+    26.154,
+    27.903
    ],
-   "median": 28.665,
+   "median": 27.264,
    "ci": [
-    27.883,
-    29.096
+    26.107,
+    30.807
    ],
-   "cv": 0.015516211595859749,
+   "cv": 0.06957135448359048,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q31",
@@ -4124,20 +4131,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    153.672,
-    174.763,
-    161.874,
-    159.063,
-    151.175
+    149.401,
+    144.994,
+    148.378,
+    154.048,
+    146.215
    ],
-   "median": 159.063,
+   "median": 148.378,
    "ci": [
-    151.175,
-    174.763
+    144.994,
+    154.048
    ],
-   "cv": 0.05759974652463198,
+   "cv": 0.023567107183313923,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q31",
@@ -4145,20 +4152,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    78.523,
-    90.631,
-    79.952,
-    78.176,
-    83.324
+    92.212,
+    76.655,
+    78.706,
+    76.478,
+    79.247
    ],
-   "median": 79.952,
+   "median": 78.706,
    "ci": [
-    78.176,
-    90.631
+    76.478,
+    92.212
    ],
-   "cv": 0.0630042592996267,
+   "cv": 0.08148476759024176,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q32",
@@ -4166,20 +4173,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    408.422,
-    375.164,
-    384.01,
-    380.807,
-    400.202
+    372.175,
+    370.986,
+    368.193,
+    369.343,
+    374.277
    ],
-   "median": 384.01,
+   "median": 370.986,
    "ci": [
-    375.164,
-    408.422
+    368.193,
+    374.277
    ],
-   "cv": 0.03591305121914513,
+   "cv": 0.006427448294785274,
    "flagged": false,
-   "attempts": 3
+   "attempts": 1
   },
   {
    "name": "Q32",
@@ -4187,20 +4194,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    412.466,
-    364.509,
-    390.278,
-    369.661,
-    407.792
+    348.165,
+    356.085,
+    357.646,
+    355.733,
+    350.103
    ],
-   "median": 390.278,
+   "median": 355.733,
    "ci": [
-    364.509,
-    412.466
+    348.165,
+    357.646
    ],
-   "cv": 0.05572809822041727,
+   "cv": 0.011734702543690334,
    "flagged": false,
-   "attempts": 3
+   "attempts": 1
   },
   {
    "name": "Q32",
@@ -4208,20 +4215,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    300.831,
-    301.531,
-    305.125,
-    302.229,
-    315.212
+    290.629,
+    300.139,
+    302.088,
+    302.798,
+    292.555
    ],
-   "median": 302.229,
+   "median": 300.139,
    "ci": [
-    300.831,
-    315.212
+    290.629,
+    302.798
    ],
-   "cv": 0.019494129609676808,
+   "cv": 0.01897927790466862,
    "flagged": false,
-   "attempts": 3
+   "attempts": 1
   },
   {
    "name": "Q32",
@@ -4229,20 +4236,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    283.217,
-    272.531,
-    285.461,
-    302.372,
-    288.972
+    276.469,
+    277.656,
+    269.187,
+    276.717,
+    283.783
    ],
-   "median": 285.461,
+   "median": 276.717,
    "ci": [
-    272.531,
-    302.372
+    269.187,
+    283.783
    ],
-   "cv": 0.037632725773190254,
+   "cv": 0.01873668279657637,
    "flagged": false,
-   "attempts": 3
+   "attempts": 1
   },
   {
    "name": "Q32",
@@ -4250,20 +4257,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    902.417,
-    891.834,
-    959.528,
-    920.607,
-    898.744
+    842.483,
+    826.131,
+    837.815,
+    826.301,
+    848.677
    ],
-   "median": 902.417,
+   "median": 837.815,
    "ci": [
-    891.834,
-    959.528
+    826.131,
+    848.677
    ],
-   "cv": 0.029806058365072406,
+   "cv": 0.011914297118071772,
    "flagged": false,
-   "attempts": 3
+   "attempts": 1
   },
   {
    "name": "Q32",
@@ -4271,20 +4278,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    793.51,
-    836.418,
-    899.364,
-    821.963,
-    936.659
+    760.212,
+    779.274,
+    783.726,
+    766.906,
+    786.072
    ],
-   "median": 836.418,
+   "median": 779.274,
    "ci": [
-    793.51,
-    936.659
+    760.212,
+    786.072
    ],
-   "cv": 0.06854248615530699,
+   "cv": 0.014434990145890596,
    "flagged": false,
-   "attempts": 3
+   "attempts": 1
   },
   {
    "name": "Q33",
@@ -4292,18 +4299,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    207.484,
-    206.641,
-    209.654,
-    206.027,
-    203.271
+    198.409,
+    200.762,
+    201.91,
+    195.481,
+    200.045
    ],
-   "median": 206.641,
+   "median": 200.045,
    "ci": [
-    203.271,
-    209.654
+    195.481,
+    201.91
    ],
-   "cv": 0.011225941390194914,
+   "cv": 0.01251265018800878,
    "flagged": false,
    "attempts": 1
   },
@@ -4313,18 +4320,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    206.339,
-    201.842,
-    209.951,
-    201.518,
-    194.981
+    188.919,
+    193.572,
+    206.27,
+    189.211,
+    193.711
    ],
-   "median": 201.842,
+   "median": 193.572,
    "ci": [
-    194.981,
-    209.951
+    188.919,
+    206.27
    ],
-   "cv": 0.0277978699763965,
+   "cv": 0.036294975987903606,
    "flagged": false,
    "attempts": 1
   },
@@ -4334,18 +4341,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    135.913,
-    129.605,
-    127.715,
-    140.448,
-    128.453
+    121.702,
+    128.041,
+    125.875,
+    127.342,
+    124.086
    ],
-   "median": 129.605,
+   "median": 125.875,
    "ci": [
-    127.715,
-    140.448
+    121.702,
+    128.041
    ],
-   "cv": 0.041780137274867735,
+   "cv": 0.020474929089435125,
    "flagged": false,
    "attempts": 1
   },
@@ -4355,18 +4362,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    116.275,
-    115.25,
-    111.51,
-    126.69,
-    112.134
+    105.237,
+    111.168,
+    107.786,
+    110.381,
+    108.503
    ],
-   "median": 115.25,
+   "median": 108.503,
    "ci": [
-    111.51,
-    126.69
+    105.237,
+    111.168
    ],
-   "cv": 0.05250425291151511,
+   "cv": 0.021467536577768037,
    "flagged": false,
    "attempts": 1
   },
@@ -4376,39 +4383,39 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    357.983,
-    396.711,
-    382.413,
-    393.881,
-    381.878
-   ],
-   "median": 382.413,
-   "ci": [
-    357.983,
-    396.711
-   ],
-   "cv": 0.03991904449581069,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "Q33",
-   "system": "postgresql",
-   "phase": "warm",
-   "unit": "ms",
-   "times": [
-    356.685,
-    353.765,
-    354.116,
+    371.797,
     370.583,
-    346.054
+    375.579,
+    371.906,
+    365.257
    ],
-   "median": 354.116,
+   "median": 371.797,
    "ci": [
-    346.054,
-    370.583
+    365.257,
+    375.579
    ],
-   "cv": 0.02511959886652747,
+   "cv": 0.01004643876991131,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q33",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    355.381,
+    342.561,
+    347.134,
+    346.175,
+    345.115
+   ],
+   "median": 346.175,
+   "ci": [
+    342.561,
+    355.381
+   ],
+   "cv": 0.013946231093839778,
    "flagged": false,
    "attempts": 1
   },
@@ -4418,18 +4425,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    222.935,
-    219.148,
-    234.371,
-    216.381,
-    217.011
+    216.643,
+    208.085,
+    214.168,
+    218.262,
+    204.995
    ],
-   "median": 219.148,
+   "median": 214.168,
    "ci": [
-    216.381,
-    234.371
+    204.995,
+    218.262
    ],
-   "cv": 0.033297472229874954,
+   "cv": 0.026726837838720232,
    "flagged": false,
    "attempts": 1
   },
@@ -4439,18 +4446,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    210.485,
-    218.425,
-    212.041,
-    207.054,
-    209.396
+    205.644,
+    199.569,
+    205.769,
+    205.764,
+    199.356
    ],
-   "median": 210.485,
+   "median": 205.644,
    "ci": [
-    207.054,
-    218.425
+    199.356,
+    205.769
    ],
-   "cv": 0.02026544789744247,
+   "cv": 0.016886439675426617,
    "flagged": false,
    "attempts": 1
   },
@@ -4460,18 +4467,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    138.208,
-    140.246,
-    142.585,
-    142.755,
-    136.013
+    136.397,
+    138.864,
+    135.497,
+    142.573,
+    134.956
    ],
-   "median": 140.246,
+   "median": 136.397,
    "ci": [
-    136.013,
-    142.755
+    134.956,
+    142.573
    ],
-   "cv": 0.02065607356216696,
+   "cv": 0.022733228394997362,
    "flagged": false,
    "attempts": 1
   },
@@ -4481,18 +4488,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    123.76,
-    120.72,
-    124.464,
-    125.492,
-    120.875
+    117.482,
+    121.264,
+    118.062,
+    125.601,
+    118.964
    ],
-   "median": 123.76,
+   "median": 118.964,
    "ci": [
-    120.72,
-    125.492
+    117.482,
+    125.601
    ],
-   "cv": 0.017534805024874024,
+   "cv": 0.027500549088280035,
    "flagged": false,
    "attempts": 1
   },
@@ -4502,18 +4509,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    406.664,
-    382.488,
-    376.817,
-    379.481,
-    373.137
+    373.448,
+    369.383,
+    382.875,
+    375.338,
+    369.398
    ],
-   "median": 379.481,
+   "median": 373.448,
    "ci": [
-    373.137,
-    406.664
+    369.383,
+    382.875
    ],
-   "cv": 0.03461203482991206,
+   "cv": 0.014842481693444423,
    "flagged": false,
    "attempts": 1
   },
@@ -4523,18 +4530,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    377.941,
-    366.293,
-    374.359,
-    366.357,
-    348.68
+    352.764,
+    359.422,
+    340.197,
+    340.884,
+    343.178
    ],
-   "median": 366.357,
+   "median": 343.178,
    "ci": [
-    348.68,
-    377.941
+    340.197,
+    359.422
    ],
-   "cv": 0.030790886710414384,
+   "cv": 0.02432263487884048,
    "flagged": false,
    "attempts": 1
   },
@@ -4544,20 +4551,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    134.729,
-    130.311,
-    138.803,
-    126.353,
-    123.245
+    127.85,
+    120.849,
+    116.134,
+    120.518,
+    145.885
    ],
-   "median": 130.311,
+   "median": 120.849,
    "ci": [
-    123.245,
-    138.803
+    116.134,
+    145.885
    ],
-   "cv": 0.04786436665343206,
+   "cv": 0.09308849791379617,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q35",
@@ -4565,20 +4572,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    113.537,
-    119.15,
-    132.506,
-    119.672,
-    112.984
+    112.343,
+    113.363,
+    112.865,
+    116.108,
+    107.771
    ],
-   "median": 119.15,
+   "median": 112.865,
    "ci": [
-    112.984,
-    132.506
+    107.771,
+    116.108
    ],
-   "cv": 0.06575972971599202,
+   "cv": 0.026773747678418888,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q35",
@@ -4586,20 +4593,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    38.598,
-    38.751,
-    42.595,
-    43.594,
-    38.593
+    36.949,
+    39.866,
+    37.445,
+    38.546,
+    37.126
    ],
-   "median": 38.751,
+   "median": 37.445,
    "ci": [
-    38.593,
-    43.594
+    36.949,
+    39.866
    ],
-   "cv": 0.06090374468928167,
+   "cv": 0.03212228431630231,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q35",
@@ -4607,20 +4614,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    35.004,
-    35.546,
-    39.686,
-    42.907,
-    34.466
+    35.4,
+    32.533,
+    34.663,
+    32.142,
+    32.88
    ],
-   "median": 35.546,
+   "median": 32.88,
    "ci": [
-    34.466,
-    42.907
+    32.142,
+    35.4
    ],
-   "cv": 0.09725410578113568,
+   "cv": 0.04250982019100042,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q35",
@@ -4628,20 +4635,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    155.938,
-    156.371,
-    157.891,
-    160.35,
-    159.241
+    147.359,
+    151.126,
+    151.679,
+    148.739,
+    157.117
    ],
-   "median": 157.891,
+   "median": 151.126,
    "ci": [
-    155.938,
-    160.35
+    147.359,
+    157.117
    ],
-   "cv": 0.01183163738346203,
+   "cv": 0.02475802219138187,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q35",
@@ -4649,20 +4656,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    90.146,
-    89.346,
-    88.919,
-    88.842,
-    89.169
+    86.874,
+    88.361,
+    88.612,
+    87.09,
+    87.989
    ],
-   "median": 89.169,
+   "median": 87.989,
    "ci": [
-    88.842,
-    90.146
+    86.874,
+    88.612
    ],
-   "cv": 0.005843173348870276,
+   "cv": 0.008768944434865714,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q36",
@@ -4670,18 +4677,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    168.73,
-    169.793,
-    156.75,
-    164.342,
-    162.688
+    169.713,
+    154.687,
+    157.187,
+    157.719,
+    156.163
    ],
-   "median": 164.342,
+   "median": 157.187,
    "ci": [
-    156.75,
-    169.793
+    154.687,
+    169.713
    ],
-   "cv": 0.03178060591411435,
+   "cv": 0.0380139618536329,
    "flagged": false,
    "attempts": 1
   },
@@ -4691,18 +4698,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    153.823,
-    171.861,
-    159.605,
-    156.827,
-    157.781
+    151.794,
+    148.053,
+    149.741,
+    152.774,
+    149.682
    ],
-   "median": 157.781,
+   "median": 149.741,
    "ci": [
-    153.823,
-    171.861
+    148.053,
+    152.774
    ],
-   "cv": 0.04353007265127243,
+   "cv": 0.01245469111464965,
    "flagged": false,
    "attempts": 1
   },
@@ -4712,18 +4719,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    66.632,
-    69.477,
-    78.694,
-    70.086,
-    71.758
+    64.971,
+    68.286,
+    67.086,
+    65.346,
+    65.244
    ],
-   "median": 70.086,
+   "median": 65.346,
    "ci": [
-    66.632,
-    78.694
+    64.971,
+    68.286
    ],
-   "cv": 0.06326803866017387,
+   "cv": 0.02174983197326542,
    "flagged": false,
    "attempts": 1
   },
@@ -4733,18 +4740,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    56.247,
-    54.729,
-    54.634,
-    55.669,
-    62.481
+    51.355,
+    51.675,
+    57.668,
+    55.908,
+    54.819
    ],
-   "median": 55.669,
+   "median": 54.819,
    "ci": [
-    54.634,
-    62.481
+    51.355,
+    57.668
    ],
-   "cv": 0.05765696219370055,
+   "cv": 0.05024741594819192,
    "flagged": false,
    "attempts": 1
   },
@@ -4754,18 +4761,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    218.848,
-    216.439,
-    222.441,
-    220.476,
-    219.719
+    204.434,
+    216.9,
+    203.925,
+    209.362,
+    212.863
    ],
-   "median": 219.719,
+   "median": 209.362,
    "ci": [
-    216.439,
-    222.441
+    203.925,
+    216.9
    ],
-   "cv": 0.010031603206234283,
+   "cv": 0.026451569948526057,
    "flagged": false,
    "attempts": 1
   },
@@ -4775,18 +4782,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    140.1,
-    139.203,
-    137.964,
-    140.466,
-    139.382
+    136.834,
+    138.55,
+    139.309,
+    137.822,
+    138.741
    ],
-   "median": 139.382,
+   "median": 138.55,
    "ci": [
-    137.964,
-    140.466
+    136.834,
+    139.309
    ],
-   "cv": 0.006921420291725482,
+   "cv": 0.006900796107599227,
    "flagged": false,
    "attempts": 1
   },
@@ -4796,18 +4803,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    124.467,
-    121.963,
-    115.92,
-    117.729,
-    116.873
+    111.816,
+    110.105,
+    117.9,
+    118.437,
+    115.869
    ],
-   "median": 117.729,
+   "median": 115.869,
    "ci": [
-    115.92,
-    124.467
+    110.105,
+    118.437
    ],
-   "cv": 0.030641129113458048,
+   "cv": 0.03227122343224645,
    "flagged": false,
    "attempts": 1
   },
@@ -4817,18 +4824,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    109.743,
-    120.021,
-    108.018,
-    107.147,
-    108.89
+    108.011,
+    108.821,
+    103.754,
+    107.508,
+    103.517
    ],
-   "median": 108.89,
+   "median": 107.508,
    "ci": [
-    107.147,
-    120.021
+    103.517,
+    108.821
    ],
-   "cv": 0.04753115204398996,
+   "cv": 0.02349789408085135,
    "flagged": false,
    "attempts": 1
   },
@@ -4838,18 +4845,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    22.103,
-    23.765,
-    21.825,
-    21.521,
-    21.787
+    21.123,
+    21.722,
+    19.659,
+    22.045,
+    19.964
    ],
-   "median": 21.825,
+   "median": 21.123,
    "ci": [
-    21.521,
-    23.765
+    19.659,
+    22.045
    ],
-   "cv": 0.040483008394868285,
+   "cv": 0.05047491760247603,
    "flagged": false,
    "attempts": 1
   },
@@ -4859,18 +4866,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    17.381,
-    19.053,
-    17.908,
-    17.149,
-    18.048
+    16.969,
+    17.008,
+    16.627,
+    16.612,
+    16.485
    ],
-   "median": 17.908,
+   "median": 16.627,
    "ci": [
-    17.149,
-    19.053
+    16.485,
+    17.008
    ],
-   "cv": 0.04126646924224681,
+   "cv": 0.013959768920065924,
    "flagged": false,
    "attempts": 1
   },
@@ -4880,18 +4887,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    158.582,
-    148.714,
-    146.231,
-    147.688,
-    147.627
+    151.847,
+    148.979,
+    152.494,
+    147.438,
+    150.023
    ],
-   "median": 147.688,
+   "median": 150.023,
    "ci": [
-    146.231,
-    158.582
+    147.438,
+    152.494
    ],
-   "cv": 0.0334212761743867,
+   "cv": 0.01377625772674338,
    "flagged": false,
    "attempts": 1
   },
@@ -4901,18 +4908,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    79.346,
-    83.088,
-    74.475,
-    77.285,
-    75.024
+    75.596,
+    75.028,
+    77.327,
+    75.013,
+    74.006
    ],
-   "median": 77.285,
+   "median": 75.028,
    "ci": [
-    74.475,
-    83.088
+    74.006,
+    77.327
    ],
-   "cv": 0.045131650042809876,
+   "cv": 0.016221501497279623,
    "flagged": false,
    "attempts": 1
   },
@@ -4922,18 +4929,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    119.447,
-    109.393,
-    113.705,
-    111.189,
-    111.365
+    124.343,
+    105.827,
+    104.579,
+    103.703,
+    107.107
    ],
-   "median": 111.365,
+   "median": 105.827,
    "ci": [
-    109.393,
-    119.447
+    103.703,
+    124.343
    ],
-   "cv": 0.03455887888519031,
+   "cv": 0.078919412451384,
    "flagged": false,
    "attempts": 1
   },
@@ -4943,18 +4950,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    127.587,
-    109.224,
-    112.114,
-    104.016,
-    102.763
+    99.749,
+    99.827,
+    96.219,
+    101.829,
+    97.224
    ],
-   "median": 109.224,
+   "median": 99.749,
    "ci": [
-    102.763,
-    127.587
+    96.219,
+    101.829
    ],
-   "cv": 0.08953049173074548,
+   "cv": 0.02266774279930227,
    "flagged": false,
    "attempts": 1
   },
@@ -4964,18 +4971,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    18.247,
-    18.208,
-    20.321,
-    18.062,
-    17.898
+    17.624,
+    18.291,
+    16.797,
+    17.558,
+    17.998
    ],
-   "median": 18.208,
+   "median": 17.624,
    "ci": [
-    17.898,
-    20.321
+    16.797,
+    18.291
    ],
-   "cv": 0.053973230263123874,
+   "cv": 0.03190148652902188,
    "flagged": false,
    "attempts": 1
   },
@@ -4985,18 +4992,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    10.324,
-    10.577,
-    11.212,
-    10.443,
-    10.581
+    9.455,
+    10.387,
+    9.371,
+    10.516,
+    9.698
    ],
-   "median": 10.577,
+   "median": 9.698,
    "ci": [
-    10.324,
-    11.212
+    9.371,
+    10.516
    ],
-   "cv": 0.03234046599715829,
+   "cv": 0.053867419215669586,
    "flagged": false,
    "attempts": 1
   },
@@ -5006,18 +5013,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    141.92,
-    141.61,
-    169.642,
-    158.512,
-    155.497
+    150.07,
+    142.353,
+    166.864,
+    142.926,
+    146.52
    ],
-   "median": 155.497,
+   "median": 146.52,
    "ci": [
-    141.61,
-    169.642
+    142.353,
+    166.864
    ],
-   "cv": 0.07746627754424039,
+   "cv": 0.06717122940569736,
    "flagged": false,
    "attempts": 1
   },
@@ -5027,18 +5034,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    65.343,
-    64.488,
-    65.05,
-    64.865,
-    65.951
+    65.577,
+    64.611,
+    66.346,
+    65.018,
+    68.054
    ],
-   "median": 65.05,
+   "median": 65.577,
    "ci": [
-    64.488,
-    65.951
+    64.611,
+    68.054
    ],
-   "cv": 0.008435601744971412,
+   "cv": 0.02060524360014609,
    "flagged": false,
    "attempts": 1
   },
@@ -5048,18 +5055,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    279.688,
-    275.907,
-    281.432,
-    293.012,
-    288.135
+    285.891,
+    272.603,
+    265.488,
+    283.365,
+    277.984
    ],
-   "median": 281.432,
+   "median": 277.984,
    "ci": [
-    275.907,
-    293.012
+    265.488,
+    285.891
    ],
-   "cv": 0.024192051575420613,
+   "cv": 0.029782795250290768,
    "flagged": false,
    "attempts": 1
   },
@@ -5069,18 +5076,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    308.075,
-    262.48,
-    291.871,
-    266.088,
-    291.838
+    255.667,
+    253.826,
+    257.805,
+    257.023,
+    251.037
    ],
-   "median": 291.838,
+   "median": 255.667,
    "ci": [
-    262.48,
-    308.075
+    251.037,
+    257.805
    ],
-   "cv": 0.06787151015677237,
+   "cv": 0.010640198637401283,
    "flagged": false,
    "attempts": 1
   },
@@ -5090,18 +5097,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    190.954,
-    200.581,
-    188.749,
-    199.702,
-    201.984
+    185.327,
+    190.34,
+    192.521,
+    191.2,
+    188.049
    ],
-   "median": 199.702,
+   "median": 190.34,
    "ci": [
-    188.749,
-    201.984
+    185.327,
+    192.521
    ],
-   "cv": 0.030947282514835042,
+   "cv": 0.014982734086569903,
    "flagged": false,
    "attempts": 1
   },
@@ -5111,18 +5118,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    166.35,
-    170.363,
-    165.704,
-    179.819,
-    165.101
+    165.071,
+    169.546,
+    170.016,
+    170.433,
+    171.406
    ],
-   "median": 166.35,
+   "median": 170.016,
    "ci": [
-    165.101,
-    179.819
+    165.071,
+    171.406
    ],
-   "cv": 0.03624390479902174,
+   "cv": 0.014521887205222728,
    "flagged": false,
    "attempts": 1
   },
@@ -5132,18 +5139,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    420.219,
-    403.637,
-    399.649,
-    413.238,
-    423.574
+    397.496,
+    405.608,
+    404.535,
+    401.305,
+    400.665
    ],
-   "median": 413.238,
+   "median": 401.305,
    "ci": [
-    399.649,
-    423.574
+    397.496,
+    405.608
    ],
-   "cv": 0.02502996912971348,
+   "cv": 0.008058790686483117,
    "flagged": false,
    "attempts": 1
   },
@@ -5153,18 +5160,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    366.001,
-    386.177,
-    379.967,
-    373.346,
-    366.893
+    357.132,
+    364.484,
+    365.814,
+    355.894,
+    377.887
    ],
-   "median": 373.346,
+   "median": 364.484,
    "ci": [
-    366.001,
-    386.177
+    355.894,
+    377.887
    ],
-   "cv": 0.023036251609804437,
+   "cv": 0.02412841240866597,
    "flagged": false,
    "attempts": 1
   },
@@ -5174,18 +5181,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    116.002,
-    115.948,
-    130.68,
-    112.011,
-    116.019
+    112.784,
+    125.784,
+    116.626,
+    114.824,
+    109.03
    ],
-   "median": 116.002,
+   "median": 114.824,
    "ci": [
-    112.011,
-    130.68
+    109.03,
+    125.784
    ],
-   "cv": 0.06114398727400704,
+   "cv": 0.05396682194542737,
    "flagged": false,
    "attempts": 2
   },
@@ -5195,18 +5202,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    106.343,
-    127.813,
-    116.715,
-    110.281,
-    105.692
+    101.127,
+    106.292,
+    102.426,
+    106.204,
+    109.175
    ],
-   "median": 110.281,
+   "median": 106.204,
    "ci": [
-    105.692,
-    127.813
+    101.127,
+    109.175
    ],
-   "cv": 0.08104333273882931,
+   "cv": 0.030908069729364277,
    "flagged": false,
    "attempts": 2
   },
@@ -5216,18 +5223,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    16.113,
-    15.747,
-    15.783,
-    15.99,
-    16.016
+    15.528,
+    15.571,
+    15.336,
+    16.004,
+    15.993
    ],
-   "median": 15.99,
+   "median": 15.571,
    "ci": [
-    15.747,
-    16.113
+    15.336,
+    16.004
    ],
-   "cv": 0.009904939969172665,
+   "cv": 0.0190199357124525,
    "flagged": false,
    "attempts": 2
   },
@@ -5237,18 +5244,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    11.488,
-    11.632,
-    11.543,
-    11.408,
-    11.248
+    10.713,
+    10.95,
+    10.912,
+    11.823,
+    10.92
    ],
-   "median": 11.488,
+   "median": 10.92,
    "ci": [
-    11.248,
-    11.632
+    10.713,
+    11.823
    ],
-   "cv": 0.012703497442282002,
+   "cv": 0.039297787273693714,
    "flagged": false,
    "attempts": 2
   },
@@ -5258,18 +5265,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    156.174,
-    157.842,
-    157.42,
-    165.503,
-    161.679
+    151.498,
+    155.074,
+    147.642,
+    151.451,
+    154.959
    ],
-   "median": 157.842,
+   "median": 151.498,
    "ci": [
-    156.174,
-    165.503
+    147.642,
+    155.074
    ],
-   "cv": 0.023978127734461237,
+   "cv": 0.020173638157146925,
    "flagged": false,
    "attempts": 2
   },
@@ -5279,18 +5286,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    86.929,
-    87.025,
-    95.351,
-    90.896,
-    86.967
+    90.766,
+    89.428,
+    87.388,
+    86.092,
+    90.938
    ],
-   "median": 87.025,
+   "median": 89.428,
    "ci": [
-    86.929,
-    95.351
+    86.092,
+    90.938
    ],
-   "cv": 0.04157974555868809,
+   "cv": 0.023910588508450726,
    "flagged": false,
    "attempts": 2
   },
@@ -5300,20 +5307,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    117.196,
-    116.992,
-    130.288,
-    123.99,
-    124.854
+    119.07,
+    119.751,
+    120.168,
+    112.672,
+    118.13
    ],
-   "median": 123.99,
+   "median": 119.07,
    "ci": [
-    116.992,
-    130.288
+    112.672,
+    120.168
    ],
-   "cv": 0.0458909958804036,
+   "cv": 0.02589025278504845,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q41",
@@ -5321,20 +5328,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    125.914,
-    106.322,
-    133.695,
-    120.161,
-    115.395
+    108.701,
+    108.521,
+    110.032,
+    108.371,
+    111.707
    ],
-   "median": 120.161,
+   "median": 108.701,
    "ci": [
-    106.322,
-    133.695
+    108.371,
+    111.707
    ],
-   "cv": 0.08622889674799002,
+   "cv": 0.012935062548095101,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q41",
@@ -5342,20 +5349,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    13.449,
-    16.521,
-    13.854,
-    13.686,
-    13.764
+    13.105,
+    14.976,
+    13.434,
+    13.504,
+    14.426
    ],
-   "median": 13.764,
+   "median": 13.504,
    "ci": [
-    13.449,
-    16.521
+    13.105,
+    14.976
    ],
-   "cv": 0.08949536240505572,
+   "cv": 0.05623155014759885,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q41",
@@ -5363,20 +5370,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    8.998,
-    11.148,
-    9.559,
-    9.456,
-    9.729
+    9.292,
+    9.987,
+    9.443,
+    9.404,
+    9.55
    ],
-   "median": 9.559,
+   "median": 9.443,
    "ci": [
-    8.998,
-    11.148
+    9.292,
+    9.987
    ],
-   "cv": 0.0830745762872691,
+   "cv": 0.02819950235504555,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q41",
@@ -5384,20 +5391,20 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    151.094,
-    151.805,
-    154.029,
-    150.117,
-    155.925
+    150.405,
+    174.659,
+    143.978,
+    147.656,
+    145.392
    ],
-   "median": 151.805,
+   "median": 147.656,
    "ci": [
-    150.117,
-    155.925
+    143.978,
+    174.659
    ],
-   "cv": 0.015425711803788624,
+   "cv": 0.08311848077240062,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q41",
@@ -5405,20 +5412,20 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    83.904,
-    91.107,
-    83.92,
-    84.386,
-    84.909
+    84.365,
+    83.492,
+    85.56,
+    84.585,
+    86.486
    ],
-   "median": 84.386,
+   "median": 84.585,
    "ci": [
-    83.904,
-    91.107
+    83.492,
+    86.486
    ],
-   "cv": 0.03597242360497557,
+   "cv": 0.013582657080549098,
    "flagged": false,
-   "attempts": 2
+   "attempts": 1
   },
   {
    "name": "Q42",
@@ -5426,18 +5433,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    127.695,
-    119.632,
-    119.981,
-    113.234,
-    122.992
+    115.21,
+    119.696,
+    113.283,
+    115.867,
+    114.964
    ],
-   "median": 119.981,
+   "median": 115.21,
    "ci": [
-    113.234,
-    127.695
+    113.283,
+    119.696
    ],
-   "cv": 0.043755731310454855,
+   "cv": 0.02051015867991914,
    "flagged": false,
    "attempts": 1
   },
@@ -5447,18 +5454,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    114.11,
-    115.418,
-    112.678,
-    111.709,
-    110.836
+    108.136,
+    124.199,
+    106.998,
+    107.314,
+    111.614
    ],
-   "median": 112.678,
+   "median": 108.136,
    "ci": [
-    110.836,
-    115.418
+    106.998,
+    124.199
    ],
-   "cv": 0.01627669716552396,
+   "cv": 0.06493669911420678,
    "flagged": false,
    "attempts": 1
   },
@@ -5468,18 +5475,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    24.548,
-    25.163,
-    23.272,
-    24.065,
-    23.479
+    24.937,
+    25.614,
+    24.24,
+    23.611,
+    24.742
    ],
-   "median": 24.065,
+   "median": 24.742,
    "ci": [
-    23.272,
-    25.163
+    23.611,
+    25.614
    ],
-   "cv": 0.03215366531649998,
+   "cv": 0.03055688318495245,
    "flagged": false,
    "attempts": 1
   },
@@ -5489,18 +5496,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    19.43,
-    20.503,
-    19.223,
-    19.553,
-    22.237
+    19.213,
+    18.716,
+    18.729,
+    19.178,
+    19.994
    ],
-   "median": 19.553,
+   "median": 19.178,
    "ci": [
-    19.223,
-    22.237
+    18.716,
+    19.994
    ],
-   "cv": 0.061699112938130296,
+   "cv": 0.02712894517861244,
    "flagged": false,
    "attempts": 1
   },
@@ -5510,18 +5517,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    156.739,
-    163.688,
-    160.227,
-    159.515,
-    158.352
+    155.177,
+    152.815,
+    156.797,
+    153.983,
+    151.933
    ],
-   "median": 159.515,
+   "median": 153.983,
    "ci": [
-    156.739,
-    163.688
+    151.933,
+    156.797
    ],
-   "cv": 0.01620787979594078,
+   "cv": 0.012473237174259454,
    "flagged": false,
    "attempts": 1
   },
@@ -5531,18 +5538,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    85.645,
-    84.994,
-    85.049,
-    85.532,
-    86.206
+    84.885,
+    86.108,
+    86.343,
+    84.744,
+    84.746
    ],
-   "median": 85.532,
+   "median": 84.885,
    "ci": [
-    84.994,
-    86.206
+    84.744,
+    86.343
    ],
-   "cv": 0.005786713727808485,
+   "cv": 0.0092753422918814,
    "flagged": false,
    "attempts": 1
   },
@@ -5552,18 +5559,18 @@
    "phase": "write",
    "unit": "s",
    "times": [
-    6.87057089805603,
-    7.331792831420898,
-    7.534290075302124,
-    7.633600950241089,
-    7.285094976425171
+    6.823973178863525,
+    6.844456911087036,
+    6.97878098487854,
+    7.061707019805908,
+    7.312299966812134
    ],
-   "median": 7.331792831420898,
+   "median": 6.97878098487854,
    "ci": [
-    6.87057089805603,
-    7.633600950241089
+    6.823973178863525,
+    7.312299966812134
    ],
-   "cv": 0.04017589086304388,
+   "cv": 0.028274194013811052,
    "flagged": false,
    "attempts": 1
   },
@@ -5573,18 +5580,18 @@
    "phase": "write",
    "unit": "s",
    "times": [
-    6.361260175704956,
-    6.472726106643677,
-    6.430753231048584,
-    6.439659833908081,
-    6.552053928375244
+    6.3454248905181885,
+    6.211338996887207,
+    6.208403825759888,
+    6.232998847961426,
+    6.2016520500183105
    ],
-   "median": 6.439659833908081,
+   "median": 6.211338996887207,
    "ci": [
-    6.361260175704956,
-    6.552053928375244
+    6.2016520500183105,
+    6.3454248905181885
    ],
-   "cv": 0.010760279993422462,
+   "cv": 0.00963337051360765,
    "flagged": false,
    "attempts": 1
   },
@@ -5594,18 +5601,18 @@
    "phase": "write",
    "unit": "s",
    "times": [
-    7.599453926086426,
-    7.635589122772217,
-    7.61771821975708,
-    7.4841508865356445,
-    7.987513780593872
+    7.216056823730469,
+    7.238885879516602,
+    7.24449896812439,
+    7.072340965270996,
+    6.889207124710083
    ],
-   "median": 7.61771821975708,
+   "median": 7.216056823730469,
    "ci": [
-    7.4841508865356445,
-    7.987513780593872
+    6.889207124710083,
+    7.24449896812439
    ],
-   "cv": 0.024764180407565242,
+   "cv": 0.02145402206410855,
    "flagged": false,
    "attempts": 1
   }
@@ -5637,7 +5644,7 @@
   "Q21": "same",
   "Q22": "same rows (ties ordered differently)",
   "Q23": "same",
-  "Q24": "differs (ties at the LIMIT)",
+  "Q24": "same",
   "Q25": "same",
   "Q26": "same",
   "Q27": "same",

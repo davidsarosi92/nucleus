@@ -1,10 +1,10 @@
 {
  "method": 1,
  "name": "ann-filtered",
- "script": "bench/method.py run ann-filtered bench/results/ann-filtered.json --runs 3 --also 'pgvector=bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/filtered.py pgvector target/ann-data/sift-128-euclidean' -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/filtered.py nucleus ./target/release/nucleus target/ann-data/sift-128-euclidean",
+ "script": "bench/method.py run ann-filtered bench/results-2/ann-filtered.json --runs 3 --also 'pgvector=bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/filtered.py pgvector target/ann-data/sift-128-euclidean' -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/filtered.py nucleus ./target/release/nucleus target/ann-data/sift-128-euclidean",
  "environment": {
   "method": 1,
-  "at": "2026-11-16T15:06:24+00:00",
+  "at": "2026-11-17T13:42:39+00:00",
   "machine": {
    "arch": "arm64",
    "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
@@ -23,7 +23,7 @@
   },
   "disk": {
    "path": ".",
-   "free_bytes": 30844575744,
+   "free_bytes": 31358586880,
    "total_bytes": 494384795648,
    "device": "/dev/disk3s5",
    "solid_state": true,
@@ -31,9 +31,9 @@
    "file_system": "apfs"
   },
   "load_before": [
-   9.6689453125,
-   14.23681640625,
-   20.08154296875
+   7.65966796875,
+   5.2607421875,
+   4.85400390625
   ],
   "systems": {
    "pgvector": {
@@ -86,11 +86,11 @@
      "max_wal_size": "4GB",
      "max_worker_processes": "10",
      "min_wal_size": "1GB",
-     "port": "55442",
+     "port": "52395",
      "random_page_cost": "1.1",
      "shared_buffers": "8GB",
      "synchronous_commit": "on",
-     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-hh7572tb",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-0bqhl4dq",
      "wal_buffers": "16MB",
      "wal_sync_method": "open_datasync",
      "work_mem": "81MB"
@@ -101,13 +101,13 @@
   },
   "data": {},
   "nucleus": {
-   "commit": "15d10437821bc2084c874fbbf6e219964ffb9ccd",
-   "dirty": true
+   "commit": "dc9aefb043ae00a79f115f799881a7844c1301e2",
+   "dirty": false
   },
   "load_after": [
-   48.169921875,
-   46.546875,
-   36.69189453125
+   7.18115234375,
+   8.26171875,
+   6.93603515625
   ]
  },
  "samples": [
@@ -117,16 +117,16 @@
    "phase": "warm",
    "unit": "s",
    "times": [
-    64.4073673330131,
-    68.64353695802856,
-    76.4663807079778
+    61.12739162496291,
+    60.89825062500313,
+    61.622784332954325
    ],
-   "median": 68.64353695802856,
+   "median": 61.12739162496291,
    "ci": [
-    64.4073673330131,
-    76.4663807079778
+    60.89825062500313,
+    61.622784332954325
    ],
-   "cv": 0.08759790759314313,
+   "cv": 0.006049558349185739,
    "flagged": false,
    "attempts": 1
   },
@@ -174,16 +174,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    583.2614999962971,
-    626.1860840022564,
-    589.4679999910295
+    609.219168080017,
+    561.0715840011835,
+    568.2569998316467
    ],
-   "median": 589.4679999910295,
+   "median": 568.2569998316467,
    "ci": [
-    583.2614999962971,
-    626.1860840022564
+    561.0715840011835,
+    609.219168080017
    ],
-   "cv": 0.03868888682405085,
+   "cv": 0.04481921013354545,
    "flagged": false,
    "attempts": 1
   },
@@ -194,15 +194,15 @@
    "unit": "recall",
    "times": [
     0.9822000000000001,
-    0.9823999999999999,
-    0.982
+    0.9822000000000001,
+    0.9823999999999999
    ],
    "median": 0.9822000000000001,
    "ci": [
-    0.982,
+    0.9822000000000001,
     0.9823999999999999
    ],
-   "cv": 0.00020362451639175112,
+   "cv": 0.00011755469034666248,
    "flagged": false,
    "attempts": 1
   },
@@ -231,16 +231,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    1721.7514159856364,
-    1832.4689159635454,
-    1718.493334017694
+    1694.205000065267,
+    1712.1843341737986,
+    1726.8257499672472
    ],
-   "median": 1721.7514159856364,
+   "median": 1712.1843341737986,
    "ci": [
-    1718.493334017694,
-    1832.4689159635454
+    1694.205000065267,
+    1726.8257499672472
    ],
-   "cv": 0.0369167168309743,
+   "cv": 0.009548876834415914,
    "flagged": false,
    "attempts": 1
   },
@@ -288,16 +288,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    1419.5171679602936,
-    1590.5324160121381,
-    1382.0205819793046
+    1395.3824159689248,
+    1426.5952499117702,
+    1389.7985841613263
    ],
-   "median": 1419.5171679602936,
+   "median": 1395.3824159689248,
    "ci": [
-    1382.0205819793046,
-    1590.5324160121381
+    1389.7985841613263,
+    1426.5952499117702
    ],
-   "cv": 0.07592268958434477,
+   "cv": 0.014124805850488866,
    "flagged": false,
    "attempts": 1
   },
@@ -345,16 +345,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    311.4373339340091,
-    335.8050819952041,
-    309.1785819269717
+    309.51858195476234,
+    310.8850000426173,
+    310.40349998511374
    ],
-   "median": 311.4373339340091,
+   "median": 310.40349998511374,
    "ci": [
-    309.1785819269717,
-    335.8050819952041
+    309.51858195476234,
+    310.8850000426173
    ],
-   "cv": 0.0463102463756853,
+   "cv": 0.002233749622997282,
    "flagged": false,
    "attempts": 1
   },
@@ -402,16 +402,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    463.79691595211625,
-    499.1967499954626,
-    460.81258193589747
+    472.8543341625482,
+    467.9753340315074,
+    501.8793339841068
    ],
-   "median": 463.79691595211625,
+   "median": 472.8543341625482,
    "ci": [
-    460.81258193589747,
-    499.1967499954626
+    467.9753340315074,
+    501.8793339841068
    ],
-   "cv": 0.04498886800848305,
+   "cv": 0.03811393285128106,
    "flagged": false,
    "attempts": 1
   },
@@ -421,16 +421,16 @@
    "phase": "warm",
    "unit": "s",
    "times": [
-    81.17342312500114,
-    82.0319579159841,
-    80.90948741603643
+    76.11352933302987,
+    77.28080508403946,
+    77.64593666698784
    ],
-   "median": 81.17342312500114,
+   "median": 77.28080508403946,
    "ci": [
-    80.90948741603643,
-    82.0319579159841
+    76.11352933302987,
+    77.64593666698784
    ],
-   "cv": 0.007212543464456916,
+   "cv": 0.010393378669915954,
    "flagged": false,
    "attempts": 1
   },
@@ -440,16 +440,16 @@
    "phase": "warm",
    "unit": "recall",
    "times": [
-    0.8914,
-    0.8892,
-    0.8957999999999999
+    0.8947999999999999,
+    0.8936000000000001,
+    0.8914
    ],
-   "median": 0.8914,
+   "median": 0.8936000000000001,
    "ci": [
-    0.8892,
-    0.8957999999999999
+    0.8914,
+    0.8947999999999999
    ],
-   "cv": 0.003766875851480629,
+   "cv": 0.0019303704987502783,
    "flagged": false,
    "attempts": 1
   },
@@ -478,16 +478,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    851.0,
-    879.0,
-    886.0
+    858.0,
+    806.0,
+    811.0
    ],
-   "median": 879.0,
+   "median": 811.0,
    "ci": [
-    851.0,
-    886.0
+    806.0,
+    858.0
    ],
-   "cv": 0.021238829331940524,
+   "cv": 0.03477330494007528,
    "flagged": false,
    "attempts": 1
   },
@@ -497,16 +497,16 @@
    "phase": "warm",
    "unit": "recall",
    "times": [
-    0.4142,
-    0.4146,
-    0.414
+    0.4154,
+    0.4144,
+    0.416
    ],
-   "median": 0.4142,
+   "median": 0.4154,
    "ci": [
-    0.414,
-    0.4146
+    0.4144,
+    0.416
    ],
-   "cv": 0.0007374598801023742,
+   "cv": 0.0019464369325705693,
    "flagged": false,
    "attempts": 1
   },
@@ -516,16 +516,16 @@
    "phase": "warm",
    "unit": "rows",
    "times": [
-    4.158,
-    4.176,
-    4.168
+    4.164,
+    4.166,
+    4.174
    ],
-   "median": 4.168,
+   "median": 4.166,
    "ci": [
-    4.158,
-    4.176
+    4.164,
+    4.174
    ],
-   "cv": 0.0021640936263747435,
+   "cv": 0.0012695543719120532,
    "flagged": false,
    "attempts": 1
   },
@@ -535,16 +535,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    969.0,
-    862.0,
-    884.0
+    834.0,
+    843.0,
+    886.0
    ],
-   "median": 884.0,
+   "median": 843.0,
    "ci": [
-    862.0,
-    969.0
+    834.0,
+    886.0
    ],
-   "cv": 0.06243827268325599,
+   "cv": 0.03252932399078378,
    "flagged": false,
    "attempts": 1
   },
@@ -554,16 +554,16 @@
    "phase": "warm",
    "unit": "recall",
    "times": [
-    0.044,
-    0.0456,
-    0.0454
+    0.0454,
+    0.044800000000000006,
+    0.0466
    ],
    "median": 0.0454,
    "ci": [
-    0.044,
-    0.0456
+    0.044800000000000006,
+    0.0466
    ],
-   "cv": 0.019372884193514163,
+   "cv": 0.02009901620594663,
    "flagged": false,
    "attempts": 1
   },
@@ -573,16 +573,16 @@
    "phase": "warm",
    "unit": "rows",
    "times": [
-    0.44,
-    0.456,
-    0.454
+    0.454,
+    0.448,
+    0.466
    ],
    "median": 0.454,
    "ci": [
-    0.44,
-    0.456
+    0.448,
+    0.466
    ],
-   "cv": 0.019372884193514125,
+   "cv": 0.020099016205946684,
    "flagged": false,
    "attempts": 1
   },
@@ -592,16 +592,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    912.0,
-    892.0,
-    961.0
+    828.0,
+    879.0,
+    872.0
    ],
-   "median": 912.0,
+   "median": 872.0,
    "ci": [
-    892.0,
-    961.0
+    828.0,
+    879.0
    ],
-   "cv": 0.03851845246602327,
+   "cv": 0.03215964992593092,
    "flagged": false,
    "attempts": 1
   },
@@ -649,16 +649,16 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
-    357.0,
-    374.0,
-    405.0
+    368.0,
+    353.0,
+    353.0
    ],
-   "median": 374.0,
+   "median": 353.0,
    "ci": [
-    357.0,
-    405.0
+    353.0,
+    368.0
    ],
-   "cv": 0.06427262090236553,
+   "cv": 0.024190653736995495,
    "flagged": false,
    "attempts": 1
   },
@@ -706,586 +706,586 @@
    "phase": "warm",
    "unit": "\u00b5s",
    "times": [
+    215.0,
+    215.0,
+    216.0
+   ],
+   "median": 215.0,
+   "ci": [
+    215.0,
+    216.0
+   ],
+   "cv": 0.002681193200571018,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8947999999999999,
+    0.8936000000000001,
+    0.8914
+   ],
+   "median": 0.8936000000000001,
+   "ci": [
+    0.8914,
+    0.8947999999999999
+   ],
+   "cv": 0.0019303704987502783,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    828.0,
+    893.0,
+    825.0
+   ],
+   "median": 828.0,
+   "ci": [
+    825.0,
+    893.0
+   ],
+   "cv": 0.045274646511880755,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.933,
+    0.9306,
+    0.9316
+   ],
+   "median": 0.9316,
+   "ci": [
+    0.9306,
+    0.933
+   ],
+   "cv": 0.001293871016029312,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1920.0,
+    1872.0,
+    1849.0
+   ],
+   "median": 1872.0,
+   "ci": [
+    1849.0,
+    1920.0
+   ],
+   "cv": 0.01926580831798352,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9876,
+    0.9872000000000001,
+    0.9867999999999999
+   ],
+   "median": 0.9872000000000001,
+   "ci": [
+    0.9867999999999999,
+    0.9876
+   ],
+   "cv": 0.0004051863857375071,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    10352.0,
+    10397.0,
+    10603.0
+   ],
+   "median": 10397.0,
+   "ci": [
+    10352.0,
+    10603.0
+   ],
+   "cv": 0.012805833137666875,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    352.0,
+    354.0,
+    358.0
+   ],
+   "median": 354.0,
+   "ci": [
+    352.0,
+    358.0
+   ],
+   "cv": 0.008613864088262858,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    228.0,
+    216.0,
+    230.0
+   ],
+   "median": 228.0,
+   "ci": [
+    216.0,
+    230.0
+   ],
+   "cv": 0.03370272015311735,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8947999999999999,
+    0.8936000000000001,
+    0.8914
+   ],
+   "median": 0.8936000000000001,
+   "ci": [
+    0.8914,
+    0.8947999999999999
+   ],
+   "cv": 0.0019303704987502783,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    810.0,
+    831.0,
+    834.0
+   ],
+   "median": 831.0,
+   "ci": [
+    810.0,
+    834.0
+   ],
+   "cv": 0.015850541612875177,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8627999999999999,
+    0.8578,
+    0.8572000000000001
+   ],
+   "median": 0.8578,
+   "ci": [
+    0.8572000000000001,
+    0.8627999999999999
+   ],
+   "cv": 0.003578199257537402,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2004.0,
+    1958.0,
+    1896.0
+   ],
+   "median": 1958.0,
+   "ci": [
+    1896.0,
+    2004.0
+   ],
+   "cv": 0.02775546478211356,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9456,
+    0.9432,
+    0.9436
+   ],
+   "median": 0.9436,
+   "ci": [
+    0.9432,
+    0.9456
+   ],
+   "cv": 0.0013619052056196644,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    10751.0,
+    10943.0,
+    11138.0
+   ],
+   "median": 10943.0,
+   "ci": [
+    10751.0,
+    11138.0
+   ],
+   "cv": 0.01768109813366149,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    356.0,
+    351.0,
+    355.0
+   ],
+   "median": 355.0,
+   "ci": [
+    351.0,
+    356.0
+   ],
+   "cv": 0.0074738737600694655,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    218.0,
     217.0,
-    221.0,
     217.0
    ],
    "median": 217.0,
    "ci": [
     217.0,
-    221.0
+    218.0
    ],
-   "cv": 0.010577409511871007,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 50%: recall@10",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    0.8914,
-    0.8892,
-    0.8957999999999999
-   ],
-   "median": 0.8914,
-   "ci": [
-    0.8892,
-    0.8957999999999999
-   ],
-   "cv": 0.003766875851480629,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 50%: rows returned",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 50%: \u00b5s a search",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    877.0,
-    928.0,
-    895.0
-   ],
-   "median": 895.0,
-   "ci": [
-    877.0,
-    928.0
-   ],
-   "cv": 0.028738927014172362,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 10%: recall@10",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    0.9316,
-    0.9316,
-    0.9326
-   ],
-   "median": 0.9316,
-   "ci": [
-    0.9316,
-    0.9326
-   ],
-   "cv": 0.0006195188524103581,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 10%: rows returned",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 10%: \u00b5s a search",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    1975.0,
-    1887.0,
-    2171.0
-   ],
-   "median": 1975.0,
-   "ci": [
-    1887.0,
-    2171.0
-   ],
-   "cv": 0.07229351305971654,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 1%: recall@10",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    0.9873999999999999,
-    0.986,
-    0.9858
-   ],
-   "median": 0.986,
-   "ci": [
-    0.9858,
-    0.9873999999999999
-   ],
-   "cv": 0.0008837994613829099,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 1%: rows returned",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 1%: \u00b5s a search",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    11758.0,
-    11130.0,
-    11428.0
-   ],
-   "median": 11428.0,
-   "ci": [
-    11130.0,
-    11758.0
-   ],
-   "cv": 0.02746262837008928,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.1%: recall@10",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    1.0,
-    1.0,
-    1.0
-   ],
-   "median": 1.0,
-   "ci": [
-    1.0,
-    1.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.1%: rows returned",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.1%: \u00b5s a search",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    369.0,
-    366.0,
-    357.0
-   ],
-   "median": 366.0,
-   "ci": [
-    357.0,
-    369.0
-   ],
-   "cv": 0.01715658790768791,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.01%: recall@10",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    1.0,
-    1.0,
-    1.0
-   ],
-   "median": 1.0,
-   "ci": [
-    1.0,
-    1.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.01%: rows returned",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.01%: \u00b5s a search",
-   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    238.0,
-    218.0,
-    222.0
-   ],
-   "median": 222.0,
-   "ci": [
-    218.0,
-    238.0
-   ],
-   "cv": 0.04682745683300161,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 50%: recall@10",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    0.8914,
-    0.8892,
-    0.8957999999999999
-   ],
-   "median": 0.8914,
-   "ci": [
-    0.8892,
-    0.8957999999999999
-   ],
-   "cv": 0.003766875851480629,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 50%: rows returned",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 50%: \u00b5s a search",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    932.0,
-    984.0,
-    856.0
-   ],
-   "median": 932.0,
-   "ci": [
-    856.0,
-    984.0
-   ],
-   "cv": 0.06966873133952849,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 10%: recall@10",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    0.8568,
-    0.8566,
-    0.8588
-   ],
-   "median": 0.8568,
-   "ci": [
-    0.8566,
-    0.8588
-   ],
-   "cv": 0.0014188855913921598,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 10%: rows returned",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 10%: \u00b5s a search",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    1979.0,
-    2050.0,
-    1984.0
-   ],
-   "median": 1984.0,
-   "ci": [
-    1979.0,
-    2050.0
-   ],
-   "cv": 0.019770878883895223,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 1%: recall@10",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    0.9432,
-    0.9438,
-    0.944
-   ],
-   "median": 0.9438,
-   "ci": [
-    0.9432,
-    0.944
-   ],
-   "cv": 0.00044118671836084145,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 1%: rows returned",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 1%: \u00b5s a search",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    12532.0,
-    11158.0,
-    10865.0
-   ],
-   "median": 11158.0,
-   "ci": [
-    10865.0,
-    12532.0
-   ],
-   "cv": 0.07726823708816014,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.1%: recall@10",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    1.0,
-    1.0,
-    1.0
-   ],
-   "median": 1.0,
-   "ci": [
-    1.0,
-    1.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.1%: rows returned",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.1%: \u00b5s a search",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    357.0,
-    360.0,
-    358.0
-   ],
-   "median": 358.0,
-   "ci": [
-    357.0,
-    360.0
-   ],
-   "cv": 0.004262861111586828,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.01%: recall@10",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "recall",
-   "times": [
-    1.0,
-    1.0,
-    1.0
-   ],
-   "median": 1.0,
-   "ci": [
-    1.0,
-    1.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.01%: rows returned",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "rows",
-   "times": [
-    10.0,
-    10.0,
-    10.0
-   ],
-   "median": 10.0,
-   "ci": [
-    10.0,
-    10.0
-   ],
-   "cv": 0.0,
-   "flagged": false,
-   "attempts": 1
-  },
-  {
-   "name": "filter 0.01%: \u00b5s a search",
-   "system": "pgvector, iterative_scan strict_order (pgvector)",
-   "phase": "warm",
-   "unit": "\u00b5s",
-   "times": [
-    252.0,
-    222.0,
-    217.0
-   ],
-   "median": 222.0,
-   "ci": [
-    217.0,
-    252.0
-   ],
-   "cv": 0.0821839123849533,
+   "cv": 0.002656519643510548,
    "flagged": false,
    "attempts": 1
   }
