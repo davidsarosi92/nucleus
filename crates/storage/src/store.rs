@@ -736,7 +736,7 @@ impl Store {
             for r in &routes {
                 let path = engines::engine_file(dir, id, r.id, lsn);
                 es.push(if fs.exists(&path)? {
-                    r.kind.load(fs, &path)?
+                    r.kind.load(fs, &engines::engines_dir(dir), &path)?
                 } else {
                     r.kind.empty()
                 });
@@ -814,13 +814,13 @@ impl Store {
         };
         // Engines' files of checkpoints that did not commit, or of
         // branches gone.
-        let keep: Vec<(u32, u64)> = store
-            .shared
-            .branches()
-            .values()
+        let branches: Vec<Arc<Branch>> = store.shared.branches().values().cloned().collect();
+        let keep: Vec<(u32, u64)> = branches
+            .iter()
             .map(|b| (b.info.id, b.checkpoint_lsn.load(Ordering::Acquire)))
             .collect();
-        remove_stale_engine_files(fs, dir, &keep)?;
+        let live = live_engine_files(branches.iter());
+        remove_stale_engine_files(fs, dir, &keep, &live)?;
         if replayed > 0 || main_root == 0 {
             store.checkpoint()?; // so the next open starts from here
         }
@@ -1200,6 +1200,24 @@ impl Store {
     /// yet and meet no other route.  The route is durable when this
     /// returns, and a checkpoint has saved every engine.  Its id.
     pub fn add_engine(&self, start: &[u8], end: &[u8], kind: EngineKind) -> Result<u32> {
+        self.add_engine_if_free(start, end, kind)?.ok_or_else(|| {
+            Error::Engine(
+                "the key range holds entries or meets another engine's: an engine is given a free one"
+                    .into(),
+            )
+        })
+    }
+
+    /// [`add_engine`](Self::add_engine), `None` when the range is not
+    /// free — it holds entries on some branch or meets another route —
+    /// for a caller that then tries another range (a table's next id,
+    /// §M14.28 L3).
+    pub fn add_engine_if_free(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        kind: EngineKind,
+    ) -> Result<Option<u32>> {
         self.check()?;
         if start >= end {
             return Err(Error::Engine(
@@ -1209,7 +1227,7 @@ impl Store {
         let sh = &*self.shared;
         if sh.pool.pager().cipher().is_some() {
             return Err(Error::Engine(
-                "the map engine keeps its file in the clear: not on an encrypted database".into(),
+                "an engine's files are in the clear for now: not on an encrypted database".into(),
             ));
         }
         let id = {
@@ -1226,13 +1244,11 @@ impl Store {
                 .iter()
                 .any(|r| start < r.end.as_slice() && r.start.as_slice() < end)
             {
-                return Err(Error::Engine("the key range meets another engine's".into()));
+                return Ok(None);
             }
             for t in &all {
                 if !t.tree_empty_in(start, end)? {
-                    return Err(Error::Engine(
-                        "the key range holds entries: an engine is given an empty one".into(),
-                    ));
+                    return Ok(None);
                 }
             }
             let id = routes.iter().map(|r| r.id).max().unwrap_or(0) + 1;
@@ -1260,7 +1276,7 @@ impl Store {
             id
         };
         self.checkpoint()?;
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// The store's routes (§M14.28 L1), sorted.
@@ -1523,6 +1539,7 @@ impl Store {
             let mut tree = s.0.tree.write().unwrap_or_else(|e| e.into_inner());
             let mut d = s.0.deferred.lock().unwrap_or_else(|e| e.into_inner());
             settle(&mut tree, &mut d)?;
+            tree.prepare_engines()?;
             s.1 = tree.tree.root().0;
         }
         // The dead lists so far into the directory (a drop reads them).
@@ -1577,7 +1594,9 @@ impl Store {
             for (route, engine) in tables.routes.iter().zip(&tables.engines) {
                 engine.save(
                     sh.platform.fs(),
+                    &engines::engines_dir(&sh.dir),
                     &engines::engine_file(&sh.dir, b.info.id, route.id, *lsn),
+                    &format!("{}-{}-{}", b.info.id, route.id, lsn),
                 )?;
             }
         }
@@ -1852,7 +1871,8 @@ impl Checkpoint<'_> {
                 remove_wal_files(s.platform.fs(), &branch_wal(&s.dir, b.info.id))?;
             }
             let keep: Vec<(u32, u64)> = lsns.iter().map(|(b, lsn)| (b.info.id, *lsn)).collect();
-            remove_stale_engine_files(s.platform.fs(), &s.dir, &keep)?;
+            let live = live_engine_files(lsns.iter().map(|(b, _)| b));
+            remove_stale_engine_files(s.platform.fs(), &s.dir, &keep, &live)?;
             crate::metrics::CHECKPOINTS.inc();
             Ok(())
         })();
@@ -1887,16 +1907,40 @@ fn settle(tree: &mut Tables, d: &mut Deferred) -> Result<()> {
     tree.apply_sorted(&ops, None)
 }
 
+/// The shared files (an LSM tree's runs) the engines of `branches` name.
+fn live_engine_files<'a>(
+    branches: impl Iterator<Item = &'a Arc<Branch>>,
+) -> std::collections::HashSet<String> {
+    let mut live = std::collections::HashSet::new();
+    for b in branches {
+        let tables = b.tree.read().unwrap_or_else(|e| e.into_inner());
+        live.extend(tables.engine_files());
+    }
+    live
+}
+
 /// Removes the engines' files not of a branch's checkpoint in `keep`
 /// (`(branch, lsn)`): of checkpoints that did not commit, before the
-/// last, or of branches gone.
-fn remove_stale_engine_files(fs: &dyn FileSystem, dir: &Path, keep: &[(u32, u64)]) -> Result<()> {
+/// last, or of branches gone; and the runs (`run-…`) no engine in `live`
+/// names any more — merged into others, or of those checkpoints.
+fn remove_stale_engine_files(
+    fs: &dyn FileSystem,
+    dir: &Path,
+    keep: &[(u32, u64)],
+    live: &std::collections::HashSet<String>,
+) -> Result<()> {
     let edir = engines::engines_dir(dir);
     if !fs.exists(&edir)? {
         return Ok(());
     }
     for name in fs.list_dir(&edir)? {
         let Some(n) = name.to_str() else { continue };
+        if n.starts_with("run-") {
+            if !live.contains(n) {
+                fs.remove_file(&edir.join(&name))?;
+            }
+            continue;
+        }
         let parts: Vec<&str> = n.split('-').collect();
         let [b, _, l] = parts.as_slice() else {
             continue;

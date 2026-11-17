@@ -3937,6 +3937,51 @@ recovery time after a crash mid-compaction.
 - **L2 — the LSM engine**: memtable, flushes to runs, the manifest,
   merging reads, bloom filters, lazy-leveling compaction, range
   tombstones; the simulation with crashes in flushes and compactions.
+  *Built* (`crates/storage/src/lsm.rs`, DOCS §4.6): `EngineKind::Lsm`
+  behind L1's boundary.  Writes go to a memtable (points, point
+  tombstones, range tombstones apart and sorted); the store's WAL is its
+  log.  A checkpoint sets the memtable apart under the branch's write
+  lock (`Engine::prepare`, a pointer swap) and writes it as a run while
+  readers go on (`Engine::save`, under the read lock), compacts, and
+  writes the manifest (the runs, per level) in the file the checkpoint's
+  LSN names; the new levels are taken in at the next write.  A run's
+  file: blocks of ~4 KiB, each compressed when that saves an eighth
+  (`lz`) and closed by a CRC-32C; the block index (first keys); a
+  split-block Bloom filter at 10 bits a key (Apache Parquet's: one
+  256-bit block a key, a bit in each 32-bit word — one cache line a
+  probe); the range tombstones; a checksummed meta section and a footer
+  with the format's magic.  Reads merge memtables and runs newest first;
+  a source's range tombstones hide older sources, and its own points
+  are newer than its own ranges (a memtable drops what a range covers
+  when it takes it; a merge keeps only what no newer range hides), so a
+  merged run keeps the invariant.  Compaction is lazy leveling
+  (Dostoevsky, Dayan and Idreos 2018) with fan-in 4: tiered upper
+  levels, one run at the bottom that the level above merges into while
+  it is at most four times what arrives (a new level forms above it
+  otherwise); merges into the bottom drop tombstones.  Runs are
+  immutable and named by branch, route, checkpoint LSN and a counter;
+  a fork shares its parent's, and the store removes a run's file once
+  no branch's engine names it (after the checkpoint commits).  *Taken*:
+  Parquet's split-block filter; RocksDB's range deletions (as ranges
+  beside the points, not fragmented tombstones) and column families'
+  shared WAL (L1); Dostoevsky's lazy leveling.  *Left to L4*: flushing
+  by size between checkpoints (the memtable is bounded by the
+  checkpoint interval now), compaction on workers with an I/O budget
+  instead of inside the checkpoint (writers wait for it now), a block
+  cache, Monkey's Bloom bits by level, a compaction filter for MVCC
+  versions (vacuum's deletes are tombstones meanwhile).
+  *Measured* (`crates/storage/tests/lsm_wamp.rs`, release, real files:
+  the study's steady state scaled down — a million rows of 108 bytes
+  under random keys into a million, 100 a commit, a 16 MiB cache, a
+  checkpoint every 16 MiB of rows): the B+tree writes 77.0 bytes a byte
+  of rows (25.7 s), the LSM tree 6.0 (6.7 s: the WAL 1.0, runs and
+  compactions 5.0); a point lookup afterwards 2.7 µs against 4.1.
+  *Learned*: the first measurement gave the LSM tree 1.9 — its values
+  were a repeated alphabet, which the runs' block compression shrinks
+  and the B+tree's pages store as they are; the values are random bytes
+  now.  A crash test's own directory listing, counted as an I/O
+  operation after the dry run, shifted every crash point by one (the
+  count is now read before it).
 - **L3 — in SQL**: `CREATE TABLE … WITH (engine = lsm)`, per partition,
   indexes following their table; `ALTER TABLE … SET (engine = …)`
   converting online (a copy into the new engine, switched at a commit).

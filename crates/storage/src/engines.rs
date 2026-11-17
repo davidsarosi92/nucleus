@@ -53,8 +53,22 @@ pub trait Engine: Send + Sync {
     fn is_empty(&self) -> bool;
     /// A copy, for a branch made from this one's.
     fn fork(&self) -> Box<dyn Engine>;
-    /// Saves its state in `path`, durably.
-    fn save(&self, fs: &dyn FileSystem, path: &Path) -> Result<()>;
+    /// Sets apart what the coming [`save`](Self::save) will write, under
+    /// the branch's write lock (cheap: readers wait for it).
+    fn prepare(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Saves its state as of the checkpoint, durably: `path` the file the
+    /// checkpoint's LSN names, `dir` the directory of files it may share
+    /// with other branches' engines (an LSM tree's runs), `name` unique
+    /// to this branch, route and checkpoint, for the files it writes
+    /// there.  Readers go on meanwhile.
+    fn save(&self, fs: &dyn FileSystem, dir: &Path, path: &Path, name: &str) -> Result<()>;
+    /// The files in `dir` its last save (or load) named: the store
+    /// removes the others no branch's engine names.
+    fn files(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A scan's entries, the key first and the value only when asked.
@@ -72,18 +86,22 @@ pub enum EngineKind {
     /// A sorted map in memory, saved whole at each checkpoint: the
     /// boundary's proof in the tests, not for tables of any size.
     Map,
+    /// The LSM tree (§M14.28 L2, [`crate::lsm`]).
+    Lsm,
 }
 
 impl EngineKind {
     fn code(self) -> u8 {
         match self {
             EngineKind::Map => 1,
+            EngineKind::Lsm => 2,
         }
     }
 
     fn from_code(c: u8) -> Option<Self> {
         match c {
             1 => Some(EngineKind::Map),
+            2 => Some(EngineKind::Lsm),
             _ => None,
         }
     }
@@ -92,13 +110,15 @@ impl EngineKind {
     pub fn empty(self) -> Box<dyn Engine> {
         match self {
             EngineKind::Map => Box::new(MapEngine::default()),
+            EngineKind::Lsm => Box::new(crate::lsm::LsmEngine::new()),
         }
     }
 
-    /// The engine saved in `path`.
-    pub fn load(self, fs: &dyn FileSystem, path: &Path) -> Result<Box<dyn Engine>> {
+    /// The engine saved in `path` (its shared files in `dir`).
+    pub fn load(self, fs: &dyn FileSystem, dir: &Path, path: &Path) -> Result<Box<dyn Engine>> {
         match self {
             EngineKind::Map => Ok(Box::new(MapEngine::load(fs, path)?)),
+            EngineKind::Lsm => Ok(Box::new(crate::lsm::LsmEngine::load(fs, dir, path)?)),
         }
     }
 }
@@ -127,7 +147,7 @@ fn corrupt(reason: &'static str) -> Error {
 
 /// Writes `bytes` (then their CRC-32C) to `path` durably: a new file
 /// beside it, synced, renamed over it, the directory synced.
-fn write_file(fs: &dyn FileSystem, path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_file(fs: &dyn FileSystem, path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     if fs.exists(&tmp)? {
         fs.remove_file(&tmp)?;
@@ -151,7 +171,7 @@ fn write_file(fs: &dyn FileSystem, path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Reads a file [`write_file`] wrote: its bytes, the checksum checked.
-fn read_file(fs: &dyn FileSystem, path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_file(fs: &dyn FileSystem, path: &Path) -> Result<Vec<u8>> {
     let f = fs.open(path, OpenMode::ReadOnly)?;
     let len = f.size()? as usize;
     let mut all = vec![0; len];
@@ -390,7 +410,7 @@ impl Engine for MapEngine {
         Box::new(self.clone())
     }
 
-    fn save(&self, fs: &dyn FileSystem, path: &Path) -> Result<()> {
+    fn save(&self, fs: &dyn FileSystem, _dir: &Path, path: &Path, _name: &str) -> Result<()> {
         let mut out = MAP_MAGIC.to_vec();
         out.extend_from_slice(&(self.map.len() as u32).to_le_bytes());
         for (k, v) in &self.map {
@@ -686,6 +706,19 @@ impl Tables {
             }
         }
         Ok(())
+    }
+
+    /// Each engine's [`Engine::prepare`], under the branch's write lock.
+    pub(crate) fn prepare_engines(&mut self) -> Result<()> {
+        for e in &mut self.engines {
+            e.prepare()?;
+        }
+        Ok(())
+    }
+
+    /// The shared files its engines name.
+    pub(crate) fn engine_files(&self) -> Vec<String> {
+        self.engines.iter().flat_map(|e| e.files()).collect()
     }
 
     /// Whether `[start, end)` holds no entry of the B+tree.
@@ -1013,7 +1046,7 @@ mod tests {
         ])
         .unwrap();
         let path = Path::new("/e/m");
-        m.save(fs, path).unwrap();
+        m.save(fs, Path::new("/e"), path, "x").unwrap();
         let back = MapEngine::load(fs, path).unwrap();
         assert_eq!(back.map, m.map);
         let f = fs.open(path, OpenMode::ReadWrite).unwrap();

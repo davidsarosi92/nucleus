@@ -1,6 +1,7 @@
-//! Engines behind the store (PLAN.md §M14.28 L1): a key range routed to
-//! the trivial map engine — reads see one ordered map, a commit across
-//! engines is atomic through a crash at any I/O point, branches keep
+//! Engines behind the store (PLAN.md §M14.28 L1, L2): a key range routed
+//! to the trivial map engine or the LSM tree — reads see one ordered map,
+//! a commit across engines is atomic through a crash at any I/O point
+//! (the LSM tree's flushes and compactions among them), branches keep
 //! their own engines, the refusals.
 
 use std::collections::BTreeMap;
@@ -14,6 +15,7 @@ use nucleus_platform::{Platform, Rng, SplitMix64};
 use nucleus_storage::{Batch, EngineKind, Error, Store, StoreOptions};
 
 const DIR: &str = "/db";
+const KINDS: [EngineKind; 2] = [EngineKind::Map, EngineKind::Lsm];
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
@@ -67,16 +69,22 @@ fn apply(model: &mut Model, batch: &Batch) {
 /// way, a cursor — see one map; the routes survive a reopen.
 #[test]
 fn a_routed_range_reads_as_one_map() {
+    for kind in KINDS {
+        a_routed_range_reads_as_one_map_in(kind);
+    }
+}
+
+fn a_routed_range_reads_as_one_map_in(kind: EngineKind) {
     let p = Arc::new(SimPlatform::new(1));
     let (store, _) = open(&p).unwrap();
-    let id = store.add_engine(b"k20", b"k30", EngineKind::Map).unwrap();
+    let id = store.add_engine(b"k20", b"k30", kind).unwrap();
     let rng = SplitMix64::new(1);
     let mut model = Model::new();
     for i in 1..=60 {
         let b = random_batch(&rng, i);
         store.commit(&b).unwrap();
         apply(&mut model, &b);
-        if i % 20 == 0 {
+        if i % 5 == 0 {
             store.checkpoint().unwrap();
         }
     }
@@ -146,9 +154,15 @@ fn routes_are_refused_where_they_would_lose_or_mix_entries() {
 /// crash.
 #[test]
 fn branches_keep_engines_of_their_own() {
+    for kind in KINDS {
+        branches_keep_engines_of_their_own_in(kind);
+    }
+}
+
+fn branches_keep_engines_of_their_own_in(kind: EngineKind) {
     let p = Arc::new(SimPlatform::new(3));
     let (main, _) = open(&p).unwrap();
-    main.add_engine(b"k20", b"k30", EngineKind::Map).unwrap();
+    main.add_engine(b"k20", b"k30", kind).unwrap();
     let put = |s: &Store, meta, k: &str, v: &str| {
         s.commit(&Batch {
             meta,
@@ -194,8 +208,10 @@ fn branches_keep_engines_of_their_own() {
         .map(|n| n.to_string_lossy().into_owned())
         .collect();
     assert!(
-        files.iter().all(|f| f == "routes" || f.starts_with("0-")),
-        "{files:?}"
+        files
+            .iter()
+            .all(|f| f == "routes" || f.starts_with("0-") || f.starts_with("run-0-")),
+        "{kind:?}: {files:?}"
     );
 }
 
@@ -203,14 +219,14 @@ fn branches_keep_engines_of_their_own() {
 /// them; a crash at every I/O point leaves a prefix of the batches —
 /// every acknowledged one — in both engines alike: a commit across
 /// engines is one WAL record, all or nothing.
-fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
+fn workload(p: &Arc<SimPlatform>, seed: u64, kind: EngineKind) -> (Vec<Model>, usize) {
     let rng = SplitMix64::new(seed);
     let mut models = vec![Model::new()];
     let mut acked = 0;
     let _ = (|| -> Result<(), Error> {
         let (store, _) = open(p)?;
         if store.routes()?.is_empty() {
-            store.add_engine(b"k20", b"k30", EngineKind::Map)?;
+            store.add_engine(b"k20", b"k30", kind)?;
         }
         let mut model = Model::new();
         for i in 1..=20u64 {
@@ -222,7 +238,8 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
                 store.wait_durable(lsn)?;
                 acked = i as usize;
             }
-            if i % 6 == 0 {
+            // Often enough for the LSM tree's runs to be compacted.
+            if i % 3 == 0 {
                 store.checkpoint()?;
                 acked = i as usize;
             }
@@ -234,12 +251,33 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
 
 #[test]
 fn commits_across_engines_survive_a_crash_at_every_io_point() {
-    for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
+    for (kind, mode) in KINDS
+        .into_iter()
+        .flat_map(|k| [(k, CrashMode::DropUnsynced), (k, CrashMode::Torn)])
+    {
         harness::run("engines_crash_at_every_io_point", 6, |seed| {
             let dry = Arc::new(SimPlatform::new(seed));
-            let (models, acked) = workload(&dry, seed);
+            let (models, acked) = workload(&dry, seed, kind);
             assert!(acked >= 18);
+            // Counted before the listing below, itself an operation.
             let total = dry.sim_fs().op_count();
+            if kind == EngineKind::Lsm {
+                // A compaction's run (`run-<branch>-<route>-<lsn>-<n>`, n
+                // ≥ 1 after a flush's 0) among the live ones: the crashes
+                // below fall inside compactions too.
+                let runs: Vec<String> = dry
+                    .fs()
+                    .list_dir(Path::new("/db/engines"))
+                    .unwrap()
+                    .into_iter()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with("run-"))
+                    .collect();
+                assert!(
+                    runs.iter().any(|n| !n.ends_with("-0")),
+                    "seed {seed}: no compaction: {runs:?}"
+                );
+            }
             for n in 1..=total {
                 let p = Arc::new(SimPlatform::new(seed));
                 p.sim_fs().set_faults(Faults {
@@ -247,8 +285,8 @@ fn commits_across_engines_survive_a_crash_at_every_io_point() {
                     ..Faults::default()
                 });
                 p.sim_fs().crash_after_ops(n);
-                let (_, acked) = workload(&p, seed);
-                let ctx = format!("{mode:?} crash at op {n} of {total}");
+                let (_, acked) = workload(&p, seed, kind);
+                let ctx = format!("{kind:?} {mode:?} crash at op {n} of {total}");
                 let (store, rec) = open(&p).unwrap_or_else(|e| panic!("{ctx}: reopen failed: {e}"));
                 let k = rec.meta as usize;
                 assert!(

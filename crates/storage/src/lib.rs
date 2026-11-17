@@ -10,6 +10,7 @@ pub mod cipher;
 pub mod crc32c;
 pub mod engines;
 mod error;
+pub mod lsm;
 pub mod lz;
 pub mod metrics;
 pub mod node;

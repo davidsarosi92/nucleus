@@ -763,6 +763,33 @@ each checkpoint, not for tables of any size; the LSM tree (L2) is the
 engine the boundary is for.  With no route, every call goes straight to
 the B+tree.
 
+**The LSM tree** (`lsm`, §M14.28 L2; `EngineKind::Lsm`).  Writes go to a
+memtable (puts, point tombstones, range tombstones for a removed range);
+the store's WAL is its log.  A checkpoint sets the memtable apart under
+the branch's write lock (`Engine::prepare`, a swap) and writes it as an
+immutable sorted run while readers go on (`Engine::save`, under the read
+lock: writers wait for it until L4), compacts, and writes a manifest
+naming the live runs in `engines/<branch>-<route>-<lsn>` before the
+checkpoint commits; runs are `engines/run-<branch>-<route>-<lsn>-<n>`,
+shared between branches by name (a branch forks its parent's), removed
+once no branch's engine names them (`Engine::files`).  Reads merge the
+memtable(s) and the runs newest first: the first source holding a key
+decides, a range tombstone hides the key in every older source, and a
+source's own points are newer than its own range tombstones.  A run's
+file: blocks of about 4 KiB (a key, put or tombstone, a value), each
+compressed by `lz` when that saves an eighth and closed by a CRC-32C;
+the block index (each block's first key), the last key, a split-block
+Bloom filter (Parquet's: a 256-bit block a key, eight bits set, one per
+32-bit word — one cache line a probe, ~1 % false positives at 10 bits a
+key), the range tombstones, a CRC-32C, a 32-byte footer with the magic
+`ncrun\0\0\x01`.  Compaction is lazy leveling with a fan-in of 4: tiered
+upper levels (four runs merge into one run of the next), one run at the
+last level, which the runs arriving from above merge into while it is at
+most four times their size (a level forms above it when larger); a merge
+into the last level drops tombstones.  Left to L4: flushing by size
+between checkpoints, compaction on workers off the lock, a block cache,
+Bloom bits by level.
+
 ### 4.7 Tests
 
 - `pager.rs` — round trips (simulated and real), the immutability rule,

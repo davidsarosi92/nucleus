@@ -1,0 +1,1397 @@
+//! The LSM tree (PLAN.md §M14.28 L2): an engine behind the store for
+//! tables written far more than they are read per key.
+//!
+//! Writes go to a **memtable** (a sorted map in memory: puts, point
+//! tombstones, and range tombstones for `DROP` / `TRUNCATE` / a covering
+//! write); the store's WAL is its log, so it has none of its own.  At a
+//! checkpoint the memtable is set apart under the branch's write lock
+//! ([`Engine::prepare`], a pointer swap) and written as an immutable,
+//! sorted **run** while readers go on ([`Engine::save`]); then the runs
+//! are compacted, and a **manifest** naming the live runs is written in
+//! the file the checkpoint's LSN names, before the checkpoint commits.
+//! A run is never changed: branches share them by name (a branch forks
+//! its parent's runs), and the store removes a run's file once no
+//! branch's manifest names it.
+//!
+//! **Reads merge** the memtable(s) and the runs, newest first: the first
+//! source holding a key decides (a value, or a tombstone), and a range
+//! tombstone hides the key in every older source.  Within one source a
+//! point is newer than its range tombstones (a memtable drops the points
+//! a range tombstone covers when it takes it), so a source's own points
+//! are never hidden by its own ranges.
+//!
+//! **A run's file**: blocks of about 4 KiB of entries (a key, put or
+//! tombstone, a value), each compressed when that pays and closed by a
+//! CRC-32C (D6's checksummed blocks); then the block index (each block's
+//! first key), a split-block Bloom filter of the keys (Apache Parquet's:
+//! a 256-bit block a key, eight bits set, one in each 32-bit word — one
+//! cache line a probe, about 1 % false positives at 10 bits a key), the
+//! range tombstones, its own CRC-32C, and a footer with the format's
+//! magic.  Versioned: a later format reads this one (D15).
+//!
+//! **Compaction**: lazy leveling (Dostoevsky, Dayan and Idreos 2018) with
+//! a fan-in [`FANIN`]: the upper levels are tiered — a level holds up to
+//! `FANIN` runs, merged into one run of the next level when full — and
+//! the last level is one run, which the runs arriving from the level
+//! above merge into while it is at most `FANIN` times their size (a new
+//! level forms above it when it is larger).  A merge into the last level
+//! drops tombstones (nothing older is left for them to hide).
+//!
+//! What L2 leaves to L4 (PLAN.md §M14.28): flushing the memtable by size
+//! between checkpoints (it is flushed at each checkpoint now, so its
+//! memory is bounded by the checkpoint interval), compaction on workers
+//! with an I/O budget instead of inside the checkpoint, a block cache,
+//! and Monkey's allocation of Bloom bits by level.
+
+use std::collections::BTreeMap;
+use std::ops::Bound;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use nucleus_platform::{File, FileSystem, OpenMode};
+
+use crate::crc32c::crc32c;
+use crate::engines::{Engine, Entries, Ops};
+use crate::{Error, PageId, Result, lz};
+
+/// Runs a tiered level holds before they merge into one run of the next.
+pub const FANIN: usize = 4;
+/// A block's entries, before compression, about this many bytes.
+const BLOCK: usize = 4096;
+/// Bloom filter bits a key.
+const BLOOM_BITS: usize = 10;
+const RUN_MAGIC: &[u8; 8] = b"ncrun\0\0\x01";
+const MANIFEST_MAGIC: &[u8; 8] = b"nclsm\0\0\x01";
+/// The footer: the meta section's offset and length, the entries, the
+/// magic.
+const FOOTER: usize = 8 + 8 + 8 + 8;
+
+fn corrupt(reason: &'static str) -> Error {
+    Error::Corrupt {
+        page: PageId(0),
+        reason,
+    }
+}
+
+/// A value, or a tombstone (`None`).
+type Val = Option<Vec<u8>>;
+
+// ------------------------------------------------------------ hashing
+
+fn mix(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// A 64-bit hash of a key (SplitMix64's finalizer over its words).
+fn hash64(b: &[u8]) -> u64 {
+    let mut h = mix((b.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let (words, r) = b.as_chunks::<8>();
+    for w in words {
+        h = mix(h ^ u64::from_le_bytes(*w));
+    }
+    if !r.is_empty() {
+        let mut w = [0u8; 8];
+        w[..r.len()].copy_from_slice(r);
+        h = mix(h ^ u64::from_le_bytes(w) ^ 0xa5a5_a5a5_0000_0000);
+    }
+    h
+}
+
+// ------------------------------------------------------------ the filter
+
+const SALT: [u32; 8] = [
+    0x47b6_137b,
+    0x4497_4d91,
+    0x8824_ad5b,
+    0xa2b7_289d,
+    0x7054_95c7,
+    0x2df1_424b,
+    0x9efc_4947,
+    0x5c6b_fb31,
+];
+
+/// A split-block Bloom filter (Apache Parquet's): 256-bit blocks.
+#[derive(Clone, Default)]
+struct Bloom {
+    blocks: Vec<[u32; 8]>,
+}
+
+impl Bloom {
+    fn with_hashes(hashes: &[u64]) -> Self {
+        let n = (hashes.len() * BLOOM_BITS).div_ceil(256).max(1);
+        let mut b = Bloom {
+            blocks: vec![[0; 8]; n],
+        };
+        for &h in hashes {
+            let i = b.block(h);
+            let m = Self::mask(h as u32);
+            for (w, m) in b.blocks[i].iter_mut().zip(m) {
+                *w |= m;
+            }
+        }
+        b
+    }
+
+    fn block(&self, h: u64) -> usize {
+        (((h >> 32) * self.blocks.len() as u64) >> 32) as usize
+    }
+
+    fn mask(h: u32) -> [u32; 8] {
+        SALT.map(|s| 1u32 << (h.wrapping_mul(s) >> 27))
+    }
+
+    /// Whether the key whose hash is `h` may be in the set.
+    fn may(&self, h: u64) -> bool {
+        if self.blocks.is_empty() {
+            return true;
+        }
+        let blk = &self.blocks[self.block(h)];
+        blk.iter()
+            .zip(Self::mask(h as u32))
+            .all(|(w, m)| w & m == m)
+    }
+}
+
+// ------------------------------------------------------------ ranges
+
+/// Range tombstones: `[start, end)` ranges, apart and sorted.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+struct Ranges(Vec<(Vec<u8>, Vec<u8>)>);
+
+impl Ranges {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Adds `[start, end)`, joining the ranges it meets.
+    fn add(&mut self, start: &[u8], end: &[u8]) {
+        if start >= end {
+            return;
+        }
+        let (mut s, mut e) = (start.to_vec(), end.to_vec());
+        // The ranges that end at or after `start` and begin at or before
+        // `end` meet it.
+        let first = self.0.partition_point(|r| r.1.as_slice() < start);
+        let last = self.0.partition_point(|r| r.0.as_slice() <= end);
+        if first < last {
+            if self.0[first].0 < s {
+                s = self.0[first].0.clone();
+            }
+            if self.0[last - 1].1 > e {
+                e = self.0[last - 1].1.clone();
+            }
+        }
+        self.0.splice(first..last, [(s, e)]);
+    }
+
+    fn covers(&self, key: &[u8]) -> bool {
+        let i = self.0.partition_point(|r| r.0.as_slice() <= key);
+        i > 0 && key < self.0[i - 1].1.as_slice()
+    }
+
+    fn union(&mut self, other: &Ranges) {
+        for (s, e) in &other.0 {
+            self.add(s, e);
+        }
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
+        for (s, e) in &self.0 {
+            put_bytes(out, s);
+            put_bytes(out, e);
+        }
+    }
+
+    fn decode(r: &mut Reader<'_>) -> Result<Self> {
+        let n = r.u32()?;
+        let mut v = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let s = r.bytes()?.to_vec();
+            let e = r.bytes()?.to_vec();
+            v.push((s, e));
+        }
+        Ok(Ranges(v))
+    }
+}
+
+// ------------------------------------------------------------ bytes
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.0.len() < n {
+            return Err(corrupt("an LSM file ends early"));
+        }
+        let (a, b) = self.0.split_at(n);
+        self.0 = b;
+        Ok(a)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4")))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8")))
+    }
+
+    fn bytes(&mut self) -> Result<&'a [u8]> {
+        let n = self.u32()? as usize;
+        self.take(n)
+    }
+}
+
+fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    out.extend_from_slice(b);
+}
+
+fn read_all(file: &dyn File, at: u64, len: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0; len];
+    let mut done = 0;
+    while done < len {
+        let n = file.read_at(&mut buf[done..], at + done as u64)?;
+        if n == 0 {
+            return Err(corrupt("an LSM run ends early"));
+        }
+        done += n;
+    }
+    Ok(buf)
+}
+
+// ------------------------------------------------------------ memtable
+
+/// Writes not yet in a run.
+#[derive(Clone, Default)]
+struct Memtable {
+    points: BTreeMap<Vec<u8>, Val>,
+    ranges: Ranges,
+}
+
+impl Memtable {
+    fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.ranges.is_empty()
+    }
+
+    fn put(&mut self, key: &[u8], v: Val) {
+        self.points.insert(key.to_vec(), v);
+    }
+
+    fn remove_range(&mut self, start: &[u8], end: &[u8]) {
+        if start >= end {
+            return;
+        }
+        let keys: Vec<Vec<u8>> = self
+            .points
+            .range::<[u8], _>((Bound::Included(start), Bound::Excluded(end)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in keys {
+            self.points.remove(&k);
+        }
+        self.ranges.add(start, end);
+    }
+
+    /// `newer` written over this one.
+    fn absorb(&mut self, newer: &Memtable) {
+        for (s, e) in &newer.ranges.0 {
+            self.remove_range(s, e);
+        }
+        for (k, v) in &newer.points {
+            self.points.insert(k.clone(), v.clone());
+        }
+    }
+
+    fn lookup(&self, key: &[u8]) -> Option<Val> {
+        if let Some(v) = self.points.get(key) {
+            return Some(v.clone());
+        }
+        self.ranges.covers(key).then_some(None)
+    }
+}
+
+// ------------------------------------------------------------ runs
+
+/// A block's place in a run.
+#[derive(Clone)]
+struct BlockRef {
+    first: Vec<u8>,
+    offset: u64,
+    len: u32,
+}
+
+/// An immutable sorted run in its file.
+pub(crate) struct Run {
+    name: String,
+    file: Box<dyn File>,
+    index: Vec<BlockRef>,
+    last: Vec<u8>,
+    bloom: Bloom,
+    ranges: Ranges,
+    size: u64,
+}
+
+impl Run {
+    fn open(fs: &dyn FileSystem, dir: &Path, name: &str) -> Result<Arc<Run>> {
+        let file = fs.open(&dir.join(name), OpenMode::ReadOnly)?;
+        let size = file.size()?;
+        if size < FOOTER as u64 {
+            return Err(corrupt("an LSM run too short"));
+        }
+        let foot = read_all(&*file, size - FOOTER as u64, FOOTER)?;
+        let mut f = Reader(&foot);
+        let (meta_at, meta_len, _entries) = (f.u64()?, f.u64()?, f.u64()?);
+        if f.take(8)? != RUN_MAGIC {
+            return Err(corrupt("not an LSM run"));
+        }
+        if meta_at.checked_add(meta_len) != Some(size - FOOTER as u64) || meta_len < 4 {
+            return Err(corrupt("an LSM run's footer is wrong"));
+        }
+        let meta = read_all(&*file, meta_at, meta_len as usize)?;
+        let (body, sum) = meta.split_at(meta.len() - 4);
+        if crc32c(body).to_le_bytes() != sum {
+            return Err(corrupt("an LSM run's index fails its checksum"));
+        }
+        let mut r = Reader(body);
+        let n = r.u32()? as usize;
+        let mut index = Vec::with_capacity(n);
+        for _ in 0..n {
+            let first = r.bytes()?.to_vec();
+            let offset = r.u64()?;
+            let len = r.u32()?;
+            index.push(BlockRef { first, offset, len });
+        }
+        let last = r.bytes()?.to_vec();
+        let words = r.u32()? as usize;
+        let mut blocks = Vec::with_capacity(words / 8);
+        for _ in 0..words / 8 {
+            let mut b = [0u32; 8];
+            for w in &mut b {
+                *w = r.u32()?;
+            }
+            blocks.push(b);
+        }
+        let ranges = Ranges::decode(&mut r)?;
+        Ok(Arc::new(Run {
+            name: name.to_owned(),
+            file,
+            index,
+            last,
+            bloom: Bloom { blocks },
+            ranges,
+            size,
+        }))
+    }
+
+    /// Block `i`'s entries.
+    fn block(&self, i: usize) -> Result<Vec<(Vec<u8>, Val)>> {
+        let b = &self.index[i];
+        let stored = read_all(&*self.file, b.offset, b.len as usize)?;
+        if stored.len() < 9 {
+            return Err(corrupt("an LSM block too short"));
+        }
+        let (body, sum) = stored.split_at(stored.len() - 4);
+        if crc32c(body).to_le_bytes() != sum {
+            return Err(corrupt("an LSM block fails its checksum"));
+        }
+        let codec = body[0];
+        let raw_len = u32::from_le_bytes(body[1..5].try_into().expect("4")) as usize;
+        let payload = &body[5..];
+        let raw;
+        let data: &[u8] = match codec {
+            0 => payload,
+            1 => {
+                let mut out = Vec::new();
+                lz::decompress(payload, raw_len, &mut out)
+                    .ok_or(corrupt("an LSM block does not decompress"))?;
+                raw = out;
+                &raw
+            }
+            _ => return Err(corrupt("an LSM block's codec is unknown")),
+        };
+        let mut r = Reader(data);
+        let mut out = Vec::new();
+        while !r.0.is_empty() {
+            let k = r.bytes()?.to_vec();
+            let v = match r.u8()? {
+                0 => Some(r.bytes()?.to_vec()),
+                1 => None,
+                _ => return Err(corrupt("an LSM entry's kind is unknown")),
+            };
+            out.push((k, v));
+        }
+        Ok(out)
+    }
+
+    /// The block that would hold `key`.
+    fn block_of(&self, key: &[u8]) -> Option<usize> {
+        let i = self.index.partition_point(|b| b.first.as_slice() <= key);
+        (i > 0).then(|| i - 1)
+    }
+
+    fn lookup(&self, key: &[u8], h: u64) -> Result<Option<Val>> {
+        if !self.index.is_empty()
+            && key >= self.index[0].first.as_slice()
+            && key <= self.last.as_slice()
+            && self.bloom.may(h)
+            && let Some(i) = self.block_of(key)
+        {
+            let entries = self.block(i)?;
+            if let Ok(j) = entries.binary_search_by(|e| e.0.as_slice().cmp(key)) {
+                return Ok(Some(entries[j].1.clone()));
+            }
+        }
+        Ok(self.ranges.covers(key).then_some(None))
+    }
+}
+
+/// Writes a run's file entry by entry.
+struct RunWriter<'f> {
+    fs: &'f dyn FileSystem,
+    tmp: std::path::PathBuf,
+    path: std::path::PathBuf,
+    name: String,
+    file: Box<dyn File>,
+    at: u64,
+    block: Vec<u8>,
+    first: Option<Vec<u8>>,
+    index: Vec<BlockRef>,
+    hashes: Vec<u64>,
+    last: Vec<u8>,
+    entries: u64,
+}
+
+impl<'f> RunWriter<'f> {
+    fn new(fs: &'f dyn FileSystem, dir: &Path, name: &str) -> Result<Self> {
+        let path = dir.join(name);
+        let tmp = dir.join(format!("{name}.tmp"));
+        if fs.exists(&tmp)? {
+            fs.remove_file(&tmp)?;
+        }
+        let file = fs.open(&tmp, OpenMode::CreateNew)?;
+        Ok(RunWriter {
+            fs,
+            tmp,
+            path,
+            name: name.to_owned(),
+            file,
+            at: 0,
+            block: Vec::new(),
+            first: None,
+            index: Vec::new(),
+            hashes: Vec::new(),
+            last: Vec::new(),
+            entries: 0,
+        })
+    }
+
+    fn add(&mut self, key: &[u8], v: &Val) -> Result<()> {
+        debug_assert!(self.entries == 0 || key > self.last.as_slice());
+        if self.first.is_none() {
+            self.first = Some(key.to_vec());
+        }
+        put_bytes(&mut self.block, key);
+        match v {
+            Some(v) => {
+                self.block.push(0);
+                put_bytes(&mut self.block, v);
+            }
+            None => self.block.push(1),
+        }
+        self.hashes.push(hash64(key));
+        self.last.clear();
+        self.last.extend_from_slice(key);
+        self.entries += 1;
+        if self.block.len() >= BLOCK {
+            self.flush_block()?;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.file.write_all_at(bytes, self.at)?;
+        self.at += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn flush_block(&mut self) -> Result<()> {
+        let Some(first) = self.first.take() else {
+            return Ok(());
+        };
+        let mut packed = Vec::new();
+        lz::compress(&self.block, &mut packed);
+        let mut stored = Vec::with_capacity(self.block.len() + 9);
+        if packed.len() + packed.len() / 8 < self.block.len() {
+            stored.push(1);
+            stored.extend_from_slice(&(self.block.len() as u32).to_le_bytes());
+            stored.extend_from_slice(&packed);
+        } else {
+            stored.push(0);
+            stored.extend_from_slice(&(self.block.len() as u32).to_le_bytes());
+            stored.extend_from_slice(&self.block);
+        }
+        stored.extend_from_slice(&crc32c(&stored).to_le_bytes());
+        self.index.push(BlockRef {
+            first,
+            offset: self.at,
+            len: stored.len() as u32,
+        });
+        self.write(&stored)?;
+        self.block.clear();
+        Ok(())
+    }
+
+    /// The run, durable under its name (its directory entry made durable
+    /// by the manifest's write after it); `None` when it holds nothing.
+    fn finish(mut self, ranges: Ranges) -> Result<Option<Arc<Run>>> {
+        self.flush_block()?;
+        if self.entries == 0 && ranges.is_empty() {
+            drop(self.file);
+            self.fs.remove_file(&self.tmp)?;
+            return Ok(None);
+        }
+        let bloom = Bloom::with_hashes(&self.hashes);
+        let mut meta = Vec::new();
+        meta.extend_from_slice(&(self.index.len() as u32).to_le_bytes());
+        for b in &self.index {
+            put_bytes(&mut meta, &b.first);
+            meta.extend_from_slice(&b.offset.to_le_bytes());
+            meta.extend_from_slice(&b.len.to_le_bytes());
+        }
+        put_bytes(&mut meta, &self.last);
+        meta.extend_from_slice(&((bloom.blocks.len() * 8) as u32).to_le_bytes());
+        for b in &bloom.blocks {
+            for w in b {
+                meta.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        ranges.encode(&mut meta);
+        meta.extend_from_slice(&crc32c(&meta).to_le_bytes());
+        let meta_at = self.at;
+        self.write(&meta)?;
+        let mut foot = Vec::with_capacity(FOOTER);
+        foot.extend_from_slice(&meta_at.to_le_bytes());
+        foot.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+        foot.extend_from_slice(&self.entries.to_le_bytes());
+        foot.extend_from_slice(RUN_MAGIC);
+        self.write(&foot)?;
+        self.file.sync()?;
+        let size = self.at;
+        drop(self.file);
+        self.fs.rename(&self.tmp, &self.path)?;
+        let file = self.fs.open(&self.path, OpenMode::ReadOnly)?;
+        Ok(Some(Arc::new(Run {
+            name: self.name,
+            file,
+            index: self.index,
+            last: self.last,
+            bloom,
+            ranges,
+            size,
+        })))
+    }
+}
+
+// ------------------------------------------------------------ scans
+
+/// One source's entries in `(start, end)`, one direction.
+enum Src<'a> {
+    Mem(Box<dyn Iterator<Item = (&'a Vec<u8>, &'a Val)> + 'a>),
+    Run(RunScan<'a>),
+}
+
+impl Src<'_> {
+    fn next(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+        match self {
+            Src::Mem(it) => Ok(it.next().map(|(k, v)| (k.clone(), v.clone()))),
+            Src::Run(r) => r.next(),
+        }
+    }
+}
+
+fn mem_scan<'a>(m: &'a Memtable, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bool) -> Src<'a> {
+    if empty_bounds(start, end) {
+        return Src::Mem(Box::new(std::iter::empty()));
+    }
+    let r = m.points.range::<[u8], _>((start, end));
+    if rev {
+        Src::Mem(Box::new(r.rev()))
+    } else {
+        Src::Mem(Box::new(r))
+    }
+}
+
+/// Whether `(start, end)` holds no key (`BTreeMap::range` refuses them).
+fn empty_bounds(start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+    match (start, end) {
+        (Bound::Included(s), Bound::Included(e)) => s > e,
+        (Bound::Included(s), Bound::Excluded(e))
+        | (Bound::Excluded(s), Bound::Included(e))
+        | (Bound::Excluded(s), Bound::Excluded(e)) => s >= e,
+        _ => false,
+    }
+}
+
+fn above(start: &Bound<Vec<u8>>, k: &[u8]) -> bool {
+    match start {
+        Bound::Unbounded => true,
+        Bound::Included(s) => k >= s.as_slice(),
+        Bound::Excluded(s) => k > s.as_slice(),
+    }
+}
+
+fn below(end: &Bound<Vec<u8>>, k: &[u8]) -> bool {
+    match end {
+        Bound::Unbounded => true,
+        Bound::Included(e) => k <= e.as_slice(),
+        Bound::Excluded(e) => k < e.as_slice(),
+    }
+}
+
+/// A run's entries in `(start, end)`, a block at a time.
+struct RunScan<'a> {
+    run: &'a Run,
+    start: Bound<Vec<u8>>,
+    end: Bound<Vec<u8>>,
+    rev: bool,
+    /// The next block to read (forward) or the one past it (reverse).
+    next: usize,
+    buf: std::vec::IntoIter<(Vec<u8>, Val)>,
+    done: bool,
+}
+
+impl<'a> RunScan<'a> {
+    fn new(run: &'a Run, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bool) -> Self {
+        let own = |b: Bound<&[u8]>| b.map(<[u8]>::to_vec);
+        let next = if rev {
+            match end {
+                Bound::Unbounded => run.index.len(),
+                Bound::Included(k) | Bound::Excluded(k) => run.block_of(k).map_or(0, |i| i + 1),
+            }
+        } else {
+            match start {
+                Bound::Unbounded => 0,
+                Bound::Included(k) | Bound::Excluded(k) => run.block_of(k).unwrap_or(0),
+            }
+        };
+        RunScan {
+            run,
+            start: own(start),
+            end: own(end),
+            rev,
+            next,
+            buf: Vec::new().into_iter(),
+            done: empty_bounds(start, end),
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+        loop {
+            if self.done {
+                return Ok(None);
+            }
+            for (k, v) in self.buf.by_ref() {
+                let (inside, past) = if self.rev {
+                    (above(&self.start, &k), !below(&self.end, &k))
+                } else {
+                    (below(&self.end, &k), !above(&self.start, &k))
+                };
+                if past {
+                    continue; // before the range in this direction
+                }
+                if !inside {
+                    self.done = true;
+                    return Ok(None);
+                }
+                return Ok(Some((k, v)));
+            }
+            let i = if self.rev {
+                if self.next == 0 {
+                    self.done = true;
+                    continue;
+                }
+                self.next -= 1;
+                self.next
+            } else {
+                if self.next >= self.run.index.len() {
+                    self.done = true;
+                    continue;
+                }
+                self.next += 1;
+                self.next - 1
+            };
+            let mut entries = self.run.block(i)?;
+            if self.rev {
+                entries.reverse();
+            }
+            self.buf = entries.into_iter();
+        }
+    }
+}
+
+/// Sources merged, newest first: what a reader sees.
+struct Merged<'a> {
+    srcs: Vec<Src<'a>>,
+    heads: Vec<Option<(Vec<u8>, Val)>>,
+    /// Each source's range tombstones (they hide older sources' keys).
+    ranges: Vec<&'a Ranges>,
+    rev: bool,
+    /// Tombstones and hidden keys passed over (a compaction keeps them).
+    keep_tombstones: bool,
+    started: bool,
+    cur: Val,
+}
+
+impl<'a> Merged<'a> {
+    fn new(srcs: Vec<Src<'a>>, ranges: Vec<&'a Ranges>, rev: bool, keep_tombstones: bool) -> Self {
+        let n = srcs.len();
+        Merged {
+            srcs,
+            heads: vec![None; n],
+            ranges,
+            rev,
+            keep_tombstones,
+            started: false,
+            cur: None,
+        }
+    }
+
+    /// The next entry: its key and value (a tombstone only when kept).
+    fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+        if !self.started {
+            for (h, src) in self.heads.iter_mut().zip(&mut self.srcs) {
+                *h = src.next()?;
+            }
+            self.started = true;
+        }
+        loop {
+            // The least key (greatest, reverse), from the newest source
+            // holding it.
+            let mut best: Option<usize> = None;
+            for (i, h) in self.heads.iter().enumerate() {
+                let Some((k, _)) = h else { continue };
+                best = match best {
+                    None => Some(i),
+                    Some(b) => {
+                        let bk = &self.heads[b].as_ref().expect("a head").0;
+                        let better = if self.rev { k > bk } else { k < bk };
+                        if better { Some(i) } else { Some(b) }
+                    }
+                };
+            }
+            let Some(b) = best else {
+                return Ok(None);
+            };
+            let (key, val) = self.heads[b].take().expect("a head");
+            self.heads[b] = self.srcs[b].next()?;
+            // The same key in older sources: passed over.
+            for (h, src) in self.heads.iter_mut().zip(&mut self.srcs).skip(b + 1) {
+                if h.as_ref().is_some_and(|h| h.0 == key) {
+                    *h = src.next()?;
+                }
+            }
+            let hidden = self.ranges[..b].iter().any(|r| r.covers(&key));
+            if hidden {
+                continue;
+            }
+            if val.is_none() && !self.keep_tombstones {
+                continue;
+            }
+            return Ok(Some((key, val)));
+        }
+    }
+}
+
+impl Entries for Merged<'_> {
+    fn next_key_into(&mut self, key: &mut Vec<u8>) -> Result<bool> {
+        match self.next_entry()? {
+            Some((k, v)) => {
+                *key = k;
+                self.cur = v;
+                Ok(true)
+            }
+            None => {
+                self.cur = None;
+                Ok(false)
+            }
+        }
+    }
+
+    fn value_into(&mut self, val: &mut Vec<u8>) -> Result<()> {
+        val.clear();
+        if let Some(v) = &self.cur {
+            val.extend_from_slice(v);
+        }
+        Ok(())
+    }
+}
+
+// ------------------------------------------------------------ levels
+
+/// The runs: tiered levels (each newest first), then the last level's
+/// one run.
+#[derive(Clone, Default)]
+struct Levels {
+    tiers: Vec<Vec<Arc<Run>>>,
+    bottom: Option<Arc<Run>>,
+}
+
+impl Levels {
+    fn is_empty(&self) -> bool {
+        self.tiers.iter().all(Vec::is_empty) && self.bottom.is_none()
+    }
+
+    /// Newest first.
+    fn runs(&self) -> impl Iterator<Item = &Arc<Run>> {
+        self.tiers.iter().flatten().chain(self.bottom.iter())
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.runs().map(|r| r.name.clone()).collect()
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = MANIFEST_MAGIC.to_vec();
+        out.extend_from_slice(&(self.tiers.len() as u32).to_le_bytes());
+        for t in &self.tiers {
+            out.extend_from_slice(&(t.len() as u32).to_le_bytes());
+            for r in t {
+                put_bytes(&mut out, r.name.as_bytes());
+            }
+        }
+        match &self.bottom {
+            Some(r) => {
+                out.push(1);
+                put_bytes(&mut out, r.name.as_bytes());
+            }
+            None => out.push(0),
+        }
+        out
+    }
+
+    fn decode(fs: &dyn FileSystem, dir: &Path, bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader(bytes);
+        if r.take(8)? != MANIFEST_MAGIC {
+            return Err(corrupt("not an LSM manifest"));
+        }
+        let name = |r: &mut Reader<'_>| -> Result<String> {
+            String::from_utf8(r.bytes()?.to_vec()).map_err(|_| corrupt("an LSM run's name"))
+        };
+        let mut tiers = Vec::new();
+        for _ in 0..r.u32()? {
+            let mut t = Vec::new();
+            for _ in 0..r.u32()? {
+                t.push(Run::open(fs, dir, &name(&mut r)?)?);
+            }
+            tiers.push(t);
+        }
+        let bottom = match r.u8()? {
+            0 => None,
+            _ => Some(Run::open(fs, dir, &name(&mut r)?)?),
+        };
+        Ok(Levels { tiers, bottom })
+    }
+}
+
+/// Merges `runs` (newest first) into one run named `name`; tombstones
+/// dropped unless `keep`.
+fn merge_runs(
+    fs: &dyn FileSystem,
+    dir: &Path,
+    name: &str,
+    runs: &[Arc<Run>],
+    keep: bool,
+) -> Result<Option<Arc<Run>>> {
+    let srcs = runs
+        .iter()
+        .map(|r| Src::Run(RunScan::new(r, Bound::Unbounded, Bound::Unbounded, false)))
+        .collect();
+    let ranges = runs.iter().map(|r| &r.ranges).collect();
+    let mut m = Merged::new(srcs, ranges, false, keep);
+    let mut w = RunWriter::new(fs, dir, name)?;
+    while let Some((k, v)) = m.next_entry()? {
+        w.add(&k, &v)?;
+    }
+    let mut ranges = Ranges::default();
+    if keep {
+        for r in runs {
+            ranges.union(&r.ranges);
+        }
+    }
+    w.finish(ranges)
+}
+
+// ------------------------------------------------------------ the engine
+
+/// [`crate::EngineKind::Lsm`].
+pub struct LsmEngine {
+    mem: Memtable,
+    /// The memtable a checkpoint set apart, until its run is taken in.
+    sealed: Option<Arc<Memtable>>,
+    levels: Levels,
+    /// What the last save wrote, taken in at the next change.
+    saved: Mutex<Option<Levels>>,
+}
+
+impl Default for LsmEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LsmEngine {
+    /// An empty one.
+    pub fn new() -> Self {
+        LsmEngine {
+            mem: Memtable::default(),
+            sealed: None,
+            levels: Levels::default(),
+            saved: Mutex::new(None),
+        }
+    }
+
+    /// The one a manifest in `path` names, its runs in `dir`.
+    pub fn load(fs: &dyn FileSystem, dir: &Path, path: &Path) -> Result<Self> {
+        let bytes = crate::engines::read_file(fs, path)?;
+        let mut e = Self::new();
+        e.levels = Levels::decode(fs, dir, &bytes)?;
+        Ok(e)
+    }
+
+    /// The last save taken in (a change follows).
+    fn settle(&mut self) {
+        if let Some(l) = self
+            .saved
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            self.levels = l;
+            self.sealed = None;
+        }
+    }
+
+    /// Newest first: the memtable, the one set apart, the runs.
+    fn mems(&self) -> impl Iterator<Item = &Memtable> {
+        std::iter::once(&self.mem).chain(self.sealed.as_deref())
+    }
+
+    /// The runs, per level: (tiers, bottom).
+    pub fn shape(&self) -> (Vec<usize>, bool) {
+        let s = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        let l = s.as_ref().unwrap_or(&self.levels);
+        (l.tiers.iter().map(Vec::len).collect(), l.bottom.is_some())
+    }
+
+    /// Compacts `levels` (lazy leveling), writing runs `{name}-{n}`, ….
+    fn compact(
+        fs: &dyn FileSystem,
+        dir: &Path,
+        name: &str,
+        n: &mut usize,
+        levels: &mut Levels,
+    ) -> Result<()> {
+        let mut i = 0;
+        while i < levels.tiers.len() {
+            if levels.tiers[i].len() < FANIN {
+                i += 1;
+                continue;
+            }
+            let runs = std::mem::take(&mut levels.tiers[i]);
+            let last = i + 1 == levels.tiers.len();
+            let mut next = || {
+                *n += 1;
+                format!("{name}-{}", *n - 1)
+            };
+            if !last {
+                if let Some(r) = merge_runs(fs, dir, &next(), &runs, true)? {
+                    levels.tiers[i + 1].insert(0, r);
+                }
+            } else {
+                let size: u64 = runs.iter().map(|r| r.size).sum();
+                match levels.bottom.take() {
+                    None => levels.bottom = merge_runs(fs, dir, &next(), &runs, false)?,
+                    Some(b) if b.size <= FANIN as u64 * size => {
+                        let mut all = runs;
+                        all.push(b);
+                        levels.bottom = merge_runs(fs, dir, &next(), &all, false)?;
+                    }
+                    Some(b) => {
+                        levels.bottom = Some(b);
+                        if let Some(r) = merge_runs(fs, dir, &next(), &runs, true)? {
+                            levels.tiers.push(vec![r]);
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        while levels.tiers.last().is_some_and(Vec::is_empty) {
+            levels.tiers.pop();
+        }
+        Ok(())
+    }
+}
+
+impl Engine for LsmEngine {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        for m in self.mems() {
+            if let Some(v) = m.lookup(key) {
+                return Ok(v);
+            }
+        }
+        let h = hash64(key);
+        for r in self.levels.runs() {
+            if let Some(v) = r.lookup(key, h)? {
+                return Ok(v);
+            }
+        }
+        Ok(None)
+    }
+
+    fn scan<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        reverse: bool,
+    ) -> Result<Box<dyn Entries + 'a>> {
+        let mut srcs = Vec::new();
+        let mut ranges = Vec::new();
+        for m in self.mems() {
+            srcs.push(mem_scan(m, start, end, reverse));
+            ranges.push(&m.ranges);
+        }
+        for r in self.levels.runs() {
+            srcs.push(Src::Run(RunScan::new(r, start, end, reverse)));
+            ranges.push(&r.ranges);
+        }
+        Ok(Box::new(Merged::new(srcs, ranges, reverse, false)))
+    }
+
+    fn apply(&mut self, ops: &Ops) -> Result<()> {
+        self.settle();
+        for (k, v) in ops {
+            self.mem.put(k, v.clone());
+        }
+        Ok(())
+    }
+
+    fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()> {
+        self.settle();
+        self.mem.remove_range(start, end);
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        self.mems().all(Memtable::is_empty)
+            && self.levels.is_empty()
+            && saved.as_ref().is_none_or(Levels::is_empty)
+    }
+
+    fn fork(&self) -> Box<dyn Engine> {
+        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut e = LsmEngine {
+            mem: self.mem.clone(),
+            sealed: self.sealed.clone(),
+            levels: self.levels.clone(),
+            saved: Mutex::new(None),
+        };
+        if let Some(l) = saved {
+            e.levels = l;
+            e.sealed = None;
+        }
+        Box::new(e)
+    }
+
+    fn prepare(&mut self) -> Result<()> {
+        self.settle();
+        if self.mem.is_empty() {
+            return Ok(());
+        }
+        let mem = std::mem::take(&mut self.mem);
+        self.sealed = Some(Arc::new(match self.sealed.take() {
+            // A save that did not happen (its checkpoint failed): the
+            // newer writes over the ones set apart then.
+            Some(old) => {
+                let mut m = Arc::unwrap_or_clone(old);
+                m.absorb(&mem);
+                m
+            }
+            None => mem,
+        }));
+        Ok(())
+    }
+
+    fn save(&self, fs: &dyn FileSystem, dir: &Path, path: &Path, name: &str) -> Result<()> {
+        let mut levels = self.levels.clone();
+        let base = format!("run-{name}");
+        let mut n = 0;
+        if let Some(m) = self.sealed.as_deref().filter(|m| !m.is_empty()) {
+            // Tombstones kept while older runs may hold what they hide.
+            let keep = !levels.is_empty();
+            let mut w = RunWriter::new(fs, dir, &format!("{base}-{n}"))?;
+            n += 1;
+            for (k, v) in &m.points {
+                if v.is_some() || keep {
+                    w.add(k, v)?;
+                }
+            }
+            let ranges = if keep {
+                m.ranges.clone()
+            } else {
+                Ranges::default()
+            };
+            if let Some(r) = w.finish(ranges)? {
+                if levels.tiers.is_empty() {
+                    levels.tiers.push(Vec::new());
+                }
+                levels.tiers[0].insert(0, r);
+            }
+        }
+        Self::compact(fs, dir, &base, &mut n, &mut levels)?;
+        crate::engines::write_file(fs, path, &levels.encode())?;
+        *self.saved.lock().unwrap_or_else(|e| e.into_inner()) = Some(levels);
+        Ok(())
+    }
+
+    fn files(&self) -> Vec<String> {
+        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        saved.as_ref().unwrap_or(&self.levels).names()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use nucleus_platform::sim::SimPlatform;
+    use nucleus_platform::{Platform, Rng, SplitMix64};
+
+    use super::*;
+
+    type Model = BTreeMap<Vec<u8>, Vec<u8>>;
+
+    /// The keys the model test draws from: enough that the data outgrows
+    /// a flush many times, so compaction makes every level.
+    const KEYS: u64 = 4000;
+
+    fn key(i: u64) -> Vec<u8> {
+        format!("k{i:04}").into_bytes()
+    }
+
+    fn bound(rng: &SplitMix64) -> Bound<Vec<u8>> {
+        match rng.below(3) {
+            0 => Bound::Unbounded,
+            1 => Bound::Included(key(rng.below(KEYS))),
+            _ => Bound::Excluded(key(rng.below(KEYS))),
+        }
+    }
+
+    fn borrow(b: &Bound<Vec<u8>>) -> Bound<&[u8]> {
+        match b {
+            Bound::Included(k) => Bound::Included(k.as_slice()),
+            Bound::Excluded(k) => Bound::Excluded(k.as_slice()),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+
+    fn collect(
+        e: &LsmEngine,
+        s: &Bound<Vec<u8>>,
+        t: &Bound<Vec<u8>>,
+        rev: bool,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut it = e.scan(borrow(s), borrow(t), rev).unwrap();
+        let mut out = Vec::new();
+        let (mut k, mut v) = (Vec::new(), Vec::new());
+        while it.next_key_into(&mut k).unwrap() {
+            it.value_into(&mut v).unwrap();
+            out.push((k.clone(), v.clone()));
+        }
+        out
+    }
+
+    fn check(e: &LsmEngine, model: &Model, rng: &SplitMix64, ctx: &str) {
+        for _ in 0..300 {
+            let i = rng.below(KEYS);
+            assert_eq!(
+                e.get(&key(i)).unwrap().as_ref(),
+                model.get(&key(i)),
+                "{ctx}: get {i}"
+            );
+        }
+        for _ in 0..20 {
+            let (s, t) = (bound(rng), bound(rng));
+            let want: Vec<(Vec<u8>, Vec<u8>)> = if empty_bounds(borrow(&s), borrow(&t)) {
+                Vec::new()
+            } else {
+                model
+                    .range::<[u8], _>((borrow(&s), borrow(&t)))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            };
+            assert_eq!(collect(e, &s, &t, false), want, "{ctx}: scan {s:?} {t:?}");
+            let mut rev = collect(e, &s, &t, true);
+            rev.reverse();
+            assert_eq!(rev, want, "{ctx}: reverse scan {s:?} {t:?}");
+        }
+    }
+
+    /// Random puts, deletes and range deletes against a model, with
+    /// checkpoints (set apart, saved, taken in — and sometimes a save
+    /// skipped, as a failed checkpoint leaves it), reloads from the
+    /// manifest, and forks: the engine reads as the model throughout, and
+    /// compaction leaves several levels.
+    #[test]
+    fn reads_as_a_model_through_flushes_compactions_and_reloads() {
+        let mut deep = 0;
+        for seed in 1..=8u64 {
+            let p = SimPlatform::new(seed);
+            let fs = p.fs();
+            let dir = Path::new("/lsm");
+            fs.create_dir_all(dir).unwrap();
+            let rng = SplitMix64::new(seed);
+            let mut e = LsmEngine::new();
+            let mut model = Model::new();
+            let mut lsn = 0;
+            for step in 0..400 {
+                match rng.below(10) {
+                    0..=5 => {
+                        let n = 1 + rng.below(20);
+                        let mut ops: Vec<(Vec<u8>, Val)> = (0..n)
+                            .map(|_| {
+                                let k = key(rng.below(KEYS));
+                                let v = (rng.below(4) != 0)
+                                    .then(|| vec![rng.below(256) as u8; rng.below(200) as usize]);
+                                (k, v)
+                            })
+                            .collect();
+                        ops.sort_by(|a, b| a.0.cmp(&b.0));
+                        ops.dedup_by(|a, b| a.0 == b.0);
+                        for (k, v) in &ops {
+                            match v {
+                                Some(v) => model.insert(k.clone(), v.clone()),
+                                None => model.remove(k),
+                            };
+                        }
+                        e.apply(&ops).unwrap();
+                    }
+                    6 => {
+                        // Narrow, so the data grows and the levels deepen.
+                        let a = rng.below(KEYS);
+                        let (s, t) = (key(a), key(a + rng.below(40)));
+                        let gone: Vec<Vec<u8>> = model
+                            .range::<[u8], _>((Bound::Included(&s[..]), Bound::Excluded(&t[..])))
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for k in gone {
+                            model.remove(&k);
+                        }
+                        e.remove_range(&s, &t).unwrap();
+                    }
+                    7 | 8 => {
+                        lsn += 1;
+                        e.prepare().unwrap();
+                        check(
+                            &e,
+                            &model,
+                            &rng,
+                            &format!("seed {seed} step {step} set apart"),
+                        );
+                        if rng.below(8) != 0 {
+                            let path = dir.join(format!("m-{lsn}"));
+                            e.save(fs, dir, &path, &format!("0-1-{lsn}")).unwrap();
+                            check(&e, &model, &rng, &format!("seed {seed} step {step} saved"));
+                            let (tiers, bottom) = e.shape();
+                            if bottom && tiers.len() >= 2 {
+                                deep += 1;
+                            }
+                            if rng.below(3) == 0 {
+                                e = LsmEngine::load(fs, dir, &path).unwrap();
+                            }
+                        }
+                    }
+                    _ => {
+                        let f = e.fork();
+                        drop(f);
+                    }
+                }
+                check(&e, &model, &rng, &format!("seed {seed} step {step}"));
+            }
+            assert!(!e.files().is_empty(), "seed {seed}: no runs");
+        }
+        // Compactions reached the last level with two tiers above it.
+        assert!(deep > 0, "never a last level with two tiers above");
+    }
+
+    /// The filter: no false negatives, about 1 % false positives.
+    #[test]
+    fn the_filter_has_no_false_negatives_and_few_false_positives() {
+        let keys: Vec<Vec<u8>> = (0..10_000u64)
+            .map(|i| format!("key {i}").into_bytes())
+            .collect();
+        let hashes: Vec<u64> = keys.iter().map(|k| hash64(k)).collect();
+        let b = Bloom::with_hashes(&hashes);
+        assert!(hashes.iter().all(|&h| b.may(h)));
+        let fp = (0..10_000u64)
+            .filter(|i| b.may(hash64(format!("other {i}").as_bytes())))
+            .count();
+        assert!(fp < 300, "{fp} false positives in 10,000");
+    }
+
+    /// A run's damaged block or index is refused, not read wrong.
+    #[test]
+    fn a_damaged_run_is_refused() {
+        let p = SimPlatform::new(5);
+        let fs = p.fs();
+        let dir = Path::new("/lsm");
+        fs.create_dir_all(dir).unwrap();
+        let mut w = RunWriter::new(fs, dir, "r").unwrap();
+        for i in 0..2000 {
+            w.add(&key(i), &Some(format!("value {i}").into_bytes()))
+                .unwrap();
+        }
+        let r = w.finish(Ranges::default()).unwrap().unwrap();
+        assert!(r.index.len() > 2);
+        assert_eq!(
+            r.lookup(&key(1500), hash64(&key(1500))).unwrap(),
+            Some(Some(b"value 1500".to_vec()))
+        );
+        let f = fs.open(&dir.join("r"), OpenMode::ReadWrite).unwrap();
+        f.write_at(b"\xff", r.index[1].offset + 7).unwrap();
+        let at = r.index[1].first.clone();
+        assert!(r.lookup(&at, hash64(&at)).is_err());
+        let size = f.size().unwrap();
+        f.write_at(b"\xff", size - FOOTER as u64 - 6).unwrap();
+        assert!(Run::open(fs, dir, "r").is_err());
+    }
+
+    #[test]
+    fn ranges_join_and_cover() {
+        let mut r = Ranges::default();
+        r.add(b"c", b"e");
+        r.add(b"a", b"b");
+        r.add(b"d", b"g");
+        r.add(b"b", b"c");
+        assert_eq!(r.0, vec![(b"a".to_vec(), b"g".to_vec())]);
+        r.add(b"x", b"z");
+        assert!(
+            r.covers(b"a")
+                && r.covers(b"f")
+                && !r.covers(b"g")
+                && r.covers(b"y")
+                && !r.covers(b"z")
+        );
+    }
+}
