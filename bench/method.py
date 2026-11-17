@@ -44,7 +44,7 @@ import subprocess
 import sys
 import time
 
-METHOD = 1
+METHOD = 2
 # Runs per measurement unless asked for more; the plan's floor.
 RUNS = 5
 # A measurement whose coefficient of variation passes this is run again.
@@ -59,6 +59,17 @@ RETRIES = 2
 RETRY_BUDGET = 600
 BOOTSTRAP = 10_000
 LEVEL = 0.95
+# Between two sessions on one machine the medians moved 3–5 % (90th
+# percentile 8–13 %, 2026-11-17: 500 measurements run twice) — more than
+# one session's interval holds, as Kalibera and Jones found ("Rigorous
+# benchmarking in reasonable time", 2013).  A difference within this is
+# not claimed, and a second run within it reproduces.
+NOISE = 0.10
+# A round starts when the machine's other work is under this (cores, the
+# CPU of every process but the measurement's own, its servers' and the
+# kernel's), waiting at most QUIET_WAIT seconds; what it saw is recorded.
+QUIET_CORES = 1.5
+QUIET_WAIT = 1800
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -136,10 +147,16 @@ class Sample:
 
 
 def disjoint(a, b):
-    """Whether two samples' intervals do not overlap: the only case a
-    difference between them is claimed."""
+    """Whether two samples' intervals do not overlap."""
     (alo, ahi), (blo, bhi) = a.ci, b.ci
     return ahi < blo or bhi < alo
+
+
+def differ(a, b):
+    """Whether a difference between two samples is claimed: their
+    intervals apart and their medians more than NOISE apart."""
+    lo, hi = sorted((a.median, b.median))
+    return disjoint(a, b) and (lo <= 0 or hi / lo > 1 + NOISE)
 
 
 # ----------------------------------------------------------------- running
@@ -284,6 +301,67 @@ def disk(path):
     return d
 
 
+# Processes that are the measurement's even when not its children: the
+# servers it starts (PostgreSQL's postmaster leaves the tree) and the
+# kernel's I/O for them.
+OURS = re.compile(r"(^|/)(postgres|nucleus|kernel_task)$")
+QUIET_LOG = []
+
+
+def background():
+    """The cores busy with other work: every process's CPU (ps's decaying
+    average) but this one's, its descendants' and OURS's."""
+    try:
+        out = _run(["ps", "-A", "-o", "pid=,ppid=,%cpu=,comm="])
+    except Exception:
+        return None
+    rows = []
+    for line in out.splitlines():
+        f = line.split(None, 3)
+        if len(f) == 4:
+            rows.append((int(f[0]), int(f[1]), float(f[2]), f[3]))
+    mine, grew = {os.getpid()}, True
+    while grew:
+        grew = False
+        for pid, ppid, _, _ in rows:
+            if ppid in mine and pid not in mine:
+                mine.add(pid)
+                grew = True
+    # This process's ancestors (the shell and bench/all.sh) too.
+    parent = {pid: ppid for pid, ppid, _, _ in rows}
+    p = os.getppid()
+    while p > 1 and p not in mine:
+        mine.add(p)
+        p = parent.get(p, 1)
+    return sum(cpu for pid, _, cpu, comm in rows
+               if pid not in mine and not OURS.search(comm)) / 100
+
+
+def quiet(echo=True):
+    """Waits (at most QUIET_WAIT s) until the machine's other work is under
+    QUIET_CORES; logs what it saw in QUIET_LOG."""
+    began = time.monotonic()
+    seen = background()
+    while seen is not None and seen > QUIET_CORES and time.monotonic() - began < QUIET_WAIT:
+        if echo:
+            print(f"[waiting: other work {seen:.1f} cores > {QUIET_CORES}]", file=sys.stderr, flush=True)
+        time.sleep(15)
+        seen = background()
+    QUIET_LOG.append({"waited": round(time.monotonic() - began, 1),
+                      "other_cores": None if seen is None else round(seen, 2)})
+    return seen
+
+
+def quiet_summary():
+    """What the rounds' waits saw, for the results' environment."""
+    if not QUIET_LOG:
+        return None
+    seen = [q["other_cores"] for q in QUIET_LOG if q["other_cores"] is not None]
+    return {"rounds": len(QUIET_LOG), "waited_s": round(sum(q["waited"] for q in QUIET_LOG), 1),
+            "other_cores_max": max(seen) if seen else None,
+            "over_bound": sum(1 for x in seen if x > QUIET_CORES), "bound": QUIET_CORES}
+
+
 def load():
     """The load averages (1, 5, 15 minutes)."""
     try:
@@ -349,6 +427,8 @@ def write(path, name, env, samples, extra=None, script=None):
     """A results file: the command that made it, the environment, every
     sample's runs, and the load after."""
     env = dict(env, load_after=load())
+    if quiet_summary():
+        env["quiet"] = quiet_summary()
     doc = {"method": METHOD, "name": name, "script": script or invocation(), "environment": env,
            "samples": [s.to_json() for s in samples]}
     if extra:
@@ -414,7 +494,7 @@ def table(samples, systems=None, baseline=None, title="measurement"):
             a, b = by.get((name, phase, o)), by.get((name, phase, baseline))
             if a and b and b.median > 0:
                 ratio = a.median / b.median
-                line += f" {ratio:.2f}× |" if disjoint(a, b) else f" ≈ ({ratio:.2f}×) |"
+                line += f" {ratio:.2f}× |" if differ(a, b) else f" ≈ ({ratio:.2f}×) |"
             else:
                 line += " — |"
         lines.append(line)
@@ -503,6 +583,7 @@ def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True
             took[label] = 0.0
         for r in range(runs):
             for label, argv in turn(todo, r):
+                quiet(echo)
                 if echo:
                     print(f"[{label} run {r + 1}/{runs}, attempt {attempts}]", file=sys.stderr, flush=True)
                 began = time.monotonic()
@@ -538,13 +619,14 @@ def run_commands(commands, runs=RUNS, bound=CV_BOUND, retries=RETRIES, echo=True
 
 def reproduce(first, second):
     """Which of `first`'s samples `second` reproduces: their intervals
-    overlap.  Returns the ones it does not (name, phase, system)."""
+    overlap, or their medians are within NOISE.  Returns the ones it does
+    not (name, phase, system)."""
     a = {(s.name, s.phase, s.system): s for s in first["samples"]}
     b = {(s.name, s.phase, s.system): s for s in second["samples"]}
     missed = []
     for key, s in a.items():
         t = b.get(key)
-        if t is None or disjoint(s, t):
+        if t is None or differ(s, t):
             missed.append(key)
     return missed
 

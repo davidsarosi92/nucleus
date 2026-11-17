@@ -342,6 +342,7 @@ def loads(systems, load, runs=method.RUNS):
     times = {s.name: [] for s in systems}
     for r in range(runs):
         for s in method.turn(systems, r):
+            method.quiet()
             started = time.time()
             load(s)
             times[s.name].append(time.time() - started)
@@ -367,6 +368,7 @@ def queries_by_method(systems, queries, runs=method.RUNS, timeout=600, retries=m
                 for s in method.turn(systems, r):
                     if s.name in failed:
                         continue
+                    method.quiet()
                     try:
                         if s.can_restart:
                             s.restart()

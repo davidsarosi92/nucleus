@@ -113,6 +113,7 @@ def main():
             for r in range(a.runs):
                 answers = {}
                 for s in method.turn(systems, r):
+                    method.quiet()
                     print(f"round {r + 1}/{a.runs} (attempt {attempts}): {s.name}", file=sys.stderr, flush=True)
                     t, answers[s.name] = one_round(s, a.rows, check=r == 0)
                     for (name, phase), ms in t.items():

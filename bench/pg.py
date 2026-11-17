@@ -98,6 +98,11 @@ class Cluster:
             os.makedirs(os.path.dirname(self.data), exist_ok=True)
             subprocess.run([self._tool("initdb"), "-D", self.data, "-U", "postgres", "--auth=trust",
                             "--encoding=UTF8", "--locale=C"], check=True, capture_output=True)
+        # A run stopped from outside leaves its postmaster up (and this one
+        # would refuse to start): stop it first — the cluster is ours.
+        if os.path.exists(os.path.join(self.data, "postmaster.pid")):
+            subprocess.run([self._tool("pg_ctl"), "-D", self.data, "-m", "fast", "-w", "stop"],
+                           capture_output=True)
         opts = " ".join(f"-c {k}={v}" for k, v in self.settings.items())
         opts += f" -p {self.port} -k {self.sock}"
         # macOS: a postmaster without a valid locale in LC_ALL refuses to

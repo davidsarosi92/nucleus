@@ -33,6 +33,21 @@ class Statistics(unittest.TestCase):
         self.assertFalse(method.disjoint(a, b))
         self.assertTrue(method.disjoint(a, c))
 
+    def test_a_difference_within_the_noise_is_not_claimed(self):
+        # Intervals apart but medians 5 % apart: within NOISE, not a
+        # difference (two sessions differ this much); 20 % apart is one.
+        a = method.Sample("q", "a", [10, 10.01, 9.99, 10, 10.02])
+        b = method.Sample("q", "b", [10.5, 10.51, 10.49, 10.5, 10.52])
+        c = method.Sample("q", "c", [12, 12.01, 11.99, 12, 12.02])
+        self.assertTrue(method.disjoint(a, b))
+        self.assertFalse(method.differ(a, b))
+        self.assertTrue(method.differ(a, c))
+
+    def test_other_work_is_measured_without_the_measurement(self):
+        seen = method.background()
+        self.assertIsNotNone(seen)
+        self.assertGreaterEqual(seen, 0)
+
 
 class Running(unittest.TestCase):
     def test_a_noisy_measurement_is_run_again_then_flagged(self):

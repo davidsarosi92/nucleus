@@ -290,6 +290,7 @@ are marked ✅.
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | 🔨 P1a the method, P1b the suite, TPC-H and ClickBench on it (2026-11-16) |
+| | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ⬜ planned 2026-11-17 (after §M14.31 P1, before §M14.28 L3b) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -10580,9 +10581,89 @@ needs repeated runs across instances and days).
   (`--layout`) have no step yet either: their tables stay in the git
   history of docs/benchmarks.md (before 2026-11-17).
 
+*The second run* (2026-11-17, the same code, a subset — suite,
+TPC-H, ClickBench, knn, ann-filtered — the whole run stopped by the
+decision below): `method.py reproduce` found 28 of 36, 98 of 135, 149
+of 261, 6 of 7 and 55 of 62 within the first run's intervals.  Between
+the two sessions the medians moved 3–5 % (the 90th percentile 8–13 %)
+— more than one session's rounds show (Kalibera and Jones, 2013) —, and
+the first run's suite and ClickBench ran beside an IDE (load 9–10:
+ClickBench's Q0 on rows 125 ms then, 80 now).  PostgreSQL's TPC-H Q14
+went 99 → 167 ms, steady in both: a plan of its own changed (`ANALYZE`
+samples at random).  *Taken*: a difference within 10 % (`NOISE`) is not
+claimed, and a second run within it reproduces (`differ`: the intervals
+apart *and* the medians more than 10 % apart); a round starts when the
+machine's other work is under 1.5 cores (`quiet`: every process's CPU
+but the measurement's own tree, its servers' and the kernel's — the
+load average counts the measurement itself), waiting up to 30 minutes,
+what it saw kept in the results (`quiet`); the method's version is 2.
+By this criterion the subset reproduces 36 of 36, 128 of 135, 201 of
+261, 7 of 7, 60 of 62 — ClickBench's misses being the first run's
+disturbed rounds.  The strict form, sessions as a level of repetition,
+is §M27 B1b.
+*When the whole run runs* (decided 2026-11-17): `bench/all.sh` whole
+takes ~17 hours, so not at every step — once at the end of each phase
+(F1's before F2 begins, then F2's and F3's), and the subset a change
+touches meanwhile.  Before the first release (§M28) the last phase ends
+otherwise: a large round of testing, fixing and testing again, then the
+release.
+
 **Done when:** every number in `docs/benchmarks.md` carries its
 environment, its runs, its spread and the script that made it; and a
 second run on the same machine reproduces each within its interval.
+
+### §M14.33 — Row tables and reads by key against a tuned PostgreSQL ⬜
+
+Planned 2026-11-17, when §M14.31 P1 put PostgreSQL native and tuned
+for the machine (`bench/pg.py`: 8 GB of buffers, its parallel workers)
+in place of the Docker image with its defaults: nucleus's own times
+moved by under 6 %, PostgreSQL's halved.  Column tables stay ahead
+(TPC-H 0.48×, ClickBench 0.17×); row tables and the transactional path
+do not.  Decided with the user: after P1 closes, before §M14.28 L3b–L5.
+
+**The gaps** (`bench/results/`, warm medians; nucleus against
+PostgreSQL):
+- *Reads by key*: 1,000 `SELECT s FROM b WHERE id = <n>` through each
+  system's own client, 58.6 ms against 24.2 (2.42×; the target is
+  ≤ 1×).  Two parts to tell apart: the client's — `nucleus sql`'s
+  `\timing` counts the table it prints (Rust's line-buffered stdout,
+  a `write` a line into the pipe), `psql`'s stops when the result is
+  in — and the server's: a literal statement parsed, bound and planned
+  each time (`latency.rs`: 36.5 µs by literal, 25.8 by parameter).
+- *Row-table scans*: on ClickBench's million rows of 105 columns the
+  simplest queries take ~100 ms whatever they ask (Q0 `count(*)` 125
+  against 27, Q3, Q6, Q11, Q26, Q30 99–109 against 56–64): a floor of
+  about 1 µs a row a core, the scan's and the row's, not the query's.
+- *Row-table joins and filters on TPC-H*: Q11 6.6× (185 ms against
+  28), Q5 4.6×, Q10 3.6×, Q6 3.1× (a filtered scan of `lineitem`), Q20,
+  Q14, Q4, Q8 2.3–2.8×.
+
+**Method**: profile before changing (`samply` / Instruments on the
+release build, the statement repeated), compare plans with
+PostgreSQL's `EXPLAIN (ANALYZE, BUFFERS)`, and look at prior art first
+(CLAUDE.md): PostgreSQL's plan cache and `slot_getsomeattrs` (a row
+deformed only up to the last column a query needs), SQLite's
+`OP_Column` with its cached offsets, DuckDB's and HyPer's scans a page
+at a time, prepared-statement and simple-query caches (SQL Server's
+simple parameterization, MySQL's former query cache — what not to do).
+
+**Steps**:
+- **R1 — measure it fairly**: `nucleus sql`'s `\timing` as `psql`'s
+  (the result in, before printing), its output buffered when not a
+  terminal; then the true per-statement gap, split by phase (protocol,
+  parse, bind, plan, execute, encode).
+- **R2 — the point read**: what R1 shows — likely a plan kept for a
+  statement's shape with its literals as parameters, and a short path
+  for a primary key's equality; target ≤ PostgreSQL's time.
+- **R3 — the row scan**: rows deformed only as far as the columns a
+  query reads, visibility decided a leaf at a time, `count(*)` without
+  decoding rows; target: ClickBench's row geomean ≤ 1×.
+- **R4 — the joins**: TPC-H Q11, Q5, Q10 and Q6 on row tables, plan by
+  plan against PostgreSQL's; target: TPC-H's row geomean ≤ 1×.
+
+**Done when:** reads by key ≤ 1× PostgreSQL's time and the row tables'
+geometric means ≤ 1× on TPC-H and ClickBench, by §M14.31's method,
+every answer still the same.
 
 ## §F2 — NoSQL layer
 
@@ -10851,6 +10932,18 @@ reported when it is a change point beyond the noise, not a single bad
 run.  Prior art: MongoDB's change-point detection in its performance CI
 (Daly et al., ICPE 2020), DataStax's Hunter, ClickHouse's per-commit
 performance tests (old and new build on one machine, interleaved).
+
+**B1b — the strict method** (asked for 2026-11-17, for the end: it
+may run long and need not run on the local machine).  Every measurement
+repeated across sessions, not only within one: each step run in several
+independent sessions — fresh instances or the machine rebooted, the
+systems' data built again, sessions spread over time —, rounds within
+each, and the interval taken from the sessions' medians (Kalibera and
+Jones, "Rigorous benchmarking in reasonable time", ISMM 2013: the
+levels of repetition chosen by where the variance is; Georges et al.,
+OOPSLA 2007).  The 10 % noise floor that §M14.31 P1 took from two local
+sessions then comes from the measurements' own sessions, per step.
+Run before the first release (§M28), within its test–fix–test round.
 
 **B2 — the leaderboards**, each entry by its own rules, its scripts
 submitted upstream for anyone to rerun: ClickBench (its instance and

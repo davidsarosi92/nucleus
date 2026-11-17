@@ -65,6 +65,7 @@ def load(a, systems):
     times = {}
     for r in range(a.runs):
         for s in method.turn(systems, r):
+            method.quiet()
             s.fresh(tpch.TABLES)
             schema(s, a.storage == "column" and s.name != "postgresql")
             st = time.time()

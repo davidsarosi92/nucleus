@@ -101,13 +101,15 @@ step_clickbench() {
 
 # --- vectors
 step_knn() { m knn "$RUNS" -- $CAP 8000 "$PY" -I bench/vectors/knn.py "$N" --pg; }
+# ann-sift's nucleus side holds a 3 GB cache, a ~2 GB index and ten
+# writer processes: ~8 GB as macOS counts it when memory is free.
 step_ann-sift() {
   need "$SIFT" "$PY bench/ann/data.py"
   m ann-sift "$LONG" --also "pgvector=$CAP 8000 $PY bench/ann/pgvector_ref.py $SIFT" -- \
-    $CAP 8000 "$PY" bench/ann/sql.py "$N" "$SIFT" --efs 10,20,40,60,80,120,200
+    $CAP 12000 "$PY" bench/ann/sql.py "$N" "$SIFT" --efs 10,20,40,60,80,120,200
 }
 step_ann-sift-int8() {
-  m ann-sift-int8 "$LONG" -- $CAP 8000 "$PY" bench/ann/sql.py "$N" "$SIFT" --efs 10,20,40,60,80,120,200 --quantize int8
+  m ann-sift-int8 "$LONG" -- $CAP 12000 "$PY" bench/ann/sql.py "$N" "$SIFT" --efs 10,20,40,60,80,120,200 --quantize int8
 }
 step_ann-filtered() {
   m ann-filtered "$LONG" --also "pgvector=$CAP 8000 $PY bench/ann/filtered.py pgvector $SIFT" -- \
