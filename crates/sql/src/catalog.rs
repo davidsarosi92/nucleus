@@ -88,8 +88,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// store's definition; version 18 the subject columns (a memory store's
 /// `subject` before it); version 19 index expressions; version 20 a
 /// column's type being changed online ([`Conversion`]); version 21 a
-/// memory store's analyzer; older versions still read.
-const TABLE_VERSION: u8 = 21;
+/// memory store's analyzer; version 22 the engine holding its keys
+/// ([`TableEngine`]); older versions still read.
+const TABLE_VERSION: u8 = 22;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -430,6 +431,42 @@ pub struct Table {
     pub subject: Vec<usize>,
     /// `ALTER COLUMN … TYPE … CONCURRENTLY` under way ([`crate::retype`]).
     pub converting: Option<Conversion>,
+    /// The engine holding its keys, `WITH (engine = …)`.
+    pub engine: TableEngine,
+}
+
+/// The engine holding a table's keys — its rows and its indexes (PLAN.md
+/// §M14.28 L3): the store's B+tree, or an LSM tree its key range is
+/// routed to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TableEngine {
+    /// The B+tree: reads in place, every write a page's.
+    #[default]
+    BTree,
+    /// The LSM tree (the storage crate's `lsm`): writes appended, merged
+    /// in the background — for tables written far more than read.
+    Lsm,
+}
+
+impl TableEngine {
+    /// Its name in `WITH (engine = …)`.
+    pub fn name(self) -> &'static str {
+        match self {
+            TableEngine::BTree => "btree",
+            TableEngine::Lsm => "lsm",
+        }
+    }
+
+    /// The engine `name` names.
+    pub fn named(name: &str) -> Result<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "btree" => Ok(TableEngine::BTree),
+            "lsm" => Ok(TableEngine::Lsm),
+            _ => Err(Error::invalid_parameter(format!(
+                "invalid value for parameter \"engine\": \"{name}\" (btree or lsm)"
+            ))),
+        }
+    }
 }
 
 /// A column's type being changed online (PLAN.md §M14.18 O5,
@@ -820,6 +857,10 @@ impl Table {
                 c.encode(&mut w);
             }
         }
+        w.u8(match self.engine {
+            TableEngine::BTree => 0,
+            TableEngine::Lsm => 1,
+        });
         w.0
     }
 
@@ -1058,6 +1099,15 @@ impl Table {
         } else {
             None
         };
+        let engine = if version >= 22 {
+            match r.u8()? {
+                0 => TableEngine::BTree,
+                1 => TableEngine::Lsm,
+                _ => return Err(Error::internal("unknown table engine")),
+            }
+        } else {
+            TableEngine::BTree
+        };
         Ok(Self {
             id,
             name,
@@ -1084,6 +1134,7 @@ impl Table {
             memory,
             subject,
             converting,
+            engine,
         })
     }
 }
@@ -1186,6 +1237,23 @@ fn type_of_tag(t: u8) -> Result<DataType> {
         17 => DataType::Cidr,
         _ => return Err(Error::internal("unknown column type tag")),
     })
+}
+
+/// The key range to route to the LSM engine before `key`'s table is
+/// restored (PLAN.md §M14.28 L3): `key`, `value` the definition of a
+/// table of that engine.  Its keys come after it, the catalog's keys
+/// sorting first.
+pub fn lsm_range_of(key: &[u8], value: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    if !key.starts_with(CATALOG) || value.len() <= 1 {
+        return None;
+    }
+    let t = Table::decode(value).ok()?;
+    if t.engine != TableEngine::Lsm {
+        return None;
+    }
+    let start = t.data_prefix();
+    let end = prefix_end(&start)?;
+    Some((start, end))
 }
 
 fn table_key(name: &str) -> Vec<u8> {
@@ -1308,6 +1376,15 @@ pub fn next_rowids(txn: &mut dyn KvTxn, table: &Table, n: u64) -> Result<i64> {
 }
 
 /// Stores a new table, giving it an id; fails if the name is taken.
+///
+/// An id is a range of keys ([`Table::data_prefix`]), which for a table
+/// of the LSM engine is routed to one (PLAN.md §M14.28 L3) — routed at
+/// once, for good, on every branch: a later table of that id (this
+/// transaction rolled back, or another branch's) finds it so.  An id
+/// whose range is not the table's engine's — routed to another, or not
+/// free to route — is passed over for the next.  Two branches making
+/// their table of one id at once, one of each engine, may leave the
+/// B+tree one's keys in the LSM tree: the right rows, the other engine.
 pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
     if get_table(txn, &table.name)?.is_some() {
         return Err(Error::duplicate_table(format!(
@@ -1316,11 +1393,32 @@ pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
         )));
     }
     crate::sealed::check_table(&*txn, &table)?;
-    table.id = u32::try_from(next_sequence(txn, "table_id")?)
-        .map_err(|_| Error::out_of_range("too many tables"))?;
-    txn.put(&table_key(&table.name), &table.encode())?;
-    Ok(table)
+    for _ in 0..PASSED_OVER {
+        table.id = u32::try_from(next_sequence(txn, "table_id")?)
+            .map_err(|_| Error::out_of_range("too many tables"))?;
+        let start = table.data_prefix();
+        let end = prefix_end(&start).expect("a table's prefix below the last");
+        let fits = match (table.engine, txn.engine_of(&start, &end)?.as_deref()) {
+            (TableEngine::BTree, None) | (TableEngine::Lsm, Some("lsm")) => true,
+            (TableEngine::Lsm, None) => txn
+                .add_engine(&start, &end, "lsm")
+                .map_err(|e| Error::feature(format!("engine = lsm: {e}")))?,
+            _ => false,
+        };
+        if fits {
+            txn.put(&table_key(&table.name), &table.encode())?;
+            return Ok(table);
+        }
+    }
+    Err(Error::program_limit(format!(
+        "no table id of the {} engine found in {PASSED_OVER}",
+        table.engine.name()
+    )))
 }
+
+/// How many table ids [`create_table`] passes over, at most, before it
+/// gives up finding one of the table's engine.
+const PASSED_OVER: usize = 1000;
 
 /// Replaces a table's definition (same name).  Refused while a column's
 /// type is being changed online, but for the conversion's own switches
@@ -1926,6 +2024,7 @@ mod tests {
                 phase: ConversionPhase::Rewrite,
                 stale: vec![2, 4],
             }),
+            engine: TableEngine::Lsm,
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

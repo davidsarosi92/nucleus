@@ -65,6 +65,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("force_row_security", B),
             ("comment", T),
             ("storage", T),
+            ("engine", T),
         ],
     ),
     ("storages", &[("name", T)]),
@@ -648,6 +649,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Bool(t.force_row_security),
                     t.comment.clone().map_or(Value::Null, text),
                     text(t.storage.clone()),
+                    text(t.engine.name().to_string()),
                 ]);
             }
         }

@@ -2337,14 +2337,14 @@ pub(crate) fn execute_statement(
                     "relation \"{name}\" already exists"
                 )));
             }
-            let storage = storage_option(options)?;
+            let opts = TableOptions::defaults()?.with(options)?;
             create_table(
                 txn,
                 reg,
                 name,
                 columns,
                 constraints,
-                &storage,
+                &opts,
                 partition_by.as_ref(),
             )?;
             let owner = crate::access::current().user.clone();
@@ -2367,7 +2367,7 @@ pub(crate) fn execute_statement(
                     "relation \"{name}\" already exists"
                 )));
             }
-            let storage = storage_option(options)?;
+            let opts = TableOptions::defaults()?.with(options)?;
             // The query's columns: their names (or those given) and types.
             let cols = {
                 let ro: &dyn KvTxn = &*txn;
@@ -2393,7 +2393,7 @@ pub(crate) fn execute_statement(
                     generated: None,
                 })
                 .collect();
-            create_table(txn, reg, name, &specs, &[], &storage, None)?;
+            create_table(txn, reg, name, &specs, &[], &opts, None)?;
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             let n = if *with_data {
@@ -3644,20 +3644,13 @@ fn create_partition(
 ) -> Result<()> {
     let parent = catalog::table(&*txn, parent_name)?;
     let bound = new_bound(txn, reg, &parent, name, bound)?;
-    let mut storage = crate::storage::ROW.to_string();
-    for (key, v) in options {
-        match key.as_str() {
-            "storage" => {
-                crate::storage::named(v)?;
-                storage = v.clone();
-            }
-            _ => {
-                return Err(Error::invalid_parameter(format!(
-                    "unrecognized parameter \"{key}\""
-                )));
-            }
-        }
+    // The parent's engine unless the partition's `WITH` names one; row
+    // storage unless it names another.
+    let opts = TableOptions {
+        storage: crate::storage::ROW.to_string(),
+        engine: parent.engine,
     }
+    .with(options)?;
     let mut child = parent.clone();
     child.id = 0;
     child.name = name.to_string();
@@ -3668,7 +3661,8 @@ fn create_partition(
     let fks = std::mem::take(&mut child.foreign_keys);
     child.owner = Some(crate::access::current().user.clone());
     child.comment = None;
-    child.storage = storage;
+    child.storage = opts.storage;
+    child.engine = opts.engine;
     child.columnar = Vec::new();
     child.copy = crate::column_store::CopyState::Ready;
     child.partition_by = None;
@@ -3691,23 +3685,47 @@ fn literal(v: &Value) -> String {
     }
 }
 
-/// A new table's storage, from its `WITH (storage = …)`.
-fn storage_option(options: &[(String, String)]) -> Result<String> {
-    let mut storage = crate::storage::ROW.to_string();
-    for (key, value) in options {
-        match key.as_str() {
-            "storage" => {
-                crate::storage::named(value)?;
-                storage = value.clone();
-            }
-            _ => {
-                return Err(Error::invalid_parameter(format!(
-                    "unrecognized parameter \"{key}\""
-                )));
+/// A new table's `WITH (storage = …, engine = …)`.
+#[derive(Clone, Debug)]
+pub(crate) struct TableOptions {
+    /// How its rows are stored ([`crate::storage`]).
+    pub storage: String,
+    /// The engine holding its keys (PLAN.md §M14.28 L3).
+    pub engine: catalog::TableEngine,
+}
+
+impl TableOptions {
+    /// Without a `WITH`: row storage, the engine `default_table_engine`
+    /// names (the B+tree unless set).
+    pub(crate) fn defaults() -> Result<Self> {
+        let engine = match crate::expr::setting("default_table_engine") {
+            Some(name) => catalog::TableEngine::named(&name)?,
+            None => catalog::TableEngine::default(),
+        };
+        Ok(Self {
+            storage: crate::storage::ROW.to_string(),
+            engine,
+        })
+    }
+
+    /// These with `WITH (options)` over them.
+    fn with(mut self, options: &[(String, String)]) -> Result<Self> {
+        for (key, value) in options {
+            match key.as_str() {
+                "storage" => {
+                    crate::storage::named(value)?;
+                    self.storage = value.clone();
+                }
+                "engine" => self.engine = catalog::TableEngine::named(value)?,
+                _ => {
+                    return Err(Error::invalid_parameter(format!(
+                        "unrecognized parameter \"{key}\""
+                    )));
+                }
             }
         }
+        Ok(self)
     }
-    Ok(storage)
 }
 
 pub(crate) fn create_table(
@@ -3716,7 +3734,7 @@ pub(crate) fn create_table(
     name: &str,
     specs: &[crate::ast::ColumnSpec],
     constraints: &[TableConstraint],
-    storage: &str,
+    opts: &TableOptions,
     partition_by: Option<&(String, Vec<String>)>,
 ) -> Result<()> {
     let mut columns = Vec::new();
@@ -3808,7 +3826,7 @@ pub(crate) fn create_table(
         row_security: false,
         force_row_security: false,
         comment: None,
-        storage: storage.to_string(),
+        storage: opts.storage.clone(),
         columnar: Vec::new(),
         copy: crate::column_store::CopyState::Ready,
         partition_by: None,
@@ -3820,6 +3838,7 @@ pub(crate) fn create_table(
         subject: Vec::new(),
         converting: None,
         memory: None,
+        engine: opts.engine,
     };
     if let Some((kind, names)) = partition_by {
         table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);

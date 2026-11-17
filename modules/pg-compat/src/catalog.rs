@@ -583,6 +583,7 @@ fn def_table(k: usize) -> Table {
         subject: Vec::new(),
         converting: None,
         memory: None,
+        engine: Default::default(),
     }
 }
 

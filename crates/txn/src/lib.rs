@@ -32,4 +32,4 @@ pub use engine::{
     TxnOptions, UserRange,
 };
 pub use error::{Error, Result};
-pub use nucleus_storage::{BranchInfo, MAIN_NAME};
+pub use nucleus_storage::{BranchInfo, EngineKind, MAIN_NAME};

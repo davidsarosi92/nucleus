@@ -1035,6 +1035,7 @@ pub fn setting(name: &str) -> Option<String> {
             "standard_conforming_strings" | "integer_datetimes" => "on",
             "max_identifier_length" => "63",
             "transaction_isolation" | "default_transaction_isolation" => "repeatable read",
+            "default_table_engine" => "btree",
             _ => return None,
         }
         .to_string(),

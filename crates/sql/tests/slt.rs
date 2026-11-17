@@ -44,14 +44,22 @@ fn sqllogictest_scripts_in_small_batches() {
 /// columnar result takes them), in batches of three rows.
 #[test]
 fn sqllogictest_scripts_into_batches() {
-    scripts_into(Some(3), true);
+    scripts_into(Some(3), true, None);
+}
+
+/// The scripts again with every table in the LSM tree (PLAN.md §M14.28
+/// L3): the same results — a second engine is trusted once every test
+/// has run on it.
+#[test]
+fn sqllogictest_scripts_on_lsm_tables() {
+    scripts_into(None, false, Some("lsm"));
 }
 
 fn scripts_with(batch: Option<usize>) {
-    scripts_into(batch, false);
+    scripts_into(batch, false, None);
 }
 
-fn scripts_into(batch: Option<usize>, batches: bool) {
+fn scripts_into(batch: Option<usize>, batches: bool, engine: Option<&str>) {
     let mut failures = Vec::new();
     let mut ran = 0;
     for (name, script) in nucleus_testkit::core_scripts() {
@@ -63,6 +71,10 @@ fn scripts_into(batch: Option<usize>, batches: bool) {
             let mut s = Session::new(Arc::clone(&db));
             if let Some(n) = batch {
                 s.execute(&format!("SET batch_size = {n}")).unwrap();
+            }
+            if let Some(e) = engine {
+                s.execute(&format!("SET default_table_engine = {e}"))
+                    .unwrap();
             }
             if batches {
                 Box::new(LocalBatches(s))

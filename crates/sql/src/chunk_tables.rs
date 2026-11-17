@@ -406,7 +406,7 @@ pub(crate) fn create(
         name,
         &columns,
         &constraints,
-        crate::storage::ROW,
+        &crate::session::TableOptions::defaults()?,
         None,
     )?;
     let mut t = catalog::table(&*txn, name)?;

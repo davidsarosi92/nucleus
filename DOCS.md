@@ -790,6 +790,31 @@ into the last level drops tombstones.  Left to L4: flushing by size
 between checkpoints, compaction on workers off the lock, a block cache,
 Bloom bits by level.
 
+**Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
+= lsm)` (or `btree`, the default; the session setting
+`default_table_engine` names the engine of a table that names none, a
+partition takes its parent's unless its own `WITH` names one) routes the
+table's key range — its data prefix `01 | id`, rows, indexes and column
+segments alike — to an LSM tree: `catalog::create_table` asks the
+transaction (`KvTxn::engine_of`, `KvTxn::add_engine`, on the store's
+`add_engine_if_free`, the user keys escaped — the escaping keeps
+prefixes and order, so every version of every key in the range is in
+it).  The route is durable at once, on every branch, whatever becomes of
+the transaction; table ids come from a per-branch sequence, so a later
+table of that id — the transaction rolled back, or another branch's —
+finds the range routed: an LSM table takes the id, a B+tree table passes
+it over, as an LSM table passes over an id whose range is not free (up
+to 1000 ids, then `54000`).  Two branches making a table of one id at
+once, one of each engine, may leave the B+tree one's keys in the LSM tree
+— the right rows in the other engine.  The record keeps the engine
+(table record version 22), `nc_catalog.tables.engine` shows it, and a
+restore routes an LSM table's range when its definition comes, before
+its keys (the catalog's sort first).  On an encrypted database the
+create is refused (`0A000`: the runs are in the clear until L4).
+DROP TABLE, DELETE and a vacuum delete key by key — tombstones in the LSM
+tree, merged away by compaction; range tombstones there wait for L4's
+compaction by the oldest snapshot.
+
 ### 4.7 Tests
 
 - `pager.rs` — round trips (simulated and real), the immutability rule,
@@ -3085,7 +3110,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | Table | Rows |
 |-------|------|
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
-| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner`, `row_security`, `force_row_security`, `comment`, `storage` (§8.15) |
+| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner`, `row_security`, `force_row_security`, `comment`, `storage` (§8.15), `engine` (`btree` or `lsm`, §4.6) |
 | `nc_catalog.storages` | `name` (the table storages registered, §8.15) |
 | `nc_catalog.text_analyzers` | `name` (the text analyzers registered, §8.19) |
 | `nc_catalog.partitions` | `table_name`, `partition`, `strategy` (`range`, `list`, `hash`), `key` (names), `bound` (`FOR VALUES …` or `DEFAULT`), `storage` (§8.16) |
@@ -3539,6 +3564,8 @@ may name them; `nc_catalog.storages` lists them).  A table names its
 storage: `CREATE TABLE … WITH (storage = name)` (`row` by default; an
 unknown storage is `42704`, an unknown option `22023`), kept in its
 record (table record version 10) and shown in `nc_catalog.tables.storage`.
+Beside it, `WITH (engine = lsm)` puts the table's keys in the LSM tree
+instead of the B+tree (§4.6).
 
 The SQL layer reads and writes rows only through the trait, by *row key* —
 the table's primary index prefix and the row's primary key or hidden row

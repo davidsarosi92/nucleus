@@ -7,7 +7,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLock
 use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
-use nucleus_storage::{Batch, BranchInfo, Deferred, Recovery, Store, StoreOptions, Tables};
+use nucleus_storage::{
+    Batch, BranchInfo, Deferred, EngineKind, Recovery, Store, StoreOptions, Tables,
+};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
@@ -2346,6 +2348,35 @@ impl Transaction {
     /// Deletes `key`.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.write(key, None)
+    }
+
+    /// The engine routed a range meeting the user keys `[start, end)`
+    /// (PLAN.md §M14.28 L3), if one is: the B+tree holds the rest.
+    pub fn engine_of(&self, start: &[u8], end: &[u8]) -> Result<Option<EngineKind>> {
+        let (start, end) = (mvcc::escape(start), mvcc::escape(end));
+        Ok(self
+            .engine
+            .store
+            .routes()?
+            .into_iter()
+            .find(|r| start < r.end && r.start < end)
+            .map(|r| r.kind))
+    }
+
+    /// Routes the user keys `[start, end)` to a new engine of `kind` on
+    /// every branch ([`Store::add_engine_if_free`]); false, nothing done,
+    /// if a version of one of them is stored on some branch or the range
+    /// meets another route.  Durable at once, whatever becomes of this
+    /// transaction — a table's range given an engine the transaction that
+    /// made the table then rolls back stays routed, empty, for the next
+    /// table of that id.  The escaping of user keys keeps their prefixes
+    /// and order, so every version of every key in the range is in it.
+    pub fn add_engine(&self, start: &[u8], end: &[u8], kind: EngineKind) -> Result<bool> {
+        Ok(self
+            .engine
+            .store
+            .add_engine_if_free(&mvcc::escape(start), &mvcc::escape(end), kind)?
+            .is_some())
     }
 
     /// Declares the keys in `[start, end)` fresh: none has a version, no

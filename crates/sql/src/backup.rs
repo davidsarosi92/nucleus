@@ -2266,6 +2266,15 @@ pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -
                     )));
                 }
             };
+            // An LSM table's range routed before its keys come.
+            if let Some((start, end)) = catalog::lsm_range_of(&k, &v)
+                && txn.engine_of(&start, &end)?.is_none()
+                && !txn.add_engine(&start, &end, "lsm")?
+            {
+                return Err(Error::data_exception(
+                    "an LSM table's keys came before its definition in the backup",
+                ));
+            }
             batch += k.len() + v.len();
             txn.put(&k, &v)?;
             out.entries += 1;

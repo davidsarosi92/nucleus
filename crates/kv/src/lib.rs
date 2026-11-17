@@ -782,6 +782,26 @@ pub trait KvTxn: Send {
         let _ = (start, end);
     }
 
+    /// The engine beside the default one that holds keys in `[start,
+    /// end)`, if one does (PLAN.md §M14.28 L3): its name (`lsm`).  The
+    /// default: none.
+    fn engine_of(&self, start: &[u8], end: &[u8]) -> Result<Option<String>> {
+        let _ = (start, end);
+        Ok(None)
+    }
+
+    /// Gives the keys in `[start, end)` to a new engine named `kind`
+    /// (`lsm`), durable at once whatever becomes of this transaction;
+    /// false, nothing done, when the range is not free — a key there has
+    /// a version, or another engine's range meets it.  The default: an
+    /// error, the implementation keeping every key in one engine.
+    fn add_engine(&mut self, start: &[u8], end: &[u8], kind: &str) -> Result<bool> {
+        let _ = (start, end);
+        Err(Error::Storage(
+            format!("no engine \"{kind}\" here: this store keeps every key in one").into(),
+        ))
+    }
+
     /// Whether this transaction reads the [watched](Kv::watch) keys as a
     /// snapshot at `at` read them — so what was derived from them there
     /// holds here: no commit between the two snapshots wrote one, nor did
@@ -1554,6 +1574,26 @@ impl KvTxn for LocalTxn {
 
     fn fresh(&mut self, start: &[u8], end: &[u8]) {
         self.0.fresh(start, end);
+    }
+
+    fn engine_of(&self, start: &[u8], end: &[u8]) -> Result<Option<String>> {
+        Ok(self.0.engine_of(start, end)?.map(|k| {
+            match k {
+                nucleus_txn::EngineKind::Lsm => "lsm",
+                nucleus_txn::EngineKind::Map => "map",
+            }
+            .to_string()
+        }))
+    }
+
+    fn add_engine(&mut self, start: &[u8], end: &[u8], kind: &str) -> Result<bool> {
+        let kind = match kind {
+            "lsm" => nucleus_txn::EngineKind::Lsm,
+            other => {
+                return Err(Error::Storage(format!("no engine \"{other}\"").into()));
+            }
+        };
+        Ok(self.0.add_engine(start, end, kind)?)
     }
 
     fn watched_as_at(&self, at: Timestamp) -> bool {
