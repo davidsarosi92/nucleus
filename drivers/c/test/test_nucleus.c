@@ -428,6 +428,30 @@ static void token(void) {
     CHECK(nc_connect(&cfg, &err) == NULL && strcmp(err.code, "28000") == 0);
 }
 
+static void unix_socket(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db;
+    nc_result *r;
+    const char *path = getenv("NUCLEUS_SOCKET");
+    if (!path) return;
+    cfg.host = path;
+    db = nc_connect(&cfg, &err);
+    CHECK(db != NULL);
+    if (!db) {
+        fprintf(stderr, "unix socket: %s\n", err.message);
+        return;
+    }
+    r = must(db, "SELECT 'by the socket'", NULL, 0);
+    if (r) {
+        CHECK(strcmp(text_of(r, 0, 0), "by the socket") == 0);
+        nc_result_free(r);
+    }
+    nc_close(db);
+    cfg.tls = 1;
+    CHECK(nc_connect(&cfg, &err) == NULL && strstr(err.message, "TLS is not offered") != NULL);
+}
+
 static void tls(void) {
     nc_error err;
     nc_config cfg = config();
@@ -965,6 +989,7 @@ int main(void) {
     sparse_vectors();
     core_types();
     authentication();
+    unix_socket();
     tls();
     token();
     directory();

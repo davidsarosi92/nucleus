@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as
+  `nc_config.host` — `"/tmp/nucleus.sock"` — reaches `nucleus server
+  --socket` (not on Windows); no TLS there.
 - Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
   `nc_column_key_init`, `nc_encrypt`, `nc_decrypt`, `nc_blind_index` —
   format 1, XChaCha20-Poly1305 in C99.  Protocol version 8:

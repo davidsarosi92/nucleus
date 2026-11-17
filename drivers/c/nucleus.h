@@ -106,7 +106,7 @@ struct nc_value {
 };
 
 typedef struct nc_config {
-    const char *host;
+    const char *host; /* a name or address, or a path: the server's Unix socket */
     uint16_t port;
     const char *user;
     const char *password;

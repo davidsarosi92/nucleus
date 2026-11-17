@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A server's Unix socket (nucleus PLAN.md §M14.33 R2), through the C
+  driver: a path as the host reaches `nucleus server --socket`.
 - Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
   `nucleus::ColumnKey(master, name)` — `encrypt`, `decrypt`,
   `blind_index`; `Connection::present_subject_key` and

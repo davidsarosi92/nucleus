@@ -285,6 +285,23 @@ public final class NucleusTest {
         equal(errorCode(() -> NucleusClient.connect(config().token("not.a.token"))), "28000", "a bad token");
     }
 
+    static void unixSocket() {
+        String path = System.getenv("NUCLEUS_SOCKET");
+        if (path == null) {
+            System.out.println("(the server has no socket)");
+            return;
+        }
+        try (NucleusClient db = NucleusClient.connect(config().host(path))) {
+            equal(db.query("SELECT 'by the socket'").rows().get(0).get(0), "by the socket", "socket");
+        }
+        try {
+            NucleusClient.connect(config().host(path).tls(true)).close();
+            throw new AssertionError("TLS on a socket was not refused");
+        } catch (NucleusException e) {
+            check(e.getMessage().contains("TLS is not offered"), e.getMessage());
+        }
+    }
+
     static void tls() {
         String ca = System.getenv("NUCLEUS_TLS_CA");
         if (ca == null) {
@@ -549,13 +566,14 @@ public final class NucleusTest {
     public static void main(String[] args) {
         int cases = runCases();
         run("authentication", NucleusTest::authentication);
+        run("a Unix socket", NucleusTest::unixSocket);
         run("tls", NucleusTest::tls);
         run("token", NucleusTest::token);
         run("directory", NucleusTest::directory);
         run("own transport", NucleusTest::ownTransport);
         run("encrypted columns' vectors", NucleusTest::encryptedColumnVectors);
         run("a subject's key", NucleusTest::subjectKey);
-        check(cases == 13 && passed == 20, "all tests ran");
+        check(cases == 13 && passed == 21, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

@@ -33,6 +33,7 @@ typedef SOCKET nc_socket;
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 typedef int nc_socket;
 #define NC_BAD_SOCKET (-1)
@@ -1030,6 +1031,37 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
             set_error(err, "", "WSAStartup failed");
             return NULL;
         }
+    }
+#endif
+#ifndef _WIN32
+    /* A path: the server's Unix socket on this machine (nucleus server
+       --socket), without TLS. */
+    if (cfg->host && cfg->host[0] == '/') {
+        struct sockaddr_un local;
+        if (cfg->tls || cfg->tls_ca) {
+            set_error(err, "", "TLS is not offered on a Unix socket");
+            return NULL;
+        }
+        if (strlen(cfg->host) >= sizeof local.sun_path) {
+            set_error(err, "", "a socket path too long: %s", cfg->host);
+            return NULL;
+        }
+        c = calloc(1, sizeof *c);
+        if (!c) {
+            set_error(err, "", "out of memory");
+            return NULL;
+        }
+        memset(&local, 0, sizeof local);
+        local.sun_family = AF_UNIX;
+        memcpy(local.sun_path, cfg->host, strlen(cfg->host) + 1);
+        c->sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (c->sock == NC_BAD_SOCKET || connect(c->sock, (struct sockaddr *)&local, sizeof local) != 0) {
+            set_error(err, "", "cannot connect to %s", cfg->host);
+            if (c->sock != NC_BAD_SOCKET) nc_closesocket(c->sock);
+            free(c);
+            return NULL;
+        }
+        return login(c, cfg, err);
     }
 #endif
     memset(&hints, 0, sizeof hints);

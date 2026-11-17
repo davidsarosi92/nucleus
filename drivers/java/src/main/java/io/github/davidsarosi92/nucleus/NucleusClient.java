@@ -122,8 +122,26 @@ public final class NucleusClient implements AutoCloseable {
         this.out = new BufferedOutputStream(out);
     }
 
-    /** Connects and logs in. */
+    /**
+     * Connects and logs in — to the server's Unix socket on this machine when
+     * the host is a path ({@code nucleus server --socket}; no TLS there).
+     */
     public static NucleusClient connect(Config config) {
+        if (config.host.startsWith("/")) {
+            if (config.tls) {
+                throw new NucleusException("TLS is not offered on a Unix socket", "");
+            }
+            try {
+                java.nio.channels.SocketChannel ch =
+                        java.nio.channels.SocketChannel.open(java.net.StandardProtocolFamily.UNIX);
+                ch.connect(java.net.UnixDomainSocketAddress.of(config.host));
+                NucleusClient c = new NucleusClient(ch, java.nio.channels.Channels.newInputStream(ch),
+                        java.nio.channels.Channels.newOutputStream(ch), null);
+                return c.login(config);
+            } catch (IOException e) {
+                throw new NucleusException("cannot connect to " + config.host + ": " + e.getMessage(), e);
+            }
+        }
         try {
             Socket s = new Socket();
             s.connect(new InetSocketAddress(config.host, config.port), config.timeoutMillis);

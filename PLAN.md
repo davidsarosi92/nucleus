@@ -10794,8 +10794,9 @@ simple parameterization, MySQL's former query cache — what not to do).
   PostgreSQL 23.4, `≈` (1.06×); cold 26.7 against 34.4 (0.78×).  The
   Python and JavaScript drivers take a path as the host too
   (`scripts/driver-tests.sh`'s server listens on a socket, each driver's
-  test reaches it); Java and C (and C++ and Swift over C) next, with the
-  session's floor (`SELECT 1` 4.5 µs in the process).
+  test reaches it), and Java and C (C++ and Swift over C) — every
+  driver.  Next in R2: the session's floor (`SELECT 1` 4.5 µs in the
+  process).
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.

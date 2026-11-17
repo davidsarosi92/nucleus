@@ -7895,7 +7895,8 @@ checks `psql` with and without TLS.
 ## 12. Change log
 
 - **2026-11-17 — §M14.33 R2b, a Unix socket:** `nucleus server
-  --socket <path>`, the Rust client's (and `nucleus sql`'s) host a path;
+  --socket <path>`, every driver's host a path (Rust and `nucleus sql`,
+  Python, JavaScript, Java, C, C++, Swift);
   the benchmarks' nucleus reached by it, as `psql` reaches PostgreSQL.
 - **2026-11-17 — §M14.33 R2a, a read by key's plan kept by its shape:**
   its key's literals as parameters, one plan for every key
