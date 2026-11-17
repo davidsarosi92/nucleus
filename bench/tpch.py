@@ -15,8 +15,8 @@ nucleus runs as `nucleus server` on a directory of its own, driven by
 `nucleus sql -h`; PostgreSQL native on this machine in a cluster of its
 own tuned for it (bench/pg.py), or one already running through --psql.
 Loads are `COPY … FROM STDIN` of the same files, then the indexes and
-`ANALYZE` (PostgreSQL: `VACUUM ANALYZE`, as its documentation has it
-after a bulk load), --runs times each with the systems in turn.  Then each query
+`VACUUM ANALYZE` on both (as PostgreSQL's documentation has it after a
+bulk load), --runs times each with the systems in turn.  Then each query
 --runs rounds, the systems in turn: restarted, the query cold, then warm,
 each time from the client's own `\\timing` in a session kept open
 (bench/method.py: medians, intervals, spread).  Results are compared with
@@ -60,7 +60,7 @@ COPY = " WITH (FORMAT csv, DELIMITER '|')"
 
 
 def load(system, data, column=False):
-    """The tables, their rows, the indexes, `ANALYZE`, on an empty
+    """The tables, their rows, the indexes, `VACUUM ANALYZE`, on an empty
     database."""
     system.fresh(TABLES)
     ddl = []

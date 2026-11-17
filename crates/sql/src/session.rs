@@ -1060,13 +1060,23 @@ impl Session {
                 }
                 Ok(Output::Command(tag.into()))
             }
-            Statement::Vacuum => {
+            Statement::Vacuum { analyze, tables } => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
                         "VACUUM cannot run inside a transaction block",
                     ));
                 }
                 self.kv.vacuum()?;
+                if *analyze {
+                    let each: Vec<Option<String>> = if tables.is_empty() {
+                        vec![None]
+                    } else {
+                        tables.iter().cloned().map(Some).collect()
+                    };
+                    for table in each {
+                        self.run(&Statement::Analyze(table), &[])?;
+                    }
+                }
                 Ok(Output::Command("VACUUM".into()))
             }
             Statement::RotateKey { purpose } => {
@@ -2037,7 +2047,7 @@ pub(crate) fn execute_statement(
                 "ALTER COLUMN … TYPE … CONCURRENTLY runs as a statement of its own",
             ));
         }
-        Statement::Vacuum => {
+        Statement::Vacuum { .. } => {
             return Err(Error::active_txn(
                 "VACUUM cannot run inside a transaction block",
             ));

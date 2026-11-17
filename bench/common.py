@@ -143,10 +143,12 @@ class Nucleus:
 
     sockets = 0
 
-    def __init__(self, binary, name, work):
+    def __init__(self, binary, name, work, cache=None):
         self.name = name
         self.db = os.path.join(work, f"db-{name.replace(' ', '-')}")
         args = [binary, "server", self.db, "--listen", address(0), "--no-auth"]
+        if cache:
+            args += ["--cache", cache]
         self.socket = None
         if takes_socket(binary):
             # A short path: a socket's is bounded (104 bytes on macOS).
@@ -229,14 +231,28 @@ def report(title, samples, load_samples, checks, env, baseline, load_label="load
 COLD = "the server restarted before the query (its caches empty; the OS's page cache kept)"
 
 
+def page_cache():
+    """The nucleus server's page cache for the benchmarks: PostgreSQL's
+    `shared_buffers` (bench/pg.py's tuning, a quarter of memory), so each
+    keeps the same in memory (PLAN.md §M14.33 R3; as knn's and the ANN
+    benchmarks' give both one size)."""
+    from pg import tuning
+    return tuning()["shared_buffers"]
+
+
 class NucleusSystem:
     """nucleus for the method's runs: `nucleus server` on a directory of
     its own (--embedded: `nucleus sql DIR`, in-process), a session kept
-    open, restarted for a cold run, emptied by `fresh`."""
+    open, restarted for a cold run, emptied by `fresh`.  The server's page
+    cache is [`page_cache`]'s."""
 
     can_restart = True
-    # After a bulk load: the statistics.
-    after_load = "ANALYZE"
+    # After a bulk load, as PostgreSQL's (its documentation's advice): the
+    # load's spilled writes made versions, and the statistics (PLAN.md
+    # §M14.33 R3 — without the vacuum every read merged the load's intents
+    # until the server's idle vacuum came, which a benchmark never left
+    # it idle for).
+    after_load = "VACUUM ANALYZE"
     # A query's plan, its estimates stripped (`plan_of`).
     explain = "EXPLAIN "
 
@@ -245,6 +261,7 @@ class NucleusSystem:
         self.name = name
         self.work = tempfile.mkdtemp(prefix="nucleus-bench-")
         self.server = self.session = None
+        self.cache = None if embedded else page_cache()
         self._start()
 
     def describe(self):
@@ -253,13 +270,14 @@ class NucleusSystem:
                 "settings": {"server": not self.embedded,
                              "client": "in the process" if self.embedded else
                              ("Unix socket" if takes_socket(self.binary) else "loopback TCP"),
+                             "page cache": self.cache or "the default",
                              "sync": "ordered (the default: fsync at commit, the drive's cache not flushed)"}}
 
     def _start(self):
         if self.embedded:
             self.client = [self.binary, "sql", os.path.join(self.work, "db")]
         else:
-            self.server = Nucleus(self.binary, "db", self.work)
+            self.server = Nucleus(self.binary, "db", self.work, self.cache)
             self.client = self.server.client
         self.session = Session(self.client)
 

@@ -556,8 +556,15 @@ pub enum Statement {
     Analyze(Option<String>),
     /// `VACUUM [options] [table, …]`: the database's maintenance (versions
     /// no snapshot sees removed, committed intents made versions) — of all
-    /// of it, whatever tables are named.
-    Vacuum,
+    /// of it, whatever tables are named; with `ANALYZE` (PostgreSQL's
+    /// `VACUUM ANALYZE t` or `VACUUM (ANALYZE) t`) then `ANALYZE` of the
+    /// tables named (`tables` empty: of every table).
+    Vacuum {
+        /// Whether `ANALYZE` follows.
+        analyze: bool,
+        /// The tables named.
+        tables: Vec<String>,
+    },
     /// `ROTATE KEY data` (PLAN.md §M14.30 K3f): a new key for the
     /// database's files, the old one's pages sealed again in the
     /// background ([`crate::keys::rotate`]).

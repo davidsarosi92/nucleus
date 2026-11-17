@@ -1115,12 +1115,46 @@ impl<'a> Parser<'a> {
             }
             "vacuum" => {
                 self.pos += 1;
-                // PostgreSQL's forms accepted: options, then tables (the
-                // whole database is vacuumed either way).
+                // PostgreSQL's forms: `VACUUM (option [value], …) tables`
+                // and `VACUUM [FULL] [FREEZE] [VERBOSE] [ANALYZE] tables`,
+                // each table perhaps with its columns.  The whole database
+                // is vacuumed either way; ANALYZE then analyzes the tables.
+                let mut analyze = false;
+                if self.peek_op("(") {
+                    self.pos += 1;
+                    while !self.at_end() && !self.peek_op(")") {
+                        let on = self.peek_kw("analyze");
+                        self.pos += 1;
+                        if on {
+                            analyze = !(self.peek_kws(&["false"])
+                                || self.peek_kws(&["off"])
+                                || matches!(self.peek_at(0), Some(Token::Number(n)) if n == "0"));
+                        }
+                    }
+                    self.expect_op(")")?;
+                }
+                for kw in ["full", "freeze", "verbose", "analyze", "verbose"] {
+                    if self.peek_kw(kw) {
+                        self.pos += 1;
+                        analyze |= kw == "analyze";
+                    }
+                }
+                let mut tables = Vec::new();
                 while !self.at_end() && !self.peek_op(";") {
+                    tables.push(self.relation()?);
+                    if self.peek_op("(") {
+                        // Its columns: the table is analyzed whole.
+                        while !self.at_end() && !self.peek_op(")") {
+                            self.pos += 1;
+                        }
+                        self.expect_op(")")?;
+                    }
+                    if !self.peek_op(",") {
+                        break;
+                    }
                     self.pos += 1;
                 }
-                Ok(Statement::Vacuum)
+                Ok(Statement::Vacuum { analyze, tables })
             }
             "rotate" => {
                 self.pos += 1;

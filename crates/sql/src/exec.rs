@@ -1235,6 +1235,12 @@ impl<'a> Entries<'a> {
         })
     }
 
+    /// Only how many entries there are wanted from here on: keys and
+    /// values may come empty ([`nucleus_kv::KvChunks::count_only`]).
+    pub fn count_only(&mut self) {
+        self.chunks.count_only();
+    }
+
     /// The next entry.
     #[allow(clippy::should_implement_trait)] // it lends from the chunk
     #[inline]

@@ -1912,13 +1912,19 @@ impl<'a> RowBatches<'a> {
             .end
             .as_deref()
             .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-        let entries = Entries::over(
+        let mut entries = Entries::over(
             scan.txn,
             scan.validated,
             std::ops::Bound::Included(&scan.start),
             end,
         )?;
         let wanted = scan.wanted;
+        if wanted.is_some_and(|w| !w.contains(&true)) {
+            // No column read (`count(*)`): how many rows is all a batch
+            // holds — neither their keys nor their values read (PLAN.md
+            // §M14.33 R3).
+            entries.count_only();
+        }
         let kinds = scan
             .table
             .columns

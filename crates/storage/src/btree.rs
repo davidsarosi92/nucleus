@@ -1565,6 +1565,28 @@ impl<'t> Cursor<'t> {
         self.value_into(self.pos - 1, val)
     }
 
+    /// The value of the entry [`next_key_within`](Self::next_key_within)
+    /// gave last into `val` when it is stored in its cell, uncompressed,
+    /// at most `max` bytes long (true); else false, `val` as it was — a
+    /// value compressed or in overflow pages is longer, and not read.
+    pub fn last_small_value_into(&self, val: &mut Vec<u8>, max: usize) -> Result<bool> {
+        let r = self.leaf.as_ref().expect("a cursor is always in a leaf");
+        let page = r.read();
+        let corrupt = |reason| Error::Corrupt {
+            page: r.id(),
+            reason,
+        };
+        let v = View::new(&page).map_err(corrupt)?;
+        match v.value(self.pos - 1).map_err(corrupt)? {
+            ValRef::Inline(b) if b.len() <= max => {
+                val.clear();
+                val.extend_from_slice(b);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// [`next_within`](Self::next_within) without the value: the next
     /// entry's key — its value, compressed or in overflow pages, not read
     /// until [`last_value_into`](Self::last_value_into) asks.
@@ -1754,6 +1776,23 @@ impl Range<'_> {
             return Ok(());
         }
         self.cursor.last_value_into(val)
+    }
+
+    /// The value of the entry [`next_key_into`](Self::next_key_into) gave
+    /// last into `val` when it is at most `max` bytes long (true); else
+    /// false — read only where it is short and stored as it is, so a
+    /// scan that asks only whether a value is a short marker (a
+    /// tombstone) does not decompress the long ones.
+    pub fn small_value_into(&mut self, val: &mut Vec<u8>, max: usize) -> Result<bool> {
+        if self.reverse {
+            if self.stash.len() > max {
+                return Ok(false);
+            }
+            val.clear();
+            val.extend_from_slice(&self.stash);
+            return Ok(true);
+        }
+        self.cursor.last_small_value_into(val, max)
     }
 
     fn inside(&self, k: &[u8]) -> bool {

@@ -859,6 +859,20 @@ impl Scan<'_> {
             Scan::Pieces(p) => p.value_into(val),
         }
     }
+
+    /// The value of the entry [`next_key_into`](Self::next_key_into) gave
+    /// last into `val` when it is at most `max` bytes long (true); else
+    /// false, read only as far as the engine must to tell
+    /// ([`btree::Range::small_value_into`]; the pieces' engines read it).
+    pub fn small_value_into(&mut self, val: &mut Vec<u8>, max: usize) -> Result<bool> {
+        match self {
+            Scan::Tree(r) => r.small_value_into(val, max),
+            Scan::Pieces(p) => {
+                p.value_into(val)?;
+                Ok(val.len() <= max)
+            }
+        }
+    }
 }
 
 impl Iterator for Scan<'_> {

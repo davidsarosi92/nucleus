@@ -76,7 +76,12 @@ performance and 4 efficiency cores, 32 GiB, SSD), nucleus release builds;
 PostgreSQL 18.7 native (Homebrew), a cluster of its own tuned for the
 machine by `bench/pg.py` (shared_buffers 8 GB, parallel workers on the
 cores) — a stronger baseline than the Docker image of the runs before
-§M14.31, whose numbers are in PLAN.md's step notes.
+§M14.31, whose numbers are in PLAN.md's step notes.  The nucleus server
+gets PostgreSQL's `shared_buffers` as its page cache (`--cache`), and
+both systems `VACUUM ANALYZE` after a load (PLAN.md §M14.33 R3; the
+suite's, TPC-H's and ClickBench's tables below are from before that,
+nucleus with its default 128 MiB cache and no vacuum after the load —
+they are run again at R4's end).
 
 **The suite** (`bash bench/all.sh suite`; `bench/run.py`, 1,000,000 rows,
 each statement cold — the server just restarted — and warm):

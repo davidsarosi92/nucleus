@@ -10834,6 +10834,50 @@ simple parameterization, MySQL's former query cache — what not to do).
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.
+
+  *Done 2026-11-17 — R3a, measured first.*  ClickBench's row table
+  showed a floor of 80–90 ms under every query (`count(*)` 79 ms against
+  PostgreSQL's 25.5).  Its profile (`sample` of the server, the query
+  repeated) had three causes, two of them the benchmark's:
+  1. *The page cache.*  PostgreSQL ran with `shared_buffers` 8 GB
+     (bench/pg.py's tuning), nucleus with its default 128 MiB — and
+     `hits` is 951 MB, so each scan read its pages again through
+     `pread`, checked and decompressed them.  As V2 found for the
+     vectors (and knn's and the ANN benchmarks' already do): the server
+     now gets the same size (`bench/common.py`'s `page_cache`, its
+     `--cache`), written beside the results.  `count(*)` 79 → 42 ms.
+  2. *The load's intents.*  A `COPY` that spills writes them as intents
+     (§M14.20 V11), made versions by vacuum — the server's when the
+     database is idle, which a benchmark never leaves it; until then
+     every read merges them (and after a restart, every read anywhere:
+     the spans are not known).  PostgreSQL was given `VACUUM ANALYZE`
+     after the load, nucleus only `ANALYZE` — and nucleus's `VACUUM
+     ANALYZE t` vacuumed but did not analyze (the parser passed over the
+     options).  Now `VACUUM [(options)] [FULL] [FREEZE] [VERBOSE]
+     [ANALYZE] [tables]` analyzes the tables named (all, none named) when
+     ANALYZE is asked, and both systems get `VACUUM ANALYZE` after a load
+     (`crates/sql/tests/row_scan.rs`).  `count(*)` 42 → 35.5 ms.
+  3. *A count read what it does not count.*  A scan that reads no column
+     still copied each row's value — decompressed (a row from 1 KiB on
+     is compressed in its cell) — and decoded each version's key.  Now
+     `KvChunks::count_only`: where the store is read alone (no side area,
+     none of the transaction's own writes, not validated), a version's
+     key is compared escaped, decoded only where a batch ends, and its
+     value is not read — a tombstone is one byte in its cell, so a value
+     compressed or in overflow pages is not one
+     (`btree::Range::small_value_into`).  The answer checked against a
+     count that reads a column through deletions, older versions, long
+     values, a transaction's own writes, snapshots and spilled writes
+     (`row_scan.rs`).  `count(*)` 35.5 → about 34 ms (the machine noisy).
+  Not taken: decoding the version keys eight bytes at a time (the bit
+  trick for a zero byte in a word): slower here — the keys' big-endian
+  integers make nearly every other byte an escaped zero.
+  A ClickBench run of the row table alone (one round, against the last
+  PostgreSQL numbers): the geometric mean 1.10× → 0.75×; above 1× still
+  Q29 1.99×, Q23 1.93×, Q0 1.42×, Q19 1.19×, Q27 1.14×.  What is left of
+  a scan is per row: each entry's key copied out of its page under the
+  page's latch, the page's header parsed again (`View::new`), three
+  buffer-pool calls a leaf — R3b, visibility a leaf at a time.
 - **R4 — the joins**: TPC-H Q11, Q5, Q10 and Q6 on row tables, plan by
   plan against PostgreSQL's; target: TPC-H's row geomean ≤ 1×.
 

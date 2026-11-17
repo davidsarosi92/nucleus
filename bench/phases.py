@@ -14,7 +14,7 @@ The systems — the build, the build before it (--base), PostgreSQL
 (--pg: native, bench/pg.py) — run in turn, round by round
 (bench/method.py: medians, intervals, spread, `≈` where intervals
 overlap).  `load` times each round's `COPY` of every table, the indexes
-and `ANALYZE` on an empty database.  `reads` loads once, then times each
+and `VACUUM ANALYZE` on an empty database.  `reads` loads once, then times each
 of the 22 queries cold (its server restarted) and warm — and with
 --vacuum again after `VACUUM` (reads before and after a load's intents
 become versions).  DIR holds generated `*.tbl` files (`bench/tpch.py
@@ -60,8 +60,8 @@ def schema(s, column):
 
 
 def load(a, systems):
-    """Each round: an empty database, then COPY, the indexes, ANALYZE,
-    timed apart."""
+    """Each round: an empty database, then COPY, the indexes, VACUUM
+    ANALYZE, timed apart."""
     times = {}
     for r in range(a.runs):
         for s in method.turn(systems, r):
@@ -78,7 +78,7 @@ def load(a, systems):
             analyze = time.time() - st - copy - index
             for name, t in (("COPY", copy), ("CREATE INDEX", index), (s.after_load, analyze),
                             ("total", copy + index + analyze)):
-                times.setdefault((name if name != "VACUUM ANALYZE" else "ANALYZE", s.name), []).append(t)
+                times.setdefault((name, s.name), []).append(t)
             print(f"  {s.name} round {r + 1}: {copy:.1f} + {index:.1f} + {analyze:.1f} s", file=sys.stderr, flush=True)
     return [method.Sample(name, system, t, "write", flagged=method.cv(t) > method.CV_BOUND, unit="s")
             for (name, system), t in times.items()]

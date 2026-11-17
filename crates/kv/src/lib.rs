@@ -190,6 +190,13 @@ pub trait KvChunks {
         let _ = key;
         Ok(false)
     }
+
+    /// From here on only how many entries there are is wanted (a
+    /// `count(*)`): where the scan can, entries come with empty keys and
+    /// values — keys not decoded, values not read (a long one not
+    /// decompressed, its overflow pages not visited).  By default they
+    /// come whole, as before.
+    fn count_only(&mut self) {}
 }
 
 /// Entries a chunk holds at most.
@@ -242,6 +249,10 @@ impl KvChunks for ScanChunks<'_> {
     fn seek(&mut self, key: &[u8]) -> Result<bool> {
         self.0.seek(key);
         Ok(true)
+    }
+
+    fn count_only(&mut self) {
+        self.0.count_only();
     }
 }
 

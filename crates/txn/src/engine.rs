@@ -2687,6 +2687,7 @@ impl Transaction {
             done: false,
             validated: self.isolation == Isolation::Serializable,
             batch: FIRST_BATCH,
+            count_only: false,
         })
     }
 
@@ -2979,6 +2980,9 @@ pub struct Scan<'t> {
     validated: bool,
     /// The next refill's entries.
     batch: usize,
+    /// Counting only ([`Scan::count_only`]): neither the store's keys
+    /// decoded nor its values read, where nothing needs them.
+    count_only: bool,
 }
 
 impl Drop for Scan<'_> {
@@ -3102,6 +3106,79 @@ impl Scan<'_> {
         self.refill_where(max, bytes, None, &mut 0, usize::MAX)
     }
 
+    /// [`refill`](Self::refill) for [`count_only`](Self::count_only), the
+    /// store read alone: an entry a live user key, its key and value
+    /// empty.  A version's user key is its store key but the last ten
+    /// bytes (`0 0` and the timestamp), escaped — compared so, decoded only
+    /// where the batch ends (the next one starts there).
+    fn refill_counting(&mut self, tree: &Tables, seek: &[u8], max: usize) -> Result<()> {
+        let txn = self.txn;
+        let store_end = self.store_end.take();
+        let end = match &store_end {
+            Some(e) => Bound::Excluded(e.as_slice()),
+            None => Bound::Unbounded,
+        };
+        let undecodable = || Error::Corrupt("undecodable version key");
+        let user_of = |k: &[u8]| decode_key(k).map(|(u, _)| u).ok_or_else(undecodable);
+        let [k, v] = &mut self.bufs;
+        let (buf, live) = (&mut self.buffer, &mut self.live);
+        // The escaped user key of the last entry taken: its older versions
+        // are passed over.
+        let mut last: Option<Vec<u8>> = None;
+        let mut upper: Option<Vec<u8>> = None;
+        let mut passed = 0;
+        'ranges: for mut range in versions(tree, Bound::Included(seek), end)? {
+            while range.next_key_into(k)? {
+                let n = k.len();
+                if n < 10 || k[n - 10] != 0 || k[n - 9] != 0 {
+                    return Err(undecodable());
+                }
+                let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
+                let escaped = &k[..n - 10];
+                let seen = last.as_deref() == Some(escaped);
+                if !seen && buf.ents.len() >= max {
+                    upper = Some(user_of(k)?);
+                    break 'ranges;
+                }
+                if ts > txn.start {
+                    // Too new: passed over (many of them end the batch, the
+                    // tree's lock let go).
+                    if !seen {
+                        passed += 1;
+                        if passed >= PASS_LIMIT {
+                            upper = Some(user_of(k)?);
+                            break 'ranges;
+                        }
+                    }
+                    continue;
+                }
+                if seen {
+                    continue; // an older version of a key taken
+                }
+                // Live unless its value is the one-byte tombstone.
+                let alive = !range.small_value_into(v, 1)?
+                    || decode_value(v)
+                        .ok_or(Error::Corrupt("bad version value"))?
+                        .is_some();
+                let at = buf.data.len();
+                buf.ents.push((at, at));
+                live.push(alive);
+                match &mut last {
+                    Some(l) => {
+                        l.clear();
+                        l.extend_from_slice(escaped);
+                    }
+                    None => last = Some(escaped.to_vec()),
+                }
+            }
+        }
+        self.store_end = store_end;
+        if let Some(u) = upper {
+            self.from = Some(Bound::Included(u));
+        }
+        Ok(())
+    }
+
     /// [`refill`](Self::refill), passing over the user keys `want` refuses
     /// — by their keys, their values not read — and counting them in
     /// `skipped`, the batch ending once that reaches `most` (where no side
@@ -3152,6 +3229,10 @@ impl Scan<'_> {
         if sides.is_empty() {
             // No side area to merge (the usual case): versions straight
             // into the buffer, each user key decoded in place.
+            if self.count_only && want.is_none() && !self.validated && self.writes.peek().is_none()
+            {
+                return self.refill_counting(&tree, &seek, max);
+            }
             let [k, v] = &mut self.bufs;
             let buf = &mut self.buffer;
             let mut passed = 0;
@@ -3385,6 +3466,19 @@ impl Scan<'_> {
             }
             // A tombstone: deleted in this snapshot.
         }
+    }
+
+    /// From here on only how many entries there are is wanted (a
+    /// `count(*)`): where the store is read alone — no side area to merge,
+    /// none of the transaction's own writes in the range, its reads not
+    /// validated — each live entry comes with an empty key and value: a
+    /// version's user key is not decoded (a key's versions are told apart
+    /// by their escaped form, decoded only where a batch ends), and it is
+    /// told live or deleted without its value read — a tombstone is one
+    /// byte in its cell, so a value compressed or in overflow pages is not
+    /// one.  Elsewhere entries come whole, as before.
+    pub fn count_only(&mut self) {
+        self.count_only = true;
     }
 
     /// Replaces `out`'s entries with the next ones — at most `entries` of

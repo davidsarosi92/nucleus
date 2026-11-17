@@ -15,8 +15,8 @@ The schema, the queries and the data are downloaded into --cache (kept
 between runs).  nucleus runs as `nucleus server`, driven by `nucleus sql
 -h`; PostgreSQL native in a cluster of its own tuned for the machine
 (bench/pg.py), or one already running through --psql.  Loads are `COPY …
-FROM STDIN` of the same file, then `ANALYZE` (PostgreSQL: `VACUUM ANALYZE`, as its documentation
-has it after a bulk load), --runs times with the
+FROM STDIN` of the same file, then `VACUUM ANALYZE` on both (as
+PostgreSQL's documentation has it after a bulk load), --runs times with the
 systems in turn; each query --runs rounds, the systems in turn,
 restarted, the query cold and then warm (bench/method.py: medians,
 intervals, spread).  A query whose LIMIT may cut ties differently is
@@ -123,7 +123,7 @@ def main():
 
     checks = check_answers(answers, queries, exact=lambda q: q not in limited)
     baseline = None if a.no_pg else "postgresql"
-    report(f"ClickBench, {a.rows:,} rows", samples, load_samples, checks, env, baseline, "load (COPY, ANALYZE; PostgreSQL VACUUM ANALYZE)")
+    report(f"ClickBench, {a.rows:,} rows", samples, load_samples, checks, env, baseline, "load (COPY, VACUUM ANALYZE)")
     if a.out:
         method.write(a.out, "clickbench", env, samples + load_samples,
                      {"baseline": baseline, "rows": a.rows, "checks": checks, "plans": plans})

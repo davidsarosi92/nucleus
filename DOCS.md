@@ -2990,7 +2990,12 @@ reserved word (as in PostgreSQL), so it ends a table's alias.
 `VACUUM` (PostgreSQL's options and tables accepted; the whole database
 either way; not in a transaction block, `25001`) runs the KV's maintenance
 (`Kv::vacuum`: versions no snapshot sees removed, committed intents made
-versions, §5.2).
+versions, §5.2).  With `ANALYZE` — `VACUUM ANALYZE t`, `VACUUM (ANALYZE)
+t, u` — it then analyzes the tables named, or every table when none is
+named (`VACUUM (ANALYZE false)` does not); after a bulk load it is what
+PostgreSQL's documentation advises there too: until a vacuum (the
+server's runs when the database is idle) a load's spilled writes are
+read through their transaction's status.
 
 `ROTATE KEY data` (a superuser's; not in a transaction block, `25001`)
 gives the database a new data key with it running (§9, *A new data
@@ -7894,6 +7899,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R3a, a row table's scan:** `VACUUM ANALYZE`
+  analyzes (PostgreSQL's forms, the tables named); a scan that reads no
+  column (`count(*)`) neither decodes keys nor reads values
+  (`KvChunks::count_only`); the benchmarks give nucleus PostgreSQL's
+  `shared_buffers` as its page cache and both `VACUUM ANALYZE` after a
+  load.
 - **2026-11-17 — §M14.33 R2c, the session's floor:** the catalog
   cache looked up by the borrowed name, a transaction that wrote nothing
   not asked under the engine's lock, a statement normalized once (and a
