@@ -492,6 +492,14 @@ test("tls", { skip: loginSkip || (process.env.NUCLEUS_TLS_CA === undefined && "t
   }
 });
 
+test("a Unix socket", { skip: loginSkip || (process.env.NUCLEUS_SOCKET === undefined && "the server has no socket") }, async () => {
+  const path = process.env.NUCLEUS_SOCKET as string;
+  const db = await connect({ ...options, host: path });
+  assert.equal((await db.query("SELECT 'by the socket'")).rows[0][0], "by the socket");
+  await db.close();
+  await assert.rejects(connect({ ...options, host: path, tls: true }), /TLS is not offered/);
+});
+
 test("pipelines and executeMany", async () => {
   const db = await connect(options);
   const t = table();

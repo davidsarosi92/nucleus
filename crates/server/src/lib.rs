@@ -528,6 +528,43 @@ pub fn serve_front_end(
     Ok(())
 }
 
+/// Serves the nucleus protocol on a Unix socket forever, one thread per
+/// connection (PLAN.md §M14.33 R2): a client on this machine skips
+/// loopback TCP's round trip (16 µs on macOS, against 4–5 on a socket).
+/// No TLS there and no client address; the login as on TCP.
+#[cfg(unix)]
+pub fn serve_local(
+    listener: std::os::unix::net::UnixListener,
+    kv: Arc<dyn Kv>,
+    config: Config,
+) -> io::Result<()> {
+    nucleus_sql::metrics::register();
+    let config = Arc::new(config);
+    // Ids apart from the TCP listeners' (counted from the top).
+    let ids = Arc::new(AtomicU32::new(1 << 31));
+    for stream in listener.incoming() {
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let (kv, config) = (Arc::clone(&kv), Arc::clone(&config));
+        let id = ids.fetch_add(1, Ordering::Relaxed);
+        let session =
+            nucleus_platform::session_thread(format!("nucleus session {id}")).spawn(move || {
+                if let Err(e) = native::handle_stream(Box::new(stream), kv, &config, id)
+                    && e.kind() != io::ErrorKind::UnexpectedEof
+                {
+                    nucleus_platform::log!("nucleus-server: socket connection {id}: {e}");
+                }
+            });
+        if let Err(e) = session {
+            nucleus_platform::log!("nucleus-server: connection {id}: no thread for it: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// How often [`maintain`] applies the storage policies.
 pub const MAINTENANCE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 

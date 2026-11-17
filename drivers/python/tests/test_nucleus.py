@@ -645,6 +645,15 @@ class Conformance(unittest.TestCase):
             connect(token="not.a.token")
         self.assertEqual(e.exception.code, "28000")
 
+    @unittest.skipUnless(os.environ.get("NUCLEUS_SOCKET"), "the server has no socket")
+    @server_only
+    def test_unix_socket(self):
+        path = os.environ["NUCLEUS_SOCKET"]
+        with nucleus.connect(path) as c:
+            self.assertEqual(c.execute("SELECT 'by the socket'").rows, [("by the socket",)])
+        with self.assertRaises(nucleus.InterfaceError):
+            nucleus.connect(path, tls=True)
+
     @unittest.skipUnless(os.environ.get("NUCLEUS_TLS_CA"), "the server has no TLS")
     @server_only
     def test_tls(self):

@@ -72,6 +72,7 @@ between the two by changing only that:
 const db = await connect("file:app.db");             // directory app.db, made if missing
 const mem = await connect(":memory:", { options: "cache=64MB" });
 const srv = await connect("nucleus://nucleus:nucleus@127.0.0.1:20035/nucleus?tls=true");
+const local = await connect({ host: "/tmp/nucleus.sock" }); // a server's Unix socket (nucleus server --socket)
 
 const shared = Database.open(":memory:");            // several sessions on one
 const a = await shared.connect(), b = await shared.connect({ user: "app" });

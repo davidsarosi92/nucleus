@@ -80,6 +80,7 @@ conn = nucleus.connect("file:app.db")            # directory app.db, made if mis
 conn = nucleus.connect("file:app.db?cache=64MB") # with options (cache, sync, wal)
 conn = nucleus.connect(":memory:")               # gone when closed
 conn = nucleus.connect("nucleus://nucleus:nucleus@127.0.0.1:20035/nucleus?tls=true")
+conn = nucleus.connect("/tmp/nucleus.sock")      # a server's Unix socket (nucleus server --socket)
 
 with nucleus.Database(":memory:") as db:         # several sessions on one
     a, b = db.connect(), db.connect(user="app")

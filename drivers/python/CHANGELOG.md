@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as the
+  host — `nucleus.connect("/tmp/nucleus.sock")` — reaches `nucleus server
+  --socket`; no TLS there.
 - Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
   `nucleus.columns.ColumnKey(master, name)` — `encrypt`, `decrypt`,
   `blind_index` — format 1, XChaCha20-Poly1305 in plain Python.  Protocol

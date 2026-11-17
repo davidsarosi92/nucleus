@@ -46,6 +46,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut subject_keys = None::<String>;
     let mut key_options = crate::keys::KeyOptions::default();
     let mut metrics = None::<String>;
+    let mut socket = None::<String>;
     let mut otlp = None::<String>;
     let mut backup_key = None::<String>;
     let mut backup_to = None::<String>;
@@ -63,6 +64,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     while let Some(a) = rest.next() {
         match a.as_str() {
             "--listen" => listen = Some(rest.next().ok_or("--listen needs an address")?.clone()),
+            "--socket" => socket = Some(rest.next().ok_or("--socket needs a path")?.clone()),
             "--pg-compat" => extra.push(("pg".into(), addr(&mut rest))),
             "--console" => extra.push(("console".into(), addr(&mut rest))),
             "--otlp" => otlp = Some(rest.next().ok_or("--otlp needs an endpoint")?.clone()),
@@ -422,6 +424,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let l = TcpListener::bind(&addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
         listeners.push((Arc::clone(front), l));
     }
+    // The nucleus protocol on a Unix socket too (PLAN.md §M14.33 R2): a
+    // client on this machine skips loopback TCP.
+    let local_listener = match &socket {
+        Some(path) => Some(bind_socket(path)?),
+        None => None,
+    };
     // Beyond loopback, not with the default password (while the database
     // is unclaimed and so takes it) or without authentication — unless told.
     let exposed: Vec<String> = listeners
@@ -480,6 +488,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         })
         .collect::<Result<_, _>>()?;
+    if let Some(path) = &socket {
+        shown.push(format!("{path} (nucleus protocol, Unix socket)"));
+    }
     if let Some(a) = metrics_addr {
         shown.push(format!("{a} (metrics and health checks)"));
     }
@@ -533,6 +544,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             )),
             _ => None,
         })
+        .chain(socket.iter().map(|p| format!("nucleus sql -h {p}")))
         .collect();
     if let Some(o) = otlp_shown {
         nucleus_platform::log!("metrics: OTLP to {o}");
@@ -575,6 +587,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     // The embedding columns' jobs (§M14.22 E4b), off the sessions.
     nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry));
+    #[cfg(unix)]
+    if let Some(l) = local_listener {
+        let (kv, config) = (Arc::clone(&kv), config.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = nucleus_server::serve_local(l, kv, config) {
+                nucleus_platform::log!("nucleus: socket listener stopped: {e}");
+            }
+        });
+    }
     let mut listeners = listeners.into_iter();
     let (first, first_listener) = listeners.next().expect("ncp");
     for (front, l) in listeners {
@@ -587,4 +608,31 @@ pub fn run(args: &[String]) -> Result<(), String> {
         });
     }
     serve_front_end(first, first_listener, kv, config).map_err(|e| e.to_string())
+}
+
+/// A Unix socket listening at `path`: a socket file left by a server no
+/// longer running is replaced; one a server answers on is refused.
+#[cfg(unix)]
+fn bind_socket(path: &str) -> Result<std::os::unix::net::UnixListener, String> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    if let Ok(m) = std::fs::symlink_metadata(path) {
+        if !m.file_type().is_socket() {
+            return Err(format!(
+                "--socket {path}: a file that is not a socket is there"
+            ));
+        }
+        if UnixStream::connect(path).is_ok() {
+            return Err(format!("--socket {path}: a server listens there already"));
+        }
+        std::fs::remove_file(path).map_err(|e| format!("--socket {path}: {e}"))?;
+    }
+    UnixListener::bind(path).map_err(|e| format!("cannot listen on {path}: {e}"))
+}
+
+#[cfg(not(unix))]
+fn bind_socket(path: &str) -> Result<(), String> {
+    Err(format!(
+        "--socket {path}: Unix sockets are not supported here"
+    ))
 }

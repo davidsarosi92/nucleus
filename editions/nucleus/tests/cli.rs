@@ -1918,3 +1918,84 @@ fn a_key_its_user_holds_over_the_network() {
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The nucleus protocol on a Unix socket (PLAN.md §M14.33 R2): `nucleus
+/// sql -h <path>` reaches the server by it; a socket a server answers on
+/// is refused to a second one, a file left by a stopped one replaced.
+#[cfg(unix)]
+#[test]
+fn a_unix_socket() {
+    let dir = temp_dir("socket");
+    let d = dir.to_str().unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    // A short path: a socket's is bounded (104 bytes on macOS).
+    let sock = format!("/tmp/nucleus-test-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&sock);
+    let db = dir.join("db");
+    let start = |sock: &str| {
+        let mut server = Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args([
+                "server",
+                db.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:0",
+                "--socket",
+                sock,
+            ])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let first = listening_line(server.stderr.take().unwrap());
+        (server, first)
+    };
+    let (mut server, first) = start(&sock);
+    assert!(
+        first.contains(&format!("{sock} (nucleus protocol, Unix socket)")),
+        "{first}"
+    );
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            "-h",
+            &sock,
+            "-c",
+            "CREATE TABLE t (id INT PRIMARY KEY, s TEXT)",
+        ],
+        "",
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = nucleus(
+        &["sql", "-h", &sock],
+        "INSERT INTO t VALUES (1, 'one'), (2, 'two');\nSELECT s FROM t WHERE id = 2;\n",
+    );
+    assert!(ok && out.contains("two") && !out.contains("one\n"), "{out}");
+    // A second server on the same socket: refused.
+    let other = dir.join("other");
+    let (ok, out) = nucleus(
+        &[
+            "server",
+            other.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--socket",
+            &sock,
+        ],
+        "",
+    );
+    assert!(
+        !ok && out.contains("a server listens there already"),
+        "{out}"
+    );
+    server.kill().unwrap();
+    server.wait().unwrap();
+    // The file left behind: replaced by the next server.
+    assert!(std::path::Path::new(&sock).exists());
+    let (mut server, _) = start(&sock);
+    let (ok, out) = nucleus(&["sql", "-h", &sock, "-c", "SELECT count(*) FROM t"], "");
+    assert!(ok && out.contains(" 2"), "{out}");
+    server.kill().unwrap();
+    server.wait().unwrap();
+    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = d;
+}

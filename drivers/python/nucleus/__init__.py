@@ -609,8 +609,17 @@ class Connection:
             self._sock = _stream
         else:
             try:
-                self._sock = _socket.create_connection((host, port), timeout=timeout)
-                self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+                if isinstance(host, str) and host.startswith("/"):
+                    # The server's Unix socket (``nucleus server --socket``),
+                    # on this machine: no TLS there.
+                    if tls or tls_ca is not None:
+                        raise InterfaceError("TLS is not offered on a Unix socket")
+                    self._sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                    self._sock.settimeout(timeout)
+                    self._sock.connect(host)
+                else:
+                    self._sock = _socket.create_connection((host, port), timeout=timeout)
+                    self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
                 if tls or tls_ca is not None:
                     # The handshake starts at once; the server sees it (DOCS §10).
                     ctx = _ssl.create_default_context(cafile=tls_ca)
@@ -2051,7 +2060,9 @@ def connect(host="127.0.0.1", port=None, user=None, password=_UNSET,
     database in directory ``app.db`` in this process, made if missing:
     the embedded edition; its options as parameters, ``file:app.db?cache=
     64MB``, or ``options``) or ``":memory:"`` (one in memory).  Keyword
-    arguments override what the string says.
+    arguments override what the string says.  A path — ``"/tmp/nucleus.sock"``
+    — reaches the server's Unix socket on this machine (``nucleus server
+    --socket``): a round trip a third of loopback TCP's.
 
     ``tls=True`` encrypts it, the server's certificate checked against the
     system's CA certificates — or against ``tls_ca`` (a PEM file; giving it

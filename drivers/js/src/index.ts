@@ -40,14 +40,23 @@ export * from "./core.ts";
 
 // ------------------------------------------------------------------ a server
 
-/** A TCP connection (TLS from the first byte when asked: DOCS §10). */
+/** A TCP connection (TLS from the first byte when asked: DOCS §10) — or,
+ * when the host is a path, the server's Unix socket on this machine
+ * (`nucleus server --socket`), without TLS. */
 setTransport(
   (options) =>
     new Promise<net.Socket>((resolve, reject) => {
       const host = options.host ?? "127.0.0.1";
       const port = options.port ?? DEFAULT_PORT;
       const secure = options.tls === true || options.tlsCa !== undefined;
-      const s = secure
+      const local = host.startsWith("/");
+      if (local && secure) {
+        reject(new NucleusError("TLS is not offered on a Unix socket"));
+        return;
+      }
+      const s = local
+        ? net.createConnection({ path: host })
+        : secure
         ? tls.connect({
             host,
             port,
@@ -58,7 +67,7 @@ setTransport(
             key: options.tlsKey === undefined ? undefined : readFileSync(options.tlsKey),
           })
         : net.createConnection({ host, port });
-      s.setNoDelay(true);
+      if (!local) s.setNoDelay(true);
       s.setTimeout(options.timeoutMs ?? 10_000, () =>
         s.destroy(new NucleusError(`cannot connect to ${host}:${port}: timed out`)),
       );

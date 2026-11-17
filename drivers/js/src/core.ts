@@ -449,6 +449,8 @@ export class Result {
 }
 
 export interface ConnectOptions {
+  /** A host name or address — or a path, the server's Unix socket on this
+   * machine (`nucleus server --socket`). */
   host?: string;
   port?: number;
   user?: string;

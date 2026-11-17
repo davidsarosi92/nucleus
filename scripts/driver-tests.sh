@@ -50,14 +50,17 @@ fi
 # The test issuer (scripts/fixtures/oidc): its token logs drivers_oidc in.
 oidc=(--oidc-issuer https://issuer.nucleus.test --oidc-audience nucleus-driver-tests
   --oidc-jwks "$root/scripts/fixtures/oidc/jwks.json")
-"$bin" server "$work/db" --listen 127.0.0.1:0 --history 1h ${tls[@]+"${tls[@]}"} ${ldap[@]+"${ldap[@]}"} \
-  "${oidc[@]}" 2>"$work/server.log" &
+# Its Unix socket too, at a short path (a socket's is bounded: 104 bytes
+# on macOS), for the drivers' socket tests.
+socket=/tmp/nucleus-drivers-$$.sock
+"$bin" server "$work/db" --listen 127.0.0.1:0 --socket "$socket" --history 1h ${tls[@]+"${tls[@]}"} \
+  ${ldap[@]+"${ldap[@]}"} "${oidc[@]}" 2>"$work/server.log" &
 pid=$!
-trap 'kill $pid ${ldap_pid:-} 2>/dev/null; wait $pid ${ldap_pid:-} 2>/dev/null || true; rm -rf "$work"' EXIT
+trap 'kill $pid ${ldap_pid:-} 2>/dev/null; wait $pid ${ldap_pid:-} 2>/dev/null || true; rm -rf "$work"; rm -f "$socket"' EXIT
 for _ in $(seq 100); do grep -q "listening on" "$work/server.log" 2>/dev/null && break; sleep 0.1; done
 port=$(sed -n 's/.*listening on 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$work/server.log" | head -1)
 [ -n "$port" ] || { cat "$work/server.log"; echo "server did not start"; exit 1; }
-export NUCLEUS_HOST=127.0.0.1 NUCLEUS_PORT=$port
+export NUCLEUS_HOST=127.0.0.1 NUCLEUS_PORT=$port NUCLEUS_SOCKET=$socket
 echo "nucleus server on port $port"
 "$bin" sql -h "127.0.0.1:$port" -c "CREATE USER drivers_oidc" >/dev/null
 if [ ${#ldap[@]} -gt 0 ]; then

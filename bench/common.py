@@ -127,15 +127,33 @@ def same(a, b):
     return "DIFFERENT"
 
 
+def takes_socket(binary, known={}):
+    """Whether `binary`'s server listens on a Unix socket (`--socket`,
+    PLAN.md §M14.33 R2; a build before it does not)."""
+    if binary not in known:
+        usage = subprocess.run([binary, "--help"], capture_output=True, text=True)
+        known[binary] = "--socket" in usage.stdout + usage.stderr
+    return known[binary]
+
+
 class Nucleus:
-    """`nucleus server` on a fresh directory, `nucleus sql -h` for timing,
-    the Python driver for results."""
+    """`nucleus server` on a fresh directory, `nucleus sql -h` for timing
+    — by its Unix socket, as `psql` reaches PostgreSQL here (loopback TCP
+    for a build without one) —, the Python driver for results."""
+
+    sockets = 0
 
     def __init__(self, binary, name, work):
         self.name = name
         self.db = os.path.join(work, f"db-{name.replace(' ', '-')}")
-        self.server = subprocess.Popen([binary, "server", self.db, "--listen", address(0), "--no-auth"],
-                                       stderr=subprocess.PIPE, text=True)
+        args = [binary, "server", self.db, "--listen", address(0), "--no-auth"]
+        self.socket = None
+        if takes_socket(binary):
+            # A short path: a socket's is bounded (104 bytes on macOS).
+            Nucleus.sockets += 1
+            self.socket = f"/tmp/nucleus-bench-{os.getpid()}-{Nucleus.sockets}.sock"
+            args += ["--socket", self.socket]
+        self.server = subprocess.Popen(args, stderr=subprocess.PIPE, text=True)
         line = self.server.stderr.readline()
         m = re.search(re.escape(address("")) + r"(\d+)", line)
         if not m:
@@ -143,7 +161,8 @@ class Nucleus:
         self.port = int(m.group(1))
         # (`localhost` for IPv6: its addresses are tried in turn, and
         # builds before 2026-11-09 do not take `-h [::1]:port`.)
-        self.client = [binary, "sql", "-h", f"localhost:{self.port}" if ":" in HOST else address(self.port)]
+        self.client = [binary, "sql", "-h", self.socket or
+                       (f"localhost:{self.port}" if ":" in HOST else address(self.port))]
 
     def script(self, lines, timeout=None):
         return run(self.client, "\\timing\n" + "".join(one_line(s) + ";\n" for s in lines), timeout=timeout)
@@ -159,6 +178,8 @@ class Nucleus:
     def close(self):
         self.server.terminate()
         self.server.wait()
+        if self.socket and os.path.exists(self.socket):
+            os.remove(self.socket)
 
 
 class Postgres:
@@ -230,6 +251,8 @@ class NucleusSystem:
         version = subprocess.run([self.binary, "--version"], capture_output=True, text=True).stdout
         return {"version": version.split("\n")[0].removeprefix("nucleus "),
                 "settings": {"server": not self.embedded,
+                             "client": "in the process" if self.embedded else
+                             ("Unix socket" if takes_socket(self.binary) else "loopback TCP"),
                              "sync": "ordered (the default: fsync at commit, the drive's cache not flushed)"}}
 
     def _start(self):

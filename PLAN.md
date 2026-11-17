@@ -10783,6 +10783,19 @@ simple parameterization, MySQL's former query cache — what not to do).
   text one), its plan kept by the normalized text; anything else as
   before.  In the process 23.6 → 9.2 µs; the suite's 1,000 reads 54.9 →
   36.2 ms (2.40× → 1.60× PostgreSQL's 22.7, `nucleus sql` over TCP).
+  *R2b done 2026-11-17*: `nucleus server --socket <path>` serves the
+  nucleus protocol on a Unix socket too (`serve_local`, over the
+  existing `handle_stream`: no TLS, no client address, the login as on
+  TCP; a stale socket file replaced, a live one refused); the Rust
+  client and `nucleus sql` take a path as the host (`libpq`'s way).  The
+  benchmarks reach nucleus by it, as `psql` reaches PostgreSQL
+  (`bench/common.py`; a build without `--socket` over TCP, recorded as
+  the client's transport).  The suite's 1,000 reads 36.2 → 24.9 ms —
+  PostgreSQL 23.4, `≈` (1.06×); cold 26.7 against 34.4 (0.78×).  The
+  Python and JavaScript drivers take a path as the host too
+  (`scripts/driver-tests.sh`'s server listens on a socket, each driver's
+  test reaches it); Java and C (and C++ and Swift over C) next, with the
+  session's floor (`SELECT 1` 4.5 µs in the process).
 - **R3 — the row scan**: rows deformed only as far as the columns a
   query reads, visibility decided a leaf at a time, `count(*)` without
   decoding rows; target: ClickBench's row geomean ≤ 1×.

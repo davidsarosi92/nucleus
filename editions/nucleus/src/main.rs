@@ -56,7 +56,7 @@ usage:
                                     sample and query (read-only unless
                                     --allow-writes); --memory: remember, recall,
                                     forget
-  nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]] [--console [<addr:port>]]
+  nucleus server <dir> [--listen <addr:port>] [--socket <path>] [--pg-compat [<addr:port>]] [--console [<addr:port>]]
                      [--front-end <name> [<addr:port>]] [--metrics [<addr:port>]] [--otlp <url>]
                      [--user <name>] [--password <pw> (or NUCLEUS_PASSWORD)] [--no-auth] [--log-queries]
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]

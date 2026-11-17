@@ -6541,7 +6541,7 @@ set of key ids, dropped whenever a key is destroyed.
 ## 9. Server (`nucleus-server`)
 
 ```
-nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
+nucleus server <dir> [--listen <addr:port>] [--socket <path>] [--pg-compat [<addr:port>]]
                      [--console [<addr:port>]] [--front-end <name> [<addr:port>]]
                      [--metrics [<addr:port>]] [--otlp <endpoint>]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
@@ -6591,7 +6591,14 @@ entries without the WAL and checkpoints at its commit; `full` logs every
 write.  Both front ends read and write through 64 KiB buffers.
 
 The server speaks **the nucleus protocol** (§10, `nucleus_server::serve`)
-on `--listen` (default `127.0.0.1:20035`).  **Who logs in is the
+on `--listen` (default `127.0.0.1:20035`), and with `--socket <path>` on
+a Unix socket too (`nucleus_server::serve_local`, PLAN.md §M14.33 R2): a
+client on the same machine skips loopback TCP — a round trip 4.4 µs
+against 16.0 on macOS.  No TLS there and no client address; the login as
+on TCP.  A socket file a stopped server left is replaced; one a server
+answers on is refused.  A client reaches it by its path as the host —
+`nucleus sql -h /tmp/nucleus.sock`, `nucleus_client::Config { host:
+"/tmp/nucleus.sock".into(), .. }` — as `libpq` takes a directory.  **Who logs in is the
 database's roles** (`roles.rs`, §M14.25): `CREATE ROLE` / `CREATE USER`
 (a role with `LOGIN`) `[WITH] SUPERUSER | LOGIN | INHERIT | CREATEROLE |
 CONNECTION LIMIT n | PASSWORD 'p' | VALID UNTIL 't' | IN ROLE r, …` (and
@@ -7887,6 +7894,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R2b, a Unix socket:** `nucleus server
+  --socket <path>`, the Rust client's (and `nucleus sql`'s) host a path;
+  the benchmarks' nucleus reached by it, as `psql` reaches PostgreSQL.
 - **2026-11-17 — §M14.33 R2a, a read by key's plan kept by its shape:**
   its key's literals as parameters, one plan for every key
   (`shape::by_key`); in the process 23.6 → 9.2 µs.

@@ -50,7 +50,8 @@ pub const DEFAULT_PORT: u16 = 20_035;
 /// Where and as whom to connect.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Host name or address.
+    /// Host name or address — or, beginning with `/`, the path of the
+    /// server's Unix socket (`nucleus server --socket`; the port unused).
     pub host: String,
     /// Port.
     pub port: u16,
@@ -926,6 +927,25 @@ impl Client {
     /// Connects and says Hello.
     pub fn connect(config: Config) -> Result<Self, Error> {
         use std::net::ToSocketAddrs;
+        // A path: the server's Unix socket, on this machine — no TLS to
+        // ask for there.
+        if config.host.starts_with('/') {
+            if config.tls.is_some() {
+                return Err(Error::Protocol(
+                    "TLS is not offered on a Unix socket".into(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                let stream = std::os::unix::net::UnixStream::connect(&config.host)?;
+                return Self::hello(Box::new(stream), None, config);
+            }
+            #[cfg(not(unix))]
+            return Err(Error::Protocol(format!(
+                "{}: Unix sockets are not supported here",
+                config.host
+            )));
+        }
         // Each address the name has, in turn (`localhost`: `::1`, then
         // `127.0.0.1`).
         let mut last = None;

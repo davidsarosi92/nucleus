@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as the
+  host — `connect({ host: "/tmp/nucleus.sock" })` — reaches `nucleus
+  server --socket` (Node, Bun, Deno); no TLS there.
 - Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
   `await ColumnKey.create(master, name)` — `encrypt`, `decrypt`,
   `await blindIndex` — format 1, XChaCha20-Poly1305 in TypeScript (in a
