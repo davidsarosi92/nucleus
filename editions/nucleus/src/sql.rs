@@ -416,6 +416,8 @@ impl Shell {
     fn run_sql(&mut self, sql: &str, out: &mut dyn Write) -> Result<bool> {
         let started = Instant::now();
         let results = self.backend.execute(sql)?;
+        // As psql's: the time until the results are in, not their printing.
+        let took = started.elapsed();
         let mut ok = true;
         for r in results {
             match r {
@@ -429,12 +431,8 @@ impl Shell {
             .map_err(|e| e.to_string())?;
         }
         if self.timing {
-            writeln!(
-                out,
-                "Time: {:.3} ms",
-                started.elapsed().as_secs_f64() * 1000.0
-            )
-            .map_err(|e| e.to_string())?;
+            writeln!(out, "Time: {:.3} ms", took.as_secs_f64() * 1000.0)
+                .map_err(|e| e.to_string())?;
         }
         Ok(ok)
     }
@@ -750,10 +748,11 @@ impl Shell {
                     self.backend.mark(),
                     if buf.trim().is_empty() { "=>" } else { "->" }
                 );
-                write!(out, "{prompt}")
-                    .and_then(|()| out.flush())
-                    .map_err(|e| e.to_string())?;
+                write!(out, "{prompt}").map_err(|e| e.to_string())?;
             }
+            // What is written goes out before waiting for more input (the
+            // output is buffered when it is not a terminal).
+            out.flush().map_err(|e| e.to_string())?;
             line.clear();
             if stdin
                 .lock()
@@ -970,7 +969,15 @@ pub fn run(args: &[String]) -> Result<()> {
         backend,
         timing: false,
     };
-    let mut out = std::io::stdout().lock();
+    // Line-buffered on a terminal; buffered into a pipe or a file, as
+    // psql's stdio is — a line a `write` costs a statement's printing
+    // several system calls.
+    let stdout = std::io::stdout();
+    let mut out: Box<dyn Write> = if stdout.is_terminal() {
+        Box::new(stdout.lock())
+    } else {
+        Box::new(std::io::BufWriter::new(stdout.lock()))
+    };
     let result = match command {
         Some(c) => {
             let ok = if c.trim_start().starts_with('\\') {
@@ -986,8 +993,9 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         None => shell.interactive(&mut out),
     };
+    let flushed = out.flush().map_err(|e| e.to_string());
     let closed = shell.backend.close();
-    result.and(closed)
+    result.and(flushed).and(closed)
 }
 
 /// The edition's registry: the built-in module and the embedding
