@@ -2345,7 +2345,14 @@ url LIKE '%x%'` builds its hundred columns for the few rows that match.
 It runs when the other columns cost — one of variable length, or four
 or more — and stops once more than half of a scan's first two batches
 pass; a filter that fails has its rows decoded whole, to fail or be
-decided a row at a time as before.  An expression with a subquery needs every
+decided a row at a time as before.  Otherwise a row table's batch decodes
+each row where the store keeps it (`KvChunks::visit`: the leaf held, the
+value in its cell, not copied into a chunk first — a row over 256
+bytes copied alone first, `WIDE_ROW`, as a wide row's column found by
+walking its encoding misses the cache); a row with a value
+stored out of line is taken back and read by chunk (its value fetched
+from the store, which a visit does not read), as is a scan merging side
+areas or the transaction's own writes.  An expression with a subquery needs every
 column (a correlated subquery reads its row), as do `DISTINCT`, set
 operations, CTEs and recursion.  Subqueries' own plans decode only
 their columns too (a correlated index lookup into a column table, say,
@@ -7916,6 +7923,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R4, rows decoded in their pages:**
+  `Scan::visit` / `KvChunks::visit` hand a row table's batch each live
+  entry where it lies, its columns decoded there, not copied first (a
+  row with a value stored out of line read by chunk; TPC-H Q1, Q9, Q12,
+  Q18 7–8 % faster).
 - **2026-11-17 — §M14.33 R4, the joins:** an index nested loop a
   pipeline's step, so what is above it runs on the workers too
   (`vector::Lookup`); a lookup's own key scan a row at a time; a lookup

@@ -1248,6 +1248,20 @@ impl<'a> Entries<'a> {
         self.chunks.escaped_keys();
     }
 
+    /// The next entries handed to `each` where the store keeps them
+    /// ([`nucleus_kv::KvChunks::visit`]) — once the chunk's are taken;
+    /// `None`: read on with [`next_entry`](Self::next_entry).
+    pub fn visit(
+        &mut self,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<Option<usize>> {
+        if self.pos < self.chunk.len() || self.done {
+            return Ok(None);
+        }
+        Ok(self.chunks.visit(max, each)?)
+    }
+
     /// The next entries — up to `max`, all from one chunk —, as the
     /// chunk and their positions in it: lent until the next call, so a
     /// caller can read them twice (a scan that tests some columns first,

@@ -3161,7 +3161,8 @@ impl Scan<'_> {
         seek: &[u8],
         max: usize,
         bytes: usize,
-    ) -> Result<()> {
+        mut sink: Option<&mut dyn FnMut(&[u8], &[u8]) -> bool>,
+    ) -> Result<usize> {
         let txn = self.txn;
         let store_end = self.store_end.take();
         let end = match &store_end {
@@ -3172,8 +3173,10 @@ impl Scan<'_> {
         let user_of = |k: &[u8]| decode_key(k).map(|(u, _)| u).ok_or_else(undecodable);
         let [k, v, prev] = &mut self.bufs;
         let (buf, live) = (&mut self.buffer, &mut self.live);
-        buf.escaped = true;
+        buf.escaped = sink.is_none();
         prev.clear();
+        // Entries given: into the buffer (a deletion's too), or to `sink`.
+        let mut given = 0;
         // Whether a version of the previous entry's user key was taken.
         let mut taken = false;
         let mut upper: Option<Vec<u8>> = None;
@@ -3194,7 +3197,7 @@ impl Scan<'_> {
                 taken = false;
             }
             let seen = taken;
-            if !seen && buf.ents.len() >= max {
+            if !seen && given >= max {
                 upper = Some(user_of(k)?);
                 stopped.set(true);
                 return Ok(false);
@@ -3222,6 +3225,20 @@ impl Scan<'_> {
                 return Ok(false);
             };
             let value = decode_value(stored).ok_or(Error::Corrupt("bad version value"))?;
+            if let Some(sink) = sink.as_mut() {
+                // A deletion is given to no one; a refused entry comes next.
+                if let Some(value) = value {
+                    if !sink(escaped, value) {
+                        upper = Some(user_of(k)?);
+                        stopped.set(true);
+                        return Ok(false);
+                    }
+                    given += 1;
+                }
+                taken = true;
+                return Ok(true);
+            }
+            given += 1;
             let at = buf.data.len();
             buf.data.extend_from_slice(escaped);
             buf.ents.push((at, buf.data.len()));
@@ -3277,7 +3294,7 @@ impl Scan<'_> {
         if let Some(u) = upper {
             self.from = Some(Bound::Included(u));
         }
-        Ok(())
+        Ok(given)
     }
 
     /// [`refill`](Self::refill) for [`count_only`](Self::count_only), the
@@ -3420,26 +3437,9 @@ impl Scan<'_> {
         };
         let txn = self.txn;
         let engine = &txn.engine;
-        // Side areas to read, each with its rank: a committed one's commit
-        // timestamp (a version at or below the snapshot), the
-        // transaction's own above everything.
-        let mut sides: Vec<(u64, u64)> = engine
-            .unresolved_over(
-                from.as_ref().map(Vec::as_slice),
-                self.range.1.as_ref().map(Vec::as_slice),
-            )
-            .into_iter()
-            .filter(|&(_, ts)| ts <= txn.start)
-            .collect();
-        if let Some(id) = txn.spilled {
-            sides.push((id, u64::MAX));
-        }
+        let sides = self.sides(&from);
         let tree = engine.store.read()?;
-        let seek = match &from {
-            Bound::Unbounded => Vec::new(),
-            Bound::Included(k) => first_version(k),
-            Bound::Excluded(k) => after_versions(k),
-        };
+        let seek = seek_of(&from);
         let end = match &self.store_end {
             Some(e) => Bound::Excluded(e.as_slice()),
             None => Bound::Unbounded,
@@ -3464,7 +3464,9 @@ impl Scan<'_> {
                 && !self.validated
                 && self.writes.peek().is_none()
             {
-                return self.refill_escaped(&tree, &seek, max, bytes);
+                return self
+                    .refill_escaped(&tree, &seek, max, bytes, None)
+                    .map(|_| ());
             }
             let [k, v, _] = &mut self.bufs;
             let buf = &mut self.buffer;
@@ -3723,6 +3725,65 @@ impl Scan<'_> {
         self.escaped_keys = true;
     }
 
+    /// The side areas a batch from `from` merges, each with its rank: a
+    /// committed one's commit timestamp (a version at or below the
+    /// snapshot), the transaction's own above everything.
+    fn sides(&self, from: &Bound<Vec<u8>>) -> Vec<(u64, u64)> {
+        let txn = self.txn;
+        let mut sides: Vec<(u64, u64)> = txn
+            .engine
+            .unresolved_over(
+                from.as_ref().map(Vec::as_slice),
+                self.range.1.as_ref().map(Vec::as_slice),
+            )
+            .into_iter()
+            .filter(|&(_, ts)| ts <= txn.start)
+            .collect();
+        if let Some(id) = txn.spilled {
+            sides.push((id, u64::MAX));
+        }
+        sides
+    }
+
+    /// The next entries — up to `entries` — handed to `each` where they
+    /// lie, none copied: the key escaped ([`escaped_keys`](Self::escaped_keys)),
+    /// the value in its page (its tree's leaf held meanwhile — `each` reads
+    /// nothing else from the store).  Only where a chunk would be read so:
+    /// keys escaped, the store read alone (no side area, none of the
+    /// transaction's own writes, its reads not validated), nothing read
+    /// ahead.  `each` returns false to stop before an entry, which then
+    /// comes next.  `None`: not so — [`next_chunk`](Self::next_chunk)
+    /// reads on (and says where the scan ends); `Some(0)`: nothing given
+    /// (an entry refused, versions too new, or the end — likewise).
+    pub fn visit(
+        &mut self,
+        entries: usize,
+        each: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<Option<usize>> {
+        if !self.escaped_keys
+            || self.validated
+            || self.count_only
+            || self.writes.peek().is_some()
+            || self.pos != self.buffer.len()
+        {
+            return Ok(None);
+        }
+        let Some(from) = self.from.take() else {
+            return Ok(None);
+        };
+        if !self.sides(&from).is_empty() {
+            self.from = Some(from);
+            return Ok(None);
+        }
+        let tree = self.txn.engine.store.read()?;
+        let seek = seek_of(&from);
+        self.buffer.clear();
+        self.live.clear();
+        self.pos = 0;
+        self.refill_escaped(&tree, &seek, entries.max(1), usize::MAX, Some(each))
+            .map(Some)
+    }
+
     /// Replaces `out`'s entries with the next ones — at most `entries` of
     /// them, and no more once they take `bytes` — through buffers reused
     /// from chunk to chunk; false at the end.
@@ -3787,6 +3848,16 @@ impl Scan<'_> {
             self.last = Some(out.key(out.len() - 1).to_vec());
         }
         Ok(!out.is_empty())
+    }
+}
+
+/// Where a batch from `from` starts in the store: a user key's first
+/// version, or past its versions.
+fn seek_of(from: &Bound<Vec<u8>>) -> Vec<u8> {
+    match from {
+        Bound::Unbounded => Vec::new(),
+        Bound::Included(k) => first_version(k),
+        Bound::Excluded(k) => after_versions(k),
     }
 }
 

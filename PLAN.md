@@ -11007,6 +11007,34 @@ simple parameterization, MySQL's former query cache — what not to do).
      227,000 do not (236 against 172 ms) — 55 lies between (swept 40 to
      200: 80 and above lose Q3, 120 and above Q7, 200 Q4 and Q21).
      Q5 515 → 172 ms (PostgreSQL 148.5), Q8 98 → 87.
+  7. *Rows decoded where they lie.*  A scan's chunk copied each row
+     out of its page (the value's bytes, the key's) for the reader to
+     decode after.  `Scan::visit` hands the reader each live entry in
+     its page instead (the leaf held, as `leaf_entries` reads it), and a
+     row table's batch decodes the columns wanted there; a row with a
+     value stored out of line is refused, its columns taken back
+     (`Builder::truncate`), and read by chunk — its value is fetched
+     from the store, which a visit must not read while it holds a leaf.
+     Where a scan is not the store's alone (side areas, its own writes,
+     validated reads) it reads by chunk as before.  A wide row is copied
+     out of its page first (`WIDE_ROW`, 256 bytes): its column is found
+     by walking the encoding, over bytes that missed the cache — on
+     ClickBench's `hits` (105 columns, ~700 bytes a row) decoding in the
+     page was 10 % slower than from the chunk (`decode_into` twice the
+     time: the chunk's copy had streamed the row in), a row copied alone
+     into a buffer kept hot 10 % faster (ClickBench row Q1 39.8 → 35.4
+     ms, Q27 72.9 → 66.1).  TPC-H Q1 252 → 234 ms, Q9 364 → 340, Q12 208
+     → 190, Q18 267 → 244, Q3 166 → 162 (copying `lineitem`'s rows too,
+     64 bytes up, 2–3 % slower).  Not
+     for a filter tested first (late materialization: its rows' other
+     columns are decoded after the test, from the copy) — decoding every
+     column in the page instead lost Q14 and Q15 10 %, and Q6 is even.
+  Left for later, as issues (no real gain within R4): a row scan's cost
+  per row — Q6 1.7×, Q14 1.24× (#2: the late path's copy, a column's
+  offset within the row, the leaf walk's version checks) — and a
+  secondary index's fetches, each a descent of the primary B+tree —
+  Q20 1.46× (#1: page hints in index entries, sorted batched fetches,
+  cheaper inner-node search).
 
 **Done when:** reads by key ≤ 1× PostgreSQL's time and the row tables'
 geometric means ≤ 1× on TPC-H and ClickBench, by §M14.31's method,

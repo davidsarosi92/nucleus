@@ -1908,6 +1908,31 @@ impl Builder {
         }
     }
 
+    /// Its first `n` rows only (a row's columns taken back).
+    fn truncate(&mut self, n: usize) {
+        match self {
+            Builder::Skip => {}
+            Builder::Int(d, x) | Builder::Time(_, d, x) | Builder::Dec(_, d, x) => {
+                d.truncate(n);
+                x.truncate(n);
+            }
+            Builder::Float(d, x) => {
+                d.truncate(n);
+                x.truncate(n);
+            }
+            Builder::Bool(d, x) => {
+                d.truncate(n);
+                x.truncate(n);
+            }
+            Builder::Text(o, b, x) | Builder::Char(o, b, x) => {
+                o.truncate(n + 1);
+                b.truncate(o.get(n).map_or(0, |&e| e as usize));
+                x.truncate(n);
+            }
+            Builder::Values(v) => v.truncate(n),
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             Builder::Skip => 0,
@@ -1964,6 +1989,8 @@ pub struct RowBatches<'a> {
     /// ([`BatchSource::next_batch_tested`]): read beside the rows that
     /// passed, as `large` is beside every row.
     large_rest: crate::large::Chunks<'a>,
+    /// A wide row copied out of its page to be decoded.
+    copy: Vec<u8>,
 }
 
 impl<'a> RowBatches<'a> {
@@ -2032,6 +2059,7 @@ impl<'a> RowBatches<'a> {
                 scan.validated,
                 scan.end.as_deref(),
             ),
+            copy: Vec::new(),
         })
     }
 
@@ -2153,6 +2181,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
                     chunk.escaped(),
                     chunk.value(i),
                     &mut firsts[..first_upto],
+                    false,
                 )?;
             }
             let firsts =
@@ -2179,6 +2208,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
                     chunk.escaped(),
                     chunk.value(i),
                     &mut cols[..upto],
+                    false,
                 )?;
             }
             if !tested {
@@ -2209,6 +2239,42 @@ impl crate::storage::BatchSource for RowBatches<'_> {
             .map_or(0, |c| c + 1);
         let mut n = 0;
         while n < max {
+            // Where the store is read alone: each row decoded where it lies
+            // in its page, not copied into a chunk — a wide one copied
+            // first ([`WIDE_ROW`]); one with a value stored out of line
+            // refused, its columns taken back: read below.
+            let mut failed = None;
+            let mut got = n;
+            let (large, table, copy) = (&mut self.large, self.table, &mut self.copy);
+            let given = self.entries.visit(max - n, &mut |key, bytes| {
+                let bytes: &[u8] = if bytes.len() > WIDE_ROW {
+                    copy.clear();
+                    copy.extend_from_slice(bytes);
+                    copy
+                } else {
+                    bytes
+                };
+                match decode_into(large, table, key, true, bytes, &mut cols[..upto], true) {
+                    Ok(true) => {
+                        got += 1;
+                        true
+                    }
+                    taken_back => {
+                        for c in &mut cols[..upto] {
+                            c.truncate(got);
+                        }
+                        failed = taken_back.err();
+                        false
+                    }
+                }
+            })?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            n = got;
+            if given.is_some_and(|g| g > 0) {
+                continue;
+            }
             let Some((key, bytes, escaped)) = self.entries.next_entry()? else {
                 break;
             };
@@ -2219,6 +2285,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
                 escaped,
                 bytes,
                 &mut cols[..upto],
+                false,
             )?;
             n += 1;
         }
@@ -2233,6 +2300,14 @@ impl crate::storage::BatchSource for RowBatches<'_> {
         }))
     }
 }
+
+/// The bytes past which a row is copied out of its page before it is
+/// decoded: a wide row's columns are found by walking its encoding, and
+/// over its page's bytes that missed the cache — a copy streams it in
+/// (ClickBench's 105 columns, ~700 bytes a row: decoded in the page 10 %
+/// slower than from a chunk, copied one at a time 10 % faster; TPC-H's
+/// `lineitem`, ~150 bytes, faster in its page — PLAN.md §M14.33 R4).
+const WIDE_ROW: usize = 256;
 
 /// Rows as a batch (a vector per column, typed where the values are);
 /// `None` for no rows.
@@ -2266,9 +2341,10 @@ fn decode_into(
     escaped: bool,
     b: &[u8],
     cols: &mut [Builder],
-) -> Result<()> {
+    in_page: bool,
+) -> Result<bool> {
     if cols.is_empty() {
-        return Ok(()); // no column read (`count(*)`): the row is not looked at
+        return Ok(true); // no column read (`count(*)`): the row is not looked at
     }
     // A column's type changed and this row not rewritten yet: its hidden
     // value is the column's (`crate::retype`) — read a value at a time.
@@ -2276,6 +2352,9 @@ fn decode_into(
         && cv.phase == crate::catalog::ConversionPhase::Rewrite
         && crate::encoding::row_header(b)?.n > t.columns.len()
     {
+        if in_page {
+            return Ok(false);
+        }
         let wanted: Vec<bool> = (0..t.columns.len())
             .map(|c| cols.get(c).is_some_and(|b| !matches!(b, Builder::Skip)))
             .collect();
@@ -2289,7 +2368,7 @@ fn decode_into(
                 col.push(v);
             }
         }
-        return Ok(());
+        return Ok(true);
     }
     let bad = |_| Error::internal("malformed row encoding");
     let h = crate::encoding::row_header(b)?;
@@ -2309,6 +2388,9 @@ fn decode_into(
         at = c + 1;
         let tag = r.peek();
         if tag == Some(OUT_OF_LINE) {
+            if in_page {
+                return Ok(false);
+            }
             r.u8().map_err(bad)?;
             let len = r.u32().map_err(bad)?;
             let user = crate::exec::user_key(key, escaped)?;
@@ -2385,7 +2467,7 @@ fn decode_into(
     for col in cols.iter_mut().skip(n) {
         col.push_null();
     }
-    Ok(())
+    Ok(true)
 }
 
 // --------------------------------------------------------------- pipelines

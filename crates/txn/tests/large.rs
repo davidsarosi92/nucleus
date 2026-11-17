@@ -394,6 +394,118 @@ fn chunked(
     out
 }
 
+/// Reads `(start, end)` as a row table's scan does: visits where the scan
+/// gives them (each entry refused one time in `refuse`), else a chunk at a
+/// time — the keys of both decoded after.
+fn visited(
+    t: &nucleus_txn::Transaction,
+    start: Bound<&[u8]>,
+    end: Bound<&[u8]>,
+    entries: usize,
+    refuse: u64,
+    rng: &SplitMix64,
+) -> (Vec<(Vec<u8>, Vec<u8>)>, usize) {
+    let mut scan = t.scan(start, end).unwrap();
+    scan.escaped_keys();
+    let mut chunk = nucleus_txn::Chunk::new();
+    let mut out = Vec::new();
+    let mut visits = 0;
+    loop {
+        let mut got = Vec::new();
+        let given = scan
+            .visit(entries, &mut |k, v| {
+                if refuse > 0 && rng.below(refuse) == 0 {
+                    return false;
+                }
+                let mut user = Vec::new();
+                nucleus_txn::mvcc::unescape_onto(k, &mut user).expect("an escaped key");
+                got.push((user, v.to_vec()));
+                true
+            })
+            .unwrap();
+        assert!(got.len() <= entries.max(1));
+        assert_eq!(given.unwrap_or(0), got.len());
+        out.extend(got);
+        if given.is_some_and(|g| g > 0) {
+            visits += 1;
+            continue;
+        }
+        if !scan.next_chunk(&mut chunk, entries, usize::MAX).unwrap() {
+            break;
+        }
+        let mut user = Vec::new();
+        for i in 0..chunk.len() {
+            chunk.user_key_into(i, &mut user).unwrap();
+            out.push((user.clone(), chunk.value(i).to_vec()));
+        }
+    }
+    (out, visits)
+}
+
+#[test]
+fn visits_read_what_scans_read() {
+    // Versions, deletions, keys with zero bytes (escaped), values too long
+    // for their cells, and versions committed after the reader began: a
+    // row table's scan by visits — each entry where it lies, some refused
+    // and read by chunk instead — gives the scan's entries.
+    let p = Arc::new(SimPlatform::new(17));
+    let e = engine_on(
+        &p,
+        EngineOptions {
+            txn_memory: 1 << 26,
+            ..opts()
+        },
+    )
+    .unwrap();
+    let rng = SplitMix64::new(5);
+    let key = |i: usize| {
+        let mut k = format!("v{i:05}").into_bytes();
+        if i.is_multiple_of(3) {
+            k.extend_from_slice(&[0, (i % 5) as u8]);
+        }
+        k
+    };
+    for round in 0..4 {
+        let mut t = e.begin();
+        for _ in 0..400 {
+            let i = rng.below(600) as usize;
+            match rng.below(6) {
+                0 => t.delete(&key(i)).unwrap(),
+                1 => t.put(&key(i), &vec![b'x'; 3000 + i]).unwrap(),
+                _ => t.put(&key(i), format!("r{round}-{i}").as_bytes()).unwrap(),
+            }
+        }
+        t.commit().unwrap();
+    }
+    let reader = e.begin();
+    // Newer than the reader's snapshot: passed over.
+    let mut later = e.begin();
+    for i in (0..600).step_by(2) {
+        later.put(&key(i), b"later").unwrap();
+    }
+    later.commit().unwrap();
+    let (lo, hi) = (key(40), key(410));
+    let mut visits = 0;
+    for (start, end) in [
+        (Bound::Unbounded, Bound::Unbounded),
+        (Bound::Included(&lo[..]), Bound::Excluded(&hi[..])),
+        (Bound::Excluded(&lo[..]), Bound::Included(&hi[..])),
+    ] {
+        let want: Vec<_> = reader
+            .scan(start, end)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(!want.is_empty());
+        for (entries, refuse) in [(1, 0), (7, 0), (64, 5), (1024, 0), (1024, 40)] {
+            let (got, n) = visited(&reader, start, end, entries, refuse, &rng);
+            assert_eq!(got, want, "{entries}/{refuse}");
+            visits += n;
+        }
+    }
+    assert!(visits > 0);
+}
+
 #[test]
 fn chunked_scans_read_what_scans_read() {
     // Versions, deletions, a spilled transaction's side area, another

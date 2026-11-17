@@ -204,6 +204,21 @@ pub trait KvChunks {
     /// [`unescape_onto`]): for a reader that seldom needs them.  By
     /// default they come decoded, as before.
     fn escaped_keys(&mut self) {}
+
+    /// The next entries — up to `entries` — handed to `each` where the
+    /// store keeps them, none copied, the keys escaped
+    /// ([`escaped_keys`](Self::escaped_keys)); `each` returns false to
+    /// stop before an entry, which comes next.  `None`: not here (by
+    /// default) — the chunks read on; `Some(0)`: nothing given, the
+    /// chunks tell why.  `each` reads nothing else from the store.
+    fn visit(
+        &mut self,
+        entries: usize,
+        each: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<Option<usize>> {
+        let _ = (entries, each);
+        Ok(None)
+    }
 }
 
 /// Entries a chunk holds at most.
@@ -264,6 +279,14 @@ impl KvChunks for ScanChunks<'_> {
 
     fn escaped_keys(&mut self) {
         self.0.escaped_keys();
+    }
+
+    fn visit(
+        &mut self,
+        entries: usize,
+        each: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<Option<usize>> {
+        Ok(self.0.visit(entries, each)?)
     }
 }
 
