@@ -4,7 +4,9 @@
 
 - A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as the
   host — `new Config().host("/tmp/nucleus.sock")` — reaches `nucleus
-  server --socket` (Java 16's Unix-domain channels); no TLS there.
+  server --socket` (Java 16's Unix-domain channels, looked up when a
+  path is used, so the driver still builds for Android, which has none);
+  no TLS there.
 - Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):
   `new ColumnKey(master, name)` — `encrypt`, `decrypt`, `blindIndex` —
   format 1, XChaCha20-Poly1305 in plain Java (Android 8 too).  Protocol

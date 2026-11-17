@@ -123,6 +123,47 @@ public final class NucleusClient implements AutoCloseable {
     }
 
     /**
+     * A channel connected to the Unix socket at {@code path} — by Java 16's
+     * {@code UnixDomainSocketAddress}, looked up when it is used: Android's
+     * library has none, and the driver builds there too (where a path as the
+     * host fails as an I/O error).
+     */
+    private static java.nio.channels.SocketChannel unixSocket(String path) throws IOException {
+        Object unix;
+        java.net.SocketAddress address;
+        java.lang.reflect.Method open;
+        try {
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Object family = Enum.valueOf((Class) java.net.StandardProtocolFamily.class, "UNIX");
+            unix = family;
+            open = java.nio.channels.SocketChannel.class.getMethod("open", java.net.ProtocolFamily.class);
+            address = (java.net.SocketAddress) Class.forName("java.net.UnixDomainSocketAddress")
+                    .getMethod("of", String.class)
+                    .invoke(null, path);
+        } catch (ReflectiveOperationException | IllegalArgumentException e) {
+            throw new IOException("Unix sockets need Java 16 or later", e);
+        }
+        java.nio.channels.SocketChannel ch;
+        try {
+            ch = (java.nio.channels.SocketChannel) open.invoke(null, unix);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            if (e.getCause() instanceof IOException io) {
+                throw io;
+            }
+            throw new IOException(e.getCause());
+        } catch (IllegalAccessException e) {
+            throw new IOException(e);
+        }
+        try {
+            ch.connect(address);
+        } catch (IOException e) {
+            ch.close();
+            throw e;
+        }
+        return ch;
+    }
+
+    /**
      * Connects and logs in — to the server's Unix socket on this machine when
      * the host is a path ({@code nucleus server --socket}; no TLS there).
      */
@@ -132,9 +173,7 @@ public final class NucleusClient implements AutoCloseable {
                 throw new NucleusException("TLS is not offered on a Unix socket", "");
             }
             try {
-                java.nio.channels.SocketChannel ch =
-                        java.nio.channels.SocketChannel.open(java.net.StandardProtocolFamily.UNIX);
-                ch.connect(java.net.UnixDomainSocketAddress.of(config.host));
+                java.nio.channels.SocketChannel ch = unixSocket(config.host);
                 NucleusClient c = new NucleusClient(ch, java.nio.channels.Channels.newInputStream(ch),
                         java.nio.channels.Channels.newOutputStream(ch), null);
                 return c.login(config);
