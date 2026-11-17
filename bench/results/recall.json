@@ -1,0 +1,220 @@
+{
+ "method": 1,
+ "name": "recall",
+ "script": "bench/method.py run recall bench/results/recall.json --runs 5 --also 'request id=env REQUEST_ID=gen RECALL_BENCH=1 cargo test --release -q -p nucleus-sql --test recall_bench -- --ignored --nocapture' -- env RECALL_BENCH=1 cargo test --release -q -p nucleus-sql --test recall_bench -- --ignored --nocapture",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T10:01:37+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 35780878336,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   5.8681640625,
+   8.4033203125,
+   8.55078125
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.86328125,
+   7.16943359375,
+   8.02978515625
+  ]
+ },
+ "samples": [
+  {
+   "name": "recall, a question a statement: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.803791,
+    0.820291,
+    0.794708,
+    0.807708,
+    0.80525
+   ],
+   "median": 0.80525,
+   "ci": [
+    0.794708,
+    0.820291
+   ],
+   "cv": 0.011425107829119941,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, a question a statement: p95",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.86675,
+    0.9137909999999999,
+    0.815,
+    0.842125,
+    0.896958
+   ],
+   "median": 0.86675,
+   "ci": [
+    0.815,
+    0.9137909999999999
+   ],
+   "cv": 0.04617498123052359,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, 16 questions a statement: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.6256999999999999,
+    0.634117,
+    0.623289,
+    0.6268619999999999,
+    0.61927
+   ],
+   "median": 0.6256999999999999,
+   "ci": [
+    0.61927,
+    0.634117
+   ],
+   "cv": 0.0087241183405518,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, 16 questions a statement: p95",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.6374920000000001,
+    0.657591,
+    0.635054,
+    0.6380589999999999,
+    0.625302
+   ],
+   "median": 0.6374920000000001,
+   "ci": [
+    0.625302,
+    0.657591
+   ],
+   "cv": 0.018384920965782064,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, a question a statement: p50",
+   "system": "request id",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.3870829999999998,
+    1.506791,
+    1.500834,
+    1.6178329999999999,
+    1.424458
+   ],
+   "median": 1.500834,
+   "ci": [
+    1.3870829999999998,
+    1.6178329999999999
+   ],
+   "cv": 0.05975134171810109,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, a question a statement: p95",
+   "system": "request id",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.751709,
+    1.771084,
+    1.8827500000000001,
+    2.000791,
+    1.771334
+   ],
+   "median": 1.771334,
+   "ci": [
+    1.751709,
+    2.000791
+   ],
+   "cv": 0.05768285693239808,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, 16 questions a statement: p50",
+   "system": "request id",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.674937,
+    0.6875749999999999,
+    0.684544,
+    0.6999190000000001,
+    0.684244
+   ],
+   "median": 0.684544,
+   "ci": [
+    0.674937,
+    0.6999190000000001
+   ],
+   "cv": 0.013105061801021937,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "recall, 16 questions a statement: p95",
+   "system": "request id",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.697096,
+    0.718083,
+    0.724028,
+    0.7225779999999999,
+    0.705153
+   ],
+   "median": 0.718083,
+   "ci": [
+    0.697096,
+    0.724028
+   ],
+   "cv": 0.016481192848747404,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

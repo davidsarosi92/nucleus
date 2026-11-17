@@ -1,0 +1,99 @@
+{
+ "method": 1,
+ "name": "keys",
+ "script": "bench/method.py run keys bench/results/keys.json --runs 5 -- python3 bench/keys.py --nucleus ./target/release/nucleus",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:19:39+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36765208576,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.17724609375,
+   4.12841796875,
+   4.904296875
+  ],
+  "systems": {
+   "nucleus": {
+    "binary": "./target/release/nucleus",
+    "version": "nucleus 0.1.0"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.076171875,
+   4.10546875,
+   4.88232421875
+  ]
+ },
+ "samples": [
+  {
+   "name": "rotate data",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.6021977500058711,
+    0.614407749962993,
+    0.6275471670087427,
+    0.6066905000479892,
+    0.604871749994345
+   ],
+   "median": 0.6066905000479892,
+   "ci": [
+    0.6021977500058711,
+    0.6275471670087427
+   ],
+   "cv": 0.01674541414051552,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "database",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MB",
+   "times": [
+    339.92704,
+    339.92704,
+    339.92704,
+    339.92704,
+    339.92704
+   ],
+   "median": 339.92704,
+   "ci": [
+    339.92704,
+    339.92704
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

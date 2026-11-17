@@ -1,0 +1,409 @@
+{
+ "method": 1,
+ "name": "page-crypto",
+ "script": "bench/method.py run page-crypto bench/results/page-crypto.json --runs 5 -- cargo test --release -q -p nucleus-storage --test page_crypto_speed -- --ignored --nocapture --test-threads=1",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:18:28+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36763697152,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   3.5029296875,
+   3.97412109375,
+   4.92041015625
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   3.44580078125,
+   3.94091796875,
+   4.89208984375
+  ]
+ },
+ "samples": [
+  {
+   "name": "crc32c: MB/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    22813.852672573685,
+    22647.689667065562,
+    19450.908738883867,
+    22623.50227587318,
+    22470.1227021391
+   ],
+   "median": 22623.50227587318,
+   "ci": [
+    19450.908738883867,
+    22813.852672573685
+   ],
+   "cv": 0.06503568134562082,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "crc32c: \u00b5s a page",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.35908007812500004,
+    0.361714599609375,
+    0.421162841796875,
+    0.36210131835937504,
+    0.36457299804687504
+   ],
+   "median": 0.36210131835937504,
+   "ci": [
+    0.35908007812500004,
+    0.421162841796875
+   ],
+   "cv": 0.0711461604532552,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "chacha20-poly1305 seal: MB/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    649.3264635733395,
+    659.1174198617607,
+    660.0092884774865,
+    661.7605819536856,
+    661.5246474100688
+   ],
+   "median": 660.0092884774865,
+   "ci": [
+    649.3264635733395,
+    661.7605819536856
+   ],
+   "cv": 0.007836862188180617,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "chacha20-poly1305 seal: \u00b5s a page",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    12.61614990234375,
+    12.428741455078125,
+    12.411946533203125,
+    12.379099365234374,
+    12.383514404296875
+   ],
+   "median": 12.411946533203125,
+   "ci": [
+    12.379099365234374,
+    12.61614990234375
+   ],
+   "cv": 0.007911183045295159,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "siv seal (in place): MB/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    666.78674529114,
+    660.6503642449301,
+    647.7298811606443,
+    666.8800798544529,
+    668.4482693361223
+   ],
+   "median": 666.78674529114,
+   "ci": [
+    647.7298811606443,
+    668.4482693361223
+   ],
+   "cv": 0.012942303708630837,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "siv seal (in place): \u00b5s a page",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    12.285787109374999,
+    12.39990234375,
+    12.647247314453125,
+    12.284067626953124,
+    12.2552490234375
+   ],
+   "median": 12.285787109374999,
+   "ci": [
+    12.2552490234375,
+    12.647247314453125
+   ],
+   "cv": 0.01311199824949508,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "siv seal + open: MB/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    334.14897070366646,
+    334.8407359036824,
+    334.08187658524804,
+    334.08575837352015,
+    322.6749677773948
+   ],
+   "median": 334.08575837352015,
+   "ci": [
+    322.6749677773948,
+    334.8407359036824
+   ],
+   "cv": 0.015676035766100164,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "siv seal + open: \u00b5s a page",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    24.516011474609375,
+    24.465362548828125,
+    24.52093505859375,
+    24.520650146484375,
+    25.387776611328125
+   ],
+   "median": 24.520650146484375,
+   "ci": [
+    24.465362548828125,
+    25.387776611328125
+   ],
+   "cv": 0.016009625289126698,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "aes-gcm-siv seal (in place): MB/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    4931.061259351613,
+    4968.8804066273,
+    4958.41642448014,
+    4927.983400690678,
+    4942.7136347553405
+   ],
+   "median": 4942.7136347553405,
+   "ci": [
+    4927.983400690678,
+    4968.8804066273
+   ],
+   "cv": 0.00355429383222167,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "aes-gcm-siv seal (in place): \u00b5s a page",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1.6613056640625,
+    1.6486611328125,
+    1.652140380859375,
+    1.6623432617187501,
+    1.6573891601562498
+   ],
+   "median": 1.6573891601562498,
+   "ci": [
+    1.6486611328125,
+    1.6623432617187501
+   ],
+   "cv": 0.0035511936441302992,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "aes-gcm-siv seal + open: MB/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    2488.9779544253042,
+    2490.41757487485,
+    2485.1913270501973,
+    2486.956653216392,
+    2479.2617017148314
+   ],
+   "median": 2486.956653216392,
+   "ci": [
+    2479.2617017148314,
+    2490.41757487485
+   ],
+   "cv": 0.001744329433547683,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "aes-gcm-siv seal + open: \u00b5s a page",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    3.2913107910156247,
+    3.2894082031250003,
+    3.29632568359375,
+    3.29398583984375,
+    3.30420947265625
+   ],
+   "median": 3.29398583984375,
+   "ci": [
+    3.2894082031250003,
+    3.30420947265625
+   ],
+   "cv": 0.0017464757890397376,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "in the clear: scan",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    49.116,
+    48.776666000000006,
+    51.280667,
+    49.548041,
+    51.325375
+   ],
+   "median": 49.548041,
+   "ci": [
+    48.776666000000006,
+    51.325375
+   ],
+   "cv": 0.024241206359253857,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "chacha20-siv: load + checkpoint",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    292.295458,
+    292.254709,
+    294.10929200000004,
+    289.634791,
+    288.453083
+   ],
+   "median": 292.254709,
+   "ci": [
+    288.453083,
+    294.10929200000004
+   ],
+   "cv": 0.007800501301767286,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "chacha20-siv: scan",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    126.536917,
+    127.206334,
+    127.0085,
+    127.44012499999998,
+    128.383667
+   ],
+   "median": 127.206334,
+   "ci": [
+    126.536917,
+    128.383667
+   ],
+   "cv": 0.005368828082993352,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "aes-gcm-siv: load + checkpoint",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    155.600667,
+    155.009292,
+    157.987333,
+    153.927125,
+    159.222833
+   ],
+   "median": 155.600667,
+   "ci": [
+    153.927125,
+    159.222833
+   ],
+   "cv": 0.013999397484410793,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "aes-gcm-siv: scan",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    60.010792,
+    57.574208,
+    57.710499999999996,
+    57.170208,
+    57.409
+   ],
+   "median": 57.574208,
+   "ci": [
+    57.170208,
+    60.010792
+   ],
+   "cv": 0.01993544418644886,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

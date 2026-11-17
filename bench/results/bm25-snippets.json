@@ -1,0 +1,898 @@
+{
+ "method": 1,
+ "name": "bm25-snippets",
+ "script": "bench/method.py run bm25-snippets bench/results/bm25-snippets.json --runs 5 --also 'paradedb=./target/ann-data/.venv/bin/python bench/text/beir.py paradedb --snippets' -- ./target/ann-data/.venv/bin/python bench/text/beir.py nucleus ./target/release/nucleus --analyzer english --k1 1.2 --b 0.75 --snippets",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T00:51:38+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 41095520256,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   2.6806640625,
+   2.73974609375,
+   2.849609375
+  ],
+  "systems": {
+   "paradedb": {
+    "version": "pg_search 0.26.6",
+    "native": false,
+    "settings": "the image's (paradedb/paradedb), in Docker's Linux VM"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7e1f26937b3442fecb9faa598c758459581ce7d2",
+   "dirty": true
+  },
+  "load_after": [
+   2.41845703125,
+   2.796875,
+   2.8642578125
+  ]
+ },
+ "samples": [
+  {
+   "name": "scifact: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.6890619732833769,
+    0.6890619732833769,
+    0.6890619732833769,
+    0.6890619732833769,
+    0.6890619732833769
+   ],
+   "median": 0.6890619732833769,
+   "ci": [
+    0.6890619732833769,
+    0.6890619732833769
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    396.5265420265496,
+    398.3087500091642,
+    393.7855410040356,
+    391.63704199017957,
+    391.51166699593887
+   ],
+   "median": 393.7855410040356,
+   "ci": [
+    391.51166699593887,
+    398.3087500091642
+   ],
+   "cv": 0.007622563648022544,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.1784653051678712,
+    0.17954975521812835,
+    0.1735856762388721,
+    0.173923602172484,
+    0.17397281616770974
+   ],
+   "median": 0.17397281616770974,
+   "ci": [
+    0.1735856762388721,
+    0.17954975521812835
+   ],
+   "cv": 0.0162988449680036,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.17316598678007722,
+    0.17558294348418713,
+    0.16908301040530205,
+    0.16958295600488782,
+    0.16950001008808613
+   ],
+   "median": 0.16958295600488782,
+   "ci": [
+    0.16908301040530205,
+    0.17558294348418713
+   ],
+   "cv": 0.016732576701792734,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: mean",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.1371380521450192,
+    1.126814713740411,
+    1.157086116145365,
+    1.1180472082924098,
+    1.114336217675979
+   ],
+   "median": 1.126814713740411,
+   "ci": [
+    1.114336217675979,
+    1.157086116145365
+   ],
+   "cv": 0.015194508745381157,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: p50",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.09270797111094,
+    1.085875032003969,
+    1.123916998039931,
+    1.0906250099651515,
+    1.0777499992400408
+   ],
+   "median": 1.0906250099651515,
+   "ci": [
+    1.0777499992400408,
+    1.123916998039931
+   ],
+   "cv": 0.016078498788297327,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.32906465814209884,
+    0.32906465814209884,
+    0.32906465814209884,
+    0.32906465814209884,
+    0.32906465814209884
+   ],
+   "median": 0.32906465814209884,
+   "ci": [
+    0.32906465814209884,
+    0.32906465814209884
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    347.0928340102546,
+    351.28937498666346,
+    342.03208301914856,
+    340.7326670130715,
+    341.01662499597296
+   ],
+   "median": 342.03208301914856,
+   "ci": [
+    340.7326670130715,
+    351.28937498666346
+   ],
+   "cv": 0.013400430067607938,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.13042623487131053,
+    0.12419181702883436,
+    0.12217375886664025,
+    0.12443744290573955,
+    0.12510422932203202
+   ],
+   "median": 0.12443744290573955,
+   "ci": [
+    0.12217375886664025,
+    0.13042623487131053
+   ],
+   "cv": 0.02462345155757183,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.13291701907292008,
+    0.12812495697289705,
+    0.12620800407603383,
+    0.12699997751042247,
+    0.12762501137331128
+   ],
+   "median": 0.12762501137331128,
+   "ci": [
+    0.12620800407603383,
+    0.13291701907292008
+   ],
+   "cv": 0.020551138343372907,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: mean",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.940992278674035,
+    0.9246975893151858,
+    0.9065249063659909,
+    0.912049519447408,
+    0.8966353406189673
+   ],
+   "median": 0.912049519447408,
+   "ci": [
+    0.8966353406189673,
+    0.940992278674035
+   ],
+   "cv": 0.018750697573000106,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: p50",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.0436250013299286,
+    1.0263750446029007,
+    1.0118330246768892,
+    1.0187089792452753,
+    1.0071669821627438
+   ],
+   "median": 1.0187089792452753,
+   "ci": [
+    1.0071669821627438,
+    1.0436250013299286
+   ],
+   "cv": 0.014015454234589471,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.49642851712609065,
+    0.49642851712609065,
+    0.49642851712609065,
+    0.49642851712609065,
+    0.49642851712609065
+   ],
+   "median": 0.49642851712609065,
+   "ci": [
+    0.49642851712609065,
+    0.49642851712609065
+   ],
+   "cv": 1.2501971923465875e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    309.6656249836087,
+    320.2516249730252,
+    304.74041699199006,
+    308.7337500182912,
+    311.40000000596046
+   ],
+   "median": 309.6656249836087,
+   "ci": [
+    304.74041699199006,
+    320.2516249730252
+   ],
+   "cv": 0.018462729175081884,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.268844742864797,
+    2.249835851184287,
+    2.1993894808777315,
+    2.2014539596835974,
+    2.2202468053507323
+   ],
+   "median": 2.2202468053507323,
+   "ci": [
+    2.1993894808777315,
+    2.268844742864797
+   ],
+   "cv": 0.013703392219107378,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.8287500240840018,
+    0.8204579935409129,
+    0.8092920179478824,
+    0.8047079900279641,
+    0.802416994702071
+   ],
+   "median": 0.8092920179478824,
+   "ci": [
+    0.802416994702071,
+    0.8287500240840018
+   ],
+   "cv": 0.013723875902886125,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: mean",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.1590381643673933,
+    3.165635771640069,
+    3.1078145805740354,
+    3.098771421690531,
+    3.1123282183339267
+   ],
+   "median": 3.1123282183339267,
+   "ci": [
+    3.098771421690531,
+    3.165635771640069
+   ],
+   "cv": 0.009960412580419988,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: p50",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.7093749484047294,
+    1.743874978274107,
+    1.693249971140176,
+    1.7009999719448388,
+    1.6931669670157135
+   ],
+   "median": 1.7009999719448388,
+   "ci": [
+    1.6931669670157135,
+    1.743874978274107
+   ],
+   "cv": 0.012333777762100475,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2534075968700772,
+    0.2534075968700772,
+    0.2534075968700772,
+    0.2534075968700772,
+    0.2534075968700772
+   ],
+   "median": 0.2534075968700772,
+   "ci": [
+    0.2534075968700772,
+    0.2534075968700772
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    683.0988330184482,
+    695.3307910007425,
+    662.3537080013193,
+    662.5880000065081,
+    662.8430829732679
+   ],
+   "median": 662.8430829732679,
+   "ci": [
+    662.3537080013193,
+    695.3307910007425
+   ],
+   "cv": 0.022590868521893938,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.3575839198921681,
+    0.3439760737280637,
+    0.3584648274463015,
+    0.3628756292775147,
+    0.36942850599671934
+   ],
+   "median": 0.3584648274463015,
+   "ci": [
+    0.3439760737280637,
+    0.36942850599671934
+   ],
+   "cv": 0.026108260277779665,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.3316249931231141,
+    0.3198749618604779,
+    0.33487501787021756,
+    0.33791596069931984,
+    0.3457499551586807
+   ],
+   "median": 0.33487501787021756,
+   "ci": [
+    0.3198749618604779,
+    0.3457499551586807
+   ],
+   "cv": 0.02837611403575174,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: mean",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.9806909140114627,
+    0.9753708211154631,
+    0.982933898975952,
+    0.97641568869154,
+    0.9764799358464065
+   ],
+   "median": 0.9764799358464065,
+   "ci": [
+    0.9753708211154631,
+    0.982933898975952
+   ],
+   "cv": 0.0033356413743467566,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: p50",
+   "system": "nucleus, snippets",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.9395829983986914,
+    0.9392089559696615,
+    0.945459003560245,
+    0.9416670072823763,
+    0.9371249470859766
+   ],
+   "median": 0.9395829983986914,
+   "ci": [
+    0.9371249470859766,
+    0.945459003560245
+   ],
+   "cv": 0.003353252565020727,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: nDCG@10",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.6839073230801845,
+    0.6839073230801845,
+    0.6839073230801845,
+    0.6839073230801845,
+    0.6839073230801845
+   ],
+   "median": 0.6839073230801845,
+   "ci": [
+    0.6839073230801845,
+    0.6839073230801845
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: CREATE INDEX",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    304.993,
+    316.538,
+    287.701,
+    288.709,
+    287.442
+   ],
+   "median": 288.709,
+   "ci": [
+    287.442,
+    316.538
+   ],
+   "cv": 0.04427970137108238,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: mean",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.4873133333333335,
+    1.50473,
+    1.4466999999999999,
+    1.4716133333333332,
+    1.4818266666666666
+   ],
+   "median": 1.4818266666666666,
+   "ci": [
+    1.4466999999999999,
+    1.50473
+   ],
+   "cv": 0.014488809804249669,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: p50",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.424,
+    1.451,
+    1.398,
+    1.403,
+    1.42
+   ],
+   "median": 1.42,
+   "ci": [
+    1.398,
+    1.451
+   ],
+   "cv": 0.014724752152872733,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: nDCG@10",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.3224824689196949,
+    0.3224824689196949,
+    0.3224824689196949,
+    0.3224824689196949,
+    0.3224824689196949
+   ],
+   "median": 0.3224824689196949,
+   "ci": [
+    0.3224824689196949,
+    0.3224824689196949
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: CREATE INDEX",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    234.696,
+    231.111,
+    218.023,
+    223.708,
+    209.349
+   ],
+   "median": 223.708,
+   "ci": [
+    209.349,
+    234.696
+   ],
+   "cv": 0.0455161449483501,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: mean",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.9402507739938081,
+    0.9620216718266253,
+    0.9363003095975233,
+    0.8987770897832817,
+    0.9163839009287926
+   ],
+   "median": 0.9363003095975233,
+   "ci": [
+    0.8987770897832817,
+    0.9620216718266253
+   ],
+   "cv": 0.025917694549159147,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: p50",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.993,
+    0.999,
+    0.982,
+    0.959,
+    0.976
+   ],
+   "median": 0.982,
+   "ci": [
+    0.959,
+    0.999
+   ],
+   "cv": 0.01590027870475915,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: nDCG@10",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.48136584112403347,
+    0.48136584112403347,
+    0.48136584112403347,
+    0.48136584112403347,
+    0.48136584112403347
+   ],
+   "median": 0.48136584112403347,
+   "ci": [
+    0.48136584112403347,
+    0.48136584112403347
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: CREATE INDEX",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    371.668,
+    350.297,
+    336.43,
+    341.366,
+    334.566
+   ],
+   "median": 341.366,
+   "ci": [
+    334.566,
+    371.668
+   ],
+   "cv": 0.04365954183575413,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: mean",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.245374822190612,
+    7.293931009957325,
+    7.136602418207682,
+    7.115285206258891,
+    7.0995967283072545
+   ],
+   "median": 7.136602418207682,
+   "ci": [
+    7.0995967283072545,
+    7.293931009957325
+   ],
+   "cv": 0.012019042880535095,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: p50",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.553,
+    6.602,
+    6.481,
+    6.443,
+    6.428
+   ],
+   "median": 6.481,
+   "ci": [
+    6.428,
+    6.602
+   ],
+   "cv": 0.011406353296481885,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: nDCG@10",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.24996471698926895,
+    0.24996471698926895,
+    0.24996471698926895,
+    0.24996471698926895,
+    0.24996471698926895
+   ],
+   "median": 0.24996471698926895,
+   "ci": [
+    0.24996471698926895,
+    0.24996471698926895
+   ],
+   "cv": 1.241442283909337e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: CREATE INDEX",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    683.683,
+    673.475,
+    648.553,
+    649.527,
+    648.152
+   ],
+   "median": 649.527,
+   "ci": [
+    648.152,
+    683.683
+   ],
+   "cv": 0.025341494681005227,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: mean",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.2087021604938273,
+    2.210243827160494,
+    2.1727623456790126,
+    2.1637700617283953,
+    2.175149691358025
+   ],
+   "median": 2.175149691358025,
+   "ci": [
+    2.1637700617283953,
+    2.210243827160494
+   ],
+   "cv": 0.009943736255651628,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: p50",
+   "system": "paradedb, snippets (paradedb)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.142,
+    2.158,
+    2.133,
+    2.121,
+    2.135
+   ],
+   "median": 2.135,
+   "ci": [
+    2.121,
+    2.158
+   ],
+   "cv": 0.006357207322890612,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

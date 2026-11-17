@@ -1,0 +1,381 @@
+{
+ "method": 1,
+ "name": "ann-related",
+ "script": "bench/method.py run ann-related bench/results/ann-related.json --runs 3 --also 'pgvector=bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/related.py pgvector target/ann-data/dbpedia-openai3-1536-100k' -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/related.py nucleus ./target/release/nucleus target/ann-data/dbpedia-openai3-1536-100k",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T09:51:59+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 35812478976,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   6.5546875,
+   8.25,
+   8.2353515625
+  ],
+  "systems": {
+   "pgvector": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "4GB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "9",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "off"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "off",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "4GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "9",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "51924",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-azl9nx91",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true,
+    "pgvector": "0.8.7"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   9.166015625,
+   9.23681640625,
+   8.84033203125
+  ]
+ },
+ "samples": [
+  {
+   "name": "index build",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    39.2021339579951,
+    37.76328541699331,
+    37.455241375020705
+   ],
+   "median": 37.76328541699331,
+   "ci": [
+    37.455241375020705,
+    39.2021339579951
+   ],
+   "cv": 0.024448019652733872,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "more like (ef 40): recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.965,
+    0.965,
+    0.965
+   ],
+   "median": 0.965,
+   "ci": [
+    0.965,
+    0.965
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "more like (ef 40): \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1070.6906247651204,
+    1095.204374869354,
+    1083.9770844904706
+   ],
+   "median": 1083.9770844904706,
+   "ci": [
+    1070.6906247651204,
+    1095.204374869354
+   ],
+   "cv": 0.011327782036792793,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "more like (ef 40): server \u00b5s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    870.345,
+    860.205,
+    880.84
+   ],
+   "median": 870.345,
+   "ci": [
+    860.205,
+    880.84
+   ],
+   "cv": 0.011853467616027258,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "lateral, 1000 rows' nearest",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    150.91587498318404,
+    169.52395893167704,
+    150.7825000444427
+   ],
+   "median": 150.91587498318404,
+   "ci": [
+    150.7825000444427,
+    169.52395893167704
+   ],
+   "cv": 0.0686433330628246,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "lateral: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9823,
+    0.9823,
+    0.9823
+   ],
+   "median": 0.9823,
+   "ci": [
+    0.9823,
+    0.9823
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "lateral, 1000 rows' nearest",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    872.0091660507023,
+    882.7345829922706,
+    853.3427499933168
+   ],
+   "median": 872.0091660507023,
+   "ci": [
+    853.3427499933168,
+    882.7345829922706
+   ],
+   "cv": 0.017108671377841854,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "lateral: recall@10",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9823,
+    0.9823,
+    0.9823
+   ],
+   "median": 0.9823,
+   "ci": [
+    0.9823,
+    0.9823
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "index build",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    59.3614372080192,
+    60.94376249995548,
+    58.80293895897921
+   ],
+   "median": 59.3614372080192,
+   "ci": [
+    58.80293895897921,
+    60.94376249995548
+   ],
+   "cv": 0.018599913528760437,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "more like (ef 40): recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9765,
+    0.977,
+    0.977
+   ],
+   "median": 0.977,
+   "ci": [
+    0.9765,
+    0.977
+   ],
+   "cv": 0.0002955213798956981,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "more like (ef 40): \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2425.0,
+    2329.0,
+    2379.0
+   ],
+   "median": 2379.0,
+   "ci": [
+    2329.0,
+    2425.0
+   ],
+   "cv": 0.020193699795352127,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "more like (ef 40): server \u00b5s",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2501.735,
+    2436.645,
+    2490.145
+   ],
+   "median": 2490.145,
+   "ci": [
+    2436.645,
+    2501.735
+   ],
+   "cv": 0.014022029125376244,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "lateral, 1000 rows' nearest",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2342.434624908492,
+    2302.2928750142455,
+    2360.3057080181316
+   ],
+   "median": 2342.434624908492,
+   "ci": [
+    2302.2928750142455,
+    2360.3057080181316
+   ],
+   "cv": 0.012723852432577096,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "lateral: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9881,
+    0.9869,
+    0.9877
+   ],
+   "median": 0.9877,
+   "ci": [
+    0.9869,
+    0.9881
+   ],
+   "cv": 0.0006187026286773268,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

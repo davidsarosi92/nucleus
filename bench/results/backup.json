@@ -1,0 +1,645 @@
+{
+ "method": 1,
+ "name": "backup",
+ "script": "bench/method.py run backup bench/results/backup.json --runs 5 -- python3 bench/backup.py --nucleus ./target/release/nucleus",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T06:53:06+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 41360953344,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   3.22021484375,
+   5.85693359375,
+   9.9619140625
+  ],
+  "systems": {
+   "nucleus": {
+    "binary": "./target/release/nucleus",
+    "version": "nucleus 0.1.0"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.64599609375,
+   5.2099609375,
+   9.16357421875
+  ]
+ },
+ "samples": [
+  {
+   "name": "BACKUP TO, the notes' rows sealed under their subjects' keys",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.5462182910414413,
+    0.5498156249523163,
+    0.5466201660456136,
+    0.5353382079629228,
+    0.5470328329829499
+   ],
+   "median": 0.5466201660456136,
+   "ci": [
+    0.5353382079629228,
+    0.5498156249523163
+   ],
+   "cv": 0.010248146772206587,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, the notes' rows sealed under their subjects' keys: stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    16.469707489013672,
+    16.470903396606445,
+    16.470726013183594,
+    16.47157859802246,
+    16.47061824798584
+   ],
+   "median": 16.470726013183594,
+   "ci": [
+    16.469707489013672,
+    16.47157859802246
+   ],
+   "cv": 4.0790434061732217e-05,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, the same with no subject column (nothing sealed)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.1709682079963386,
+    0.15840579196810722,
+    0.16302041593007743,
+    0.15958991600200534,
+    0.16109187505207956
+   ],
+   "median": 0.16109187505207956,
+   "ci": [
+    0.15840579196810722,
+    0.1709682079963386
+   ],
+   "cv": 0.030613215236746198,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, the same with no subject column (nothing sealed): stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    4.043301582336426,
+    4.043302536010742,
+    4.043304443359375,
+    4.043305397033691,
+    4.043304443359375
+   ],
+   "median": 4.043304443359375,
+   "ci": [
+    4.043301582336426,
+    4.043305397033691
+   ],
+   "cv": 3.875659437641645e-07,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nucleus restore, sealed",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.8482771660201252,
+    0.8436547499150038,
+    0.8564685829915106,
+    0.8519049169262871,
+    0.8479072919581085
+   ],
+   "median": 0.8482771660201252,
+   "ci": [
+    0.8436547499150038,
+    0.8564685829915106
+   ],
+   "cv": 0.005658076704650316,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nucleus restore, unsealed",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.7148430410306901,
+    0.701453083078377,
+    0.7066680829739198,
+    0.7226677500875667,
+    0.6949766670586541
+   ],
+   "median": 0.7066680829739198,
+   "ci": [
+    0.6949766670586541,
+    0.7226677500875667
+   ],
+   "cv": 0.015407391575595822,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, the first: full",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.6743082909379154,
+    0.6862336249323562,
+    0.6841680830111727,
+    0.684226791956462,
+    0.6807957920245826
+   ],
+   "median": 0.6841680830111727,
+   "ci": [
+    0.6743082909379154,
+    0.6862336249323562
+   ],
+   "cv": 0.006885050387100245,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, the first: full: stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    29.243234634399414,
+    29.243233680725098,
+    29.24323272705078,
+    29.243236541748047,
+    29.243234634399414
+   ],
+   "median": 29.243234634399414,
+   "ci": [
+    29.24323272705078,
+    29.243236541748047
+   ],
+   "cv": 4.837110639138815e-08,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, nothing changed",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.02090216602664441,
+    0.01804170908872038,
+    0.020479207974858582,
+    0.021935875061899424,
+    0.021174750057980418
+   ],
+   "median": 0.02090216602664441,
+   "ci": [
+    0.01804170908872038,
+    0.021935875061899424
+   ],
+   "cv": 0.07200877272180756,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, nothing changed: stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    0.00019359588623046875,
+    0.00019359588623046875,
+    0.00019359588623046875,
+    0.00019359588623046875,
+    0.00019359588623046875
+   ],
+   "median": 0.00019359588623046875,
+   "ci": [
+    0.00019359588623046875,
+    0.00019359588623046875
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 10,000 rows updated, adjacent (1 %)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.035315082990564406,
+    0.03006304195150733,
+    0.03509554103948176,
+    0.03285841702017933,
+    0.03234845807310194
+   ],
+   "median": 0.03285841702017933,
+   "ci": [
+    0.03006304195150733,
+    0.035315082990564406
+   ],
+   "cv": 0.0653011118321223,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 10,000 rows updated, adjacent (1 %): stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    0.2850818634033203,
+    0.2850818634033203,
+    0.2850818634033203,
+    0.2850818634033203,
+    0.2850818634033203
+   ],
+   "median": 0.2850818634033203,
+   "ci": [
+    0.2850818634033203,
+    0.2850818634033203
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 10,000 rows updated, every 100th (1 %: nearly every leaf)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.4780560409417376,
+    0.4808657909743488,
+    0.4884953749133274,
+    0.4778585000894964,
+    0.48283804091624916
+   ],
+   "median": 0.4808657909743488,
+   "ci": [
+    0.4778585000894964,
+    0.4884953749133274
+   ],
+   "cv": 0.009060789876784365,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 10,000 rows updated, every 100th (1 %: nearly every leaf): stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    0.3003654479980469,
+    0.3003654479980469,
+    0.3003654479980469,
+    0.3003654479980469,
+    0.3003654479980469
+   ],
+   "median": 0.3003654479980469,
+   "ci": [
+    0.3003654479980469,
+    0.3003654479980469
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 100 rows updated, every 10,000th",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.06778904201928526,
+    0.07080012490041554,
+    0.06842712499201298,
+    0.07247591600753367,
+    0.06843104201834649
+   ],
+   "median": 0.06843104201834649,
+   "ci": [
+    0.06778904201928526,
+    0.07247591600753367
+   ],
+   "cv": 0.028499952447619797,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 100 rows updated, every 10,000th: stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    0.0036163330078125,
+    0.0036163330078125,
+    0.0036163330078125,
+    0.0036163330078125,
+    0.0036163330078125
+   ],
+   "median": 0.0036163330078125,
+   "ci": [
+    0.0036163330078125,
+    0.0036163330078125
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 10,000 rows deleted, adjacent",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.4326162920333445,
+    0.43494270800147206,
+    0.4441996249370277,
+    0.43609670794103295,
+    0.44807583396323025
+   ],
+   "median": 0.43609670794103295,
+   "ci": [
+    0.4326162920333445,
+    0.44807583396323025
+   ],
+   "cv": 0.015055190824004748,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP TO, 10,000 rows deleted, adjacent: stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    0.04804039001464844,
+    0.04804039001464844,
+    0.04804039001464844,
+    0.04804039001464844,
+    0.04804039001464844
+   ],
+   "median": 0.04804039001464844,
+   "ci": [
+    0.04804039001464844,
+    0.04804039001464844
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP FULL TO",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.6794639590661973,
+    0.6960208329837769,
+    0.6905000830302015,
+    0.6869498329469934,
+    0.6910282910102978
+   ],
+   "median": 0.6905000830302015,
+   "ci": [
+    0.6794639590661973,
+    0.6960208329837769
+   ],
+   "cv": 0.008907706407968294,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP FULL TO: stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    29.01759147644043,
+    29.017590522766113,
+    29.017590522766113,
+    29.017597198486328,
+    29.017592430114746
+   ],
+   "median": 29.01759147644043,
+   "ci": [
+    29.017590522766113,
+    29.017597198486328
+   ],
+   "cv": 9.581823639757302e-08,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nucleus restore, the chain of 6",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    1.543530666967854,
+    1.5288576669991016,
+    1.5191379999741912,
+    1.5221297909738496,
+    1.5194083749083802
+   ],
+   "median": 1.5221297909738496,
+   "ci": [
+    1.5191379999741912,
+    1.543530666967854
+   ],
+   "cv": 0.006705236515648299,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nucleus restore, the full one after it",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    1.4510876659769565,
+    1.4455024579074234,
+    1.4631377919577062,
+    1.441569042042829,
+    1.5018160829786211
+   ],
+   "median": 1.4510876659769565,
+   "ci": [
+    1.441569042042829,
+    1.5018160829786211
+   ],
+   "cv": 0.01672049347604809,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP FULL TO, compressed (LZ4 block)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.6745575829409063,
+    0.6818769170204177,
+    0.7012137910351157,
+    0.6803216249682009,
+    0.6929305830271915
+   ],
+   "median": 0.6818769170204177,
+   "ci": [
+    0.6745575829409063,
+    0.7012137910351157
+   ],
+   "cv": 0.015619819666165267,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP FULL TO, compressed (LZ4 block): stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    29.243229866027832,
+    29.24323558807373,
+    29.243229866027832,
+    29.243233680725098,
+    29.243231773376465
+   ],
+   "median": 29.243231773376465,
+   "ci": [
+    29.243229866027832,
+    29.24323558807373
+   ],
+   "cv": 8.504115912187638e-08,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nucleus restore, compressed (LZ4 block)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    1.4708863329142332,
+    1.4736232499126345,
+    1.4723129579797387,
+    1.4516779170371592,
+    1.459029958001338
+   ],
+   "median": 1.4708863329142332,
+   "ci": [
+    1.4516779170371592,
+    1.4736232499126345
+   ],
+   "cv": 0.00660097654923127,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP FULL TO, compressed and encrypted (ChaCha20-Poly1305)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.7518949580844492,
+    0.7567560829920694,
+    0.7398312919540331,
+    0.7435357080539688,
+    0.7441057919058949
+   ],
+   "median": 0.7441057919058949,
+   "ci": [
+    0.7398312919540331,
+    0.7567560829920694
+   ],
+   "cv": 0.009239436184196561,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "BACKUP FULL TO, compressed and encrypted (ChaCha20-Poly1305): stored",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    29.24367046356201,
+    29.24367618560791,
+    29.24367046356201,
+    29.243674278259277,
+    29.243672370910645
+   ],
+   "median": 29.243672370910645,
+   "ci": [
+    29.24367046356201,
+    29.24367618560791
+   ],
+   "cv": 8.50398778558285e-08,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nucleus restore, compressed and encrypted (ChaCha20-Poly1305)",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    1.500288667040877,
+    1.5297726669814438,
+    1.4891424590023234,
+    1.4857157500227913,
+    1.48807224992197
+   ],
+   "median": 1.4891424590023234,
+   "ci": [
+    1.4857157500227913,
+    1.5297726669814438
+   ],
+   "cv": 0.012217376776845515,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

@@ -1,0 +1,1268 @@
+{
+ "method": 1,
+ "name": "bm25-filters",
+ "script": "bench/method.py run bm25-filters bench/results/bm25-filters.json --runs 3 -- ./target/ann-data/.venv/bin/python bench/text/beir.py nucleus ./target/release/nucleus --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1 --unranked",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T10:10:22+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 31146221568,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   6.541015625,
+   6.51611328125,
+   7.447265625
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   2.8681640625,
+   2.9423828125,
+   2.9111328125
+  ]
+ },
+ "samples": [
+  {
+   "name": "scifact: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.6890619732833769,
+    0.6890619732833769,
+    0.6890619732833769
+   ],
+   "median": 0.6890619732833769,
+   "ci": [
+    0.6890619732833769,
+    0.6890619732833769
+   ],
+   "cv": 1.9733202646945736e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    415.16008391045034,
+    393.2785000652075,
+    392.7426249720156
+   ],
+   "median": 393.2785000652075,
+   "ci": [
+    392.7426249720156,
+    415.16008391045034
+   ],
+   "cv": 0.031945651522160654,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.24102237851669392,
+    0.1746858578796188,
+    0.17247277622421583
+   ],
+   "median": 0.1746858578796188,
+   "ci": [
+    0.17247277622421583,
+    0.24102237851669392
+   ],
+   "cv": 0.19868367946135895,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.23987493477761745,
+    0.17004203982651234,
+    0.16658392269164324
+   ],
+   "median": 0.17004203982651234,
+   "ci": [
+    0.16658392269164324,
+    0.23987493477761745
+   ],
+   "cv": 0.21519035322554594,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 50%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.22654848832947513,
+    0.21883016840244332,
+    0.21135737925457457
+   ],
+   "median": 0.21883016840244332,
+   "ci": [
+    0.21135737925457457,
+    0.22654848832947513
+   ],
+   "cv": 0.034698348282999086,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 50%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.21483295131474733,
+    0.2085419837385416,
+    0.2038750099018216
+   ],
+   "median": 0.2085419837385416,
+   "ci": [
+    0.2038750099018216,
+    0.21483295131474733
+   ],
+   "cv": 0.026300476364003043,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 50%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    85.58171086556588,
+    83.69906352250837,
+    83.93934054804656
+   ],
+   "median": 83.93934054804656,
+   "ci": [
+    83.69906352250837,
+    85.58171086556588
+   ],
+   "cv": 0.012139466001170046,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 50%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    89.56133399624377,
+    87.73912501055747,
+    88.06079102214426
+   ],
+   "median": 88.06079102214426,
+   "ci": [
+    87.73912501055747,
+    89.56133399624377
+   ],
+   "cv": 0.010995421088294625,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 10%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.47299072418051463,
+    0.4640854010358453,
+    0.478508451487869
+   ],
+   "median": 0.47299072418051463,
+   "ci": [
+    0.4640854010358453,
+    0.478508451487869
+   ],
+   "cv": 0.01542301621580646,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 10%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.4544999683275819,
+    0.4503329982981086,
+    0.45366701669991016
+   ],
+   "median": 0.45366701669991016,
+   "ci": [
+    0.4503329982981086,
+    0.4544999683275819
+   ],
+   "cv": 0.00486942272865727,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 10%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    18.947788901859894,
+    18.264425290593255,
+    18.397304450239364
+   ],
+   "median": 18.397304450239364,
+   "ci": [
+    18.264425290593255,
+    18.947788901859894
+   ],
+   "cv": 0.019546556208290503,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 10%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    19.443957949988544,
+    18.919750000350177,
+    19.143625046126544
+   ],
+   "median": 19.143625046126544,
+   "ci": [
+    18.919750000350177,
+    19.443957949988544
+   ],
+   "cv": 0.013721640018263075,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 1%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.3369916687564305,
+    2.3524681730971984,
+    2.2875122108962387
+   ],
+   "median": 2.3369916687564305,
+   "ci": [
+    2.2875122108962387,
+    2.3524681730971984
+   ],
+   "cv": 0.014588944630371341,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 1%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.2902910131961107,
+    2.3023339454084635,
+    2.2702079731971025
+   ],
+   "median": 2.2902910131961107,
+   "ci": [
+    2.2702079731971025,
+    2.3023339454084635
+   ],
+   "cv": 0.007094651135939408,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 1%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.441621648147702,
+    4.374659305127959,
+    4.3672194494865835
+   ],
+   "median": 4.374659305127959,
+   "ci": [
+    4.3672194494865835,
+    4.441621648147702
+   ],
+   "cv": 0.009324752013659085,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: filter 1%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.602790926583111,
+    4.463750054128468,
+    4.484165925532579
+   ],
+   "median": 4.484165925532579,
+   "ci": [
+    4.463750054128468,
+    4.602790926583111
+   ],
+   "cv": 0.01662177134430424,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.32906465814209884,
+    0.32906465814209884,
+    0.32906465814209884
+   ],
+   "median": 0.32906465814209884,
+   "ci": [
+    0.32906465814209884,
+    0.32906465814209884
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    347.86808397620916,
+    349.2601669859141,
+    358.7194159626961
+   ],
+   "median": 349.2601669859141,
+   "ci": [
+    347.86808397620916,
+    358.7194159626961
+   ],
+   "cv": 0.016776085433119547,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.1359599863752815,
+    0.12726575531203865,
+    0.1368680395814518
+   ],
+   "median": 0.1359599863752815,
+   "ci": [
+    0.12726575531203865,
+    0.1368680395814518
+   ],
+   "cv": 0.03974988671067465,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.13520801439881325,
+    0.12958294246345758,
+    0.1359590096399188
+   ],
+   "median": 0.13520801439881325,
+   "ci": [
+    0.12958294246345758,
+    0.1359590096399188
+   ],
+   "cv": 0.026086493578014704,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 50%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.15707237497491086,
+    0.14488892226073394,
+    0.1532474010836783
+   ],
+   "median": 0.1532474010836783,
+   "ci": [
+    0.14488892226073394,
+    0.15707237497491086
+   ],
+   "cv": 0.04106282543320446,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 50%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.1586669823154807,
+    0.1490419963374734,
+    0.1546659041196108
+   ],
+   "median": 0.1546659041196108,
+   "ci": [
+    0.1490419963374734,
+    0.1586669823154807
+   ],
+   "cv": 0.0313722109222439,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 50%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    17.872440075824734,
+    17.63766150829316,
+    17.60764797066768
+   ],
+   "median": 17.63766150829316,
+   "ci": [
+    17.60764797066768,
+    17.872440075824734
+   ],
+   "cv": 0.008188919540263163,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 50%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.453499943949282,
+    7.443249924108386,
+    7.375167100690305
+   ],
+   "median": 7.443249924108386,
+   "ci": [
+    7.375167100690305,
+    7.453499943949282
+   ],
+   "cv": 0.005734954532156616,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 10%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.29344252100208595,
+    0.30454940879111964,
+    0.29146838133099373
+   ],
+   "median": 0.29344252100208595,
+   "ci": [
+    0.29146838133099373,
+    0.30454940879111964
+   ],
+   "cv": 0.023784780784436136,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 10%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.31100003980100155,
+    0.3233749885112047,
+    0.3144160145893693
+   ],
+   "median": 0.3144160145893693,
+   "ci": [
+    0.31100003980100155,
+    0.3233749885112047
+   ],
+   "cv": 0.020207910807676536,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 10%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.732150662670217,
+    4.614907086195407,
+    4.625187842204198
+   ],
+   "median": 4.625187842204198,
+   "ci": [
+    4.614907086195407,
+    4.732150662670217
+   ],
+   "cv": 0.013940483348840862,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 10%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.2707079770043492,
+    2.2054159780964255,
+    2.21279205288738
+   ],
+   "median": 2.21279205288738,
+   "ci": [
+    2.2054159780964255,
+    2.2707079770043492
+   ],
+   "cv": 0.016037470065333816,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 1%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.966376567334398,
+    0.9285457754484594,
+    0.9331697495019888
+   ],
+   "median": 0.9331697495019888,
+   "ci": [
+    0.9285457754484594,
+    0.966376567334398
+   ],
+   "cv": 0.021891129005583033,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 1%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.6222910014912486,
+    0.5829159636050463,
+    0.5909999599680305
+   ],
+   "median": 0.5909999599680305,
+   "ci": [
+    0.5829159636050463,
+    0.6222910014912486
+   ],
+   "cv": 0.03473340743419106,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 1%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.3196416395275217,
+    1.26828815270469,
+    1.2746359695227754
+   ],
+   "median": 1.2746359695227754,
+   "ci": [
+    1.26828815270469,
+    1.3196416395275217
+   ],
+   "cv": 0.02174485785333413,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: filter 1%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.7680410053580999,
+    0.7031669374555349,
+    0.7229170296341181
+   ],
+   "median": 0.7229170296341181,
+   "ci": [
+    0.7031669374555349,
+    0.7680410053580999
+   ],
+   "cv": 0.04546748547400008,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.49642851712609065,
+    0.49642851712609065,
+    0.49642851712609065
+   ],
+   "median": 0.49642851712609065,
+   "ci": [
+    0.49642851712609065,
+    0.49642851712609065
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    320.63204201404005,
+    307.6184169622138,
+    311.1737079452723
+   ],
+   "median": 311.1737079452723,
+   "ci": [
+    307.6184169622138,
+    320.63204201404005
+   ],
+   "cv": 0.021479912871233006,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.2602493515050046,
+    2.2067639515218542,
+    2.262158134132809
+   ],
+   "median": 2.2602493515050046,
+   "ci": [
+    2.2067639515218542,
+    2.262158134132809
+   ],
+   "cv": 0.014018953926264205,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.8130409987643361,
+    0.8097089594230056,
+    0.8259169990196824
+   ],
+   "median": 0.8130409987643361,
+   "ci": [
+    0.8097089594230056,
+    0.8259169990196824
+   ],
+   "cv": 0.01048677602287696,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 50%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.326932823342426,
+    2.2726660821378855,
+    2.2615041576490165
+   ],
+   "median": 2.2726660821378855,
+   "ci": [
+    2.2615041576490165,
+    2.326932823342426
+   ],
+   "cv": 0.015304055249212871,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 50%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.8678330341354012,
+    0.8450830355286598,
+    0.842750072479248
+   ],
+   "median": 0.8450830355286598,
+   "ci": [
+    0.842750072479248,
+    0.8678330341354012
+   ],
+   "cv": 0.016266642769817083,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 50%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    226.45734048002714,
+    222.4668570838711,
+    224.91016818205847
+   ],
+   "median": 224.91016818205847,
+   "ci": [
+    222.4668570838711,
+    226.45734048002714
+   ],
+   "cv": 0.008957433705531913,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 50%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    225.22925003431737,
+    220.97424999810755,
+    223.7364170141518
+   ],
+   "median": 223.7364170141518,
+   "ci": [
+    220.97424999810755,
+    225.22925003431737
+   ],
+   "cv": 0.009667245801983308,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 10%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.542621768321471,
+    2.459219099482148,
+    2.466862053831623
+   ],
+   "median": 2.466862053831623,
+   "ci": [
+    2.459219099482148,
+    2.542621768321471
+   ],
+   "cv": 0.01851922772073982,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 10%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.0919580236077309,
+    1.0592499747872353,
+    1.0658750543370843
+   ],
+   "median": 1.0658750543370843,
+   "ci": [
+    1.0592499747872353,
+    1.0919580236077309
+   ],
+   "cv": 0.016124941114172647,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 10%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    52.06545214653929,
+    51.59698088307617,
+    52.32845077244433
+   ],
+   "median": 52.06545214653929,
+   "ci": [
+    51.59698088307617,
+    52.32845077244433
+   ],
+   "cv": 0.007125677225984511,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 10%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    51.68695794418454,
+    51.153749926015735,
+    51.91070795990527
+   ],
+   "median": 51.68695794418454,
+   "ci": [
+    51.153749926015735,
+    51.91070795990527
+   ],
+   "cv": 0.0075387769017252375,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 1%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.575572955037254,
+    4.502187917210363,
+    4.513439188388761
+   ],
+   "median": 4.513439188388761,
+   "ci": [
+    4.502187917210363,
+    4.575572955037254
+   ],
+   "cv": 0.008724025677118044,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 1%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.197083016857505,
+    3.1575419707223773,
+    3.1786670442670584
+   ],
+   "median": 3.1786670442670584,
+   "ci": [
+    3.1575419707223773,
+    3.197083016857505
+   ],
+   "cv": 0.006226385749861711,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 1%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    10.34157976561463,
+    10.255583412007987,
+    10.365498078418009
+   ],
+   "median": 10.34157976561463,
+   "ci": [
+    10.255583412007987,
+    10.365498078418009
+   ],
+   "cv": 0.005600803996807744,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "arguana: filter 1%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    10.255582979880273,
+    10.162291000597179,
+    10.25833294261247
+   ],
+   "median": 10.255582979880273,
+   "ci": [
+    10.162291000597179,
+    10.25833294261247
+   ],
+   "cv": 0.005346810427868898,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2534075968700772,
+    0.2534075968700772,
+    0.2534075968700772
+   ],
+   "median": 0.2534075968700772,
+   "ci": [
+    0.2534075968700772,
+    0.2534075968700772
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    700.0209171092138,
+    702.6381670730188,
+    714.4319170620292
+   ],
+   "median": 702.6381670730188,
+   "ci": [
+    700.0209171092138,
+    714.4319170620292
+   ],
+   "cv": 0.010878629327446534,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.3809080594636063,
+    0.3535664770795308,
+    0.3584858143621665
+   ],
+   "median": 0.3584858143621665,
+   "ci": [
+    0.3535664770795308,
+    0.3809080594636063
+   ],
+   "cv": 0.04000501090529359,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.33583398908376694,
+    0.32933393958956003,
+    0.33087492920458317
+   ],
+   "median": 0.33087492920458317,
+   "ci": [
+    0.32933393958956003,
+    0.33583398908376694
+   ],
+   "cv": 0.010230003202207462,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 50%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.48808560614692575,
+    0.49535485676541513,
+    0.4809302930723025
+   ],
+   "median": 0.48808560614692575,
+   "ci": [
+    0.4809302930723025,
+    0.49535485676541513
+   ],
+   "cv": 0.01477567784259549,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 50%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.4574169870465994,
+    0.4580829991027713,
+    0.44620793778449297
+   ],
+   "median": 0.4574169870465994,
+   "ci": [
+    0.44620793778449297,
+    0.4580829991027713
+   ],
+   "cv": 0.014699460801671237,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 50%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    425.28694792292055,
+    420.93444036777606,
+    427.034471581588
+   ],
+   "median": 425.28694792292055,
+   "ci": [
+    420.93444036777606,
+    427.034471581588
+   ],
+   "cv": 0.007401540646478238,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 50%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    422.63462499249727,
+    419.8242499260232,
+    422.9917499469593
+   ],
+   "median": 422.63462499249727,
+   "ci": [
+    419.8242499260232,
+    422.9917499469593
+   ],
+   "cv": 0.004112869225073423,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 10%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.7307594455203709,
+    0.759195492000687,
+    0.7232260429674047
+   ],
+   "median": 0.7307594455203709,
+   "ci": [
+    0.7232260429674047,
+    0.759195492000687
+   ],
+   "cv": 0.025714100096642125,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 10%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.6547910161316395,
+    0.6740839453414083,
+    0.6568749668076634
+   ],
+   "median": 0.6568749668076634,
+   "ci": [
+    0.6547910161316395,
+    0.6740839453414083
+   ],
+   "cv": 0.015996857052785796,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 10%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    94.2362507181472,
+    94.22055311482342,
+    94.43639582748824
+   ],
+   "median": 94.2362507181472,
+   "ci": [
+    94.22055311482342,
+    94.43639582748824
+   ],
+   "cv": 0.0012761872704566946,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 10%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    93.28274999279529,
+    94.18095904402435,
+    93.35583297070116
+   ],
+   "median": 93.35583297070116,
+   "ci": [
+    93.28274999279529,
+    94.18095904402435
+   ],
+   "cv": 0.00532894780434807,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 1%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.204135988288513,
+    3.1771223758919347,
+    3.1949762918951885
+   ],
+   "median": 3.1949762918951885,
+   "ci": [
+    3.1771223758919347,
+    3.204135988288513
+   ],
+   "cv": 0.004303782566122889,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 1%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.1543340301141143,
+    3.1197499483823776,
+    3.179708030074835
+   ],
+   "median": 3.1543340301141143,
+   "ci": [
+    3.1197499483823776,
+    3.179708030074835
+   ],
+   "cv": 0.00955067732059382,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 1%, mean",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    18.738897641284254,
+    18.872862795467004,
+    18.75431848891844
+   ],
+   "median": 18.75431848891844,
+   "ci": [
+    18.738897641284254,
+    18.872862795467004
+   ],
+   "cv": 0.0039012751470797876,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fiqa: filter 1%, p50",
+   "system": "nucleus, every match scored",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    18.278874922543764,
+    18.28979200217873,
+    18.102332949638367
+   ],
+   "median": 18.278874922543764,
+   "ci": [
+    18.102332949638367,
+    18.28979200217873
+   ],
+   "cv": 0.005773795710715492,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

@@ -1,0 +1,1342 @@
+{
+ "method": 1,
+ "name": "analyzers",
+ "script": "bench/method.py run analyzers bench/results/analyzers.json --runs 5 --also 'postgresql=./target/ann-data/.venv/bin/python bench/text/analyzers.py postgres' -- ./target/ann-data/.venv/bin/python bench/text/analyzers.py nucleus ./target/release/nucleus",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-16T21:53:51+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 40647110656,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.5400390625,
+   6.10302734375,
+   6.373046875
+  ],
+  "systems": {
+   "postgresql": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "2048MB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "5",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "on"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "on",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "2GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "5",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "62247",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-4lodtbud",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7e1f26937b3442fecb9faa598c758459581ce7d2",
+   "dirty": true
+  },
+  "load_after": [
+   2.947265625,
+   3.3466796875,
+   4.16015625
+  ]
+ },
+ "samples": [
+  {
+   "name": "analyzer simple",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    181.09183403430507,
+    180.97958399448544,
+    179.7668340150267,
+    173.49620797904208,
+    177.69675003364682
+   ],
+   "median": 179.7668340150267,
+   "ci": [
+    173.49620797904208,
+    181.09183403430507
+   ],
+   "cv": 0.01772687214886879,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer porter",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    322.61458301218227,
+    316.7445000144653,
+    320.25091705145314,
+    309.0590420179069,
+    304.3506249669008
+   ],
+   "median": 316.7445000144653,
+   "ci": [
+    304.3506249669008,
+    322.61458301218227
+   ],
+   "cv": 0.02444202247808215,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer english",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    307.2117919800803,
+    306.40125001082197,
+    322.5272499839775,
+    316.52145797852427,
+    313.1394590018317
+   ],
+   "median": 313.1394590018317,
+   "ci": [
+    306.40125001082197,
+    322.5272499839775
+   ],
+   "cv": 0.021427365103094783,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer hungarian",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    323.5374999931082,
+    304.61133300559595,
+    316.0599999828264,
+    307.6217910274863,
+    300.30583299230784
+   ],
+   "median": 307.6217910274863,
+   "ci": [
+    300.30583299230784,
+    323.5374999931082
+   ],
+   "cv": 0.030035897832778196,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer trigram",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    462.2807080158964,
+    464.3675420084037,
+    446.2653750088066,
+    453.9064159616828,
+    454.3460829881951
+   ],
+   "median": 454.3460829881951,
+   "ci": [
+    446.2653750088066,
+    464.3675420084037
+   ],
+   "cv": 0.01592204936669816,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ market, no index",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    123.49999998696148,
+    127.58224998833612,
+    125.22449996322393,
+    137.22712500020862,
+    122.44441697839648
+   ],
+   "median": 125.22449996322393,
+   "ci": [
+    122.44441697839648,
+    137.22712500020862
+   ],
+   "cv": 0.046660484906609935,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ stock market, no index",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    127.17845797305927,
+    128.4538329928182,
+    123.59070900129154,
+    123.49341699155048,
+    123.0947079602629
+   ],
+   "median": 123.59070900129154,
+   "ci": [
+    123.0947079602629,
+    128.4538329928182
+   ],
+   "cv": 0.01974469167418712,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ stock AND market, no index",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    128.96637502126396,
+    128.62154195317999,
+    124.3435830110684,
+    120.22829195484519,
+    124.36687498120591
+   ],
+   "median": 124.36687498120591,
+   "ci": [
+    120.22829195484519,
+    128.96637502126396
+   ],
+   "cv": 0.02876927762210683,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ \"stock market\", no index",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    127.45516700670123,
+    123.28762497054413,
+    126.67241599410772,
+    125.18849998014048,
+    125.17604097956792
+   ],
+   "median": 125.18849998014048,
+   "ci": [
+    123.28762497054413,
+    127.45516700670123
+   ],
+   "cv": 0.012767051577054345,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ invest*, no index",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    124.31283399928361,
+    126.2878329725936,
+    124.6590829687193,
+    125.20620902068913,
+    131.439707998652
+   ],
+   "median": 125.20620902068913,
+   "ci": [
+    124.31283399928361,
+    131.439707998652
+   ],
+   "cv": 0.0231439896771102,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ markte~1, no index",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    147.00262498809025,
+    141.26658398890868,
+    147.4595419713296,
+    137.32075004372746,
+    145.12574998661876
+   ],
+   "median": 145.12574998661876,
+   "ci": [
+    137.32075004372746,
+    147.4595419713296
+   ],
+   "cv": 0.029878131902226206,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer simple",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1056.4094579895027,
+    1055.1592499832623,
+    1071.3687500101514,
+    1034.5169169595465,
+    1031.3424159539863
+   ],
+   "median": 1055.1592499832623,
+   "ci": [
+    1031.3424159539863,
+    1071.3687500101514
+   ],
+   "cv": 0.015882034409297082,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer porter",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2008.721417048946,
+    2030.4835839779116,
+    2030.862832965795,
+    1989.1730830422603,
+    1986.2940410384908
+   ],
+   "median": 2008.721417048946,
+   "ci": [
+    1986.2940410384908,
+    2030.862832965795
+   ],
+   "cv": 0.010699001164635019,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer english",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2072.0195419853553,
+    2068.7095829634927,
+    2082.8562079695985,
+    2032.482834008988,
+    2027.3007079958916
+   ],
+   "median": 2068.7095829634927,
+   "ci": [
+    2027.3007079958916,
+    2082.8562079695985
+   ],
+   "cv": 0.01218917810907707,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer hungarian",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2025.2024590154178,
+    2018.0038749822415,
+    2019.659582991153,
+    1976.2065000250004,
+    1971.928041020874
+   ],
+   "median": 2018.0038749822415,
+   "ci": [
+    1971.928041020874,
+    2025.2024590154178
+   ],
+   "cv": 0.01291774199915646,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer trigram",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2680.65175000811,
+    2711.8118329672143,
+    2690.3015410061926,
+    2620.3870000317693,
+    2616.2479170016013
+   ],
+   "median": 2680.65175000811,
+   "ci": [
+    2616.2479170016013,
+    2711.8118329672143
+   ],
+   "cv": 0.016186881341673735,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ market, no index",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    764.1939159948379,
+    762.9348749760538,
+    765.6375829828903,
+    753.884083009325,
+    758.7112920009531
+   ],
+   "median": 762.9348749760538,
+   "ci": [
+    753.884083009325,
+    765.6375829828903
+   ],
+   "cv": 0.006277405297443506,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ stock market, no index",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    775.782665994484,
+    780.9995830175467,
+    776.815458026249,
+    764.4837499829009,
+    763.3381250197999
+   ],
+   "median": 775.782665994484,
+   "ci": [
+    763.3381250197999,
+    780.9995830175467
+   ],
+   "cv": 0.010228758147132595,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ stock AND market, no index",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    770.8277920028195,
+    780.417583999224,
+    776.874708943069,
+    762.3644580016844,
+    766.1051659961231
+   ],
+   "median": 770.8277920028195,
+   "ci": [
+    762.3644580016844,
+    780.417583999224
+   ],
+   "cv": 0.009642448710028182,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ \"stock market\", no index",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    779.3487919843756,
+    776.6259579802863,
+    770.8164170035161,
+    768.9760419889353,
+    767.2452919650823
+   ],
+   "median": 770.8164170035161,
+   "ci": [
+    767.2452919650823,
+    779.3487919843756
+   ],
+   "cv": 0.006686222522252569,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ invest*, no index",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    780.5627910420299,
+    765.4210409964435,
+    772.6368339499459,
+    759.7134999814443,
+    760.1410420029424
+   ],
+   "median": 765.4210409964435,
+   "ci": [
+    759.7134999814443,
+    780.5627910420299
+   ],
+   "cv": 0.011576654777744746,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ markte~1, no index",
+   "system": "nucleus, one thread",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    875.2980830031447,
+    882.3229169938713,
+    884.079625015147,
+    866.8323329766281,
+    867.2604170278646
+   ],
+   "median": 875.2980830031447,
+   "ci": [
+    866.8323329766281,
+    884.079625015147
+   ],
+   "cv": 0.009258983377314364,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    661.917999968864,
+    665.177249989938,
+    672.1964169992134,
+    664.9464999791235,
+    652.1195420064032
+   ],
+   "median": 664.9464999791235,
+   "ci": [
+    652.1195420064032,
+    672.1964169992134
+   ],
+   "cv": 0.010983561464933584,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ market, indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.686999992467463,
+    0.7159169763326645,
+    0.6262499955482781,
+    0.6338329985737801,
+    0.6320830434560776
+   ],
+   "median": 0.6338329985737801,
+   "ci": [
+    0.6262499955482781,
+    0.7159169763326645
+   ],
+   "cv": 0.06095204121363518,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ stock market, indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.8659170125611126,
+    0.977249990683049,
+    0.8662079926580191,
+    0.8867500000633299,
+    0.859582971315831
+   ],
+   "median": 0.8662079926580191,
+   "ci": [
+    0.859582971315831,
+    0.977249990683049
+   ],
+   "cv": 0.05522516903404819,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ stock AND market, indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.34554197918623686,
+    0.3783749998547137,
+    0.3451670054346323,
+    0.3505420172587037,
+    0.35158300306648016
+   ],
+   "median": 0.3505420172587037,
+   "ci": [
+    0.3451670054346323,
+    0.3783749998547137
+   ],
+   "cv": 0.03894231681342252,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ \"stock market\", indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.7135000196285546,
+    0.7591249886900187,
+    0.7019999902695417,
+    0.6868750206194818,
+    0.6923330365680158
+   ],
+   "median": 0.7019999902695417,
+   "ci": [
+    0.6868750206194818,
+    0.7591249886900187
+   ],
+   "cv": 0.040615404259660204,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ invest*, indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.0730409994721413,
+    1.2107910006307065,
+    1.0963749955408275,
+    1.122749992646277,
+    1.0838340385816991
+   ],
+   "median": 1.0963749955408275,
+   "ci": [
+    1.0730409994721413,
+    1.2107910006307065
+   ],
+   "cv": 0.049602026329954516,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ markte~1, indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.067500005476177,
+    4.459207993932068,
+    4.0995419840328395,
+    4.065459012053907,
+    4.051583004184067
+   ],
+   "median": 4.067500005476177,
+   "ci": [
+    4.051583004184067,
+    4.459207993932068
+   ],
+   "cv": 0.042059187923867244,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "@@ market, rows read, indexed",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    8.93399998312816,
+    9.489417017903179,
+    8.628999989014119,
+    8.189750020392239,
+    8.446041960269213
+   ],
+   "median": 8.628999989014119,
+   "ci": [
+    8.189750020392239,
+    9.489417017903179
+   ],
+   "cv": 0.05724488757613321,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "analyzer simple",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    931.685,
+    926.083,
+    925.467,
+    927.047,
+    927.263,
+    928.741,
+    925.6,
+    927.568,
+    926.245,
+    934.992
+   ],
+   "median": 927.155,
+   "ci": [
+    926.083,
+    929.6265
+   ],
+   "cv": 0.0032827627676020534,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "analyzer english",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1136.953,
+    1138.833,
+    1141.182,
+    1138.622,
+    1140.777,
+    1136.426,
+    1133.8,
+    1136.356,
+    1135.283,
+    1143.804
+   ],
+   "median": 1137.7875,
+   "ci": [
+    1135.8545,
+    1140.777
+   ],
+   "cv": 0.0026759061479661025,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "analyzer hungarian",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1333.023,
+    1354.679,
+    1346.117,
+    1334.111,
+    1332.259,
+    1330.692,
+    1330.92,
+    1331.26,
+    1331.125,
+    1329.787
+   ],
+   "median": 1331.7595000000001,
+   "ci": [
+    1330.9085,
+    1339.188
+   ],
+   "cv": 0.006179477293373719,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ market, no index",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    927.978,
+    927.482,
+    928.387,
+    926.698,
+    931.623,
+    929.547,
+    926.401,
+    928.288,
+    929.221,
+    924.789
+   ],
+   "median": 928.133,
+   "ci": [
+    926.698,
+    929.221
+   ],
+   "cv": 0.0020336369238538867,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ stock market, no index",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    929.161,
+    931.741,
+    937.06,
+    932.453,
+    927.596,
+    927.403,
+    928.715,
+    927.383,
+    928.01,
+    930.049
+   ],
+   "median": 928.938,
+   "ci": [
+    927.596,
+    931.741
+   ],
+   "cv": 0.003296151533679587,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ stock AND market, no index",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    926.852,
+    928.302,
+    933.506,
+    929.054,
+    924.949,
+    925.004,
+    924.788,
+    925.433,
+    925.129,
+    924.785
+   ],
+   "median": 925.281,
+   "ci": [
+    924.949,
+    928.302
+   ],
+   "cv": 0.003046091148733345,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ \"stock market\", no index",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    926.557,
+    927.164,
+    927.867,
+    927.454,
+    926.04,
+    929.624,
+    926.575,
+    926.592,
+    926.793,
+    926.504
+   ],
+   "median": 926.6925,
+   "ci": [
+    926.5395000000001,
+    927.5155
+   ],
+   "cv": 0.00110740995211737,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ invest*, no index",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    931.252,
+    927.623,
+    935.942,
+    928.576,
+    929.939,
+    927.558,
+    925.64,
+    931.705,
+    934.712,
+    926.966
+   ],
+   "median": 929.2574999999999,
+   "ci": [
+    927.558,
+    932.3254999999999
+   ],
+   "cv": 0.003652499793997774,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "analyzer simple",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2706.269,
+    2721.506,
+    2721.245,
+    2714.56,
+    2694.606,
+    2692.742,
+    2693.377,
+    2693.369,
+    2688.329,
+    2790.719
+   ],
+   "median": 2700.4375,
+   "ci": [
+    2693.0595000000003,
+    2721.245
+   ],
+   "cv": 0.011224983202380258,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "analyzer english",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3327.151,
+    3357.221,
+    3349.631,
+    3351.622,
+    3329.972,
+    3319.554,
+    3320.686,
+    3316.855,
+    3327.108,
+    3427.521
+   ],
+   "median": 3328.5615,
+   "ci": [
+    3320.686,
+    3353.426
+   ],
+   "cv": 0.009905997185001332,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "analyzer hungarian",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3908.45,
+    3920.179,
+    3948.776,
+    3930.194,
+    3902.702,
+    3896.965,
+    3893.343,
+    3892.111,
+    3902.195,
+    3896.834
+   ],
+   "median": 3902.4485000000004,
+   "ci": [
+    3896.834,
+    3920.179
+   ],
+   "cv": 0.004721102790291775,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ market, no index",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2719.762,
+    2722.167,
+    2729.238,
+    2729.749,
+    2705.416,
+    2706.056,
+    2700.982,
+    2695.648,
+    2705.615,
+    2702.117
+   ],
+   "median": 2705.8355,
+   "ci": [
+    2702.117,
+    2724.5
+   ],
+   "cv": 0.004567532956858386,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ stock market, no index",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2731.103,
+    2728.758,
+    2748.765,
+    2743.321,
+    2707.763,
+    2703.603,
+    2709.039,
+    2699.081,
+    2702.145,
+    2698.479
+   ],
+   "median": 2708.401,
+   "ci": [
+    2702.145,
+    2736.0395
+   ],
+   "cv": 0.006995168016461977,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ stock AND market, no index",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2741.936,
+    2719.431,
+    2722.021,
+    2735.716,
+    2705.445,
+    2701.536,
+    2701.358,
+    2698.881,
+    2714.807,
+    2700.658
+   ],
+   "median": 2710.126,
+   "ci": [
+    2701.358,
+    2727.5735
+   ],
+   "cv": 0.005682780173287903,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ \"stock market\", no index",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2717.416,
+    2719.851,
+    2736.353,
+    2723.333,
+    2701.486,
+    2702.346,
+    2703.738,
+    2708.182,
+    2697.504,
+    2705.954
+   ],
+   "median": 2707.068,
+   "ci": [
+    2702.346,
+    2720.3745
+   ],
+   "cv": 0.004507071616225979,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ invest*, no index",
+   "system": "postgresql, one thread (postgresql)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2721.497,
+    2724.772,
+    2722.16,
+    2700.865,
+    2703.492,
+    2697.944,
+    2718.827,
+    2704.638,
+    2701.997,
+    2706.388
+   ],
+   "median": 2705.513,
+   "ci": [
+    2701.997,
+    2721.497
+   ],
+   "cv": 0.003795784014170543,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "CREATE INDEX",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1691.769,
+    1667.074,
+    1675.6,
+    1671.466,
+    1662.382,
+    1648.04,
+    1649.318,
+    1653.067,
+    1646.183,
+    1652.476
+   ],
+   "median": 1657.7245,
+   "ci": [
+    1649.318,
+    1671.466
+   ],
+   "cv": 0.008885982619295768,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ market, indexed",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.479,
+    3.435,
+    3.496,
+    3.453,
+    3.408,
+    3.439,
+    3.268,
+    3.33,
+    3.442,
+    3.586
+   ],
+   "median": 3.4405,
+   "ci": [
+    3.3845,
+    3.479
+   ],
+   "cv": 0.025402734987829263,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ stock market, indexed",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.928,
+    3.757,
+    3.768,
+    3.563,
+    3.376,
+    3.29,
+    3.24,
+    3.245,
+    3.286,
+    3.257
+   ],
+   "median": 3.333,
+   "ci": [
+    3.257,
+    3.757
+   ],
+   "cv": 0.07522346923925317,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ stock AND market, indexed",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.143,
+    0.935,
+    0.906,
+    0.922,
+    0.93,
+    0.91,
+    0.926,
+    0.944,
+    0.933,
+    0.916
+   ],
+   "median": 0.928,
+   "ci": [
+    0.916,
+    0.9385
+   ],
+   "cv": 0.07398057622225192,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ \"stock market\", indexed",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    236.437,
+    234.666,
+    234.355,
+    231.424,
+    230.984,
+    231.181,
+    231.746,
+    231.464,
+    232.342,
+    231.068
+   ],
+   "median": 231.60500000000002,
+   "ci": [
+    231.181,
+    234.355
+   ],
+   "cv": 0.008171114087959598,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ invest*, indexed",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.133,
+    4.168,
+    4.182,
+    4.182,
+    4.063,
+    4.523,
+    4.22,
+    4.093,
+    4.392,
+    4.266
+   ],
+   "median": 4.182,
+   "ci": [
+    4.133,
+    4.306
+   ],
+   "cv": 0.03325188439883981,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "@@ market, rows read, indexed",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    10.436,
+    10.623,
+    10.321,
+    10.374,
+    10.394,
+    10.404,
+    10.381,
+    10.228,
+    10.121,
+    10.584
+   ],
+   "median": 10.3875,
+   "ci": [
+    10.301,
+    10.494
+   ],
+   "cv": 0.014274563248435346,
+   "flagged": false,
+   "attempts": 2
+  }
+ ]
+}

@@ -1,0 +1,178 @@
+{
+ "method": 1,
+ "name": "encrypted",
+ "script": "bench/method.py run encrypted bench/results/encrypted.json --runs 5 -- cargo test --release -q -p nucleus-sql --test encrypted -- --ignored --nocapture",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:18:43+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36764966912,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   3.44580078125,
+   3.94091796875,
+   4.89208984375
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.55517578125,
+   4.1708984375,
+   4.962890625
+  ]
+ },
+ "samples": [
+  {
+   "name": "in the clear: load",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    362.796459,
+    347.88837500000005,
+    336.816917,
+    341.204333,
+    345.671
+   ],
+   "median": 345.671,
+   "ci": [
+    336.816917,
+    362.796459
+   ],
+   "cv": 0.02844026293164999,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "in the clear: scan",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    9.751125,
+    9.709333,
+    9.565292,
+    10.073958,
+    9.490958000000001
+   ],
+   "median": 9.709333,
+   "ci": [
+    9.490958000000001,
+    10.073958
+   ],
+   "cv": 0.02316666468702814,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "in the clear: sort past work_mem",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    105.34275,
+    100.41154100000001,
+    100.09908300000001,
+    100.494292,
+    99.03345800000001
+   ],
+   "median": 100.41154100000001,
+   "ci": [
+    99.03345800000001,
+    105.34275
+   ],
+   "cv": 0.024290257280216693,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "encrypted: load",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    324.19025,
+    334.01520800000003,
+    322.084708,
+    318.837584,
+    324.121417
+   ],
+   "median": 324.121417,
+   "ci": [
+    318.837584,
+    334.01520800000003
+   ],
+   "cv": 0.01746274331725895,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "encrypted: scan",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    10.258625,
+    10.311292,
+    9.834125,
+    10.216709,
+    10.251916999999999
+   ],
+   "median": 10.251916999999999,
+   "ci": [
+    9.834125,
+    10.311292
+   ],
+   "cv": 0.01899584809146707,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "encrypted: sort past work_mem",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    119.441541,
+    119.507292,
+    120.208375,
+    120.801584,
+    121.414042
+   ],
+   "median": 120.208375,
+   "ci": [
+    119.441541,
+    121.414042
+   ],
+   "cv": 0.007034287844658894,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

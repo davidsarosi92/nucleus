@@ -1,0 +1,5660 @@
+{
+ "method": 1,
+ "name": "clickbench",
+ "script": "bench/clickbench.py --nucleus ./target/release/nucleus --rows 1000000 --runs 5 --out bench/results/clickbench.json",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-16T13:44:36+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/nucleus-bench-q83t87c5",
+   "free_bytes": 36846784512,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   9.31591796875,
+   9.8310546875,
+   9.41162109375
+  ],
+  "systems": {
+   "nucleus (row)": {
+    "version": "0.1.0",
+    "settings": {
+     "server": true,
+     "sync": "ordered (the default: fsync at commit, the drive's cache not flushed)"
+    }
+   },
+   "nucleus (column)": {
+    "version": "0.1.0",
+    "settings": {
+     "server": true,
+     "sync": "ordered (the default: fsync at commit, the drive's cache not flushed)"
+    }
+   },
+   "postgresql": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "2048MB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "5",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "on"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "on",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "2GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "5",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "49626",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-qlkhiqk4",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true
+   }
+  },
+  "data": {
+   "hits-1000000.tsv": "42252392a38f43b6c14ec58df71127f40cd25b139cda0ac4070d3b0f09bac3e9"
+  },
+  "nucleus": {
+   "commit": "15d10437821bc2084c874fbbf6e219964ffb9ccd",
+   "dirty": true
+  },
+  "cold": "the server restarted before the query (its caches empty; the OS's page cache kept)",
+  "clickbench": "18e5485b36227b160d11f119477bad16bad754c7",
+  "load_after": [
+   8.18994140625,
+   9.26611328125,
+   9.2001953125
+  ]
+ },
+ "samples": [
+  {
+   "name": "Q0",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    104.122,
+    128.746,
+    123.327,
+    106.912,
+    148.048
+   ],
+   "median": 123.327,
+   "ci": [
+    104.122,
+    148.048
+   ],
+   "cv": 0.14593648200018547,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q0",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.17,
+    105.367,
+    132.84,
+    134.338,
+    125.449
+   ],
+   "median": 125.449,
+   "ci": [
+    105.367,
+    134.338
+   ],
+   "cv": 0.11058272339529088,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q0",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    6.627,
+    6.043,
+    7.728,
+    6.065,
+    10.104
+   ],
+   "median": 6.627,
+   "ci": [
+    6.043,
+    10.104
+   ],
+   "cv": 0.23288099546928456,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q0",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.448,
+    3.095,
+    3.558,
+    3.109,
+    4.363
+   ],
+   "median": 3.448,
+   "ci": [
+    3.095,
+    4.363
+   ],
+   "cv": 0.14693004302113014,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q0",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    141.954,
+    138.895,
+    139.692,
+    138.833,
+    154.693
+   ],
+   "median": 139.692,
+   "ci": [
+    138.833,
+    154.693
+   ],
+   "cv": 0.047336260535637005,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q0",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    27.445,
+    27.187,
+    27.245,
+    28.337,
+    28.952
+   ],
+   "median": 27.445,
+   "ci": [
+    27.187,
+    28.952
+   ],
+   "cv": 0.027944405664216805,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q1",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    139.551,
+    106.983,
+    112.475,
+    108.508,
+    110.686
+   ],
+   "median": 110.686,
+   "ci": [
+    106.983,
+    139.551
+   ],
+   "cv": 0.1169893038485398,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q1",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    114.216,
+    100.755,
+    138.803,
+    102.764,
+    102.508
+   ],
+   "median": 102.764,
+   "ci": [
+    100.755,
+    138.803
+   ],
+   "cv": 0.14316947083824544,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q1",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    7.356,
+    6.717,
+    8.372,
+    6.752,
+    6.743
+   ],
+   "median": 6.752,
+   "ci": [
+    6.717,
+    8.372
+   ],
+   "cv": 0.09935311551014026,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q1",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.788,
+    3.281,
+    3.692,
+    3.577,
+    3.375
+   ],
+   "median": 3.577,
+   "ci": [
+    3.281,
+    3.788
+   ],
+   "cv": 0.05992175974581321,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q1",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    168.982,
+    160.979,
+    157.764,
+    145.158,
+    154.075
+   ],
+   "median": 157.764,
+   "ci": [
+    145.158,
+    168.982
+   ],
+   "cv": 0.05575300137365263,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q1",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    62.395,
+    69.536,
+    59.462,
+    57.895,
+    72.081
+   ],
+   "median": 62.395,
+   "ci": [
+    57.895,
+    72.081
+   ],
+   "cv": 0.09716725345743904,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q2",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    104.907,
+    109.892,
+    123.141,
+    104.27,
+    101.89
+   ],
+   "median": 104.907,
+   "ci": [
+    101.89,
+    123.141
+   ],
+   "cv": 0.07828332021679194,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q2",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.856,
+    101.844,
+    109.638,
+    96.569,
+    97.826
+   ],
+   "median": 101.844,
+   "ci": [
+    96.569,
+    109.856
+   ],
+   "cv": 0.06139750155233883,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q2",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    7.636,
+    7.331,
+    8.838,
+    9.924,
+    7.538
+   ],
+   "median": 7.636,
+   "ci": [
+    7.331,
+    9.924
+   ],
+   "cv": 0.1337795054931212,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q2",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.607,
+    3.668,
+    3.958,
+    13.105,
+    3.801
+   ],
+   "median": 3.801,
+   "ci": [
+    3.607,
+    13.105
+   ],
+   "cv": 0.7431068755667153,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q2",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    185.078,
+    166.469,
+    161.239,
+    173.3,
+    172.883
+   ],
+   "median": 172.883,
+   "ci": [
+    161.239,
+    185.078
+   ],
+   "cv": 0.052038142789843714,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q2",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    68.667,
+    69.054,
+    65.521,
+    79.412,
+    65.76
+   ],
+   "median": 68.667,
+   "ci": [
+    65.521,
+    79.412
+   ],
+   "cv": 0.08143130636884906,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q3",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    98.884,
+    98.189,
+    110.622,
+    102.999,
+    108.014
+   ],
+   "median": 102.999,
+   "ci": [
+    98.189,
+    110.622
+   ],
+   "cv": 0.052922582027233024,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q3",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    94.541,
+    95.976,
+    101.842,
+    100.661,
+    98.888
+   ],
+   "median": 98.888,
+   "ci": [
+    94.541,
+    101.842
+   ],
+   "cv": 0.03131408878245067,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q3",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    7.115,
+    6.821,
+    7.401,
+    6.945,
+    6.765
+   ],
+   "median": 6.945,
+   "ci": [
+    6.765,
+    7.401
+   ],
+   "cv": 0.03664278275995328,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q3",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.504,
+    3.373,
+    3.493,
+    3.335,
+    3.356
+   ],
+   "median": 3.373,
+   "ci": [
+    3.335,
+    3.504
+   ],
+   "cv": 0.023450229535370185,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q3",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    138.574,
+    142.365,
+    154.566,
+    141.597,
+    145.79
+   ],
+   "median": 142.365,
+   "ci": [
+    138.574,
+    154.566
+   ],
+   "cv": 0.042505245410089335,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q3",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    53.388,
+    58.817,
+    63.882,
+    57.779,
+    54.481
+   ],
+   "median": 57.779,
+   "ci": [
+    53.388,
+    63.882
+   ],
+   "cv": 0.0717168868751806,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q4",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    110.044,
+    113.237,
+    112.94,
+    127.895,
+    114.683
+   ],
+   "median": 113.237,
+   "ci": [
+    110.044,
+    127.895
+   ],
+   "cv": 0.06037876525060574,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q4",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    102.794,
+    104.287,
+    98.209,
+    108.733,
+    102.143
+   ],
+   "median": 102.794,
+   "ci": [
+    98.209,
+    108.733
+   ],
+   "cv": 0.03688063431023954,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q4",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    17.427,
+    17.637,
+    17.493,
+    18.143,
+    17.407
+   ],
+   "median": 17.493,
+   "ci": [
+    17.407,
+    18.143
+   ],
+   "cv": 0.017319083634487017,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q4",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    14.297,
+    13.824,
+    13.59,
+    14.182,
+    13.875
+   ],
+   "median": 13.875,
+   "ci": [
+    13.59,
+    14.297
+   ],
+   "cv": 0.020436438184300524,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q4",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    270.317,
+    264.244,
+    256.913,
+    253.683,
+    257.923
+   ],
+   "median": 257.923,
+   "ci": [
+    253.683,
+    270.317
+   ],
+   "cv": 0.025474076612414808,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q4",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    272.102,
+    265.441,
+    267.222,
+    264.465,
+    273.238
+   ],
+   "median": 267.222,
+   "ci": [
+    264.465,
+    273.238
+   ],
+   "cv": 0.014745243267768283,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    110.845,
+    107.925,
+    116.956,
+    110.355,
+    108.748
+   ],
+   "median": 110.355,
+   "ci": [
+    107.925,
+    116.956
+   ],
+   "cv": 0.031999855492431804,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    99.209,
+    97.04,
+    98.432,
+    103.942,
+    103.519
+   ],
+   "median": 99.209,
+   "ci": [
+    97.04,
+    103.942
+   ],
+   "cv": 0.031032341500341162,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    16.977,
+    16.511,
+    16.853,
+    16.589,
+    16.29
+   ],
+   "median": 16.589,
+   "ci": [
+    16.29,
+    16.977
+   ],
+   "cv": 0.016470500074348526,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    12.471,
+    12.449,
+    12.565,
+    13.308,
+    12.185
+   ],
+   "median": 12.471,
+   "ci": [
+    12.185,
+    13.308
+   ],
+   "cv": 0.03354426293483733,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    338.221,
+    327.17,
+    337.441,
+    328.884,
+    330.432
+   ],
+   "median": 330.432,
+   "ci": [
+    327.17,
+    338.221
+   ],
+   "cv": 0.015255792901596768,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q5",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    286.962,
+    279.949,
+    290.155,
+    265.814,
+    291.614
+   ],
+   "median": 286.962,
+   "ci": [
+    265.814,
+    291.614
+   ],
+   "cv": 0.037313358029234106,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    98.734,
+    94.012,
+    96.945,
+    113.055,
+    105.944
+   ],
+   "median": 98.734,
+   "ci": [
+    94.012,
+    113.055
+   ],
+   "cv": 0.07573131820288347,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    101.34,
+    91.54,
+    99.536,
+    118.308,
+    103.934
+   ],
+   "median": 101.34,
+   "ci": [
+    91.54,
+    118.308
+   ],
+   "cv": 0.09485009757282965,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    9.985,
+    9.536,
+    10.562,
+    10.752,
+    9.821
+   ],
+   "median": 9.985,
+   "ci": [
+    9.536,
+    10.752
+   ],
+   "cv": 0.05039860771269255,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.516,
+    6.737,
+    7.161,
+    7.289,
+    6.694
+   ],
+   "median": 6.737,
+   "ci": [
+    6.516,
+    7.289
+   ],
+   "cv": 0.04786904961959762,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    144.087,
+    139.332,
+    141.585,
+    157.675,
+    138.717
+   ],
+   "median": 141.585,
+   "ci": [
+    138.717,
+    157.675
+   ],
+   "cv": 0.053927944588472415,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q6",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    54.752,
+    62.767,
+    55.172,
+    58.437,
+    55.958
+   ],
+   "median": 55.958,
+   "ci": [
+    54.752,
+    62.767
+   ],
+   "cv": 0.05772016062264376,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    99.67,
+    96.969,
+    103.256,
+    102.006,
+    106.212
+   ],
+   "median": 102.006,
+   "ci": [
+    96.969,
+    106.212
+   ],
+   "cv": 0.03456262040943638,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    110.049,
+    96.677,
+    94.774,
+    100.008,
+    94.026
+   ],
+   "median": 96.677,
+   "ci": [
+    94.026,
+    110.049
+   ],
+   "cv": 0.06597960332913336,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    6.744,
+    6.742,
+    6.676,
+    7.019,
+    6.398
+   ],
+   "median": 6.742,
+   "ci": [
+    6.398,
+    7.019
+   ],
+   "cv": 0.03296038750243963,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.68,
+    3.303,
+    3.63,
+    3.493,
+    3.494
+   ],
+   "median": 3.494,
+   "ci": [
+    3.303,
+    3.68
+   ],
+   "cv": 0.04170286177552562,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    137.58,
+    144.147,
+    136.351,
+    144.403,
+    135.261
+   ],
+   "median": 137.58,
+   "ci": [
+    135.261,
+    144.403
+   ],
+   "cv": 0.03148016443501264,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q7",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    57.323,
+    69.434,
+    58.96,
+    57.395,
+    57.055
+   ],
+   "median": 57.395,
+   "ci": [
+    57.055,
+    69.434
+   ],
+   "cv": 0.08841835031014984,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    133.08,
+    125.586,
+    123.23,
+    115.984,
+    115.539
+   ],
+   "median": 123.23,
+   "ci": [
+    115.539,
+    133.08
+   ],
+   "cv": 0.05944356846338935,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    107.231,
+    107.952,
+    111.867,
+    105.165,
+    104.236
+   ],
+   "median": 107.231,
+   "ci": [
+    104.236,
+    111.867
+   ],
+   "cv": 0.027662151909746864,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    26.69,
+    28.746,
+    26.462,
+    26.536,
+    26.65
+   ],
+   "median": 26.65,
+   "ci": [
+    26.462,
+    28.746
+   ],
+   "cv": 0.03593621972890745,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q8",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    22.581,
+    22.895,
+    22.696,
+    22.072,
+    22.883
+   ],
+   "median": 22.696,
+   "ci": [
+    22.072,
+    22.895
+   ],
+   "cv": 0.014861499870585387,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q8",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    387.919,
+    399.743,
+    387.657,
+    393.258,
+    386.254
+   ],
+   "median": 387.919,
+   "ci": [
+    386.254,
+    399.743
+   ],
+   "cv": 0.014282644899053504,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q8",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    412.932,
+    397.729,
+    401.157,
+    391.969,
+    416.373
+   ],
+   "median": 401.157,
+   "ci": [
+    391.969,
+    416.373
+   ],
+   "cv": 0.025512837510005337,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    169.994,
+    202.233,
+    165.405,
+    166.39,
+    165.355
+   ],
+   "median": 166.39,
+   "ci": [
+    165.355,
+    202.233
+   ],
+   "cv": 0.0918217739069068,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    161.883,
+    162.312,
+    158.61,
+    157.155,
+    159.575
+   ],
+   "median": 159.575,
+   "ci": [
+    157.155,
+    162.312
+   ],
+   "cv": 0.013649028492578064,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    75.029,
+    77.176,
+    76.969,
+    76.956,
+    75.898
+   ],
+   "median": 76.956,
+   "ci": [
+    75.029,
+    77.176
+   ],
+   "cv": 0.012007098427016112,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    68.209,
+    68.023,
+    72.704,
+    70.182,
+    70.731
+   ],
+   "median": 70.182,
+   "ci": [
+    68.023,
+    72.704
+   ],
+   "cv": 0.027667572977883113,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    471.704,
+    468.729,
+    465.464,
+    466.202,
+    468.486
+   ],
+   "median": 468.486,
+   "ci": [
+    465.464,
+    471.704
+   ],
+   "cv": 0.005241674573545201,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q9",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    447.913,
+    454.988,
+    444.312,
+    417.228,
+    417.68
+   ],
+   "median": 444.312,
+   "ci": [
+    417.228,
+    454.988
+   ],
+   "cv": 0.040645833677181324,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    106.397,
+    101.048,
+    99.725,
+    99.702,
+    116.77
+   ],
+   "median": 101.048,
+   "ci": [
+    99.702,
+    116.77
+   ],
+   "cv": 0.06945324143973018,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    97.092,
+    109.312,
+    97.49,
+    94.006,
+    91.868
+   ],
+   "median": 97.092,
+   "ci": [
+    91.868,
+    109.312
+   ],
+   "cv": 0.06897416245922842,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    9.808,
+    9.832,
+    10.312,
+    9.888,
+    9.52
+   ],
+   "median": 9.832,
+   "ci": [
+    9.52,
+    10.312
+   ],
+   "cv": 0.02880530403107976,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    5.743,
+    6.005,
+    5.984,
+    5.77,
+    5.784
+   ],
+   "median": 5.784,
+   "ci": [
+    5.743,
+    6.005
+   ],
+   "cv": 0.02158347821647405,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    144.968,
+    142.456,
+    143.734,
+    138.804,
+    136.48
+   ],
+   "median": 142.456,
+   "ci": [
+    136.48,
+    144.968
+   ],
+   "cv": 0.02506769306355421,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    59.542,
+    59.569,
+    70.915,
+    59.259,
+    59.325
+   ],
+   "median": 59.542,
+   "ci": [
+    59.259,
+    70.915
+   ],
+   "cv": 0.08328948536625001,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    101.514,
+    97.451,
+    109.223,
+    104.872,
+    95.657
+   ],
+   "median": 101.514,
+   "ci": [
+    95.657,
+    109.223
+   ],
+   "cv": 0.05411430035448215,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    107.073,
+    93.716,
+    106.091,
+    93.855,
+    132.25
+   ],
+   "median": 106.091,
+   "ci": [
+    93.716,
+    132.25
+   ],
+   "cv": 0.14734923936796027,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    12.538,
+    11.105,
+    10.526,
+    10.436,
+    12.658
+   ],
+   "median": 11.105,
+   "ci": [
+    10.436,
+    12.658
+   ],
+   "cv": 0.09408289459883519,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q11",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.258,
+    5.934,
+    6.274,
+    6.694,
+    6.635
+   ],
+   "median": 6.635,
+   "ci": [
+    5.934,
+    7.258
+   ],
+   "cv": 0.07563619036766066,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q11",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    135.444,
+    138.117,
+    138.629,
+    138.654,
+    143.351
+   ],
+   "median": 138.629,
+   "ci": [
+    135.444,
+    143.351
+   ],
+   "cv": 0.02052540779029472,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q11",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    70.442,
+    61.264,
+    60.138,
+    60.357,
+    64.287
+   ],
+   "median": 61.264,
+   "ci": [
+    60.138,
+    70.442
+   ],
+   "cv": 0.06831185638935836,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    105.771,
+    104.831,
+    108.669,
+    105.428,
+    108.721
+   ],
+   "median": 105.771,
+   "ci": [
+    104.831,
+    108.721
+   ],
+   "cv": 0.017494978637973512,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    97.245,
+    98.358,
+    97.706,
+    99.164,
+    97.052
+   ],
+   "median": 97.706,
+   "ci": [
+    97.052,
+    99.164
+   ],
+   "cv": 0.008835390442278539,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    15.291,
+    15.552,
+    15.465,
+    14.668,
+    17.891
+   ],
+   "median": 15.465,
+   "ci": [
+    14.668,
+    17.891
+   ],
+   "cv": 0.07818128096415337,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    11.392,
+    11.316,
+    11.241,
+    11.338,
+    13.403
+   ],
+   "median": 11.338,
+   "ci": [
+    11.241,
+    13.403
+   ],
+   "cv": 0.0794292328212918,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    154.94,
+    148.97,
+    147.676,
+    144.874,
+    148.905
+   ],
+   "median": 148.905,
+   "ci": [
+    144.874,
+    154.94
+   ],
+   "cv": 0.024657195507750862,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q12",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    66.577,
+    66.261,
+    65.754,
+    65.711,
+    65.953
+   ],
+   "median": 65.953,
+   "ci": [
+    65.711,
+    66.577
+   ],
+   "cv": 0.005532694384444612,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    119.622,
+    126.676,
+    116.132,
+    115.283,
+    144.922
+   ],
+   "median": 119.622,
+   "ci": [
+    115.283,
+    144.922
+   ],
+   "cv": 0.09839770604419941,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    115.105,
+    106.982,
+    105.941,
+    106.092,
+    111.462
+   ],
+   "median": 106.982,
+   "ci": [
+    105.941,
+    115.105
+   ],
+   "cv": 0.036986266579333724,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    26.317,
+    27.082,
+    26.419,
+    26.883,
+    27.507
+   ],
+   "median": 26.883,
+   "ci": [
+    26.317,
+    27.507
+   ],
+   "cv": 0.018213943989309714,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    21.506,
+    20.79,
+    20.723,
+    20.635,
+    24.728
+   ],
+   "median": 20.79,
+   "ci": [
+    20.635,
+    24.728
+   ],
+   "cv": 0.08030506209313161,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    150.94,
+    153.006,
+    154.821,
+    150.626,
+    152.088
+   ],
+   "median": 152.088,
+   "ci": [
+    150.626,
+    154.821
+   ],
+   "cv": 0.011157931105537843,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q13",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    74.183,
+    74.761,
+    77.883,
+    76.029,
+    74.745
+   ],
+   "median": 74.761,
+   "ci": [
+    74.183,
+    77.883
+   ],
+   "cv": 0.019648253292904594,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    118.95,
+    119.553,
+    107.722,
+    108.018,
+    124.937
+   ],
+   "median": 118.95,
+   "ci": [
+    107.722,
+    124.937
+   ],
+   "cv": 0.06593002928054612,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    108.74,
+    105.138,
+    96.182,
+    120.062,
+    98.912
+   ],
+   "median": 105.138,
+   "ci": [
+    96.182,
+    120.062
+   ],
+   "cv": 0.08871498895401866,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    17.31,
+    17.079,
+    16.812,
+    16.595,
+    16.854
+   ],
+   "median": 16.854,
+   "ci": [
+    16.595,
+    17.31
+   ],
+   "cv": 0.016136306227761743,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    12.099,
+    11.985,
+    11.912,
+    11.913,
+    11.842
+   ],
+   "median": 11.913,
+   "ci": [
+    11.842,
+    12.099
+   ],
+   "cv": 0.008145738754307805,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    145.304,
+    148.586,
+    144.276,
+    151.582,
+    141.949
+   ],
+   "median": 145.304,
+   "ci": [
+    141.949,
+    151.582
+   ],
+   "cv": 0.02582669215373011,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q14",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    66.374,
+    67.088,
+    72.479,
+    66.796,
+    65.209
+   ],
+   "median": 66.796,
+   "ci": [
+    65.209,
+    72.479
+   ],
+   "cv": 0.04180321341935279,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    116.178,
+    117.319,
+    135.971,
+    112.026,
+    111.435
+   ],
+   "median": 116.178,
+   "ci": [
+    111.435,
+    135.971
+   ],
+   "cv": 0.08472803425218617,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    107.417,
+    107.026,
+    109.765,
+    109.308,
+    108.447
+   ],
+   "median": 108.447,
+   "ci": [
+    107.026,
+    109.765
+   ],
+   "cv": 0.010861097805591259,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    23.01,
+    22.713,
+    22.86,
+    22.184,
+    23.129
+   ],
+   "median": 22.86,
+   "ci": [
+    22.184,
+    23.129
+   ],
+   "cv": 0.016141764332824937,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    17.528,
+    17.719,
+    18.086,
+    18.074,
+    18.163
+   ],
+   "median": 18.074,
+   "ci": [
+    17.528,
+    18.163
+   ],
+   "cv": 0.015394348793726118,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    254.566,
+    270.599,
+    268.09,
+    258.483,
+    253.36
+   ],
+   "median": 258.483,
+   "ci": [
+    253.36,
+    270.599
+   ],
+   "cv": 0.03019724123356597,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q15",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    271.436,
+    277.79,
+    273.009,
+    277.501,
+    263.873
+   ],
+   "median": 273.009,
+   "ci": [
+    263.873,
+    277.79
+   ],
+   "cv": 0.02078789743497312,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    125.477,
+    133.844,
+    137.887,
+    132.715,
+    129.387
+   ],
+   "median": 132.715,
+   "ci": [
+    125.477,
+    137.887
+   ],
+   "cv": 0.03554039392664502,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    126.375,
+    129.457,
+    129.568,
+    136.607,
+    123.687
+   ],
+   "median": 129.457,
+   "ci": [
+    123.687,
+    136.607
+   ],
+   "cv": 0.037422571616516735,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    37.451,
+    54.574,
+    34.43,
+    40.457,
+    34.247
+   ],
+   "median": 37.451,
+   "ci": [
+    34.247,
+    54.574
+   ],
+   "cv": 0.20905656739808753,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q16",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    30.069,
+    33.099,
+    28.773,
+    34.267,
+    28.195
+   ],
+   "median": 30.069,
+   "ci": [
+    28.195,
+    34.267
+   ],
+   "cv": 0.08674436786424514,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q16",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    394.087,
+    357.11,
+    359.424,
+    340.3,
+    361.736
+   ],
+   "median": 359.424,
+   "ci": [
+    340.3,
+    394.087
+   ],
+   "cv": 0.05394155013942019,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q16",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    341.728,
+    274.905,
+    300.585,
+    287.351,
+    263.675
+   ],
+   "median": 287.351,
+   "ci": [
+    263.675,
+    341.728
+   ],
+   "cv": 0.10285777301866614,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    129.401,
+    118.37,
+    149.922,
+    115.398,
+    117.065
+   ],
+   "median": 118.37,
+   "ci": [
+    115.398,
+    149.922
+   ],
+   "cv": 0.11459012961276886,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.991,
+    108.808,
+    124.581,
+    111.116,
+    105.781
+   ],
+   "median": 109.991,
+   "ci": [
+    105.781,
+    124.581
+   ],
+   "cv": 0.06496096486766277,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    38.234,
+    27.973,
+    28.313,
+    27.791,
+    27.756
+   ],
+   "median": 27.973,
+   "ci": [
+    27.756,
+    38.234
+   ],
+   "cv": 0.1532900186123803,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q17",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    21.937,
+    21.958,
+    22.133,
+    21.655,
+    21.748
+   ],
+   "median": 21.937,
+   "ci": [
+    21.655,
+    22.133
+   ],
+   "cv": 0.008584502741883885,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q17",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    150.871,
+    152.125,
+    151.125,
+    151.452,
+    151.236
+   ],
+   "median": 151.236,
+   "ci": [
+    150.871,
+    152.125
+   ],
+   "cv": 0.003139731526362403,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q17",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    76.459,
+    77.245,
+    76.077,
+    76.73,
+    74.857
+   ],
+   "median": 76.459,
+   "ci": [
+    74.857,
+    77.245
+   ],
+   "cv": 0.011784501737763456,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    233.229,
+    241.87,
+    221.817,
+    214.797,
+    239.329
+   ],
+   "median": 233.229,
+   "ci": [
+    214.797,
+    241.87
+   ],
+   "cv": 0.050294910330599275,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    208.946,
+    214.398,
+    207.285,
+    209.026,
+    215.516
+   ],
+   "median": 209.026,
+   "ci": [
+    207.285,
+    215.516
+   ],
+   "cv": 0.017386676905431598,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    138.133,
+    136.801,
+    141.419,
+    146.516,
+    135.933
+   ],
+   "median": 138.133,
+   "ci": [
+    135.933,
+    146.516
+   ],
+   "cv": 0.030867562707264536,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    124.599,
+    127.366,
+    126.848,
+    126.138,
+    128.436
+   ],
+   "median": 126.848,
+   "ci": [
+    124.599,
+    128.436
+   ],
+   "cv": 0.011307165402037545,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    527.287,
+    520.749,
+    553.656,
+    528.019,
+    512.889
+   ],
+   "median": 527.287,
+   "ci": [
+    512.889,
+    553.656
+   ],
+   "cv": 0.028978834495614336,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q18",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    466.011,
+    479.691,
+    467.203,
+    485.905,
+    442.879
+   ],
+   "median": 467.203,
+   "ci": [
+    442.879,
+    485.905
+   ],
+   "cv": 0.03528519168935408,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    105.56,
+    109.017,
+    102.152,
+    129.251,
+    105.694
+   ],
+   "median": 105.694,
+   "ci": [
+    102.152,
+    129.251
+   ],
+   "cv": 0.09833321615889946,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.946,
+    102.827,
+    99.945,
+    112.576,
+    101.981
+   ],
+   "median": 102.827,
+   "ci": [
+    99.945,
+    112.576
+   ],
+   "cv": 0.05198503406185828,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    4.487,
+    4.516,
+    4.172,
+    4.28,
+    4.456
+   ],
+   "median": 4.456,
+   "ci": [
+    4.172,
+    4.516
+   ],
+   "cv": 0.03403119109332677,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.122,
+    3.237,
+    3.061,
+    3.108,
+    3.326
+   ],
+   "median": 3.122,
+   "ci": [
+    3.061,
+    3.326
+   ],
+   "cv": 0.03413183679591515,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    140.585,
+    141.006,
+    150.689,
+    139.743,
+    147.208
+   ],
+   "median": 141.006,
+   "ci": [
+    139.743,
+    150.689
+   ],
+   "cv": 0.03364015699963091,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q19",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    52.819,
+    53.132,
+    52.864,
+    52.74,
+    53.08
+   ],
+   "median": 52.864,
+   "ci": [
+    52.74,
+    53.132
+   ],
+   "cv": 0.0032180226825486045,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    114.533,
+    109.782,
+    108.902,
+    122.065,
+    108.677
+   ],
+   "median": 109.782,
+   "ci": [
+    108.677,
+    122.065
+   ],
+   "cv": 0.050571551632118336,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    107.733,
+    104.574,
+    120.661,
+    108.583,
+    109.622
+   ],
+   "median": 108.583,
+   "ci": [
+    104.574,
+    120.661
+   ],
+   "cv": 0.05557271582717374,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    26.75,
+    26.396,
+    28.372,
+    32.219,
+    33.132
+   ],
+   "median": 28.372,
+   "ci": [
+    26.396,
+    33.132
+   ],
+   "cv": 0.10626735816166065,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q20",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.307,
+    7.269,
+    7.789,
+    9.543,
+    10.736
+   ],
+   "median": 7.789,
+   "ci": [
+    7.269,
+    10.736
+   ],
+   "cv": 0.1809556755954007,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q20",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    148.93,
+    145.642,
+    142.501,
+    139.7,
+    170.69
+   ],
+   "median": 145.642,
+   "ci": [
+    139.7,
+    170.69
+   ],
+   "cv": 0.08255595309502452,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q20",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    66.979,
+    67.911,
+    67.123,
+    74.306,
+    86.069
+   ],
+   "median": 67.911,
+   "ci": [
+    66.979,
+    86.069
+   ],
+   "cv": 0.1129003550889039,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    111.279,
+    164.726,
+    133.446,
+    130.242,
+    113.514
+   ],
+   "median": 130.242,
+   "ci": [
+    111.279,
+    164.726
+   ],
+   "cv": 0.16408396449885113,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    113.461,
+    197.584,
+    116.015,
+    126.441,
+    100.774
+   ],
+   "median": 116.015,
+   "ci": [
+    100.774,
+    197.584
+   ],
+   "cv": 0.2934955367449995,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    32.938,
+    30.592,
+    31.875,
+    34.881,
+    28.73
+   ],
+   "median": 31.875,
+   "ci": [
+    28.73,
+    34.881
+   ],
+   "cv": 0.07319850424961527,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q21",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    8.867,
+    10.13,
+    8.531,
+    11.506,
+    7.526
+   ],
+   "median": 8.867,
+   "ci": [
+    7.526,
+    11.506
+   ],
+   "cv": 0.1653269372378842,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q21",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    146.64,
+    143.72,
+    148.325,
+    155.064,
+    141.138
+   ],
+   "median": 146.64,
+   "ci": [
+    141.138,
+    155.064
+   ],
+   "cv": 0.036007328238927175,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q21",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    71.085,
+    97.742,
+    70.02,
+    77.843,
+    66.229
+   ],
+   "median": 71.085,
+   "ci": [
+    66.229,
+    97.742
+   ],
+   "cv": 0.163845094763452,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    120.31,
+    112.482,
+    110.454,
+    128.873,
+    118.844
+   ],
+   "median": 118.844,
+   "ci": [
+    110.454,
+    128.873
+   ],
+   "cv": 0.06151907265447672,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    106.757,
+    105.427,
+    101.764,
+    107.006,
+    102.648
+   ],
+   "median": 105.427,
+   "ci": [
+    101.764,
+    107.006
+   ],
+   "cv": 0.022851494205608256,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    39.312,
+    38.432,
+    39.669,
+    40.692,
+    38.656
+   ],
+   "median": 39.312,
+   "ci": [
+    38.432,
+    40.692
+   ],
+   "cv": 0.022829778915064523,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q22",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.9,
+    7.778,
+    7.789,
+    7.841,
+    7.883
+   ],
+   "median": 7.841,
+   "ci": [
+    7.778,
+    7.9
+   ],
+   "cv": 0.0069524832097718255,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q22",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    147.413,
+    146.026,
+    156.063,
+    200.183,
+    145.191
+   ],
+   "median": 147.413,
+   "ci": [
+    145.191,
+    200.183
+   ],
+   "cv": 0.14745108026790893,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q22",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    71.861,
+    70.421,
+    73.974,
+    76.035,
+    77.262
+   ],
+   "median": 73.974,
+   "ci": [
+    70.421,
+    77.262
+   ],
+   "cv": 0.038344170272258914,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    174.032,
+    170.154,
+    183.341,
+    212.265,
+    178.588
+   ],
+   "median": 178.588,
+   "ci": [
+    170.154,
+    212.265
+   ],
+   "cv": 0.09106845548845419,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    198.558,
+    155.621,
+    165.221,
+    179.513,
+    171.559
+   ],
+   "median": 171.559,
+   "ci": [
+    155.621,
+    198.558
+   ],
+   "cv": 0.09325223742008819,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    132.884,
+    148.734,
+    142.757,
+    133.83,
+    143.933
+   ],
+   "median": 142.757,
+   "ci": [
+    132.884,
+    148.734
+   ],
+   "cv": 0.048708639202905024,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q23",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    119.101,
+    120.777,
+    118.663,
+    118.023,
+    125.486
+   ],
+   "median": 119.101,
+   "ci": [
+    118.023,
+    125.486
+   ],
+   "cv": 0.025040420886862823,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q23",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    143.454,
+    139.58,
+    146.293,
+    145.617,
+    142.677
+   ],
+   "median": 143.454,
+   "ci": [
+    139.58,
+    146.293
+   ],
+   "cv": 0.018541006894403786,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q23",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    66.448,
+    65.994,
+    67.692,
+    66.26,
+    66.151
+   ],
+   "median": 66.26,
+   "ci": [
+    65.994,
+    67.692
+   ],
+   "cv": 0.010249025005469448,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    96.13,
+    97.631,
+    98.612,
+    100.363,
+    98.373
+   ],
+   "median": 98.373,
+   "ci": [
+    96.13,
+    100.363
+   ],
+   "cv": 0.015677252372069427,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    92.602,
+    97.32,
+    95.885,
+    92.265,
+    92.914
+   ],
+   "median": 92.914,
+   "ci": [
+    92.265,
+    97.32
+   ],
+   "cv": 0.02404782616019454,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    12.864,
+    13.23,
+    13.122,
+    13.474,
+    11.442
+   ],
+   "median": 13.122,
+   "ci": [
+    11.442,
+    13.474
+   ],
+   "cv": 0.06270710482087534,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.028,
+    6.393,
+    5.874,
+    6.185,
+    5.661
+   ],
+   "median": 6.028,
+   "ci": [
+    5.661,
+    6.393
+   ],
+   "cv": 0.046646320601546234,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    138.963,
+    138.045,
+    143.63,
+    137.509,
+    137.122
+   ],
+   "median": 138.045,
+   "ci": [
+    137.122,
+    143.63
+   ],
+   "cv": 0.019055942784003885,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q24",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    71.397,
+    58.603,
+    59.232,
+    58.989,
+    59.0
+   ],
+   "median": 59.0,
+   "ci": [
+    58.603,
+    71.397
+   ],
+   "cv": 0.09062468714223923,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    113.308,
+    101.136,
+    114.741,
+    109.072,
+    111.982
+   ],
+   "median": 111.982,
+   "ci": [
+    101.136,
+    114.741
+   ],
+   "cv": 0.04909661339889401,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    97.228,
+    96.315,
+    107.286,
+    113.056,
+    99.873
+   ],
+   "median": 99.873,
+   "ci": [
+    96.315,
+    113.056
+   ],
+   "cv": 0.07000559607608546,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    13.941,
+    13.509,
+    13.869,
+    13.902,
+    11.774
+   ],
+   "median": 13.869,
+   "ci": [
+    11.774,
+    13.941
+   ],
+   "cv": 0.06901379971028526,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q25",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.998,
+    6.776,
+    7.255,
+    6.974,
+    7.073
+   ],
+   "median": 6.998,
+   "ci": [
+    6.776,
+    7.255
+   ],
+   "cv": 0.024695607357771446,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q25",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    160.669,
+    142.651,
+    141.585,
+    143.047,
+    140.834
+   ],
+   "median": 142.651,
+   "ci": [
+    140.834,
+    160.669
+   ],
+   "cv": 0.05750341079539289,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q25",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    60.359,
+    59.032,
+    59.772,
+    59.779,
+    59.181
+   ],
+   "median": 59.772,
+   "ci": [
+    59.032,
+    60.359
+   ],
+   "cv": 0.00892552239165488,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    96.278,
+    106.495,
+    103.62,
+    98.824,
+    99.116
+   ],
+   "median": 99.116,
+   "ci": [
+    96.278,
+    106.495
+   ],
+   "cv": 0.04074199140625992,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    96.013,
+    111.77,
+    100.587,
+    104.413,
+    93.634
+   ],
+   "median": 100.587,
+   "ci": [
+    93.634,
+    111.77
+   ],
+   "cv": 0.07094672153237419,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    15.387,
+    14.101,
+    15.87,
+    14.372,
+    14.008
+   ],
+   "median": 14.372,
+   "ci": [
+    14.008,
+    15.87
+   ],
+   "cv": 0.05647596395516546,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q26",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.695,
+    7.614,
+    7.393,
+    7.312,
+    7.53
+   ],
+   "median": 7.53,
+   "ci": [
+    7.312,
+    7.695
+   ],
+   "cv": 0.020880236827562782,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q26",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    137.81,
+    139.303,
+    140.456,
+    137.472,
+    134.821
+   ],
+   "median": 137.81,
+   "ci": [
+    134.821,
+    140.456
+   ],
+   "cv": 0.015437555936920755,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q26",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    60.587,
+    58.823,
+    58.942,
+    58.673,
+    58.523
+   ],
+   "median": 58.823,
+   "ci": [
+    58.523,
+    60.587
+   ],
+   "cv": 0.014224123573970826,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    128.048,
+    122.144,
+    132.587,
+    129.988,
+    130.518
+   ],
+   "median": 129.988,
+   "ci": [
+    122.144,
+    132.587
+   ],
+   "cv": 0.030961376340596897,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    119.551,
+    118.469,
+    122.502,
+    119.805,
+    129.886
+   ],
+   "median": 119.805,
+   "ci": [
+    118.469,
+    129.886
+   ],
+   "cv": 0.037930473823457496,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    52.689,
+    52.756,
+    52.961,
+    57.684,
+    56.203
+   ],
+   "median": 52.961,
+   "ci": [
+    52.689,
+    57.684
+   ],
+   "cv": 0.04278841269796412,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    35.588,
+    36.064,
+    36.464,
+    40.301,
+    38.65
+   ],
+   "median": 36.464,
+   "ci": [
+    35.588,
+    40.301
+   ],
+   "cv": 0.0533258860227425,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    152.685,
+    147.259,
+    146.707,
+    146.502,
+    170.855
+   ],
+   "median": 147.259,
+   "ci": [
+    146.502,
+    170.855
+   ],
+   "cv": 0.06812881393500395,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q27",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    81.082,
+    77.964,
+    77.543,
+    79.864,
+    77.844
+   ],
+   "median": 77.964,
+   "ci": [
+    77.543,
+    81.082
+   ],
+   "cv": 0.019557697244639013,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    301.512,
+    294.848,
+    298.972,
+    303.406,
+    336.56
+   ],
+   "median": 301.512,
+   "ci": [
+    294.848,
+    336.56
+   ],
+   "cv": 0.05471179551528513,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    289.55,
+    299.105,
+    296.896,
+    350.221,
+    297.811
+   ],
+   "median": 297.811,
+   "ci": [
+    289.55,
+    350.221
+   ],
+   "cv": 0.08021054962895106,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    235.454,
+    234.886,
+    234.871,
+    250.644,
+    238.99
+   ],
+   "median": 235.454,
+   "ci": [
+    234.871,
+    250.644
+   ],
+   "cv": 0.028236714015697675,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    232.784,
+    217.665,
+    273.374,
+    243.708,
+    231.893
+   ],
+   "median": 232.784,
+   "ci": [
+    217.665,
+    273.374
+   ],
+   "cv": 0.08704815647481268,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    636.976,
+    642.878,
+    672.087,
+    667.615,
+    646.28
+   ],
+   "median": 646.28,
+   "ci": [
+    636.976,
+    672.087
+   ],
+   "cv": 0.023990284805257934,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q28",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    633.933,
+    645.27,
+    608.923,
+    626.685,
+    612.308
+   ],
+   "median": 626.685,
+   "ci": [
+    608.923,
+    645.27
+   ],
+   "cv": 0.0241453410398934,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    310.319,
+    286.894,
+    298.433,
+    306.307,
+    302.808
+   ],
+   "median": 302.808,
+   "ci": [
+    286.894,
+    310.319
+   ],
+   "cv": 0.029897427490006838,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    289.443,
+    285.241,
+    290.087,
+    289.097,
+    294.84
+   ],
+   "median": 289.443,
+   "ci": [
+    285.241,
+    294.84
+   ],
+   "cv": 0.011814647843510807,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    216.315,
+    221.118,
+    254.91,
+    217.913,
+    211.882
+   ],
+   "median": 217.913,
+   "ci": [
+    211.882,
+    254.91
+   ],
+   "cv": 0.07736190452385218,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    246.326,
+    217.855,
+    220.35,
+    220.225,
+    219.202
+   ],
+   "median": 220.225,
+   "ci": [
+    217.855,
+    246.326
+   ],
+   "cv": 0.05373711967769813,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    182.654,
+    184.632,
+    205.355,
+    183.595,
+    190.733
+   ],
+   "median": 184.632,
+   "ci": [
+    182.654,
+    205.355
+   ],
+   "cv": 0.049970647374638716,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q29",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    127.817,
+    128.802,
+    128.328,
+    127.519,
+    156.837
+   ],
+   "median": 128.328,
+   "ci": [
+    127.519,
+    156.837
+   ],
+   "cv": 0.09602191035173482,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    110.717,
+    117.601,
+    109.872,
+    115.461,
+    140.674
+   ],
+   "median": 115.461,
+   "ci": [
+    109.872,
+    140.674
+   ],
+   "cv": 0.10608948455654577,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.29,
+    106.016,
+    112.755,
+    104.215,
+    142.615
+   ],
+   "median": 109.29,
+   "ci": [
+    104.215,
+    142.615
+   ],
+   "cv": 0.1373277682869937,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    21.575,
+    21.651,
+    21.455,
+    22.475,
+    22.679
+   ],
+   "median": 21.651,
+   "ci": [
+    21.455,
+    22.679
+   ],
+   "cv": 0.025758360171565135,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q30",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    15.509,
+    14.977,
+    15.479,
+    15.45,
+    15.835
+   ],
+   "median": 15.479,
+   "ci": [
+    14.977,
+    15.835
+   ],
+   "cv": 0.019851566361518986,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q30",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    142.397,
+    150.338,
+    149.797,
+    147.952,
+    185.294
+   ],
+   "median": 149.797,
+   "ci": [
+    142.397,
+    185.294
+   ],
+   "cv": 0.11046045689758413,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "Q30",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    64.011,
+    64.307,
+    69.078,
+    63.397,
+    69.397
+   ],
+   "median": 64.307,
+   "ci": [
+    63.397,
+    69.397
+   ],
+   "cv": 0.04453916598868649,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q31",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    134.224,
+    131.473,
+    130.804,
+    126.963,
+    144.493
+   ],
+   "median": 131.473,
+   "ci": [
+    126.963,
+    144.493
+   ],
+   "cv": 0.04957392426048643,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q31",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    119.014,
+    116.326,
+    117.098,
+    134.027,
+    116.908
+   ],
+   "median": 117.098,
+   "ci": [
+    116.326,
+    134.027
+   ],
+   "cv": 0.062417126399481555,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q31",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    35.287,
+    36.425,
+    35.338,
+    34.641,
+    37.62
+   ],
+   "median": 35.338,
+   "ci": [
+    34.641,
+    37.62
+   ],
+   "cv": 0.03270811475634983,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q31",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    28.573,
+    28.75,
+    28.665,
+    29.096,
+    27.883
+   ],
+   "median": 28.665,
+   "ci": [
+    27.883,
+    29.096
+   ],
+   "cv": 0.015516211595859749,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q31",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    153.672,
+    174.763,
+    161.874,
+    159.063,
+    151.175
+   ],
+   "median": 159.063,
+   "ci": [
+    151.175,
+    174.763
+   ],
+   "cv": 0.05759974652463198,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q31",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    78.523,
+    90.631,
+    79.952,
+    78.176,
+    83.324
+   ],
+   "median": 79.952,
+   "ci": [
+    78.176,
+    90.631
+   ],
+   "cv": 0.0630042592996267,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q32",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    408.422,
+    375.164,
+    384.01,
+    380.807,
+    400.202
+   ],
+   "median": 384.01,
+   "ci": [
+    375.164,
+    408.422
+   ],
+   "cv": 0.03591305121914513,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q32",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    412.466,
+    364.509,
+    390.278,
+    369.661,
+    407.792
+   ],
+   "median": 390.278,
+   "ci": [
+    364.509,
+    412.466
+   ],
+   "cv": 0.05572809822041727,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q32",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    300.831,
+    301.531,
+    305.125,
+    302.229,
+    315.212
+   ],
+   "median": 302.229,
+   "ci": [
+    300.831,
+    315.212
+   ],
+   "cv": 0.019494129609676808,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q32",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    283.217,
+    272.531,
+    285.461,
+    302.372,
+    288.972
+   ],
+   "median": 285.461,
+   "ci": [
+    272.531,
+    302.372
+   ],
+   "cv": 0.037632725773190254,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q32",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    902.417,
+    891.834,
+    959.528,
+    920.607,
+    898.744
+   ],
+   "median": 902.417,
+   "ci": [
+    891.834,
+    959.528
+   ],
+   "cv": 0.029806058365072406,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q32",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    793.51,
+    836.418,
+    899.364,
+    821.963,
+    936.659
+   ],
+   "median": 836.418,
+   "ci": [
+    793.51,
+    936.659
+   ],
+   "cv": 0.06854248615530699,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "Q33",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    207.484,
+    206.641,
+    209.654,
+    206.027,
+    203.271
+   ],
+   "median": 206.641,
+   "ci": [
+    203.271,
+    209.654
+   ],
+   "cv": 0.011225941390194914,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q33",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    206.339,
+    201.842,
+    209.951,
+    201.518,
+    194.981
+   ],
+   "median": 201.842,
+   "ci": [
+    194.981,
+    209.951
+   ],
+   "cv": 0.0277978699763965,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q33",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    135.913,
+    129.605,
+    127.715,
+    140.448,
+    128.453
+   ],
+   "median": 129.605,
+   "ci": [
+    127.715,
+    140.448
+   ],
+   "cv": 0.041780137274867735,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q33",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    116.275,
+    115.25,
+    111.51,
+    126.69,
+    112.134
+   ],
+   "median": 115.25,
+   "ci": [
+    111.51,
+    126.69
+   ],
+   "cv": 0.05250425291151511,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q33",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    357.983,
+    396.711,
+    382.413,
+    393.881,
+    381.878
+   ],
+   "median": 382.413,
+   "ci": [
+    357.983,
+    396.711
+   ],
+   "cv": 0.03991904449581069,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q33",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    356.685,
+    353.765,
+    354.116,
+    370.583,
+    346.054
+   ],
+   "median": 354.116,
+   "ci": [
+    346.054,
+    370.583
+   ],
+   "cv": 0.02511959886652747,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q34",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    222.935,
+    219.148,
+    234.371,
+    216.381,
+    217.011
+   ],
+   "median": 219.148,
+   "ci": [
+    216.381,
+    234.371
+   ],
+   "cv": 0.033297472229874954,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q34",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    210.485,
+    218.425,
+    212.041,
+    207.054,
+    209.396
+   ],
+   "median": 210.485,
+   "ci": [
+    207.054,
+    218.425
+   ],
+   "cv": 0.02026544789744247,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q34",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    138.208,
+    140.246,
+    142.585,
+    142.755,
+    136.013
+   ],
+   "median": 140.246,
+   "ci": [
+    136.013,
+    142.755
+   ],
+   "cv": 0.02065607356216696,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q34",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    123.76,
+    120.72,
+    124.464,
+    125.492,
+    120.875
+   ],
+   "median": 123.76,
+   "ci": [
+    120.72,
+    125.492
+   ],
+   "cv": 0.017534805024874024,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q34",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    406.664,
+    382.488,
+    376.817,
+    379.481,
+    373.137
+   ],
+   "median": 379.481,
+   "ci": [
+    373.137,
+    406.664
+   ],
+   "cv": 0.03461203482991206,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q34",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    377.941,
+    366.293,
+    374.359,
+    366.357,
+    348.68
+   ],
+   "median": 366.357,
+   "ci": [
+    348.68,
+    377.941
+   ],
+   "cv": 0.030790886710414384,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q35",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    134.729,
+    130.311,
+    138.803,
+    126.353,
+    123.245
+   ],
+   "median": 130.311,
+   "ci": [
+    123.245,
+    138.803
+   ],
+   "cv": 0.04786436665343206,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q35",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    113.537,
+    119.15,
+    132.506,
+    119.672,
+    112.984
+   ],
+   "median": 119.15,
+   "ci": [
+    112.984,
+    132.506
+   ],
+   "cv": 0.06575972971599202,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q35",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    38.598,
+    38.751,
+    42.595,
+    43.594,
+    38.593
+   ],
+   "median": 38.751,
+   "ci": [
+    38.593,
+    43.594
+   ],
+   "cv": 0.06090374468928167,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q35",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    35.004,
+    35.546,
+    39.686,
+    42.907,
+    34.466
+   ],
+   "median": 35.546,
+   "ci": [
+    34.466,
+    42.907
+   ],
+   "cv": 0.09725410578113568,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q35",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    155.938,
+    156.371,
+    157.891,
+    160.35,
+    159.241
+   ],
+   "median": 157.891,
+   "ci": [
+    155.938,
+    160.35
+   ],
+   "cv": 0.01183163738346203,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q35",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    90.146,
+    89.346,
+    88.919,
+    88.842,
+    89.169
+   ],
+   "median": 89.169,
+   "ci": [
+    88.842,
+    90.146
+   ],
+   "cv": 0.005843173348870276,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q36",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    168.73,
+    169.793,
+    156.75,
+    164.342,
+    162.688
+   ],
+   "median": 164.342,
+   "ci": [
+    156.75,
+    169.793
+   ],
+   "cv": 0.03178060591411435,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q36",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    153.823,
+    171.861,
+    159.605,
+    156.827,
+    157.781
+   ],
+   "median": 157.781,
+   "ci": [
+    153.823,
+    171.861
+   ],
+   "cv": 0.04353007265127243,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q36",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    66.632,
+    69.477,
+    78.694,
+    70.086,
+    71.758
+   ],
+   "median": 70.086,
+   "ci": [
+    66.632,
+    78.694
+   ],
+   "cv": 0.06326803866017387,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q36",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    56.247,
+    54.729,
+    54.634,
+    55.669,
+    62.481
+   ],
+   "median": 55.669,
+   "ci": [
+    54.634,
+    62.481
+   ],
+   "cv": 0.05765696219370055,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q36",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    218.848,
+    216.439,
+    222.441,
+    220.476,
+    219.719
+   ],
+   "median": 219.719,
+   "ci": [
+    216.439,
+    222.441
+   ],
+   "cv": 0.010031603206234283,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q36",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    140.1,
+    139.203,
+    137.964,
+    140.466,
+    139.382
+   ],
+   "median": 139.382,
+   "ci": [
+    137.964,
+    140.466
+   ],
+   "cv": 0.006921420291725482,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q37",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    124.467,
+    121.963,
+    115.92,
+    117.729,
+    116.873
+   ],
+   "median": 117.729,
+   "ci": [
+    115.92,
+    124.467
+   ],
+   "cv": 0.030641129113458048,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q37",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    109.743,
+    120.021,
+    108.018,
+    107.147,
+    108.89
+   ],
+   "median": 108.89,
+   "ci": [
+    107.147,
+    120.021
+   ],
+   "cv": 0.04753115204398996,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q37",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    22.103,
+    23.765,
+    21.825,
+    21.521,
+    21.787
+   ],
+   "median": 21.825,
+   "ci": [
+    21.521,
+    23.765
+   ],
+   "cv": 0.040483008394868285,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q37",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    17.381,
+    19.053,
+    17.908,
+    17.149,
+    18.048
+   ],
+   "median": 17.908,
+   "ci": [
+    17.149,
+    19.053
+   ],
+   "cv": 0.04126646924224681,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q37",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    158.582,
+    148.714,
+    146.231,
+    147.688,
+    147.627
+   ],
+   "median": 147.688,
+   "ci": [
+    146.231,
+    158.582
+   ],
+   "cv": 0.0334212761743867,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q37",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    79.346,
+    83.088,
+    74.475,
+    77.285,
+    75.024
+   ],
+   "median": 77.285,
+   "ci": [
+    74.475,
+    83.088
+   ],
+   "cv": 0.045131650042809876,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q38",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    119.447,
+    109.393,
+    113.705,
+    111.189,
+    111.365
+   ],
+   "median": 111.365,
+   "ci": [
+    109.393,
+    119.447
+   ],
+   "cv": 0.03455887888519031,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q38",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    127.587,
+    109.224,
+    112.114,
+    104.016,
+    102.763
+   ],
+   "median": 109.224,
+   "ci": [
+    102.763,
+    127.587
+   ],
+   "cv": 0.08953049173074548,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q38",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    18.247,
+    18.208,
+    20.321,
+    18.062,
+    17.898
+   ],
+   "median": 18.208,
+   "ci": [
+    17.898,
+    20.321
+   ],
+   "cv": 0.053973230263123874,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q38",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    10.324,
+    10.577,
+    11.212,
+    10.443,
+    10.581
+   ],
+   "median": 10.577,
+   "ci": [
+    10.324,
+    11.212
+   ],
+   "cv": 0.03234046599715829,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q38",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    141.92,
+    141.61,
+    169.642,
+    158.512,
+    155.497
+   ],
+   "median": 155.497,
+   "ci": [
+    141.61,
+    169.642
+   ],
+   "cv": 0.07746627754424039,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q38",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    65.343,
+    64.488,
+    65.05,
+    64.865,
+    65.951
+   ],
+   "median": 65.05,
+   "ci": [
+    64.488,
+    65.951
+   ],
+   "cv": 0.008435601744971412,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q39",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    279.688,
+    275.907,
+    281.432,
+    293.012,
+    288.135
+   ],
+   "median": 281.432,
+   "ci": [
+    275.907,
+    293.012
+   ],
+   "cv": 0.024192051575420613,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q39",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    308.075,
+    262.48,
+    291.871,
+    266.088,
+    291.838
+   ],
+   "median": 291.838,
+   "ci": [
+    262.48,
+    308.075
+   ],
+   "cv": 0.06787151015677237,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q39",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    190.954,
+    200.581,
+    188.749,
+    199.702,
+    201.984
+   ],
+   "median": 199.702,
+   "ci": [
+    188.749,
+    201.984
+   ],
+   "cv": 0.030947282514835042,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q39",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    166.35,
+    170.363,
+    165.704,
+    179.819,
+    165.101
+   ],
+   "median": 166.35,
+   "ci": [
+    165.101,
+    179.819
+   ],
+   "cv": 0.03624390479902174,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q39",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    420.219,
+    403.637,
+    399.649,
+    413.238,
+    423.574
+   ],
+   "median": 413.238,
+   "ci": [
+    399.649,
+    423.574
+   ],
+   "cv": 0.02502996912971348,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q39",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    366.001,
+    386.177,
+    379.967,
+    373.346,
+    366.893
+   ],
+   "median": 373.346,
+   "ci": [
+    366.001,
+    386.177
+   ],
+   "cv": 0.023036251609804437,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q40",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    116.002,
+    115.948,
+    130.68,
+    112.011,
+    116.019
+   ],
+   "median": 116.002,
+   "ci": [
+    112.011,
+    130.68
+   ],
+   "cv": 0.06114398727400704,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q40",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    106.343,
+    127.813,
+    116.715,
+    110.281,
+    105.692
+   ],
+   "median": 110.281,
+   "ci": [
+    105.692,
+    127.813
+   ],
+   "cv": 0.08104333273882931,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q40",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    16.113,
+    15.747,
+    15.783,
+    15.99,
+    16.016
+   ],
+   "median": 15.99,
+   "ci": [
+    15.747,
+    16.113
+   ],
+   "cv": 0.009904939969172665,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q40",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    11.488,
+    11.632,
+    11.543,
+    11.408,
+    11.248
+   ],
+   "median": 11.488,
+   "ci": [
+    11.248,
+    11.632
+   ],
+   "cv": 0.012703497442282002,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q40",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    156.174,
+    157.842,
+    157.42,
+    165.503,
+    161.679
+   ],
+   "median": 157.842,
+   "ci": [
+    156.174,
+    165.503
+   ],
+   "cv": 0.023978127734461237,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q40",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    86.929,
+    87.025,
+    95.351,
+    90.896,
+    86.967
+   ],
+   "median": 87.025,
+   "ci": [
+    86.929,
+    95.351
+   ],
+   "cv": 0.04157974555868809,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q41",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    117.196,
+    116.992,
+    130.288,
+    123.99,
+    124.854
+   ],
+   "median": 123.99,
+   "ci": [
+    116.992,
+    130.288
+   ],
+   "cv": 0.0458909958804036,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q41",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    125.914,
+    106.322,
+    133.695,
+    120.161,
+    115.395
+   ],
+   "median": 120.161,
+   "ci": [
+    106.322,
+    133.695
+   ],
+   "cv": 0.08622889674799002,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q41",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    13.449,
+    16.521,
+    13.854,
+    13.686,
+    13.764
+   ],
+   "median": 13.764,
+   "ci": [
+    13.449,
+    16.521
+   ],
+   "cv": 0.08949536240505572,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q41",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    8.998,
+    11.148,
+    9.559,
+    9.456,
+    9.729
+   ],
+   "median": 9.559,
+   "ci": [
+    8.998,
+    11.148
+   ],
+   "cv": 0.0830745762872691,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q41",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    151.094,
+    151.805,
+    154.029,
+    150.117,
+    155.925
+   ],
+   "median": 151.805,
+   "ci": [
+    150.117,
+    155.925
+   ],
+   "cv": 0.015425711803788624,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q41",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    83.904,
+    91.107,
+    83.92,
+    84.386,
+    84.909
+   ],
+   "median": 84.386,
+   "ci": [
+    83.904,
+    91.107
+   ],
+   "cv": 0.03597242360497557,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "Q42",
+   "system": "nucleus (row)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    127.695,
+    119.632,
+    119.981,
+    113.234,
+    122.992
+   ],
+   "median": 119.981,
+   "ci": [
+    113.234,
+    127.695
+   ],
+   "cv": 0.043755731310454855,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q42",
+   "system": "nucleus (row)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    114.11,
+    115.418,
+    112.678,
+    111.709,
+    110.836
+   ],
+   "median": 112.678,
+   "ci": [
+    110.836,
+    115.418
+   ],
+   "cv": 0.01627669716552396,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q42",
+   "system": "nucleus (column)",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    24.548,
+    25.163,
+    23.272,
+    24.065,
+    23.479
+   ],
+   "median": 24.065,
+   "ci": [
+    23.272,
+    25.163
+   ],
+   "cv": 0.03215366531649998,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q42",
+   "system": "nucleus (column)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    19.43,
+    20.503,
+    19.223,
+    19.553,
+    22.237
+   ],
+   "median": 19.553,
+   "ci": [
+    19.223,
+    22.237
+   ],
+   "cv": 0.061699112938130296,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q42",
+   "system": "postgresql",
+   "phase": "cold",
+   "unit": "ms",
+   "times": [
+    156.739,
+    163.688,
+    160.227,
+    159.515,
+    158.352
+   ],
+   "median": 159.515,
+   "ci": [
+    156.739,
+    163.688
+   ],
+   "cv": 0.01620787979594078,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "Q42",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    85.645,
+    84.994,
+    85.049,
+    85.532,
+    86.206
+   ],
+   "median": 85.532,
+   "ci": [
+    84.994,
+    86.206
+   ],
+   "cv": 0.005786713727808485,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "load",
+   "system": "nucleus (row)",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    6.87057089805603,
+    7.331792831420898,
+    7.534290075302124,
+    7.633600950241089,
+    7.285094976425171
+   ],
+   "median": 7.331792831420898,
+   "ci": [
+    6.87057089805603,
+    7.633600950241089
+   ],
+   "cv": 0.04017589086304388,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "load",
+   "system": "nucleus (column)",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    6.361260175704956,
+    6.472726106643677,
+    6.430753231048584,
+    6.439659833908081,
+    6.552053928375244
+   ],
+   "median": 6.439659833908081,
+   "ci": [
+    6.361260175704956,
+    6.552053928375244
+   ],
+   "cv": 0.010760279993422462,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "load",
+   "system": "postgresql",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    7.599453926086426,
+    7.635589122772217,
+    7.61771821975708,
+    7.4841508865356445,
+    7.987513780593872
+   ],
+   "median": 7.61771821975708,
+   "ci": [
+    7.4841508865356445,
+    7.987513780593872
+   ],
+   "cv": 0.024764180407565242,
+   "flagged": false,
+   "attempts": 1
+  }
+ ],
+ "baseline": "postgresql",
+ "rows": 1000000,
+ "checks": {
+  "Q0": "same",
+  "Q1": "same",
+  "Q2": "same",
+  "Q3": "same",
+  "Q4": "same",
+  "Q5": "same",
+  "Q6": "same",
+  "Q7": "same",
+  "Q8": "same",
+  "Q9": "same",
+  "Q10": "same",
+  "Q11": "differs (ties at the LIMIT)",
+  "Q12": "same",
+  "Q13": "same",
+  "Q14": "same",
+  "Q15": "same",
+  "Q16": "same",
+  "Q17": "differs (ties at the LIMIT)",
+  "Q18": "differs (ties at the LIMIT), same rows (ties ordered differently)",
+  "Q19": "same",
+  "Q20": "same",
+  "Q21": "same",
+  "Q22": "same rows (ties ordered differently)",
+  "Q23": "same",
+  "Q24": "differs (ties at the LIMIT)",
+  "Q25": "same",
+  "Q26": "same",
+  "Q27": "same",
+  "Q28": "differs (ties at the LIMIT)",
+  "Q29": "same",
+  "Q30": "differs (ties at the LIMIT)",
+  "Q31": "differs (ties at the LIMIT)",
+  "Q32": "differs (ties at the LIMIT)",
+  "Q33": "same",
+  "Q34": "same",
+  "Q35": "same rows (ties ordered differently)",
+  "Q36": "same",
+  "Q37": "same",
+  "Q38": "differs (ties at the LIMIT)",
+  "Q39": "differs (ties at the LIMIT)",
+  "Q40": "differs (ties at the LIMIT)",
+  "Q41": "same",
+  "Q42": "same"
+ }
+}

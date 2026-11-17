@@ -1,0 +1,101 @@
+{
+ "method": 1,
+ "name": "history-sql",
+ "script": "bench/method.py run history-sql bench/results/history-sql.json --runs 5 --label 'no history' --also 'history=python3 bench/inserts.py --nucleus ./target/release/nucleus --history 1h' -- python3 bench/inserts.py --nucleus ./target/release/nucleus",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T09:14:41+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36506959872,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   2.4931640625,
+   2.24755859375,
+   2.361328125
+  ],
+  "systems": {
+   "nucleus": {
+    "binary": "./target/release/nucleus",
+    "settings": {
+     "history": "1h"
+    }
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.77880859375,
+   3.1279296875,
+   2.6875
+  ]
+ },
+ "samples": [
+  {
+   "name": "one-row INSERTs, 8 sessions",
+   "system": "no history",
+   "phase": "write",
+   "unit": "/s",
+   "times": [
+    14195.083483707396,
+    14586.499739832827,
+    14346.602483551937,
+    14228.410262864092,
+    14403.681293396476
+   ],
+   "median": 14346.602483551937,
+   "ci": [
+    14195.083483707396,
+    14586.499739832827
+   ],
+   "cv": 0.01088310488203324,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "one-row INSERTs, 8 sessions",
+   "system": "history",
+   "phase": "write",
+   "unit": "/s",
+   "times": [
+    12629.219235928414,
+    13829.976878963189,
+    13470.157062072069,
+    13976.510203515638,
+    13826.977009086993
+   ],
+   "median": 13826.977009086993,
+   "ci": [
+    12629.219235928414,
+    13976.510203515638
+   ],
+   "cv": 0.04028349439030892,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

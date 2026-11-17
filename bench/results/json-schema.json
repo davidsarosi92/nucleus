@@ -1,0 +1,199 @@
+{
+ "method": 1,
+ "name": "json-schema",
+ "script": "bench/method.py run json-schema bench/results/json-schema.json --runs 5 -- target/json/release/schema",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:38:48+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36725514240,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   2.3427734375,
+   3.04443359375,
+   3.66259765625
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   2.56005859375,
+   3.0576171875,
+   3.65625
+  ]
+ },
+ "samples": [
+  {
+   "name": "fits (a document)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ns",
+   "times": [
+    375.73125,
+    378.3825,
+    376.49375,
+    377.5025,
+    378.39
+   ],
+   "median": 377.5025,
+   "ci": [
+    375.73125,
+    378.39
+   ],
+   "cv": 0.0031112504470856834,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "fits (a document)",
+   "system": "jsonschema",
+   "phase": "warm",
+   "unit": "ns",
+   "times": [
+    144.30084,
+    145.16084,
+    144.39291999999998,
+    143.58833,
+    144.04834
+   ],
+   "median": 144.30084,
+   "ci": [
+    143.58833,
+    145.16084
+   ],
+   "cv": 0.003980237837878503,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "errors (a document)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ns",
+   "times": [
+    474.23917000000006,
+    476.37667000000005,
+    473.75624999999997,
+    475.32042,
+    474.39207999999996
+   ],
+   "median": 474.39207999999996,
+   "ci": [
+    473.75624999999997,
+    476.37667000000005
+   ],
+   "cv": 0.002190124824519815,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "errors (a document)",
+   "system": "jsonschema",
+   "phase": "warm",
+   "unit": "ns",
+   "times": [
+    246.3275,
+    246.78583,
+    255.35875,
+    252.46166000000002,
+    246.40749999999997
+   ],
+   "median": 246.78583,
+   "ci": [
+    246.3275,
+    255.35875
+   ],
+   "cv": 0.01677921027440881,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "compile (the schema)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    16.708,
+    16.834,
+    18.125,
+    16.792,
+    18.208
+   ],
+   "median": 16.834,
+   "ci": [
+    16.708,
+    18.208
+   ],
+   "cv": 0.0439861503068015,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "compile (the schema)",
+   "system": "jsonschema",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    22.416999999999998,
+    21.917,
+    22.042,
+    22.125,
+    22.334
+   ],
+   "median": 22.125,
+   "ci": [
+    21.917,
+    22.416999999999998
+   ],
+   "cv": 0.009307699494038544,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "compiled, kept",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ns",
+   "times": [
+    186.917,
+    188.37500000000003,
+    188.291,
+    186.875,
+    186.208
+   ],
+   "median": 186.917,
+   "ci": [
+    186.208,
+    188.37500000000003
+   ],
+   "cv": 0.005100573611793071,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

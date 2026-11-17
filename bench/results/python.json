@@ -1,0 +1,141 @@
+{
+ "method": 1,
+ "name": "python",
+ "script": "bench/method.py run python bench/results/python.json --runs 5 -- python3 bench/embedded/python.py --nucleus ./target/release/nucleus",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T09:17:51+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36235132928,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   2.94189453125,
+   2.943359375,
+   2.65283203125
+  ],
+  "systems": {
+   "nucleus": {
+    "python": "3.13.0",
+    "library": "./target/release/libnucleus_embedded.dylib"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   3.09765625,
+   2.97705078125,
+   2.66845703125
+  ]
+ },
+ "samples": [
+  {
+   "name": "SELECT 1, in the process",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    9.874929673969746,
+    9.875046089291573,
+    9.833020158112049,
+    9.875046089291573,
+    9.875046089291573
+   ],
+   "median": 9.875046089291573,
+   "ci": [
+    9.833020158112049,
+    9.875046089291573
+   ],
+   "cv": 0.0019035520104669307,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "SELECT 1, loopback TCP to nucleus server",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    28.20801455527544,
+    30.082999728620052,
+    28.209062293171883,
+    30.04202153533697,
+    28.45900598913431
+   ],
+   "median": 28.45900598913431,
+   "ci": [
+    28.20801455527544,
+    30.082999728620052
+   ],
+   "cv": 0.03362792599245018,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "1,000,000 rows of two columns into numpy, in the process",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    31.114417011849582,
+    31.387707917019725,
+    33.29458402004093,
+    33.03795796819031,
+    30.597583972848952
+   ],
+   "median": 31.387707917019725,
+   "ci": [
+    30.597583972848952,
+    33.29458402004093
+   ],
+   "cv": 0.03781202721585369,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "1,000,000 rows of two columns into numpy, in the process, a column table",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    11.122082942165434,
+    10.787541046738625,
+    10.749541921541095,
+    10.364999994635582,
+    11.135624954476953
+   ],
+   "median": 10.787541046738625,
+   "ci": [
+    10.364999994635582,
+    11.135624954476953
+   ],
+   "cv": 0.02931054637997043,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

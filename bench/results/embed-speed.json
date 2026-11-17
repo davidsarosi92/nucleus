@@ -1,0 +1,436 @@
+{
+ "method": 1,
+ "name": "embed-speed",
+ "script": "bench/method.py run embed-speed bench/results/embed-speed.json --runs 3 -- bash target/bench-tools/memcap.sh 7000 ./target/ann-data/.venv/bin/python -I bench/embed/speed.py",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T03:03:03+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 40912830464,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   2.154296875,
+   2.7587890625,
+   2.8779296875
+  ],
+  "systems": {
+   "fastembed": {
+    "version": "0.9.1"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   14.27392578125,
+   8.94921875,
+   6.732421875
+  ]
+ },
+ "samples": [
+  {
+   "name": "bge-small-en-v1.5, 1 thread: tokens/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    1615.0193750919702,
+    1616.6052928757304,
+    1617.2405324426543
+   ],
+   "median": 1616.6052928757304,
+   "ci": [
+    1615.0193750919702,
+    1617.2405324426543
+   ],
+   "cv": 0.0007077849431970787,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 1 thread: texts/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    9.810173149556089,
+    9.81980654981097,
+    9.823665209489661
+   ],
+   "median": 9.81980654981097,
+   "ci": [
+    9.810173149556089,
+    9.823665209489661
+   ],
+   "cv": 0.0007077849431971246,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 1 thread: tokens/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    503.80972467619506,
+    501.88871506107495,
+    502.0463541706853
+   ],
+   "median": 502.0463541706853,
+   "ci": [
+    501.88871506107495,
+    503.80972467619506
+   ],
+   "cv": 0.00212205436762233,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 1 thread: texts/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    3.060310427063574,
+    3.0486415658493136,
+    3.0495991190429597
+   ],
+   "median": 3.0495991190429597,
+   "ci": [
+    3.0486415658493136,
+    3.060310427063574
+   ],
+   "cv": 0.0021220543676222655,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 1 thread: tokens/s",
+   "system": "fastembed, its default (Qdrant's)",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    509.0006799716605,
+    508.2233397162793,
+    507.87228557833123
+   ],
+   "median": 508.2233397162793,
+   "ci": [
+    507.87228557833123,
+    509.0006799716605
+   ],
+   "cv": 0.0011359181253856097,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 1 thread: texts/s",
+   "system": "fastembed, its default (Qdrant's)",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    3.0918420427491267,
+    3.0871202154949025,
+    3.0849877940941113
+   ],
+   "median": 3.0871202154949025,
+   "ci": [
+    3.0849877940941113,
+    3.0918420427491267
+   ],
+   "cv": 0.0011359181253855915,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 10 threads: tokens/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    10627.953518398966,
+    10566.55969191271,
+    10631.385211494995
+   ],
+   "median": 10627.953518398966,
+   "ci": [
+    10566.55969191271,
+    10631.385211494995
+   ],
+   "cv": 0.0034384039824197623,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 10 threads: texts/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    64.55777921239509,
+    64.18485237483954,
+    64.57862447529868
+   ],
+   "median": 64.55777921239509,
+   "ci": [
+    64.18485237483954,
+    64.57862447529868
+   ],
+   "cv": 0.0034384039824198404,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 10 threads: tokens/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    2566.06594386969,
+    2560.275760026549,
+    2574.4802570814127
+   ],
+   "median": 2566.06594386969,
+   "ci": [
+    2560.275760026549,
+    2574.4802570814127
+   ],
+   "cv": 0.002782507884585167,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 10 threads: texts/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    15.587151219846623,
+    15.551979687575846,
+    15.638262600189597
+   ],
+   "median": 15.587151219846623,
+   "ci": [
+    15.551979687575846,
+    15.638262600189597
+   ],
+   "cv": 0.0027825078845852163,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 10 threads: tokens/s",
+   "system": "fastembed, its default (Qdrant's)",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    2464.7416929493775,
+    2452.1343738544947,
+    2444.866264494452
+   ],
+   "median": 2452.1343738544947,
+   "ci": [
+    2444.866264494452,
+    2464.7416929493775
+   ],
+   "cv": 0.004098158213498692,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bge-small-en-v1.5, 10 threads: texts/s",
+   "system": "fastembed, its default (Qdrant's)",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    14.971673497964353,
+    14.89509238371892,
+    14.850943432696045
+   ],
+   "median": 14.89509238371892,
+   "ci": [
+    14.850943432696045,
+    14.971673497964353
+   ],
+   "cv": 0.004098158213498759,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 1 thread: tokens/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    1600.9287925696594,
+    1601.2338621313897,
+    1588.3701148338923
+   ],
+   "median": 1600.9287925696594,
+   "ci": [
+    1588.3701148338923,
+    1601.2338621313897
+   ],
+   "cv": 0.004596820859295842,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 1 thread: texts/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    9.526077637532746,
+    9.527892906483732,
+    9.451349180095457
+   ],
+   "median": 9.526077637532746,
+   "ci": [
+    9.451349180095457,
+    9.527892906483732
+   ],
+   "cv": 0.004596820859295859,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 1 thread: tokens/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    502.5691446772345,
+    501.6549688928287,
+    495.70793897876797
+   ],
+   "median": 501.6549688928287,
+   "ci": [
+    495.70793897876797,
+    502.5691446772345
+   ],
+   "cv": 0.007451468361318495,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 1 thread: texts/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    2.9904594836721627,
+    2.9850198229345835,
+    2.949632946930473
+   ],
+   "median": 2.9850198229345835,
+   "ci": [
+    2.949632946930473,
+    2.9904594836721627
+   ],
+   "cv": 0.007451468361318537,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 10 threads: tokens/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    10523.324984345647,
+    10467.611336032389,
+    10326.113671274963
+   ],
+   "median": 10467.611336032389,
+   "ci": [
+    10326.113671274963,
+    10523.324984345647
+   ],
+   "cv": 0.009739200759321746,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 10 threads: texts/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    62.61740763932373,
+    62.285892245406416,
+    61.44393241167435
+   ],
+   "median": 62.285892245406416,
+   "ci": [
+    61.44393241167435,
+    62.61740763932373
+   ],
+   "cv": 0.009739200759321796,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 10 threads: tokens/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "tokens/s",
+   "times": [
+    2579.6750889000004,
+    2547.9358016507977,
+    2553.200329776248
+   ],
+   "median": 2553.200329776248,
+   "ci": [
+    2547.9358016507977,
+    2579.6750889000004
+   ],
+   "cv": 0.006643771847117799,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "multilingual-e5-small, 10 threads: texts/s",
+   "system": "fastembed, publisher's f32 ONNX",
+   "phase": "warm",
+   "unit": "texts/s",
+   "times": [
+    15.349955157609749,
+    15.161095468222468,
+    15.192421223546988
+   ],
+   "median": 15.192421223546988,
+   "ci": [
+    15.161095468222468,
+    15.349955157609749
+   ],
+   "cv": 0.006643771847117811,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

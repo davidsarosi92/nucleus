@@ -1,0 +1,262 @@
+{
+ "method": 1,
+ "name": "aes",
+ "script": "bench/method.py run aes bench/results/aes.json --runs 5 -- cargo test --release -q -p nucleus-kernels --test aes_speed -- --ignored --nocapture",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:18:53+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36765696000,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.55517578125,
+   4.1708984375,
+   4.962890625
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.17724609375,
+   4.12841796875,
+   4.904296875
+  ]
+ },
+ "samples": [
+  {
+   "name": "instructions, 64 bytes: seal",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.31154344229072783,
+    0.31134774336599674,
+    0.31124502300741486,
+    0.3114546360536919,
+    0.31124065040650406
+   ],
+   "median": 0.31134774336599674,
+   "ci": [
+    0.31124065040650406,
+    0.31154344229072783
+   ],
+   "cv": 0.0004249311137047038,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 64 bytes: open",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.3049922895357985,
+    0.2833657201440049,
+    0.3080839854087691,
+    0.3079357747419117,
+    0.29615947357127526
+   ],
+   "median": 0.3049922895357985,
+   "ci": [
+    0.2833657201440049,
+    0.3080839854087691
+   ],
+   "cv": 0.035131623241465106,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 4096 bytes: seal",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.9776102464332036,
+    0.9759376134889755,
+    0.975416147859922,
+    0.978383073929961,
+    0.975035149156939
+   ],
+   "median": 0.9759376134889755,
+   "ci": [
+    0.975035149156939,
+    0.978383073929961
+   ],
+   "cv": 0.001485164139319854,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 4096 bytes: open",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.9395454604409857,
+    0.9377458495460441,
+    0.9373784046692604,
+    0.9405020752269779,
+    0.8621784695201038
+   ],
+   "median": 0.9377458495460441,
+   "ci": [
+    0.8621784695201038,
+    0.9405020752269779
+   ],
+   "cv": 0.037128492057132166,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 8168 bytes: seal",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1.7545871202611096,
+    1.7467308561385888,
+    1.752327642480542,
+    1.755345719307055,
+    1.7478292744162691
+   ],
+   "median": 1.752327642480542,
+   "ci": [
+    1.7467308561385888,
+    1.755345719307055
+   ],
+   "cv": 0.002232164028760725,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 8168 bytes: open",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1.4032868440873714,
+    1.7256620637710267,
+    1.6063321616871704,
+    1.7095519708762237,
+    1.7275557368817471
+   ],
+   "median": 1.7095519708762237,
+   "ci": [
+    1.4032868440873714,
+    1.7275557368817471
+   ],
+   "cv": 0.08480644479337647,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 65536 bytes: seal",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    11.244240196078431,
+    11.195670588235295,
+    11.222141176470588,
+    11.216994117647058,
+    11.202409803921569
+   ],
+   "median": 11.216994117647058,
+   "ci": [
+    11.195670588235295,
+    11.244240196078431
+   ],
+   "cv": 0.0016879508247811706,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "instructions, 65536 bytes: open",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    11.214543137254902,
+    11.281986274509803,
+    11.231740196078432,
+    11.282638235294117,
+    10.953840196078431
+   ],
+   "median": 11.231740196078432,
+   "ci": [
+    10.953840196078431,
+    11.282638235294117
+   ],
+   "cv": 0.012243098188754525,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "portable, 8168 bytes: seal",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    9091.50416,
+    8925.60167,
+    8898.3475,
+    8855.495410000001,
+    8834.36375
+   ],
+   "median": 8898.3475,
+   "ci": [
+    8834.36375,
+    9091.50416
+   ],
+   "cv": 0.011404270210989708,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "portable, 8168 bytes: open",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    9046.654590000002,
+    8813.599580000002,
+    8812.595829999998,
+    8762.285830000003,
+    8758.796670000002
+   ],
+   "median": 8812.595829999998,
+   "ci": [
+    8758.796670000002,
+    9046.654590000002
+   ],
+   "cv": 0.013479563256393365,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

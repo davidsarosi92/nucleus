@@ -1,0 +1,1710 @@
+{
+ "method": 1,
+ "name": "tsearch-rank",
+ "script": "bench/method.py run tsearch-rank bench/results/tsearch-rank.json --runs 5 --also 'postgresql=./target/ann-data/.venv/bin/python bench/text/tsearch.py postgres --sets scifact,nfcorpus --rank' -- ./target/ann-data/.venv/bin/python bench/text/tsearch.py nucleus ./target/release/nucleus --sets scifact,nfcorpus --rank",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T01:53:58+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 40765763584,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   8.68505859375,
+   10.50048828125,
+   9.4306640625
+  ],
+  "systems": {
+   "postgresql": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "2048MB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "5",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "on"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "on",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "2GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "5",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "53893",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-tba0hmqx",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   2.16796875,
+   2.77197265625,
+   2.88330078125
+  ]
+ },
+ "samples": [
+  {
+   "name": "scifact: index built",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    391.83579199016094,
+    387.1724999626167,
+    394.2370829754509,
+    394.31950001744553,
+    384.8536249715835
+   ],
+   "median": 391.83579199016094,
+   "ci": [
+    384.8536249715835,
+    394.31950001744553
+   ],
+   "cv": 0.010962080263188932,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all index: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.14904195093549788,
+    0.1492520955313618,
+    0.1481585716828704,
+    0.14881434035487473,
+    0.1461289772608628
+   ],
+   "median": 0.14881434035487473,
+   "ci": [
+    0.1461289772608628,
+    0.1492520955313618
+   ],
+   "cv": 0.008565653625351709,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all index: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.14541699783876538,
+    0.14433299656957388,
+    0.14520797412842512,
+    0.1450830022804439,
+    0.1432499848306179
+   ],
+   "median": 0.1450830022804439,
+   "ci": [
+    0.1432499848306179,
+    0.14541699783876538
+   ],
+   "cv": 0.006131923562021834,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all index: found",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    29.0,
+    29.0,
+    29.0,
+    29.0,
+    29.0
+   ],
+   "median": 29.0,
+   "ci": [
+    29.0,
+    29.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any index: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.3764619759749621,
+    0.3624354174826294,
+    0.3598362197711443,
+    0.35876862025664497,
+    0.3722755816609909
+   ],
+   "median": 0.3624354174826294,
+   "ci": [
+    0.35876862025664497,
+    0.3764619759749621
+   ],
+   "cv": 0.021681254957926017,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any index: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.35916699562221766,
+    0.3548329696059227,
+    0.35437499172985554,
+    0.3514590207487345,
+    0.3629999700933695
+   ],
+   "median": 0.3548329696059227,
+   "ci": [
+    0.3514590207487345,
+    0.3629999700933695
+   ],
+   "cv": 0.012701604934379716,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any index: found",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    750257.0,
+    750257.0,
+    750257.0,
+    750257.0,
+    750257.0
+   ],
+   "median": 750257.0,
+   "ci": [
+    750257.0,
+    750257.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all rank: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.170371545633922,
+    0.18215680999370912,
+    0.16845806249572584,
+    0.24234279718560478,
+    0.16968710289802402
+   ],
+   "median": 0.170371545633922,
+   "ci": [
+    0.16845806249572584,
+    0.24234279718560478
+   ],
+   "cv": 0.1695826071338198,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all rank: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.1576659851707518,
+    0.16787496861070395,
+    0.1567089930176735,
+    0.21595804719254375,
+    0.1550830202177167
+   ],
+   "median": 0.1576659851707518,
+   "ci": [
+    0.1550830202177167,
+    0.21595804719254375
+   ],
+   "cv": 0.15127095245293098,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all rank: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "median": 0.07490935322926773,
+   "ci": [
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all headline: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.19293289612202594,
+    0.19204849163846424,
+    0.19240681256633252,
+    0.19580142475509396,
+    0.19284026639070362
+   ],
+   "median": 0.19284026639070362,
+   "ci": [
+    0.19204849163846424,
+    0.19580142475509396
+   ],
+   "cv": 0.007730496495787491,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all headline: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.16566697740927339,
+    0.16487500397488475,
+    0.16633298946544528,
+    0.1674999948590994,
+    0.1662500435486436
+   ],
+   "median": 0.1662500435486436,
+   "ci": [
+    0.16487500397488475,
+    0.1674999948590994
+   ],
+   "cv": 0.005806446383090221,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all headline: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "median": 0.07490935322926773,
+   "ci": [
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any rank: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    241.51420282471614,
+    241.75542989590517,
+    242.45369455912927,
+    241.6689354297705,
+    241.19393723454172
+   ],
+   "median": 241.6689354297705,
+   "ci": [
+    241.19393723454172,
+    242.45369455912927
+   ],
+   "cv": 0.001919646206886013,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any rank: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    252.68562498968095,
+    254.592000041157,
+    254.8453330527991,
+    254.99466696055606,
+    253.5288329818286
+   ],
+   "median": 254.592000041157,
+   "ci": [
+    252.68562498968095,
+    254.99466696055606
+   ],
+   "cv": 0.003895661186657863,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any rank: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.5719894116240358,
+    0.5719894116240358,
+    0.5719894116240358,
+    0.5719894116240358,
+    0.5719894116240358
+   ],
+   "median": 0.5719894116240358,
+   "ci": [
+    0.5719894116240358,
+    0.5719894116240358
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any headline: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    243.25804070977028,
+    243.3322861121269,
+    244.20827207213733,
+    243.50074927924047,
+    243.10170626228987
+   ],
+   "median": 243.3322861121269,
+   "ci": [
+    243.10170626228987,
+    244.20827207213733
+   ],
+   "cv": 0.0017724951365367602,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any headline: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    255.53179095732048,
+    256.90620800014585,
+    255.79770799959078,
+    254.0307499584742,
+    253.9924590382725
+   ],
+   "median": 255.53179095732048,
+   "ci": [
+    253.9924590382725,
+    256.90620800014585
+   ],
+   "cv": 0.004873711810371004,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any headline: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.5719894116240358,
+    0.5719894116240358,
+    0.5719894116240358,
+    0.5719894116240358,
+    0.5719894116240358
+   ],
+   "median": 0.5719894116240358,
+   "ci": [
+    0.5719894116240358,
+    0.5719894116240358
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: index built",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    345.5699580372311,
+    340.518000011798,
+    341.3322920096107,
+    351.41945898067206,
+    351.4335419749841
+   ],
+   "median": 345.5699580372311,
+   "ci": [
+    340.518000011798,
+    351.4335419749841
+   ],
+   "cv": 0.015215926725257532,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all index: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.10881873407046493,
+    0.11006334235015161,
+    0.10938016083610501,
+    0.11201236983069186,
+    0.10958193237648199
+   ],
+   "median": 0.10958193237648199,
+   "ci": [
+    0.10881873407046493,
+    0.11201236983069186
+   ],
+   "cv": 0.011140566956960354,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all index: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.10616699000820518,
+    0.10504201054573059,
+    0.10541698429733515,
+    0.10812497930601239,
+    0.10704202577471733
+   ],
+   "median": 0.10616699000820518,
+   "ci": [
+    0.10504201054573059,
+    0.10812497930601239
+   ],
+   "cv": 0.011746983991240273,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all index: found",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    2790.0,
+    2790.0,
+    2790.0,
+    2790.0,
+    2790.0
+   ],
+   "median": 2790.0,
+   "ci": [
+    2790.0,
+    2790.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any index: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.1469879510636577,
+    0.14573955009532832,
+    0.14803379874290096,
+    0.14674071375361353,
+    0.14643212340645284
+   ],
+   "median": 0.14674071375361353,
+   "ci": [
+    0.14573955009532832,
+    0.14803379874290096
+   ],
+   "cv": 0.005720271849829979,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any index: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.1252919901162386,
+    0.12387504102662206,
+    0.1217919634655118,
+    0.12416701065376401,
+    0.12333295308053493
+   ],
+   "median": 0.12387504102662206,
+   "ci": [
+    0.1217919634655118,
+    0.1252919901162386
+   ],
+   "cv": 0.010351902074458276,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any index: found",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    160305.0,
+    160305.0,
+    160305.0,
+    160305.0,
+    160305.0
+   ],
+   "median": 160305.0,
+   "ci": [
+    160305.0,
+    160305.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all rank: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.1110073242022227,
+    1.105884282529677,
+    1.1005451172538356,
+    1.1124379645266078,
+    1.1042039697245916
+   ],
+   "median": 1.105884282529677,
+   "ci": [
+    1.1005451172538356,
+    1.1124379645266078
+   ],
+   "cv": 0.004430534797379059,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all rank: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.30275003518909216,
+    0.3000000142492354,
+    0.2936659730039537,
+    0.305499997921288,
+    0.29845896642655134
+   ],
+   "median": 0.3000000142492354,
+   "ci": [
+    0.2936659730039537,
+    0.305499997921288
+   ],
+   "cv": 0.014929380704894147,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all rank: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2074572585983361,
+    0.2074572585983361,
+    0.2074572585983361,
+    0.2074572585983361,
+    0.2074572585983361
+   ],
+   "median": 0.2074572585983361,
+   "ci": [
+    0.2074572585983361,
+    0.2074572585983361
+   ],
+   "cv": 1.4958106130030486e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all headline: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.4258168968256713,
+    1.44652165501341,
+    1.430232468711345,
+    1.4195542987263055,
+    1.4275344464950979
+   ],
+   "median": 1.4275344464950979,
+   "ci": [
+    1.4195542987263055,
+    1.44652165501341
+   ],
+   "cv": 0.007042869153997405,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all headline: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.4237499670125544,
+    0.4230410559102893,
+    0.42683398351073265,
+    0.42100000428035855,
+    0.42204197961837053
+   ],
+   "median": 0.4230410559102893,
+   "ci": [
+    0.42100000428035855,
+    0.42683398351073265
+   ],
+   "cv": 0.005232373345265258,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all headline: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2074572585983361,
+    0.2074572585983361,
+    0.2074572585983361,
+    0.2074572585983361,
+    0.2074572585983361
+   ],
+   "median": 0.2074572585983361,
+   "ci": [
+    0.2074572585983361,
+    0.2074572585983361
+   ],
+   "cv": 1.4958106130030486e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any rank: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    51.25909106248713,
+    51.39137860589398,
+    51.705587808844335,
+    51.39383091825571,
+    52.041201978048235
+   ],
+   "median": 51.39383091825571,
+   "ci": [
+    51.25909106248713,
+    52.041201978048235
+   ],
+   "cv": 0.0061282480629303365,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any rank: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    22.414957988075912,
+    21.921792009379715,
+    22.04812498530373,
+    21.86866698320955,
+    22.066375007852912
+   ],
+   "median": 22.04812498530373,
+   "ci": [
+    21.86866698320955,
+    22.414957988075912
+   ],
+   "cv": 0.009662548769376115,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any rank: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.3039371629579412,
+    0.3039371629579412,
+    0.3039371629579412,
+    0.3039371629579412,
+    0.3039371629579412
+   ],
+   "median": 0.3039371629579412,
+   "ci": [
+    0.3039371629579412,
+    0.3039371629579412
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any headline: mean",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    52.52287564846044,
+    52.52297433873858,
+    52.61388442755876,
+    52.24914940044532,
+    52.88520126045615
+   ],
+   "median": 52.52297433873858,
+   "ci": [
+    52.24914940044532,
+    52.88520126045615
+   ],
+   "cv": 0.004338973486570985,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any headline: p50",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    24.046082980930805,
+    23.104708001483232,
+    23.69995799381286,
+    23.09204201446846,
+    23.88875000178814
+   ],
+   "median": 23.69995799381286,
+   "ci": [
+    23.09204201446846,
+    24.046082980930805
+   ],
+   "cv": 0.018858056796357693,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any headline: nDCG@10",
+   "system": "nucleus, pg-compat",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.3039371629579412,
+    0.3039371629579412,
+    0.3039371629579412,
+    0.3039371629579412,
+    0.3039371629579412
+   ],
+   "median": 0.3039371629579412,
+   "ci": [
+    0.3039371629579412,
+    0.3039371629579412
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact: index built",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    752.544,
+    784.3,
+    755.731,
+    738.892,
+    760.22
+   ],
+   "median": 755.731,
+   "ci": [
+    738.892,
+    784.3
+   ],
+   "cv": 0.021828751004676485,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.07987999999999999,
+    0.08345,
+    0.07984333333333334,
+    0.08018,
+    0.08079333333333333
+   ],
+   "median": 0.08018,
+   "ci": [
+    0.07984333333333334,
+    0.08345
+   ],
+   "cv": 0.01872619539304603,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.077,
+    0.08,
+    0.077,
+    0.078,
+    0.078
+   ],
+   "median": 0.078,
+   "ci": [
+    0.077,
+    0.08
+   ],
+   "cv": 0.015701857325533208,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all: found",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    29.0,
+    29.0,
+    29.0,
+    29.0,
+    29.0
+   ],
+   "median": 29.0,
+   "ci": [
+    29.0,
+    29.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    16.873350000000002,
+    16.899356666666666,
+    16.912743333333335,
+    16.69997,
+    16.846326666666666
+   ],
+   "median": 16.873350000000002,
+   "ci": [
+    16.69997,
+    16.912743333333335
+   ],
+   "cv": 0.005086802866876844,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.675,
+    0.65,
+    0.676,
+    0.668,
+    0.69
+   ],
+   "median": 0.675,
+   "ci": [
+    0.65,
+    0.69
+   ],
+   "cv": 0.0216836650605896,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any: found",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    739735.0,
+    739735.0,
+    739735.0,
+    739735.0,
+    739735.0
+   ],
+   "median": 739735.0,
+   "ci": [
+    739735.0,
+    739735.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all rank: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.10759666666666667,
+    0.11137666666666665,
+    0.10802666666666667,
+    0.10948333333333334,
+    0.10922
+   ],
+   "median": 0.10922,
+   "ci": [
+    0.10759666666666667,
+    0.11137666666666665
+   ],
+   "cv": 0.013550218048974912,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all rank: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.095,
+    0.099,
+    0.095,
+    0.095,
+    0.094
+   ],
+   "median": 0.095,
+   "ci": [
+    0.094,
+    0.099
+   ],
+   "cv": 0.020390783148135926,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all rank: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "median": 0.07490935322926773,
+   "ci": [
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all headline: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.13113666666666668,
+    0.13084,
+    0.13227333333333335,
+    0.13881666666666667,
+    0.13280333333333333
+   ],
+   "median": 0.13227333333333335,
+   "ci": [
+    0.13084,
+    0.13881666666666667
+   ],
+   "cv": 0.02444357187655775,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all headline: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.105,
+    0.105,
+    0.106,
+    0.112,
+    0.106
+   ],
+   "median": 0.106,
+   "ci": [
+    0.105,
+    0.112
+   ],
+   "cv": 0.027617755063207187,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact all headline: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "median": 0.07490935322926773,
+   "ci": [
+    0.07490935322926773,
+    0.07490935322926773
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any rank: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    307.6253033333333,
+    307.145,
+    308.06578666666667,
+    305.66819,
+    307.93225333333334
+   ],
+   "median": 307.6253033333333,
+   "ci": [
+    305.66819,
+    308.06578666666667
+   ],
+   "cv": 0.0031626960330838694,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any rank: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    306.243,
+    304.161,
+    305.67,
+    307.024,
+    305.166
+   ],
+   "median": 305.67,
+   "ci": [
+    304.161,
+    307.024
+   ],
+   "cv": 0.00354312526595324,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any rank: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.5683294123178068,
+    0.5683294123178068,
+    0.5683294123178068,
+    0.5683294123178068,
+    0.5683294123178068
+   ],
+   "median": 0.5683294123178068,
+   "ci": [
+    0.5683294123178068,
+    0.5683294123178068
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any headline: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    308.99666,
+    308.71727999999996,
+    309.4798666666667,
+    306.77485666666666,
+    309.6879333333334
+   ],
+   "median": 308.99666,
+   "ci": [
+    306.77485666666666,
+    309.6879333333334
+   ],
+   "cv": 0.0037543032858623226,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any headline: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    307.754,
+    306.438,
+    307.278,
+    304.679,
+    308.052
+   ],
+   "median": 307.278,
+   "ci": [
+    304.679,
+    308.052
+   ],
+   "cv": 0.004411048656679504,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "scifact any headline: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.5683294123178068,
+    0.5683294123178068,
+    0.5683294123178068,
+    0.5683294123178068,
+    0.5683294123178068
+   ],
+   "median": 0.5683294123178068,
+   "ci": [
+    0.5683294123178068,
+    0.5683294123178068
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus: index built",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    556.958,
+    560.343,
+    554.345,
+    545.235,
+    551.282
+   ],
+   "median": 554.345,
+   "ci": [
+    545.235,
+    560.343
+   ],
+   "cv": 0.01040126240749684,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.05744272445820433,
+    0.05673993808049535,
+    0.05821052631578947,
+    0.05872445820433436,
+    0.05976780185758514
+   ],
+   "median": 0.05821052631578947,
+   "ci": [
+    0.05673993808049535,
+    0.05976780185758514
+   ],
+   "cv": 0.020037772820463262,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.056,
+    0.055,
+    0.056,
+    0.057,
+    0.057
+   ],
+   "median": 0.056,
+   "ci": [
+    0.055,
+    0.057
+   ],
+   "cv": 0.014887189084236231,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all: found",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    2745.0,
+    2745.0,
+    2745.0,
+    2745.0,
+    2745.0
+   ],
+   "median": 2745.0,
+   "ci": [
+    2745.0,
+    2745.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.15083900928792568,
+    0.15043653250773995,
+    0.1621578947368421,
+    0.15194117647058822,
+    0.15706811145510835
+   ],
+   "median": 0.15194117647058822,
+   "ci": [
+    0.15043653250773995,
+    0.1621578947368421
+   ],
+   "cv": 0.032638815745681955,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.101,
+    0.103,
+    0.106,
+    0.102,
+    0.107
+   ],
+   "median": 0.103,
+   "ci": [
+    0.101,
+    0.107
+   ],
+   "cv": 0.02493676128235988,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any: found",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "documents",
+   "times": [
+    158593.0,
+    158593.0,
+    158593.0,
+    158593.0,
+    158593.0
+   ],
+   "median": 158593.0,
+   "ci": [
+    158593.0,
+    158593.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all rank: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.1474891640866873,
+    1.1534613003095975,
+    1.1663374613003095,
+    1.1658018575851392,
+    1.18012693498452
+   ],
+   "median": 1.1658018575851392,
+   "ci": [
+    1.1474891640866873,
+    1.18012693498452
+   ],
+   "cv": 0.010907268690062193,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all rank: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.211,
+    0.208,
+    0.212,
+    0.215,
+    0.215
+   ],
+   "median": 0.212,
+   "ci": [
+    0.208,
+    0.215
+   ],
+   "cv": 0.013899982284403995,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all rank: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2028552241759635,
+    0.2028552241759635,
+    0.2028552241759635,
+    0.2028552241759635,
+    0.2028552241759635
+   ],
+   "median": 0.2028552241759635,
+   "ci": [
+    0.2028552241759635,
+    0.2028552241759635
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all headline: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.5197213622291021,
+    1.576328173374613,
+    1.519640866873065,
+    1.6000743034055727,
+    1.5243498452012385
+   ],
+   "median": 1.5243498452012385,
+   "ci": [
+    1.519640866873065,
+    1.6000743034055727
+   ],
+   "cv": 0.024337162819983087,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all headline: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.343,
+    0.35,
+    0.341,
+    0.355,
+    0.347
+   ],
+   "median": 0.347,
+   "ci": [
+    0.341,
+    0.355
+   ],
+   "cv": 0.016087834151807475,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus all headline: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2028552241759635,
+    0.2028552241759635,
+    0.2028552241759635,
+    0.2028552241759635,
+    0.2028552241759635
+   ],
+   "median": 0.2028552241759635,
+   "ci": [
+    0.2028552241759635,
+    0.2028552241759635
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any rank: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    62.148829721362226,
+    62.28701238390094,
+    62.20399380804953,
+    61.56108049535604,
+    62.24139009287926
+   ],
+   "median": 62.20399380804953,
+   "ci": [
+    61.56108049535604,
+    62.28701238390094
+   ],
+   "cv": 0.004817920109598287,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any rank: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    26.479,
+    26.91,
+    26.808,
+    26.502,
+    27.366
+   ],
+   "median": 26.808,
+   "ci": [
+    26.479,
+    27.366
+   ],
+   "cv": 0.013492462974939048,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any rank: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.29862752356741973,
+    0.29862752356741973,
+    0.29862752356741973,
+    0.29862752356741973,
+    0.29862752356741973
+   ],
+   "median": 0.29862752356741973,
+   "ci": [
+    0.29862752356741973,
+    0.29862752356741973
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any headline: mean",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    63.218427244582045,
+    63.27955108359133,
+    63.3171826625387,
+    62.73786687306501,
+    63.424393188854495
+   ],
+   "median": 63.27955108359133,
+   "ci": [
+    62.73786687306501,
+    63.424393188854495
+   ],
+   "cv": 0.004218024010008143,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any headline: p50",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    27.827,
+    28.002,
+    28.016,
+    28.147,
+    28.288
+   ],
+   "median": 28.016,
+   "ci": [
+    27.827,
+    28.288
+   ],
+   "cv": 0.006149373022200935,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "nfcorpus any headline: nDCG@10",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.29862752356741973,
+    0.29862752356741973,
+    0.29862752356741973,
+    0.29862752356741973,
+    0.29862752356741973
+   ],
+   "median": 0.29862752356741973,
+   "ci": [
+    0.29862752356741973,
+    0.29862752356741973
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

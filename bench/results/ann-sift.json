@@ -1,0 +1,1508 @@
+{
+ "method": 1,
+ "name": "ann-sift",
+ "script": "bench/method.py run ann-sift bench/results/ann-sift.json --runs 3 --also 'pgvector=bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/pgvector_ref.py target/ann-data/sift-128-euclidean' -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/sql.py ./target/release/nucleus target/ann-data/sift-128-euclidean --efs 10,20,40,60,80,120,200",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-16T14:00:34+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 37588721664,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   5.6474609375,
+   6.1044921875,
+   7.58837890625
+  ],
+  "systems": {
+   "nucleus": {
+    "settings": {
+     "cache": "3GB",
+     "index": "m = 16, ef_construction = 64"
+    }
+   },
+   "pgvector": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "4GB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "9",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "off"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "off",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "4GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "9",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "64854",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-3j8tdlf2",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true,
+    "pgvector": "0.8.7"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "15d10437821bc2084c874fbbf6e219964ffb9ccd",
+   "dirty": true
+  },
+  "load_after": [
+   25.45751953125,
+   36.66748046875,
+   35.37060546875
+  ]
+ },
+ "samples": [
+  {
+   "name": "load",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    15.63703041698318,
+    15.881279541994445,
+    15.893428749986924
+   ],
+   "median": 15.881279541994445,
+   "ci": [
+    15.63703041698318,
+    15.893428749986924
+   ],
+   "cv": 0.00915292812205348,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "index build",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    56.51298258401221,
+    55.56061245803721,
+    56.6240173340193
+   ],
+   "median": 56.51298258401221,
+   "ci": [
+    55.56061245803721,
+    56.6240173340193
+   ],
+   "cv": 0.010395164498053399,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "index, resident",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB",
+   "times": [
+    1879.203125,
+    1961.328125,
+    1973.921875
+   ],
+   "median": 1961.328125,
+   "ci": [
+    1879.203125,
+    1973.921875
+   ],
+   "cv": 0.02653935334909878,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "index, on disk",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB",
+   "times": [
+    587.067403793335,
+    587.067403793335,
+    587.067403793335
+   ],
+   "median": 587.067403793335,
+   "ci": [
+    587.067403793335,
+    587.067403793335
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.65415,
+    0.65415,
+    0.65415
+   ],
+   "median": 0.65415,
+   "ci": [
+    0.65415,
+    0.65415
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    662.5248749915045,
+    662.8028955019545,
+    648.1870624993462
+   ],
+   "median": 662.5248749915045,
+   "ci": [
+    648.1870624993462,
+    662.8028955019545
+   ],
+   "cv": 0.012707307701710023,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    14237.991591116539,
+    9330.055374262274,
+    13894.746682497514
+   ],
+   "median": 13894.746682497514,
+   "ci": [
+    9330.055374262274,
+    14237.991591116539
+   ],
+   "cv": 0.21940908184105354,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 20: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.78455,
+    0.78455,
+    0.78455
+   ],
+   "median": 0.78455,
+   "ci": [
+    0.78455,
+    0.78455
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 20: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    282.3629585036542,
+    274.908791994676,
+    271.2222295231186
+   ],
+   "median": 274.908791994676,
+   "ci": [
+    271.2222295231186,
+    282.3629585036542
+   ],
+   "cv": 0.020551324909994954,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 20: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    16985.432563694503,
+    16823.8469638621,
+    16501.67862490853
+   ],
+   "median": 16823.8469638621,
+   "ci": [
+    16501.67862490853,
+    16985.432563694503
+   ],
+   "cv": 0.014685411930794704,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8906000000000001,
+    0.8906000000000001,
+    0.8906000000000001
+   ],
+   "median": 0.8906000000000001,
+   "ci": [
+    0.8906000000000001,
+    0.8906000000000001
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    372.5582500046585,
+    357.2901044972241,
+    356.6310625174083
+   ],
+   "median": 357.2901044972241,
+   "ci": [
+    356.6310625174083,
+    372.5582500046585
+   ],
+   "cv": 0.02488223066279842,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    11339.89346236824,
+    9313.839741907177,
+    10480.436297858076
+   ],
+   "median": 10480.436297858076,
+   "ci": [
+    9313.839741907177,
+    11339.89346236824
+   ],
+   "cv": 0.0979855449202981,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 60: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.93335,
+    0.93335,
+    0.93335
+   ],
+   "median": 0.93335,
+   "ci": [
+    0.93335,
+    0.93335
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 60: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    447.10529150324874,
+    504.39241700223647,
+    434.21447949367575
+   ],
+   "median": 447.10529150324874,
+   "ci": [
+    434.21447949367575,
+    504.39241700223647
+   ],
+   "cv": 0.08087445013997935,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 60: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    12150.757535994426,
+    11798.458704646064,
+    11649.314895150055
+   ],
+   "median": 11798.458704646064,
+   "ci": [
+    11649.314895150055,
+    12150.757535994426
+   ],
+   "cv": 0.021699394389110175,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 80: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.95285,
+    0.95285,
+    0.95285
+   ],
+   "median": 0.95285,
+   "ci": [
+    0.95285,
+    0.95285
+   ],
+   "cv": 1.4270241438951757e-16,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 80: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    532.5656874920242,
+    517.7592709951568,
+    527.4985835130792
+   ],
+   "median": 527.4985835130792,
+   "ci": [
+    517.7592709951568,
+    532.5656874920242
+   ],
+   "cv": 0.014307809304909547,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 80: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    10767.341307344825,
+    9301.189971309363,
+    9066.455419109625
+   ],
+   "median": 9301.189971309363,
+   "ci": [
+    9066.455419109625,
+    10767.341307344825
+   ],
+   "cv": 0.09491142409116794,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 120: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9739,
+    0.9739,
+    0.9739
+   ],
+   "median": 0.9739,
+   "ci": [
+    0.9739,
+    0.9739
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 120: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    657.4983335158322,
+    695.904979511397,
+    656.8216040031984
+   ],
+   "median": 657.4983335158322,
+   "ci": [
+    656.8216040031984,
+    695.904979511397
+   ],
+   "cv": 0.03338731075116607,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 120: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    6122.398219824397,
+    7115.905649896964,
+    8255.682619249988
+   ],
+   "median": 7115.905649896964,
+   "ci": [
+    6122.398219824397,
+    8255.682619249988
+   ],
+   "cv": 0.14899203911562997,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.98875,
+    0.98875,
+    0.98875
+   ],
+   "median": 0.98875,
+   "ci": [
+    0.98875,
+    0.98875
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    943.2922915148083,
+    933.7154584936798,
+    898.9247079880442
+   ],
+   "median": 933.7154584936798,
+   "ci": [
+    898.9247079880442,
+    943.2922915148083
+   ],
+   "cv": 0.025231907675713497,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    6131.008937185356,
+    6527.45242532707,
+    4773.2611457125395
+   ],
+   "median": 6131.008937185356,
+   "ci": [
+    4773.2611457125395,
+    6527.45242532707
+   ],
+   "cv": 0.1583231988565043,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: server \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    261.34499999999997,
+    264.46000000000004,
+    270.98
+   ],
+   "median": 264.46000000000004,
+   "ci": [
+    261.34499999999997,
+    270.98
+   ],
+   "cv": 0.018512225452245505,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "inserts, rows/s",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "rows/s",
+   "times": [
+    5046.4532223871165,
+    4880.832680304862,
+    4828.060222520076
+   ],
+   "median": 4880.832680304862,
+   "ci": [
+    4828.060222520076,
+    5046.4532223871165
+   ],
+   "cv": 0.023168317639053106,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 during inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1043.0581882349977,
+    882.8230265299314,
+    1004.3352259316981
+   ],
+   "median": 1004.3352259316981,
+   "ci": [
+    882.8230265299314,
+    1043.0581882349977
+   ],
+   "cv": 0.08559730420987556,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.6434500000000001,
+    0.6463,
+    0.64735
+   ],
+   "median": 0.6463,
+   "ci": [
+    0.6434500000000001,
+    0.64735
+   ],
+   "cv": 0.0031253579170837905,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    428.4817709994968,
+    598.9935210091062,
+    581.9099999789614
+   ],
+   "median": 581.9099999789614,
+   "ci": [
+    428.4817709994968,
+    598.9935210091062
+   ],
+   "cv": 0.17504084425327657,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    13791.922478889333,
+    11654.955077450017,
+    10855.919149950516
+   ],
+   "median": 11654.955077450017,
+   "ci": [
+    10855.919149950516,
+    13791.922478889333
+   ],
+   "cv": 0.1254415218845621,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 20 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.7795,
+    0.78,
+    0.7804500000000001
+   ],
+   "median": 0.78,
+   "ci": [
+    0.7795,
+    0.7804500000000001
+   ],
+   "cv": 0.0006092684642571428,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 20 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    324.32824998977594,
+    373.5440625168849,
+    399.9971044831909
+   ],
+   "median": 373.5440625168849,
+   "ci": [
+    324.32824998977594,
+    399.9971044831909
+   ],
+   "cv": 0.10493273673484474,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 20 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    15411.298628538227,
+    1027.379734125964,
+    914.7265079076622
+   ],
+   "median": 1027.379734125964,
+   "ci": [
+    914.7265079076622,
+    15411.298628538227
+   ],
+   "cv": 1.4413200118323923,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8854,
+    0.88595,
+    0.88735
+   ],
+   "median": 0.88595,
+   "ci": [
+    0.8854,
+    0.88735
+   ],
+   "cv": 0.0011344665537184058,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    442.0910210174043,
+    449.66145799844526,
+    407.1431875054259
+   ],
+   "median": 442.0910210174043,
+   "ci": [
+    407.1431875054259,
+    449.66145799844526
+   ],
+   "cv": 0.052384415668333406,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    14058.16866555722,
+    11480.28189953302,
+    11382.98796089916
+   ],
+   "median": 11480.28189953302,
+   "ci": [
+    11382.98796089916,
+    14058.16866555722
+   ],
+   "cv": 0.12327878718527353,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 60 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9309,
+    0.92965,
+    0.93145
+   ],
+   "median": 0.9309,
+   "ci": [
+    0.92965,
+    0.93145
+   ],
+   "cv": 0.0009911242193425367,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 60 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    476.80839549866505,
+    510.68000000668695,
+    496.73235398950055
+   ],
+   "median": 496.73235398950055,
+   "ci": [
+    476.80839549866505,
+    510.68000000668695
+   ],
+   "cv": 0.03440885855468423,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 60 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    11826.301224609084,
+    9699.387654504895,
+    10874.051767474648
+   ],
+   "median": 10874.051767474648,
+   "ci": [
+    9699.387654504895,
+    11826.301224609084
+   ],
+   "cv": 0.09864830902645716,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 80 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9522,
+    0.9519500000000001,
+    0.95245
+   ],
+   "median": 0.9522,
+   "ci": [
+    0.9519500000000001,
+    0.95245
+   ],
+   "cv": 0.0002625498844780219,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 80 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    531.8052499787882,
+    557.2679999750108,
+    590.2864584932104
+   ],
+   "median": 557.2679999750108,
+   "ci": [
+    531.8052499787882,
+    590.2864584932104
+   ],
+   "cv": 0.05238039302933547,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 80 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    9852.51198497315,
+    7691.034472456489,
+    8650.36469462494
+   ],
+   "median": 8650.36469462494,
+   "ci": [
+    7691.034472456489,
+    9852.51198497315
+   ],
+   "cv": 0.12403754893572876,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 120 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9719500000000001,
+    0.972,
+    0.972
+   ],
+   "median": 0.972,
+   "ci": [
+    0.9719500000000001,
+    0.972
+   ],
+   "cv": 2.9699597173559915e-05,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 120 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    674.9394374783151,
+    694.2294795007911,
+    726.0444579878822
+   ],
+   "median": 694.2294795007911,
+   "ci": [
+    674.9394374783151,
+    726.0444579878822
+   ],
+   "cv": 0.03695143345755124,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 120 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    7958.576913116974,
+    7245.412069190404,
+    8261.656303225558
+   ],
+   "median": 7958.576913116974,
+   "ci": [
+    7245.412069190404,
+    8261.656303225558
+   ],
+   "cv": 0.06670134876965332,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200 after inserts: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.988,
+    0.98805,
+    0.9883
+   ],
+   "median": 0.98805,
+   "ci": [
+    0.988,
+    0.9883
+   ],
+   "cv": 0.0001626604611633561,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200 after inserts: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    929.2364374850877,
+    948.000291507924,
+    951.0331460041925
+   ],
+   "median": 948.000291507924,
+   "ci": [
+    929.2364374850877,
+    951.0331460041925
+   ],
+   "cv": 0.01252350240250547,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200 after inserts: QPS, 10 clients",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    6090.68728218489,
+    5263.355837993074,
+    5290.59181326151
+   ],
+   "median": 5290.59181326151,
+   "ci": [
+    5263.355837993074,
+    6090.68728218489
+   ],
+   "cv": 0.08471108234805669,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "load",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    1.8150281250127591,
+    1.7202237080200575,
+    1.8035668330267072
+   ],
+   "median": 1.8035668330267072,
+   "ci": [
+    1.7202237080200575,
+    1.8150281250127591
+   ],
+   "cv": 0.029076697912540826,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "index build",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    74.71951379202073,
+    72.73911129200133,
+    73.11710291699274
+   ],
+   "median": 73.11710291699274,
+   "ci": [
+    72.73911129200133,
+    74.71951379202073
+   ],
+   "cv": 0.014299786746706473,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "index, on disk",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "MB",
+   "times": [
+    702.0,
+    702.0,
+    702.0
+   ],
+   "median": 702.0,
+   "ci": [
+    702.0,
+    702.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.7332000000000012,
+    0.730900000000001,
+    0.7298500000000014
+   ],
+   "median": 0.730900000000001,
+   "ci": [
+    0.7298500000000014,
+    0.7332000000000012
+   ],
+   "cv": 0.00234293493171044,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    374.0,
+    394.0,
+    368.0
+   ],
+   "median": 374.0,
+   "ci": [
+    368.0,
+    394.0
+   ],
+   "cv": 0.03595172157863052,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10: QPS, 10 clients",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    11739.087051,
+    9945.300845,
+    11251.758087
+   ],
+   "median": 11251.758087,
+   "ci": [
+    9945.300845,
+    11739.087051
+   ],
+   "cv": 0.08448534616417121,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.926600000000004,
+    0.9266500000000043,
+    0.927450000000005
+   ],
+   "median": 0.9266500000000043,
+   "ci": [
+    0.926600000000004,
+    0.927450000000005
+   ],
+   "cv": 0.0005145858244783373,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    784.0,
+    770.0,
+    782.0
+   ],
+   "median": 782.0,
+   "ci": [
+    770.0,
+    784.0
+   ],
+   "cv": 0.009724158126370333,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: QPS, 10 clients",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    5683.222842,
+    6645.887193,
+    5834.390817
+   ],
+   "median": 5834.390817,
+   "ci": [
+    5683.222842,
+    6645.887193
+   ],
+   "cv": 0.08550720325303193,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9928500000000013,
+    0.9932500000000014,
+    0.9933000000000013
+   ],
+   "median": 0.9932500000000014,
+   "ci": [
+    0.9928500000000013,
+    0.9933000000000013
+   ],
+   "cv": 0.000248349476185619,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2644.0,
+    2429.0,
+    2691.0
+   ],
+   "median": 2644.0,
+   "ci": [
+    2429.0,
+    2691.0
+   ],
+   "cv": 0.053975633751613496,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200: QPS, 10 clients",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    2192.203647,
+    2371.472139,
+    2446.405374
+   ],
+   "median": 2371.472139,
+   "ci": [
+    2192.203647,
+    2446.405374
+   ],
+   "cv": 0.05589982133250437,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40: server \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1000.245,
+    985.84,
+    1046.7450000000001
+   ],
+   "median": 1000.245,
+   "ci": [
+    985.84,
+    1046.7450000000001
+   ],
+   "cv": 0.031486168499032734,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "inserts, rows/s",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "rows/s",
+   "times": [
+    2470.4219722196985,
+    2551.5980434840276,
+    2428.720639193258
+   ],
+   "median": 2470.4219722196985,
+   "ci": [
+    2428.720639193258,
+    2551.5980434840276
+   ],
+   "cv": 0.02515986707486171,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 during inserts: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2237.870068979765,
+    2166.955822468604,
+    1851.8712321155715
+   ],
+   "median": 2166.955822468604,
+   "ci": [
+    1851.8712321155715,
+    2237.870068979765
+   ],
+   "cv": 0.0985190023715333,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10 after inserts: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.7255499999999997,
+    0.7265,
+    0.7252500000000002
+   ],
+   "median": 0.7255499999999997,
+   "ci": [
+    0.7252500000000002,
+    0.7265
+   ],
+   "cv": 0.0008991306641460503,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10 after inserts: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    353.0,
+    365.0,
+    361.0
+   ],
+   "median": 361.0,
+   "ci": [
+    353.0,
+    365.0
+   ],
+   "cv": 0.01698823241874269,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 10 after inserts: QPS, 10 clients",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    10311.351251,
+    10383.730771,
+    7417.132092
+   ],
+   "median": 10311.351251,
+   "ci": [
+    7417.132092,
+    10383.730771
+   ],
+   "cv": 0.18058976604610616,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 after inserts: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.926150000000005,
+    0.9249000000000043,
+    0.9249000000000047
+   ],
+   "median": 0.9249000000000047,
+   "ci": [
+    0.9249000000000043,
+    0.926150000000005
+   ],
+   "cv": 0.0007799360613346786,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 after inserts: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    778.0,
+    796.0,
+    846.0
+   ],
+   "median": 796.0,
+   "ci": [
+    778.0,
+    846.0
+   ],
+   "cv": 0.04367672813792996,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 40 after inserts: QPS, 10 clients",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    6164.373006,
+    6190.723819,
+    5666.268139
+   ],
+   "median": 6164.373006,
+   "ci": [
+    5666.268139,
+    6190.723819
+   ],
+   "cv": 0.04918856478021018,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200 after inserts: recall@10",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9924500000000018,
+    0.9930500000000019,
+    0.9928500000000023
+   ],
+   "median": 0.9928500000000023,
+   "ci": [
+    0.9924500000000018,
+    0.9930500000000019
+   ],
+   "cv": 0.0003077258008600038,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200 after inserts: \u00b5s a search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2580.0,
+    2633.0,
+    2694.0
+   ],
+   "median": 2633.0,
+   "ci": [
+    2580.0,
+    2694.0
+   ],
+   "cv": 0.02164414990854297,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "ef 200 after inserts: QPS, 10 clients",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "QPS",
+   "times": [
+    1759.41109,
+    1928.190336,
+    2239.042406
+   ],
+   "median": 1928.190336,
+   "ci": [
+    1759.41109,
+    2239.042406
+   ],
+   "cv": 0.12315437054548989,
+   "flagged": true,
+   "attempts": 3
+  }
+ ]
+}

@@ -1,0 +1,2364 @@
+{
+ "method": 1,
+ "name": "stats",
+ "script": "bench/method.py run stats bench/results/stats.json --runs 5 --also 'work_mem 1GB=bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/stats/aggs.py ./target/release/nucleus --work-mem 1GB' -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/stats/aggs.py ./target/release/nucleus --pg --numpy --python",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-16T19:35:45+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 14003662848,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   5.12744140625,
+   6.18212890625,
+   6.46337890625
+  ],
+  "systems": {
+   "postgresql": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "2048MB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "5",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "on"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "on",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "2GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "5",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "56041",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-f5k39yun",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true
+   },
+   "python": {
+    "version": "scipy 1.18.1, scikit-learn 1.9.1"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "c6a8dfd7c7589350713b12e0a5afd31e3a9beb27",
+   "dirty": true
+  },
+  "load_after": [
+   23.70166015625,
+   12.65576171875,
+   11.39111328125
+  ]
+ },
+ "samples": [
+  {
+   "name": "sum",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    194.82983299531043,
+    210.64212499186397,
+    215.97429102985188,
+    226.70437500346452,
+    206.16270904429257
+   ],
+   "median": 210.64212499186397,
+   "ci": [
+    194.82983299531043,
+    226.70437500346452
+   ],
+   "cv": 0.055926342383278004,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "avg spread",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    191.10695802373812,
+    210.8634160249494,
+    210.53887496236712,
+    234.41029200330377,
+    205.01733402488753
+   ],
+   "median": 210.53887496236712,
+   "ci": [
+    191.10695802373812,
+    234.41029200330377
+   ],
+   "cv": 0.0743194387839523,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "sum 1000 groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    218.8923329813406,
+    207.49000000068918,
+    194.81904100393876,
+    217.07908296957612,
+    180.17524998867884
+   ],
+   "median": 207.49000000068918,
+   "ci": [
+    180.17524998867884,
+    218.8923329813406
+   ],
+   "cv": 0.07978542042792379,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "avg 1M groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1703.113834024407,
+    1712.0006670011207,
+    1883.5420830291696,
+    1715.902208990883,
+    1802.4019590229727
+   ],
+   "median": 1715.902208990883,
+   "ci": [
+    1703.113834024407,
+    1883.5420830291696
+   ],
+   "cv": 0.044370512288222703,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    199.98645799933,
+    195.48845797544345,
+    219.37829197850078,
+    206.40450000064448,
+    189.4053749856539
+   ],
+   "median": 199.98645799933,
+   "ci": [
+    189.4053749856539,
+    219.37829197850078
+   ],
+   "cv": 0.05675313088883659,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "stddev 1000 groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    214.83095799339935,
+    224.64116697665304,
+    226.20837501017377,
+    227.688750019297,
+    211.9089579791762
+   ],
+   "median": 224.64116697665304,
+   "ci": [
+    211.9089579791762,
+    227.688750019297
+   ],
+   "cv": 0.03244928315124655,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance of integers",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    187.94249999336898,
+    186.09495798591524,
+    219.60629103705287,
+    203.21008400060236,
+    207.67595898360014
+   ],
+   "median": 203.21008400060236,
+   "ci": [
+    186.09495798591524,
+    219.60629103705287
+   ],
+   "cv": 0.06987346789168096,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "skewness, kurtosis",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    302.6165420305915,
+    296.0000000311993,
+    297.8942079935223,
+    309.9681250168942,
+    292.43758297525346
+   ],
+   "median": 297.8942079935223,
+   "ci": [
+    292.43758297525346,
+    309.9681250168942
+   ],
+   "cv": 0.022599474240650348,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "corr",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    240.05633301567286,
+    241.91541696200147,
+    246.3444999884814,
+    251.53283402323723,
+    217.7904580021277
+   ],
+   "median": 241.91541696200147,
+   "ci": [
+    217.7904580021277,
+    251.53283402323723
+   ],
+   "cv": 0.05399493423024727,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "regression 1000 groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    283.14333397429436,
+    282.92641701409593,
+    288.2737909676507,
+    294.61662500398234,
+    286.6411249851808
+   ],
+   "median": 286.6411249851808,
+   "ci": [
+    282.92641701409593,
+    294.61662500398234
+   ],
+   "cv": 0.016626782356305467,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "row_number by groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2655.8497499790974,
+    2706.9170839968137,
+    2639.7294999915175,
+    2697.8221670142375,
+    2682.9758749809116
+   ],
+   "median": 2682.9758749809116,
+   "ci": [
+    2639.7294999915175,
+    2706.9170839968137
+   ],
+   "cv": 0.010567249112782744,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "top 3 by groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2116.1043340107426,
+    2152.722083032131,
+    2136.1765839974396,
+    2116.4677499909885,
+    2104.43716699956
+   ],
+   "median": 2116.4677499909885,
+   "ci": [
+    2104.43716699956,
+    2152.722083032131
+   ],
+   "cv": 0.009014487262233197,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "running sum",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3726.285332988482,
+    3770.786917011719,
+    3852.214291051496,
+    3826.6522909980267,
+    3953.219791990705
+   ],
+   "median": 3826.6522909980267,
+   "ci": [
+    3726.285332988482,
+    3953.219791990705
+   ],
+   "cv": 0.022584840190145467,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "moving avg 10 rows",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    5287.696249957662,
+    5325.19412500551,
+    5242.392915999517,
+    5300.5216250312515,
+    5316.593582974747
+   ],
+   "median": 5300.5216250312515,
+   "ci": [
+    5242.392915999517,
+    5325.19412500551
+   ],
+   "cv": 0.006140613799841708,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "lag",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2809.5553329912946,
+    2810.946832993068,
+    2907.3092920007184,
+    2839.4088750355877,
+    2814.7011660039425
+   ],
+   "median": 2814.7011660039425,
+   "ci": [
+    2809.5553329912946,
+    2907.3092920007184
+   ],
+   "cv": 0.01461804372410482,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    661.0627080081031,
+    699.6092919725925,
+    712.2976669925265,
+    784.027874993626,
+    668.0671659996733
+   ],
+   "median": 699.6092919725925,
+   "ci": [
+    661.0627080081031,
+    784.027874993626
+   ],
+   "cv": 0.06956823759290494,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "p50, p95, p99",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    688.6691669933498,
+    675.3230830072425,
+    716.5521249989979,
+    726.9626670167781,
+    654.1972499690019
+   ],
+   "median": 688.6691669933498,
+   "ci": [
+    654.1972499690019,
+    726.9626670167781
+   ],
+   "cv": 0.042986096928605014,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "percentile_disc",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    623.2602079981007,
+    624.4749579927884,
+    661.8207919527777,
+    641.5371659677476,
+    601.6594170359895
+   ],
+   "median": 624.4749579927884,
+   "ci": [
+    601.6594170359895,
+    661.8207919527777
+   ],
+   "cv": 0.03566806410975511,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median 1000 groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    641.5554170380346,
+    681.0801249812357,
+    667.155958013609,
+    651.4960839995183,
+    702.0849580294453
+   ],
+   "median": 667.155958013609,
+   "ci": [
+    641.5554170380346,
+    702.0849580294453
+   ],
+   "cv": 0.035884165541390844,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "mode",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    724.0910829859786,
+    798.1936249998398,
+    771.3949590106495,
+    759.8909169901162,
+    741.233833017759
+   ],
+   "median": 759.8909169901162,
+   "ci": [
+    724.0910829859786,
+    798.1936249998398
+   ],
+   "cv": 0.03741140840711802,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "histogram",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    166.6331659653224,
+    175.99074996542186,
+    175.84216699469835,
+    175.9633329929784,
+    176.6044999822043
+   ],
+   "median": 175.9633329929784,
+   "ci": [
+    166.6331659653224,
+    176.6044999822043
+   ],
+   "cv": 0.02436270900273691,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "count distinct",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    898.7174580106512,
+    886.0356249497272,
+    924.6299999649636,
+    939.0469170175493,
+    871.0092080291361
+   ],
+   "median": 898.7174580106512,
+   "ci": [
+    871.0092080291361,
+    939.0469170175493
+   ],
+   "cv": 0.03076337359189884,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_count_distinct",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    198.82416602922603,
+    188.75841703265905,
+    210.2234159829095,
+    199.01820801896974,
+    188.0212920368649
+   ],
+   "median": 198.82416602922603,
+   "ci": [
+    188.0212920368649,
+    210.2234159829095
+   ],
+   "cv": 0.046169137181042444,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_count_distinct 1000 groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    365.3502499801107,
+    369.1025840234943,
+    360.803916992154,
+    346.75162500934675,
+    354.2989999987185
+   ],
+   "median": 360.803916992154,
+   "ci": [
+    346.75162500934675,
+    369.1025840234943
+   ],
+   "cv": 0.024795794669766332,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "count distinct 1000 groups",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1558.2776249502786,
+    1579.1060830233619,
+    1587.1551660238765,
+    1639.393875026144,
+    1571.0668330430053
+   ],
+   "median": 1579.1060830233619,
+   "ci": [
+    1558.2776249502786,
+    1639.393875026144
+   ],
+   "cv": 0.01964088631250158,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_percentile",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    187.72070802515373,
+    181.96829204680398,
+    181.50199996307492,
+    174.36425003688782,
+    194.36887500341982
+   ],
+   "median": 181.96829204680398,
+   "ci": [
+    174.36425003688782,
+    194.36887500341982
+   ],
+   "cv": 0.04072540586267781,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_top_k",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    254.66741702985018,
+    254.12208295892924,
+    255.03695796942338,
+    238.70141699444503,
+    254.63774998206645
+   ],
+   "median": 254.63774998206645,
+   "ci": [
+    238.70141699444503,
+    255.03695796942338
+   ],
+   "cv": 0.028336317258428088,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "tablesample",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    195.83295797929168,
+    180.23983400780708,
+    209.0553329908289,
+    183.7095840019174,
+    186.20695895515382
+   ],
+   "median": 186.20695895515382,
+   "ci": [
+    180.23983400780708,
+    209.0553329908289
+   ],
+   "cv": 0.06090009532619783,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "tablesample repeatable",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    271.08812500955537,
+    218.8149580033496,
+    230.22479203063995,
+    216.87633398687467,
+    222.50437503680587
+   ],
+   "median": 222.50437503680587,
+   "ci": [
+    216.87633398687467,
+    271.08812500955537
+   ],
+   "cv": 0.09699324197673212,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "hash_unit split",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    368.85591701138765,
+    361.20454099727795,
+    369.3936659838073,
+    357.99108300125226,
+    375.20179100101814
+   ],
+   "median": 368.85591701138765,
+   "ci": [
+    357.99108300125226,
+    375.20179100101814
+   ],
+   "cv": 0.01880762790813604,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "reservoir_sample",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    180.00308301998302,
+    169.06345798633993,
+    193.24820797191933,
+    166.37270903447643,
+    179.88241696730256
+   ],
+   "median": 179.88241696730256,
+   "ci": [
+    166.37270903447643,
+    193.24820797191933
+   ],
+   "cv": 0.05999510576386954,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "order by random() limit",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    234.5007080002688,
+    232.74612502427772,
+    243.09925001580268,
+    225.4793749889359,
+    242.97341599594802
+   ],
+   "median": 234.5007080002688,
+   "ci": [
+    225.4793749889359,
+    243.09925001580268
+   ],
+   "cv": 0.031617640470834735,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "ks_test",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    829.2016250197776,
+    782.3847090476193,
+    815.6930829863995,
+    800.6714580114931,
+    813.101458013989
+   ],
+   "median": 813.101458013989,
+   "ci": [
+    782.3847090476193,
+    829.2016250197776
+   ],
+   "cv": 0.021823087591808052,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "auc",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    878.8683749735355,
+    881.9931670441292,
+    905.8271670364775,
+    854.0273749968037,
+    879.8733750008978
+   ],
+   "median": 879.8733750008978,
+   "ci": [
+    854.0273749968037,
+    905.8271670364775
+   ],
+   "cv": 0.020848934967692873,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "psi",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    786.8029160308652,
+    797.1934580127709,
+    822.5425000418909,
+    788.6104169883765,
+    819.6437499718741
+   ],
+   "median": 797.1934580127709,
+   "ci": [
+    786.8029160308652,
+    822.5425000418909
+   ],
+   "cv": 0.021226909609027917,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "chisq_test",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    253.55945801129565,
+    261.40216598287225,
+    260.9486670116894,
+    261.4578749635257,
+    267.84766698256135
+   ],
+   "median": 261.40216598287225,
+   "ci": [
+    253.55945801129565,
+    267.84766698256135
+   ],
+   "cv": 0.019402922505730655,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "js_divergence",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    261.1880420008674,
+    252.38658301532269,
+    277.33608399285004,
+    260.8571669552475,
+    262.8567079664208
+   ],
+   "median": 261.1880420008674,
+   "ci": [
+    252.38658301532269,
+    277.33608399285004
+   ],
+   "cv": 0.034337644579601784,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "summarize",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    524.6733750100248,
+    523.2133750105277,
+    526.3236250029877,
+    499.2977080401033,
+    513.125209021382
+   ],
+   "median": 523.2133750105277,
+   "ci": [
+    499.2977080401033,
+    526.3236250029877
+   ],
+   "cv": 0.021875293683445766,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "sum",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    85.689,
+    85.342,
+    85.803,
+    85.905,
+    85.295
+   ],
+   "median": 85.689,
+   "ci": [
+    85.295,
+    85.905
+   ],
+   "cv": 0.003207115626638889,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "avg spread",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    102.286,
+    104.456,
+    103.885,
+    101.968,
+    101.287
+   ],
+   "median": 102.286,
+   "ci": [
+    101.287,
+    104.456
+   ],
+   "cv": 0.013019815609078054,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "sum 1000 groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    171.988,
+    170.889,
+    178.045,
+    172.324,
+    171.766
+   ],
+   "median": 171.988,
+   "ci": [
+    170.889,
+    178.045
+   ],
+   "cv": 0.01658044904267604,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "avg 1M groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1713.922,
+    1768.817,
+    1734.038,
+    1723.761,
+    1762.031
+   ],
+   "median": 1734.038,
+   "ci": [
+    1713.922,
+    1768.817
+   ],
+   "cv": 0.013758406730563276,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    93.305,
+    93.4,
+    94.883,
+    92.901,
+    94.151
+   ],
+   "median": 93.4,
+   "ci": [
+    92.901,
+    94.883
+   ],
+   "cv": 0.008406663094341418,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "stddev 1000 groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    182.511,
+    180.445,
+    181.744,
+    182.722,
+    189.983
+   ],
+   "median": 182.511,
+   "ci": [
+    180.445,
+    189.983
+   ],
+   "cv": 0.020397612366181976,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance of integers",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    147.97,
+    148.854,
+    147.837,
+    144.537,
+    149.378
+   ],
+   "median": 147.97,
+   "ci": [
+    144.537,
+    149.378
+   ],
+   "cv": 0.012774316417087156,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "corr",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    100.509,
+    103.866,
+    101.734,
+    101.603,
+    101.446
+   ],
+   "median": 101.603,
+   "ci": [
+    100.509,
+    103.866
+   ],
+   "cv": 0.012125505366038401,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "regression 1000 groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    199.616,
+    196.063,
+    200.447,
+    199.425,
+    196.487
+   ],
+   "median": 199.425,
+   "ci": [
+    196.063,
+    200.447
+   ],
+   "cv": 0.010029838478469912,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "row_number by groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4603.944,
+    4676.237,
+    4630.633,
+    4641.587,
+    4633.532
+   ],
+   "median": 4633.532,
+   "ci": [
+    4603.944,
+    4676.237
+   ],
+   "cv": 0.0056085826644742525,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "top 3 by groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3797.036,
+    3784.412,
+    3698.095,
+    3805.899,
+    3758.215
+   ],
+   "median": 3784.412,
+   "ci": [
+    3698.095,
+    3805.899
+   ],
+   "cv": 0.0115114680281888,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "running sum",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2309.398,
+    2299.632,
+    2302.904,
+    2296.465,
+    2291.689
+   ],
+   "median": 2299.632,
+   "ci": [
+    2291.689,
+    2309.398
+   ],
+   "cv": 0.00290407208761118,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "moving avg 10 rows",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    8592.635,
+    8581.57,
+    8578.945,
+    8585.049,
+    8576.987
+   ],
+   "median": 8581.57,
+   "ci": [
+    8576.987,
+    8592.635
+   ],
+   "cv": 0.0007174260400442706,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "lag",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2139.97,
+    2130.464,
+    2143.599,
+    2135.346,
+    2126.272
+   ],
+   "median": 2135.346,
+   "ci": [
+    2126.272,
+    2143.599
+   ],
+   "cv": 0.0032737341514739123,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1968.16,
+    1993.271,
+    2001.298,
+    1963.711,
+    1968.035
+   ],
+   "median": 1968.16,
+   "ci": [
+    1963.711,
+    2001.298
+   ],
+   "cv": 0.008650997096593937,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "p50, p95, p99",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2215.974,
+    2210.277,
+    2274.803,
+    2182.881,
+    2240.452
+   ],
+   "median": 2215.974,
+   "ci": [
+    2182.881,
+    2274.803
+   ],
+   "cv": 0.015555694382489672,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "percentile_disc",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2102.971,
+    2070.963,
+    2107.524,
+    2054.21,
+    2065.789
+   ],
+   "median": 2070.963,
+   "ci": [
+    2054.21,
+    2107.524
+   ],
+   "cv": 0.011359110775407022,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median 1000 groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    512.445,
+    510.836,
+    512.982,
+    501.725,
+    520.274
+   ],
+   "median": 512.445,
+   "ci": [
+    501.725,
+    520.274
+   ],
+   "cv": 0.012962445111511954,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "mode",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1096.142,
+    1109.163,
+    1116.712,
+    1098.705,
+    1123.588
+   ],
+   "median": 1109.163,
+   "ci": [
+    1096.142,
+    1123.588
+   ],
+   "cv": 0.010512469610206096,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "count distinct",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    400.947,
+    398.013,
+    402.104,
+    401.314,
+    396.236
+   ],
+   "median": 400.947,
+   "ci": [
+    396.236,
+    402.104
+   ],
+   "cv": 0.00622699142751657,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "count distinct 1000 groups",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    820.998,
+    821.339,
+    901.964,
+    811.453,
+    875.696
+   ],
+   "median": 821.339,
+   "ci": [
+    811.453,
+    901.964
+   ],
+   "cv": 0.04741318924988198,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "tablesample",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    200.28,
+    188.597,
+    197.447,
+    190.634,
+    189.188
+   ],
+   "median": 190.634,
+   "ci": [
+    188.597,
+    200.28
+   ],
+   "cv": 0.027387922824799262,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "tablesample repeatable",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    193.993,
+    194.182,
+    195.191,
+    193.253,
+    195.188
+   ],
+   "median": 194.182,
+   "ci": [
+    193.253,
+    195.191
+   ],
+   "cv": 0.004279959613222799,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "order by random() limit",
+   "system": "postgresql",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    599.414,
+    595.682,
+    598.895,
+    599.069,
+    599.237
+   ],
+   "median": 599.069,
+   "ci": [
+    595.682,
+    599.414
+   ],
+   "cv": 0.002614291486975993,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance",
+   "system": "numpy",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    8.218750008381903,
+    7.793083961587399,
+    7.667666999623179,
+    7.746040995698422,
+    7.475416990928352
+   ],
+   "median": 7.746040995698422,
+   "ci": [
+    7.475416990928352,
+    8.218750008381903
+   ],
+   "cv": 0.03515374527243113,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "sum",
+   "system": "numpy",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.0547910244204104,
+    1.9869999960064888,
+    1.9680419936776161,
+    1.9101669895462692,
+    1.8874999950639904
+   ],
+   "median": 1.9680419936776161,
+   "ci": [
+    1.8874999950639904,
+    2.0547910244204104
+   ],
+   "cv": 0.033728093442345675,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "corr",
+   "system": "numpy",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    35.33129201969132,
+    34.463832969777286,
+    34.49595900019631,
+    34.871459007263184,
+    34.6913329558447
+   ],
+   "median": 34.6913329558447,
+   "ci": [
+    34.463832969777286,
+    35.33129201969132
+   ],
+   "cv": 0.010171828782822849,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median",
+   "system": "numpy",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    25.324542017187923,
+    25.37029201630503,
+    25.324042013380677,
+    25.326790986582637,
+    25.382624997291714
+   ],
+   "median": 25.326790986582637,
+   "ci": [
+    25.324042013380677,
+    25.382624997291714
+   ],
+   "cv": 0.0011233264389020091,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "percentile_disc",
+   "system": "numpy",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    43.610625027213246,
+    43.41245797695592,
+    43.46458299551159,
+    44.0433329786174,
+    43.389457976445556
+   ],
+   "median": 43.46458299551159,
+   "ci": [
+    43.389457976445556,
+    44.0433329786174
+   ],
+   "cv": 0.006212203947284157,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "ks_test",
+   "system": "python",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    389.7290000459179,
+    398.86675000889227,
+    393.377042026259,
+    396.67620800901204,
+    389.9756669998169
+   ],
+   "median": 393.377042026259,
+   "ci": [
+    389.7290000459179,
+    398.86675000889227
+   ],
+   "cv": 0.010261552992434766,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "auc",
+   "system": "python",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1287.6602500327863,
+    1293.0765000055544,
+    1300.8864159928635,
+    1285.4459169902839,
+    1304.6031669946387
+   ],
+   "median": 1293.0765000055544,
+   "ci": [
+    1285.4459169902839,
+    1304.6031669946387
+   ],
+   "cv": 0.006388643836038622,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "sum",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    204.66483302880079,
+    234.4234170159325,
+    194.1895000054501,
+    222.12458297144622,
+    225.1308749546297
+   ],
+   "median": 222.12458297144622,
+   "ci": [
+    194.1895000054501,
+    234.4234170159325
+   ],
+   "cv": 0.07548505982000461,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "avg spread",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    183.0752920359373,
+    234.49287499533966,
+    192.9632910178043,
+    209.81274999212474,
+    218.78299996023998
+   ],
+   "median": 209.81274999212474,
+   "ci": [
+    183.0752920359373,
+    234.49287499533966
+   ],
+   "cv": 0.09827666107741301,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "sum 1000 groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    203.16658297087997,
+    208.10033299494535,
+    204.8187080072239,
+    206.4150419901125,
+    192.55300000077114
+   ],
+   "median": 204.8187080072239,
+   "ci": [
+    192.55300000077114,
+    208.10033299494535
+   ],
+   "cv": 0.03017967275762016,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "avg 1M groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1920.7514579757117,
+    1890.8960410044529,
+    1983.761291950941,
+    2022.1686249715276,
+    2062.049207976088
+   ],
+   "median": 1983.761291950941,
+   "ci": [
+    1890.8960410044529,
+    2062.049207976088
+   ],
+   "cv": 0.0356887300890169,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    191.97424995945767,
+    189.46587498066947,
+    211.54516702517867,
+    190.47983404016122,
+    183.86895797448233
+   ],
+   "median": 190.47983404016122,
+   "ci": [
+    183.86895797448233,
+    211.54516702517867
+   ],
+   "cv": 0.05458597717728064,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "stddev 1000 groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    205.03554097376764,
+    233.32520900294185,
+    208.1242910353467,
+    219.17195798596367,
+    224.62820797227323
+   ],
+   "median": 219.17195798596367,
+   "ci": [
+    205.03554097376764,
+    233.32520900294185
+   ],
+   "cv": 0.05356738272146552,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "variance of integers",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    200.11183299357072,
+    181.3434159848839,
+    186.03170796995983,
+    178.00145799992606,
+    166.23729100683704
+   ],
+   "median": 181.3434159848839,
+   "ci": [
+    166.23729100683704,
+    200.11183299357072
+   ],
+   "cv": 0.06764483504566735,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "skewness, kurtosis",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    294.85908296192065,
+    306.6767090349458,
+    282.92762499768287,
+    277.4809999973513,
+    285.9084579977207
+   ],
+   "median": 285.9084579977207,
+   "ci": [
+    277.4809999973513,
+    306.6767090349458
+   ],
+   "cv": 0.03953662951847716,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "corr",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    234.84179098159075,
+    234.39549998147413,
+    236.52912495890632,
+    216.28862502984703,
+    214.7542919847183
+   ],
+   "median": 234.39549998147413,
+   "ci": [
+    214.7542919847183,
+    236.52912495890632
+   ],
+   "cv": 0.0477282503878976,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "regression 1000 groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    272.3742080270313,
+    295.2320000040345,
+    264.2310409573838,
+    280.81074997317046,
+    281.9183749961667
+   ],
+   "median": 280.81074997317046,
+   "ci": [
+    264.2310409573838,
+    295.2320000040345
+   ],
+   "cv": 0.0415520788696978,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "row_number by groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2742.7235419745557,
+    2741.379833954852,
+    2711.1913330154493,
+    2757.871291018091,
+    2685.8988750027493
+   ],
+   "median": 2741.379833954852,
+   "ci": [
+    2685.8988750027493,
+    2757.871291018091
+   ],
+   "cv": 0.010597925449512881,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "top 3 by groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1832.1599999908358,
+    1865.6044169911183,
+    1829.8557919915766,
+    1857.218749995809,
+    1888.3214999805205
+   ],
+   "median": 1857.218749995809,
+   "ci": [
+    1829.8557919915766,
+    1888.3214999805205
+   ],
+   "cv": 0.013154808613739894,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "running sum",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3662.6287500257604,
+    3696.4074169518426,
+    3646.925499953795,
+    3684.4358749804087,
+    3703.5556670161895
+   ],
+   "median": 3684.4358749804087,
+   "ci": [
+    3646.925499953795,
+    3703.5556670161895
+   ],
+   "cv": 0.006421310814520423,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "moving avg 10 rows",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    5371.01966701448,
+    5303.873708995525,
+    5314.876832999289,
+    5342.073958017863,
+    5270.454166980926
+   ],
+   "median": 5314.876832999289,
+   "ci": [
+    5270.454166980926,
+    5371.01966701448
+   ],
+   "cv": 0.007175735483819476,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "lag",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2781.157166988123,
+    2834.583209012635,
+    2823.9381659659557,
+    2834.8241670173593,
+    2852.6775410282426
+   ],
+   "median": 2834.583209012635,
+   "ci": [
+    2781.157166988123,
+    2852.6775410282426
+   ],
+   "cv": 0.009491547701209942,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    242.37733404152095,
+    299.5991670177318,
+    257.0184579817578,
+    253.94058303209022,
+    264.5575830247253
+   ],
+   "median": 257.0184579817578,
+   "ci": [
+    242.37733404152095,
+    299.5991670177318
+   ],
+   "cv": 0.08235923359755426,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "p50, p95, p99",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    247.45666602393612,
+    300.8118339930661,
+    261.6964579792693,
+    255.7034160126932,
+    256.4349169842899
+   ],
+   "median": 256.4349169842899,
+   "ci": [
+    247.45666602393612,
+    300.8118339930661
+   ],
+   "cv": 0.0793125477937392,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "percentile_disc",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    251.77662499481812,
+    267.6453750464134,
+    246.00487499265,
+    245.9566660108976,
+    251.2410000199452
+   ],
+   "median": 251.2410000199452,
+   "ci": [
+    245.9566660108976,
+    267.6453750464134
+   ],
+   "cv": 0.035224548760806045,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "median 1000 groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    271.1576670408249,
+    304.68795902561396,
+    275.542083021719,
+    283.7524999631569,
+    272.99899997888133
+   ],
+   "median": 275.542083021719,
+   "ci": [
+    271.1576670408249,
+    304.68795902561396
+   ],
+   "cv": 0.048860441364764515,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "mode",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    287.6612500404008,
+    314.632875029929,
+    313.5517080081627,
+    305.35820801742375,
+    309.8444580100477
+   ],
+   "median": 309.8444580100477,
+   "ci": [
+    287.6612500404008,
+    314.632875029929
+   ],
+   "cv": 0.03587988884372787,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "histogram",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    168.5627920087427,
+    164.2960419994779,
+    184.8544579697773,
+    187.18937499215826,
+    192.52370798494667
+   ],
+   "median": 184.8544579697773,
+   "ci": [
+    164.2960419994779,
+    192.52370798494667
+   ],
+   "cv": 0.06870095328679963,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "count distinct",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    948.4871249878779,
+    916.9306660187431,
+    910.1316669839434,
+    857.8384579741396,
+    911.343083018437
+   ],
+   "median": 911.343083018437,
+   "ci": [
+    857.8384579741396,
+    948.4871249878779
+   ],
+   "cv": 0.03584607996389042,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_count_distinct",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    204.81845899485052,
+    198.7216249690391,
+    189.55424998421222,
+    175.9520000196062,
+    210.35691699944437
+   ],
+   "median": 198.7216249690391,
+   "ci": [
+    175.9520000196062,
+    210.35691699944437
+   ],
+   "cv": 0.06918806935215895,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_count_distinct 1000 groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    358.5999580100179,
+    370.97024999093264,
+    362.510040984489,
+    351.0519589763135,
+    362.87583300145343
+   ],
+   "median": 362.510040984489,
+   "ci": [
+    351.0519589763135,
+    370.97024999093264
+   ],
+   "cv": 0.020046833971702076,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "count distinct 1000 groups",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1588.627249991987,
+    1657.320958969649,
+    1612.6821669749916,
+    1555.0775839947164,
+    1613.3633750141598
+   ],
+   "median": 1612.6821669749916,
+   "ci": [
+    1555.0775839947164,
+    1657.320958969649
+   ],
+   "cv": 0.023360327509169106,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_percentile",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    190.04308397416025,
+    192.24016700172797,
+    189.21616597799584,
+    171.156374970451,
+    187.23366601625457
+   ],
+   "median": 189.21616597799584,
+   "ci": [
+    171.156374970451,
+    192.24016700172797
+   ],
+   "cv": 0.04558421575382139,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "approx_top_k",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    245.3107080073096,
+    249.7754999785684,
+    281.15558304125443,
+    244.08212502021343,
+    259.3823750503361
+   ],
+   "median": 249.7754999785684,
+   "ci": [
+    244.08212502021343,
+    281.15558304125443
+   ],
+   "cv": 0.059872086273769116,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "tablesample",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    211.2869580159895,
+    198.26908299000934,
+    198.270249995403,
+    181.02191702928394,
+    203.49300000816584
+   ],
+   "median": 198.270249995403,
+   "ci": [
+    181.02191702928394,
+    211.2869580159895
+   ],
+   "cv": 0.055995302717192594,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "tablesample repeatable",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    229.35487498762086,
+    228.78116701031104,
+    247.37545801326632,
+    215.69387504132465,
+    225.735625019297
+   ],
+   "median": 228.78116701031104,
+   "ci": [
+    215.69387504132465,
+    247.37545801326632
+   ],
+   "cv": 0.0499333173435017,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "hash_unit split",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    367.92320798849687,
+    371.6273750178516,
+    379.9040410085581,
+    379.78095799917355,
+    420.2620420255698
+   ],
+   "median": 379.78095799917355,
+   "ci": [
+    367.92320798849687,
+    420.2620420255698
+   ],
+   "cv": 0.05465539442290832,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "reservoir_sample",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    180.9623750159517,
+    177.46129201259464,
+    187.17874999856576,
+    167.44554199976847,
+    196.3343329844065
+   ],
+   "median": 180.9623750159517,
+   "ci": [
+    167.44554199976847,
+    196.3343329844065
+   ],
+   "cv": 0.05932780800165224,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "order by random() limit",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    225.32233397942036,
+    238.45345800509676,
+    225.4933340009302,
+    220.67608300130814,
+    234.97604194562882
+   ],
+   "median": 225.4933340009302,
+   "ci": [
+    220.67608300130814,
+    238.45345800509676
+   ],
+   "cv": 0.03240129974892432,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "ks_test",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    335.54929203819484,
+    335.42387501802295,
+    331.978166999761,
+    323.21891601895913,
+    340.03150003263727
+   ],
+   "median": 335.42387501802295,
+   "ci": [
+    323.21891601895913,
+    340.03150003263727
+   ],
+   "cv": 0.018874344380590796,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "auc",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    424.11645798711106,
+    428.80441597662866,
+    416.9836660148576,
+    419.6589170023799,
+    436.7512919707224
+   ],
+   "median": 424.11645798711106,
+   "ci": [
+    416.9836660148576,
+    436.7512919707224
+   ],
+   "cv": 0.01843294381290242,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "psi",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    340.8788330270909,
+    334.8232089774683,
+    336.01362502668053,
+    321.7927499790676,
+    341.46295802202076
+   ],
+   "median": 336.01362502668053,
+   "ci": [
+    321.7927499790676,
+    341.46295802202076
+   ],
+   "cv": 0.023685259458601938,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "chisq_test",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    264.4595410092734,
+    259.29112505400553,
+    258.91145796049386,
+    255.38074999349192,
+    275.82625002833083
+   ],
+   "median": 259.29112505400553,
+   "ci": [
+    255.38074999349192,
+    275.82625002833083
+   ],
+   "cv": 0.030379673693887072,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "js_divergence",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    255.3973330068402,
+    271.4232500293292,
+    266.96008298313245,
+    254.13845799630508,
+    268.978749983944
+   ],
+   "median": 266.96008298313245,
+   "ci": [
+    254.13845799630508,
+    271.4232500293292
+   ],
+   "cv": 0.03049200120434952,
+   "flagged": false,
+   "attempts": 2
+  },
+  {
+   "name": "summarize",
+   "system": "nucleus, work_mem 1GB (work_mem 1GB)",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    533.5603330167942,
+    530.8709579985589,
+    517.0844160020351,
+    552.9160409932956,
+    524.2295829812065
+   ],
+   "median": 530.8709579985589,
+   "ci": [
+    517.0844160020351,
+    552.9160409932956
+   ],
+   "cv": 0.025296008869427244,
+   "flagged": false,
+   "attempts": 2
+  }
+ ]
+}

@@ -1,0 +1,261 @@
+{
+ "method": 1,
+ "name": "erasure",
+ "script": "bench/method.py run erasure bench/results/erasure.json --runs 5 -- env ROWS=100000 cargo test --release -q -p nucleus-sql --test erasure_bench -- --ignored --nocapture",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T11:42:56+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 28736704512,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   5.89111328125,
+   4.72216796875,
+   3.921875
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "b4a2517f1a047eea40393e92c73cbd23084b7092",
+   "dirty": false
+  },
+  "load_after": [
+   5.32080078125,
+   4.6728515625,
+   3.92236328125
+  ]
+ },
+ "samples": [
+  {
+   "name": "loaded",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MiB",
+   "times": [
+    114,
+    114,
+    114,
+    114,
+    114
+   ],
+   "median": 114,
+   "ci": [
+    114,
+    114
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "planted texts found, before",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "places",
+   "times": [
+    100,
+    100,
+    100,
+    100,
+    100
+   ],
+   "median": 100,
+   "ci": [
+    100,
+    100
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "planted texts found, after DELETE",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "places",
+   "times": [
+    100,
+    100,
+    100,
+    100,
+    100
+   ],
+   "median": 100,
+   "ci": [
+    100,
+    100
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "planted texts found, after the upkeep and a vacuum",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "places",
+   "times": [
+    100,
+    100,
+    100,
+    100,
+    100
+   ],
+   "median": 100,
+   "ci": [
+    100,
+    100
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "the search of the files",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    92.856792,
+    91.564375,
+    92.493708,
+    91.527625,
+    91.482083
+   ],
+   "median": 91.564375,
+   "ci": [
+    91.482083,
+    92.856792
+   ],
+   "cv": 0.0069988345006037995,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "DELETE a subject's rows",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.421833,
+    5.903209,
+    6.089375,
+    6.458792,
+    5.39375,
+    5.446791999999999,
+    6.184417,
+    5.8875,
+    5.542167,
+    7.002959,
+    6.081625,
+    5.8387910000000005,
+    6.205083,
+    6.336208,
+    5.996833
+   ],
+   "median": 6.081625,
+   "ci": [
+    5.8875,
+    6.336208
+   ],
+   "cv": 0.06964650605851225,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "FORGET SUBJECT",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    467.801167,
+    427.771125,
+    418.72083399999997,
+    424.088834,
+    399.227167,
+    396.811125,
+    459.787125,
+    411.515875,
+    411.15212499999996,
+    449.24225,
+    410.52441600000003,
+    403.57237499999997,
+    455.319542,
+    423.96612500000003,
+    407.532167
+   ],
+   "median": 418.72083399999997,
+   "ci": [
+    407.532167,
+    449.24225
+   ],
+   "cv": 0.054163661100997844,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "planted texts found, after FORGET SUBJECT",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "places",
+   "times": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "median": 0,
+   "ci": [
+    0,
+    0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "after the erasures",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MiB",
+   "times": [
+    76,
+    61,
+    76,
+    68,
+    68
+   ],
+   "median": 68,
+   "ci": [
+    61,
+    76
+   ],
+   "cv": 0.09083591681459806,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

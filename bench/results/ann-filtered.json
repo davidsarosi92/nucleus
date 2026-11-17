@@ -1,0 +1,1293 @@
+{
+ "method": 1,
+ "name": "ann-filtered",
+ "script": "bench/method.py run ann-filtered bench/results/ann-filtered.json --runs 3 --also 'pgvector=bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/filtered.py pgvector target/ann-data/sift-128-euclidean' -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python bench/ann/filtered.py nucleus ./target/release/nucleus target/ann-data/sift-128-euclidean",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-16T15:06:24+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 30844575744,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   9.6689453125,
+   14.23681640625,
+   20.08154296875
+  ],
+  "systems": {
+   "pgvector": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "4GB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "9",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "off"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "off",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "4GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "9",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "55442",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-hh7572tb",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true,
+    "pgvector": "0.8.7"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "15d10437821bc2084c874fbbf6e219964ffb9ccd",
+   "dirty": true
+  },
+  "load_after": [
+   48.169921875,
+   46.546875,
+   36.69189453125
+  ]
+ },
+ "samples": [
+  {
+   "name": "index build",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    64.4073673330131,
+    68.64353695802856,
+    76.4663807079778
+   ],
+   "median": 68.64353695802856,
+   "ci": [
+    64.4073673330131,
+    76.4663807079778
+   ],
+   "cv": 0.08759790759314313,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9244,
+    0.9244,
+    0.9264
+   ],
+   "median": 0.9244,
+   "ci": [
+    0.9244,
+    0.9264
+   ],
+   "cv": 0.0012482349434771397,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: rows returned",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    583.2614999962971,
+    626.1860840022564,
+    589.4679999910295
+   ],
+   "median": 589.4679999910295,
+   "ci": [
+    583.2614999962971,
+    626.1860840022564
+   ],
+   "cv": 0.03868888682405085,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9822000000000001,
+    0.9823999999999999,
+    0.982
+   ],
+   "median": 0.9822000000000001,
+   "ci": [
+    0.982,
+    0.9823999999999999
+   ],
+   "cv": 0.00020362451639175112,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: rows returned",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1721.7514159856364,
+    1832.4689159635454,
+    1718.493334017694
+   ],
+   "median": 1721.7514159856364,
+   "ci": [
+    1718.493334017694,
+    1832.4689159635454
+   ],
+   "cv": 0.0369167168309743,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: rows returned",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1419.5171679602936,
+    1590.5324160121381,
+    1382.0205819793046
+   ],
+   "median": 1419.5171679602936,
+   "ci": [
+    1382.0205819793046,
+    1590.5324160121381
+   ],
+   "cv": 0.07592268958434477,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: rows returned",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    311.4373339340091,
+    335.8050819952041,
+    309.1785819269717
+   ],
+   "median": 311.4373339340091,
+   "ci": [
+    309.1785819269717,
+    335.8050819952041
+   ],
+   "cv": 0.0463102463756853,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: recall@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: rows returned",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: \u00b5s a search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    463.79691595211625,
+    499.1967499954626,
+    460.81258193589747
+   ],
+   "median": 463.79691595211625,
+   "ci": [
+    460.81258193589747,
+    499.1967499954626
+   ],
+   "cv": 0.04498886800848305,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "index build",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    81.17342312500114,
+    82.0319579159841,
+    80.90948741603643
+   ],
+   "median": 81.17342312500114,
+   "ci": [
+    80.90948741603643,
+    82.0319579159841
+   ],
+   "cv": 0.007212543464456916,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: recall@10",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8914,
+    0.8892,
+    0.8957999999999999
+   ],
+   "median": 0.8914,
+   "ci": [
+    0.8892,
+    0.8957999999999999
+   ],
+   "cv": 0.003766875851480629,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: rows returned",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: \u00b5s a search",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    851.0,
+    879.0,
+    886.0
+   ],
+   "median": 879.0,
+   "ci": [
+    851.0,
+    886.0
+   ],
+   "cv": 0.021238829331940524,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: recall@10",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.4142,
+    0.4146,
+    0.414
+   ],
+   "median": 0.4142,
+   "ci": [
+    0.414,
+    0.4146
+   ],
+   "cv": 0.0007374598801023742,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: rows returned",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    4.158,
+    4.176,
+    4.168
+   ],
+   "median": 4.168,
+   "ci": [
+    4.158,
+    4.176
+   ],
+   "cv": 0.0021640936263747435,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: \u00b5s a search",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    969.0,
+    862.0,
+    884.0
+   ],
+   "median": 884.0,
+   "ci": [
+    862.0,
+    969.0
+   ],
+   "cv": 0.06243827268325599,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: recall@10",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.044,
+    0.0456,
+    0.0454
+   ],
+   "median": 0.0454,
+   "ci": [
+    0.044,
+    0.0456
+   ],
+   "cv": 0.019372884193514163,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: rows returned",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    0.44,
+    0.456,
+    0.454
+   ],
+   "median": 0.454,
+   "ci": [
+    0.44,
+    0.456
+   ],
+   "cv": 0.019372884193514125,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    912.0,
+    892.0,
+    961.0
+   ],
+   "median": 912.0,
+   "ci": [
+    892.0,
+    961.0
+   ],
+   "cv": 0.03851845246602327,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: recall@10",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: rows returned",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    357.0,
+    374.0,
+    405.0
+   ],
+   "median": 374.0,
+   "ci": [
+    357.0,
+    405.0
+   ],
+   "cv": 0.06427262090236553,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: recall@10",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: rows returned",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: \u00b5s a search",
+   "system": "pgvector, iterative_scan off (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    217.0,
+    221.0,
+    217.0
+   ],
+   "median": 217.0,
+   "ci": [
+    217.0,
+    221.0
+   ],
+   "cv": 0.010577409511871007,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8914,
+    0.8892,
+    0.8957999999999999
+   ],
+   "median": 0.8914,
+   "ci": [
+    0.8892,
+    0.8957999999999999
+   ],
+   "cv": 0.003766875851480629,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    877.0,
+    928.0,
+    895.0
+   ],
+   "median": 895.0,
+   "ci": [
+    877.0,
+    928.0
+   ],
+   "cv": 0.028738927014172362,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9316,
+    0.9316,
+    0.9326
+   ],
+   "median": 0.9316,
+   "ci": [
+    0.9316,
+    0.9326
+   ],
+   "cv": 0.0006195188524103581,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1975.0,
+    1887.0,
+    2171.0
+   ],
+   "median": 1975.0,
+   "ci": [
+    1887.0,
+    2171.0
+   ],
+   "cv": 0.07229351305971654,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9873999999999999,
+    0.986,
+    0.9858
+   ],
+   "median": 0.986,
+   "ci": [
+    0.9858,
+    0.9873999999999999
+   ],
+   "cv": 0.0008837994613829099,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    11758.0,
+    11130.0,
+    11428.0
+   ],
+   "median": 11428.0,
+   "ci": [
+    11130.0,
+    11758.0
+   ],
+   "cv": 0.02746262837008928,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    369.0,
+    366.0,
+    357.0
+   ],
+   "median": 366.0,
+   "ci": [
+    357.0,
+    369.0
+   ],
+   "cv": 0.01715658790768791,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: recall@10",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: rows returned",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: \u00b5s a search",
+   "system": "pgvector, iterative_scan relaxed_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    238.0,
+    218.0,
+    222.0
+   ],
+   "median": 222.0,
+   "ci": [
+    218.0,
+    238.0
+   ],
+   "cv": 0.04682745683300161,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8914,
+    0.8892,
+    0.8957999999999999
+   ],
+   "median": 0.8914,
+   "ci": [
+    0.8892,
+    0.8957999999999999
+   ],
+   "cv": 0.003766875851480629,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 50%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    932.0,
+    984.0,
+    856.0
+   ],
+   "median": 932.0,
+   "ci": [
+    856.0,
+    984.0
+   ],
+   "cv": 0.06966873133952849,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.8568,
+    0.8566,
+    0.8588
+   ],
+   "median": 0.8568,
+   "ci": [
+    0.8566,
+    0.8588
+   ],
+   "cv": 0.0014188855913921598,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 10%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1979.0,
+    2050.0,
+    1984.0
+   ],
+   "median": 1984.0,
+   "ci": [
+    1979.0,
+    2050.0
+   ],
+   "cv": 0.019770878883895223,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    0.9432,
+    0.9438,
+    0.944
+   ],
+   "median": 0.9438,
+   "ci": [
+    0.9432,
+    0.944
+   ],
+   "cv": 0.00044118671836084145,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    12532.0,
+    11158.0,
+    10865.0
+   ],
+   "median": 11158.0,
+   "ci": [
+    10865.0,
+    12532.0
+   ],
+   "cv": 0.07726823708816014,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.1%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    357.0,
+    360.0,
+    358.0
+   ],
+   "median": 358.0,
+   "ci": [
+    357.0,
+    360.0
+   ],
+   "cv": 0.004262861111586828,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: recall@10",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "recall",
+   "times": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "median": 1.0,
+   "ci": [
+    1.0,
+    1.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: rows returned",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "rows",
+   "times": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "median": 10.0,
+   "ci": [
+    10.0,
+    10.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "filter 0.01%: \u00b5s a search",
+   "system": "pgvector, iterative_scan strict_order (pgvector)",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    252.0,
+    222.0,
+    217.0
+   ],
+   "median": 222.0,
+   "ci": [
+    217.0,
+    252.0
+   ],
+   "cv": 0.0821839123849533,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

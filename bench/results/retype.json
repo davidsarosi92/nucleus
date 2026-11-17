@@ -1,0 +1,347 @@
+{
+ "method": 1,
+ "name": "retype",
+ "script": "bench/method.py run retype bench/results/retype.json --runs 1 -- env RETYPE_DIR=./target/retype-bench RETYPE_ROWS=1000000 cargo test --release -q -p nucleus-sql --test retype_bench -- --ignored --nocapture",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T06:55:04+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 41273204736,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.67431640625,
+   5.2060546875,
+   9.13916015625
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.92138671875,
+   4.1474609375,
+   5.484375
+  ]
+ },
+ "samples": [
+  {
+   "name": "idle, ALTER COLUMN \u2026 TYPE",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    3.711775334,
+    4.570655375,
+    5.310819667,
+    5.926367667,
+    6.694409666
+   ],
+   "median": 5.310819667,
+   "ci": [
+    3.711775334,
+    6.694409666
+   ],
+   "cv": 0.22110090423296686,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "idle, ALTER COLUMN \u2026 TYPE CONCURRENTLY",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    10.4243605,
+    10.069243,
+    10.345887541,
+    10.902049958,
+    11.051762292
+   ],
+   "median": 10.4243605,
+   "ci": [
+    10.069243,
+    11.051762292
+   ],
+   "cv": 0.038584583561065255,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a writer alone",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "updates/s",
+   "times": [
+    3107
+   ],
+   "median": 3107,
+   "ci": [
+    3107,
+    3107
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a writer alone: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.273667
+   ],
+   "median": 0.273667,
+   "ci": [
+    0.273667,
+    0.273667
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a writer alone: p99",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.767709
+   ],
+   "median": 0.767709,
+   "ci": [
+    0.767709,
+    0.767709
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, ALTER COLUMN \u2026 TYPE",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    137.467819,
+    136.293259084,
+    141.916969583,
+    151.347730166,
+    162.774658084
+   ],
+   "median": 141.916969583,
+   "ci": [
+    136.293259084,
+    162.774658084
+   ],
+   "cv": 0.07611215662572772,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE: not done in 3 tries",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "runs",
+   "times": [
+    5
+   ],
+   "median": 5,
+   "ci": [
+    5,
+    5
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE: the writer",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "updates/s",
+   "times": [
+    2537.975815270627,
+    3117.3221834701667,
+    3130.5981328762828,
+    2920.9688147626607,
+    2937.6624446861765
+   ],
+   "median": 2937.6624446861765,
+   "ci": [
+    2537.975815270627,
+    3130.5981328762828
+   ],
+   "cv": 0.08171865735193536,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE: the writer's p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.347625,
+    0.272875,
+    0.27591699999999997,
+    0.301875,
+    0.3085
+   ],
+   "median": 0.301875,
+   "ci": [
+    0.272875,
+    0.347625
+   ],
+   "cv": 0.10024416500811921,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE: the writer's p99",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.840334,
+    0.8015,
+    0.734834,
+    0.6694589999999999,
+    0.625125
+   ],
+   "median": 0.734834,
+   "ci": [
+    0.625125,
+    0.840334
+   ],
+   "cv": 0.12159184109901186,
+   "flagged": true,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, ALTER COLUMN \u2026 TYPE CONCURRENTLY",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    23.911327292,
+    24.693334541,
+    24.985525042,
+    25.126501,
+    25.466738708
+   ],
+   "median": 24.985525042,
+   "ci": [
+    23.911327292,
+    25.466738708
+   ],
+   "cv": 0.023648747134926616,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE CONCURRENTLY: not done in 3 tries",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "runs",
+   "times": [
+    0
+   ],
+   "median": 0,
+   "ci": [
+    0,
+    0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE CONCURRENTLY: the writer",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "updates/s",
+   "times": [
+    3396.88378683918,
+    3270.3967083065972,
+    2907.6835438870025,
+    3166.2188061919164,
+    3175.553844065458
+   ],
+   "median": 3175.553844065458,
+   "ci": [
+    2907.6835438870025,
+    3396.88378683918
+   ],
+   "cv": 0.05652681241455298,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE CONCURRENTLY: the writer's p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.246333,
+    0.252541,
+    0.240041,
+    0.24504099999999998,
+    0.23725
+   ],
+   "median": 0.24504099999999998,
+   "ci": [
+    0.23725,
+    0.252541
+   ],
+   "cv": 0.024258637571839943,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "under writes, TYPE CONCURRENTLY: the writer's p99",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.121792,
+    1.5434999999999999,
+    2.7566669999999998,
+    1.848083,
+    2.1480829999999997
+   ],
+   "median": 1.848083,
+   "ci": [
+    1.121792,
+    2.7566669999999998
+   ],
+   "cv": 0.328282094100699,
+   "flagged": true,
+   "attempts": 1
+  }
+ ]
+}

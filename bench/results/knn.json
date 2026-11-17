@@ -1,0 +1,271 @@
+{
+ "method": 1,
+ "name": "knn",
+ "script": "bench/method.py run knn bench/results/knn.json --runs 5 -- bash target/bench-tools/memcap.sh 8000 ./target/ann-data/.venv/bin/python -I bench/vectors/knn.py ./target/release/nucleus --pg",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-16T13:54:03+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 37161979904,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   7.69384765625,
+   9.14501953125,
+   9.15771484375
+  ],
+  "systems": {
+   "numpy": {
+    "version": "2.5.4",
+    "settings": "one core, float64 sums"
+   },
+   "nucleus": {
+    "settings": {
+     "cache": "1GB"
+    }
+   },
+   "pgvector": {
+    "version": "18.7 (Homebrew)",
+    "build": "postgres (PostgreSQL) 18.7 (Homebrew)",
+    "settings": {
+     "max_connections": "20",
+     "shared_buffers": "8192MB",
+     "effective_cache_size": "24576MB",
+     "maintenance_work_mem": "2048MB",
+     "work_mem": "81MB",
+     "wal_buffers": "16MB",
+     "min_wal_size": "1GB",
+     "max_wal_size": "4GB",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "random_page_cost": "1.1",
+     "max_worker_processes": "10",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_parallel_maintenance_workers": "5",
+     "listen_addresses": "''",
+     "fsync": "on",
+     "synchronous_commit": "on",
+     "jit": "on"
+    },
+    "effective": {
+     "DateStyle": "ISO, MDY",
+     "TimeZone": "Europe/Budapest",
+     "application_name": "psql",
+     "autovacuum_worker_slots": "16",
+     "checkpoint_completion_target": "0.9",
+     "default_statistics_target": "100",
+     "default_text_search_config": "pg_catalog.english",
+     "dynamic_shared_memory_type": "posix",
+     "effective_cache_size": "24GB",
+     "fsync": "on",
+     "jit": "on",
+     "lc_messages": "C",
+     "lc_monetary": "C",
+     "lc_numeric": "C",
+     "lc_time": "C",
+     "listen_addresses": "",
+     "log_timezone": "Europe/Budapest",
+     "maintenance_work_mem": "2GB",
+     "max_connections": "20",
+     "max_parallel_maintenance_workers": "5",
+     "max_parallel_workers": "10",
+     "max_parallel_workers_per_gather": "5",
+     "max_wal_size": "4GB",
+     "max_worker_processes": "10",
+     "min_wal_size": "1GB",
+     "port": "54287",
+     "random_page_cost": "1.1",
+     "shared_buffers": "8GB",
+     "synchronous_commit": "on",
+     "unix_socket_directories": "/var/folders/lj/vxp0njpn4nz5v58pk8jyn9kc0000gn/T/pg-3l8xqbd8",
+     "wal_buffers": "16MB",
+     "wal_sync_method": "open_datasync",
+     "work_mem": "81MB"
+    },
+    "native": true,
+    "pgvector": "0.8.7"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "15d10437821bc2084c874fbbf6e219964ffb9ccd",
+   "dirty": true
+  },
+  "load_after": [
+   5.6474609375,
+   6.1044921875,
+   7.58837890625
+  ]
+ },
+ "samples": [
+  {
+   "name": "search",
+   "system": "numpy",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    41.97029198985547,
+    43.68216701550409,
+    41.50991700589657,
+    42.00204199878499,
+    41.66777053615078
+   ],
+   "median": 41.97029198985547,
+   "ci": [
+    41.50991700589657,
+    43.68216701550409
+   ],
+   "cv": 0.02068364855162338,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "search",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    36.939124489435926,
+    36.42877045786008,
+    35.961062501883134,
+    39.27589600789361,
+    36.610833019949496
+   ],
+   "median": 36.610833019949496,
+   "ci": [
+    35.961062501883134,
+    39.27589600789361
+   ],
+   "cv": 0.03501951201941318,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "load",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    20.045096084009856,
+    20.059509583981708,
+    20.015811041987035,
+    20.338258208998013,
+    19.998077583964914
+   ],
+   "median": 20.045096084009856,
+   "ci": [
+    19.998077583964914,
+    20.338258208998013
+   ],
+   "cv": 0.006973626813780957,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "answers differing from numpy's",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "count",
+   "times": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "median": 0.0,
+   "ci": [
+    0.0,
+    0.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "search",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    215.357,
+    212.9615,
+    214.18099999999998,
+    210.904,
+    212.4555
+   ],
+   "median": 212.9615,
+   "ci": [
+    210.904,
+    215.357
+   ],
+   "cv": 0.007951925494403328,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "load",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "s",
+   "times": [
+    34.368532875028905,
+    34.40378683299059,
+    34.42773641704116,
+    34.55227454204578,
+    34.59853212500457
+   ],
+   "median": 34.42773641704116,
+   "ci": [
+    34.368532875028905,
+    34.59853212500457
+   ],
+   "cv": 0.0028921763737047917,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "answers differing from numpy's",
+   "system": "pgvector",
+   "phase": "warm",
+   "unit": "count",
+   "times": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "median": 0.0,
+   "ci": [
+    0.0,
+    0.0
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

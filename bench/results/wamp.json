@@ -1,0 +1,394 @@
+{
+ "method": 1,
+ "name": "wamp",
+ "script": "bench/method.py run wamp bench/results/wamp.json --runs 3 -- python3 -I bench/wamp/wamp.py nucleus ./target/release/nucleus ./target/wamp-db 21006 0,1,2,3,4,5",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:41:55+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36723552256,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   3.54638671875,
+   3.1201171875,
+   3.5595703125
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   2.095703125,
+   2.1669921875,
+   2.34033203125
+  ]
+ },
+ "samples": [
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: write amplification",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    3.603895940740741,
+    4.0778676148148145,
+    4.082722133333333
+   ],
+   "median": 4.0778676148148145,
+   "ci": [
+    3.603895940740741,
+    4.082722133333333
+   ],
+   "cv": 0.07014155217677835,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: time",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    8.62487587495707,
+    8.357662208029069,
+    8.251054708031006
+   ],
+   "median": 8.357662208029069,
+   "ci": [
+    8.251054708031006,
+    8.62487587495707
+   ],
+   "cv": 0.022895063905392574,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: files",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    1560.3082847595215,
+    1560.3082847595215,
+    1560.3082847595215
+   ],
+   "median": 1560.3082847595215,
+   "ci": [
+    1560.3082847595215,
+    1560.3082847595215
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: write amplification",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    5.710783525925926,
+    5.714333392592593,
+    5.715110874074074
+   ],
+   "median": 5.714333392592593,
+   "ci": [
+    5.710783525925926,
+    5.715110874074074
+   ],
+   "cv": 0.0004037773147305743,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: time",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    70.04299129208084,
+    69.28356620797422,
+    68.06188900000416
+   ],
+   "median": 69.28356620797422,
+   "ci": [
+    68.06188900000416,
+    70.04299129208084
+   ],
+   "cv": 0.014458358995092516,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: files",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    4646.338603973389,
+    4646.338603973389,
+    4646.338603973389
+   ],
+   "median": 4646.338603973389,
+   "ci": [
+    4646.338603973389,
+    4646.338603973389
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: write amplification",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    152.5426251851852,
+    152.41936592592592,
+    152.25362962962964
+   ],
+   "median": 152.41936592592592,
+   "ci": [
+    152.25362962962964,
+    152.5426251851852
+   ],
+   "cv": 0.000951523416313883,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: time",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    18.41385033307597,
+    18.25283616699744,
+    18.41711999999825
+   ],
+   "median": 18.41385033307597,
+   "ci": [
+    18.25283616699744,
+    18.41711999999825
+   ],
+   "cv": 0.005115097117862676,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: files",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    4588.602224349976,
+    4588.602224349976,
+    4588.602224349976
+   ],
+   "median": 4588.602224349976,
+   "ci": [
+    4588.602224349976,
+    4588.602224349976
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: write amplification",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    216.22746074074075,
+    215.95780740740742,
+    215.82013629629628
+   ],
+   "median": 215.95780740740742,
+   "ci": [
+    215.82013629629628,
+    216.22746074074075
+   ],
+   "cv": 0.0009592296934939117,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: time",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    19.779521833988838,
+    19.487427458981983,
+    18.75739445805084
+   ],
+   "median": 19.487427458981983,
+   "ci": [
+    18.75739445805084,
+    19.779521833988838
+   ],
+   "cv": 0.027219681663894452,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: files",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    4590.627941131592,
+    4590.627941131592,
+    4590.627941131592
+   ],
+   "median": 4590.627941131592,
+   "ci": [
+    4590.627941131592,
+    4590.627941131592
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: write amplification",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    76.95966814814815,
+    76.95435851851852,
+    76.95587555555555
+   ],
+   "median": 76.95587555555555,
+   "ci": [
+    76.95435851851852,
+    76.95966814814815
+   ],
+   "cv": 3.553790319466396e-05,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: time",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    4.484501916915178,
+    4.326583500020206,
+    4.4739642079221085
+   ],
+   "median": 4.4739642079221085,
+   "ci": [
+    4.326583500020206,
+    4.484501916915178
+   ],
+   "cv": 0.019937363401403504,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: files",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    4589.928404808044,
+    4589.928404808044,
+    4589.928404808044
+   ],
+   "median": 4589.928404808044,
+   "ci": [
+    4589.928404808044,
+    4589.928404808044
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: write amplification",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    137.89155934814815,
+    123.12800521481482,
+    136.35303348148148
+   ],
+   "median": 136.35303348148148,
+   "ci": [
+    123.12800521481482,
+    137.89155934814815
+   ],
+   "cv": 0.06127357150748167,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: time",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    610.9197483749595,
+    602.5242042500759,
+    616.7277839171002
+   ],
+   "median": 610.9197483749595,
+   "ci": [
+    602.5242042500759,
+    616.7277839171002
+   ],
+   "cv": 0.011705398188057114,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: files",
+   "system": "nucleus",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    7351.550415992737,
+    6314.748296737671,
+    7351.550415992737
+   ],
+   "median": 7351.550415992737,
+   "ci": [
+    6314.748296737671,
+    7351.550415992737
+   ],
+   "cv": 0.08544137589658093,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

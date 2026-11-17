@@ -1,0 +1,115 @@
+{
+ "method": 1,
+ "name": "aead",
+ "script": "bench/method.py run aead bench/results/aead.json --runs 5 -- cargo test --release -q -p nucleus-crypto speed -- --ignored --nocapture",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:18:52+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36765724672,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.55517578125,
+   4.1708984375,
+   4.962890625
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.55517578125,
+   4.1708984375,
+   4.962890625
+  ]
+ },
+ "samples": [
+  {
+   "name": "chacha20",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    981.8606262190983,
+    997.7195826782482,
+    997.9581884874094,
+    998.2476893915874,
+    998.1956909582614
+   ],
+   "median": 997.9581884874094,
+   "ci": [
+    981.8606262190983,
+    998.2476893915874
+   ],
+   "cv": 0.0072721822525929035,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "chacha20, a block at a time",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    621.9523287110492,
+    623.3122775110882,
+    623.6221629125296,
+    623.400577945128,
+    622.8716243471246
+   ],
+   "median": 623.3122775110882,
+   "ci": [
+    621.9523287110492,
+    623.6221629125296
+   ],
+   "cv": 0.001062889016537142,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "poly1305",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "MB/s",
+   "times": [
+    2196.3659690062022,
+    2197.834524854258,
+    2185.8496816116476,
+    2190.6540435503257,
+    2196.4378549102394
+   ],
+   "median": 2196.3659690062022,
+   "ci": [
+    2185.8496816116476,
+    2197.834524854258
+   ],
+   "cv": 0.0023048592679190743,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

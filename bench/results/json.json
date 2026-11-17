@@ -1,0 +1,493 @@
+{
+ "method": 1,
+ "name": "json",
+ "script": "bench/method.py run json bench/results/json.json --runs 5 -- target/json/release/nucleus-json-bench target/bench-data/json/canada.json target/bench-data/json/citm_catalog.json target/bench-data/json/twitter.json",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T07:19:54+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36764979200,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.076171875,
+   4.10546875,
+   4.88232421875
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   4.39013671875,
+   4.169921875,
+   4.900390625
+  ]
+ },
+ "samples": [
+  {
+   "name": "parse (canada.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.538625,
+    3.866708,
+    3.8461250000000002,
+    3.8625410000000002,
+    3.803083
+   ],
+   "median": 3.8625410000000002,
+   "ci": [
+    3.803083,
+    4.538625
+   ],
+   "cv": 0.07817183726261416,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "parse (canada.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.789625,
+    6.813042,
+    6.7972090000000005,
+    6.798292,
+    6.797833
+   ],
+   "median": 6.797833,
+   "ci": [
+    6.789625,
+    6.813042
+   ],
+   "cv": 0.0012521759578975836,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "output (canada.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    4.999417,
+    4.9972080000000005,
+    5.1255,
+    5.002083,
+    4.996874999999999
+   ],
+   "median": 4.999417,
+   "ci": [
+    4.996874999999999,
+    5.1255
+   ],
+   "cv": 0.011276874485879464,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "output (canada.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.092291,
+    2.127875,
+    2.094833,
+    2.092333,
+    2.088208
+   ],
+   "median": 2.092333,
+   "ci": [
+    2.088208,
+    2.127875
+   ],
+   "cv": 0.0077441241913963925,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "field (canada.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.024209,
+    0.024208,
+    0.024166,
+    0.024209,
+    0.024166
+   ],
+   "median": 0.024208,
+   "ci": [
+    0.024166,
+    0.024209
+   ],
+   "cv": 0.0009661643470022453,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "field (canada.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    6783.25,
+    6791.542,
+    6803.0419999999995,
+    6789.625,
+    6774.459
+   ],
+   "median": 6789.625,
+   "ci": [
+    6774.459,
+    6803.0419999999995
+   ],
+   "cv": 0.0015566082194661793,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "size (canada.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "KB",
+   "times": [
+    1667.1083984375,
+    1667.1083984375,
+    1667.1083984375,
+    1667.1083984375,
+    1667.1083984375
+   ],
+   "median": 1667.1083984375,
+   "ci": [
+    1667.1083984375,
+    1667.1083984375
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "parse (citm_catalog.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.675958,
+    1.6815,
+    1.685167,
+    1.6755,
+    1.6820419999999998
+   ],
+   "median": 1.6815,
+   "ci": [
+    1.6755,
+    1.685167
+   ],
+   "cv": 0.002484665767833729,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "parse (citm_catalog.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.5891249999999997,
+    2.464,
+    2.471375,
+    2.4736659999999997,
+    2.4676250000000004
+   ],
+   "median": 2.471375,
+   "ci": [
+    2.464,
+    2.5891249999999997
+   ],
+   "cv": 0.021568303750633813,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "output (citm_catalog.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.085,
+    1.059166,
+    1.062333,
+    1.0575409999999998,
+    1.056917
+   ],
+   "median": 1.059166,
+   "ci": [
+    1.056917,
+    1.085
+   ],
+   "cv": 0.01110703691868903,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "output (citm_catalog.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.420375,
+    0.433416,
+    0.417833,
+    0.416208,
+    0.41516699999999995
+   ],
+   "median": 0.417833,
+   "ci": [
+    0.41516699999999995,
+    0.433416
+   ],
+   "cv": 0.01766302134504223,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "field (citm_catalog.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.034583,
+    0.034583,
+    0.034625,
+    0.034666,
+    0.034790999999999996
+   ],
+   "median": 0.034625,
+   "ci": [
+    0.034583,
+    0.034790999999999996
+   ],
+   "cv": 0.0024884929786893805,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "field (citm_catalog.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    2540.8340000000003,
+    2461.083,
+    2459.875,
+    2461.1659999999997,
+    2460.375
+   ],
+   "median": 2461.083,
+   "ci": [
+    2459.875,
+    2540.8340000000003
+   ],
+   "cv": 0.014485032310427968,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "size (citm_catalog.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "KB",
+   "times": [
+    407.2236328125,
+    407.2236328125,
+    407.2236328125,
+    407.2236328125,
+    407.2236328125
+   ],
+   "median": 407.2236328125,
+   "ci": [
+    407.2236328125,
+    407.2236328125
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "parse (twitter.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.758833,
+    0.741792,
+    0.744375,
+    0.744667,
+    0.745959
+   ],
+   "median": 0.744667,
+   "ci": [
+    0.741792,
+    0.758833
+   ],
+   "cv": 0.008990700569916642,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "parse (twitter.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.323667,
+    1.293625,
+    1.289375,
+    1.28225,
+    1.285584
+   ],
+   "median": 1.289375,
+   "ci": [
+    1.28225,
+    1.323667
+   ],
+   "cv": 0.012844280678197215,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "output (twitter.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.5545,
+    0.5335,
+    0.5378750000000001,
+    0.535083,
+    0.535375
+   ],
+   "median": 0.535375,
+   "ci": [
+    0.5335,
+    0.5545
+   ],
+   "cv": 0.01605647462139911,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "output (twitter.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    0.319875,
+    0.299708,
+    0.296375,
+    0.298667,
+    0.29712500000000003
+   ],
+   "median": 0.298667,
+   "ci": [
+    0.296375,
+    0.319875
+   ],
+   "cv": 0.03268631125623182,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "field (twitter.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    0.025457999999999998,
+    0.025167000000000002,
+    0.025208,
+    0.025165999999999997,
+    0.02525
+   ],
+   "median": 0.025208,
+   "ci": [
+    0.025165999999999997,
+    0.025457999999999998
+   ],
+   "cv": 0.0048088135205284705,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "field (twitter.json)",
+   "system": "serde_json",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    1291.75,
+    1282.916,
+    1280.4579999999999,
+    1282.7920000000001,
+    1281.458
+   ],
+   "median": 1282.7920000000001,
+   "ci": [
+    1280.4579999999999,
+    1291.75
+   ],
+   "cv": 0.003518532078351605,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "size (twitter.json)",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "KB",
+   "times": [
+    431.234375,
+    431.234375,
+    431.234375,
+    431.234375,
+    431.234375
+   ],
+   "median": 431.234375,
+   "ci": [
+    431.234375,
+    431.234375
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

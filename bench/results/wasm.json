@@ -1,0 +1,120 @@
+{
+ "method": 1,
+ "name": "wasm",
+ "script": "bench/method.py run wasm bench/results/wasm.json --runs 5 -- node bench/embedded/wasm.mjs",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T09:18:05+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 36234838016,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   3.09765625,
+   2.97705078125,
+   2.66845703125
+  ],
+  "systems": {
+   "nucleus": {
+    "runtime": "node v24.16.0",
+    "edition": "wasm32-wasip1"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "dirty": true
+  },
+  "load_after": [
+   3.00927734375,
+   2.96044921875,
+   2.6640625
+  ]
+ },
+ "samples": [
+  {
+   "name": "INSERT \u2026 SELECT of 200000 rows",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    232.769667,
+    225.80900000000003,
+    224.354084,
+    224.58200000000002,
+    224.08854199999996
+   ],
+   "median": 224.58200000000002,
+   "ci": [
+    224.08854199999996,
+    232.769667
+   ],
+   "cv": 0.016193129000521504,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "GROUP BY over them",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    42.131583999999975,
+    42.530250000000024,
+    42.518708000000004,
+    43.99633399999999,
+    45.08499999999998
+   ],
+   "median": 42.530250000000024,
+   "ci": [
+    42.131583999999975,
+    45.08499999999998
+   ],
+   "cv": 0.028848991512018828,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a point query",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "\u00b5s",
+   "times": [
+    25.832999999977346,
+    25.666999999998552,
+    25.207999999963704,
+    25.374999999996817,
+    25.792000000024018
+   ],
+   "median": 25.666999999998552,
+   "ci": [
+    25.207999999963704,
+    25.832999999977346
+   ],
+   "cv": 0.010651007733036908,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}

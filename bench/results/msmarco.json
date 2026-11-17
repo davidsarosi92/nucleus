@@ -1,0 +1,384 @@
+{
+ "method": 1,
+ "name": "msmarco",
+ "script": "bench/method.py run msmarco bench/results/msmarco.json --runs 3 --also 'paradedb=./target/ann-data/.venv/bin/python bench/text/beir.py paradedb --sets msmarco --split dev --queries 1000' -- bash target/bench-tools/memcap.sh 12000 ./target/ann-data/.venv/bin/python bench/text/beir.py nucleus ./target/release/nucleus --sets msmarco --split dev --queries 1000 --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1",
+ "environment": {
+  "method": 1,
+  "at": "2026-11-17T11:43:55+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 28730388480,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   4.24609375,
+   4.4638671875,
+   3.87890625
+  ],
+  "systems": {
+   "paradedb": {
+    "version": "pg_search 0.26.6",
+    "native": false,
+    "settings": "paradedb/paradedb in Docker's Linux VM: shared_buffers 1GB, maintenance_work_mem 512MB, max_parallel_maintenance_workers 2"
+   }
+  },
+  "data": {},
+  "nucleus": {
+   "commit": "4e15edf5c4efd9f73a03b5e7468d032866d8b5d0",
+   "dirty": false
+  },
+  "load_after": [
+   2.71630859375,
+   4.806640625,
+   5.72412109375
+  ]
+ },
+ "samples": [
+  {
+   "name": "msmarco: nDCG@10",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194,
+    0.2604884876453194
+   ],
+   "median": 0.2604884876453194,
+   "ci": [
+    0.2604884876453194,
+    0.2604884876453194
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: CREATE INDEX",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    48498.03120899014,
+    48281.395333004184,
+    46048.01208304707,
+    50646.17624995299,
+    57024.542082916014,
+    51602.84470906481,
+    46221.09799995087,
+    47952.50766701065,
+    47909.33162497822
+   ],
+   "median": 48281.395333004184,
+   "ci": [
+    46221.09799995087,
+    51602.84470906481
+   ],
+   "cv": 0.06880215348273398,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: mean",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.9154775423230603,
+    1.9196940482361242,
+    1.9330454641021788,
+    2.0167127487948164,
+    2.0286365505307913,
+    2.1381339660147205,
+    1.9101990000344813,
+    1.9410219128476456,
+    1.94308005226776
+   ],
+   "median": 1.9410219128476456,
+   "ci": [
+    1.9154775423230603,
+    2.0286365505307913
+   ],
+   "cv": 0.038402877629954854,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: p50",
+   "system": "nucleus",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    1.3665829319506884,
+    1.3695829547941685,
+    1.3387500075623393,
+    1.4237919822335243,
+    1.3962090015411377,
+    1.4352909056469798,
+    1.3783329632133245,
+    1.3860840117558837,
+    1.3867500238120556
+   ],
+   "median": 1.3860840117558837,
+   "ci": [
+    1.3665829319506884,
+    1.4237919822335243
+   ],
+   "cv": 0.021168270090474867,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: filter 50%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    3.4534673682646826,
+    3.40149940259289,
+    3.4492750841891393,
+    3.5450004106387496,
+    3.1727645345963538,
+    3.50720633007586,
+    3.463773444411345,
+    3.454367082566023,
+    3.488791469600983
+   ],
+   "median": 3.454367082566023,
+   "ci": [
+    3.40149940259289,
+    3.50720633007586
+   ],
+   "cv": 0.031163152433202116,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: filter 50%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    2.7764999540522695,
+    2.7206249069422483,
+    2.780207898467779,
+    2.920374972745776,
+    2.4857500102370977,
+    2.842416986823082,
+    2.802792005240917,
+    2.7728750137612224,
+    2.915416960604489
+   ],
+   "median": 2.780207898467779,
+   "ci": [
+    2.7206249069422483,
+    2.915416960604489
+   ],
+   "cv": 0.046321414403893965,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: filter 10%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    7.403295627911575,
+    6.820884230779484,
+    7.267523459391668,
+    7.969583047088236,
+    8.465748461778276,
+    8.779346463736147,
+    7.254436346003786,
+    7.514773364644498,
+    7.911873635137454
+   ],
+   "median": 7.514773364644498,
+   "ci": [
+    7.254436346003786,
+    8.465748461778276
+   ],
+   "cv": 0.08137495202529832,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: filter 10%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.5004159696400166,
+    5.939166992902756,
+    6.328667048364878,
+    6.950124981813133,
+    7.393624982796609,
+    7.780082989484072,
+    6.36254099663347,
+    6.538082961924374,
+    7.03050009906292
+   ],
+   "median": 6.538082961924374,
+   "ci": [
+    6.328667048364878,
+    7.393624982796609
+   ],
+   "cv": 0.0857356572150033,
+   "flagged": false,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: filter 1%, mean",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    30.17539934744127,
+    27.829020871664397,
+    34.553944996441714,
+    26.662577840615995,
+    21.403451333753765,
+    36.06396502221469,
+    30.476423469604924,
+    36.93101888091769,
+    38.34578415460419
+   ],
+   "median": 30.476423469604924,
+   "ci": [
+    26.662577840615995,
+    36.93101888091769
+   ],
+   "cv": 0.17742105417307627,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: filter 1%, p50",
+   "system": "nucleus, ranked by the index",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    29.65062507428229,
+    27.311875019222498,
+    33.63554191309959,
+    25.95779101829976,
+    19.88366700243205,
+    35.377916996367276,
+    29.909500037319958,
+    36.31958307232708,
+    37.69679204560816
+   ],
+   "median": 29.909500037319958,
+   "ci": [
+    25.95779101829976,
+    36.31958307232708
+   ],
+   "cv": 0.18738617619264072,
+   "flagged": true,
+   "attempts": 3
+  },
+  {
+   "name": "msmarco: nDCG@10",
+   "system": "paradedb",
+   "phase": "warm",
+   "unit": "nDCG@10",
+   "times": [
+    0.257463557811085,
+    0.2575008665459814,
+    0.2577552484747159
+   ],
+   "median": 0.2575008665459814,
+   "ci": [
+    0.257463557811085,
+    0.2577552484747159
+   ],
+   "cv": 0.0006162810350892849,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "msmarco: CREATE INDEX",
+   "system": "paradedb",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    70957.733,
+    70944.538,
+    71118.842
+   ],
+   "median": 70957.733,
+   "ci": [
+    70944.538,
+    71118.842
+   ],
+   "cv": 0.0013667645692108854,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "msmarco: mean",
+   "system": "paradedb",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.293719,
+    6.402311,
+    6.502841
+   ],
+   "median": 6.402311,
+   "ci": [
+    6.293719,
+    6.502841
+   ],
+   "cv": 0.016342663651801502,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "msmarco: p50",
+   "system": "paradedb",
+   "phase": "warm",
+   "unit": "ms",
+   "times": [
+    6.73,
+    6.806,
+    6.943
+   ],
+   "median": 6.806,
+   "ci": [
+    6.73,
+    6.943
+   ],
+   "cv": 0.015813170683342183,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}
