@@ -313,7 +313,9 @@ def checksum(path, limit=None):
 def commit():
     """nucleus's commit, and whether the tree had changes."""
     sha = _run(["git", "-C", ROOT, "rev-parse", "HEAD"])
-    dirty = _run(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"])
+    # Mode bits and Markdown are not what a run measures.
+    dirty = _run(["git", "-C", ROOT, "-c", "core.fileMode=false", "status", "--porcelain",
+                  "--untracked-files=no", "--", ".", ":!*.md"])
     return {"commit": sha, "dirty": bool(dirty)}
 
 

@@ -149,8 +149,10 @@ def paradedb(a):
             break
         time.sleep(0.2)
     version = psql("SELECT extversion FROM pg_extension WHERE extname = 'pg_search'").strip()
+    settings = ", ".join(f"{k} {psql(f'SHOW {k}').strip()}" for k in
+                         ("shared_buffers", "maintenance_work_mem", "max_parallel_maintenance_workers"))
     method.emit_system("paradedb", {"version": f"pg_search {version}", "native": False,
-                                    "settings": "the image's (paradedb/paradedb), in Docker's Linux VM"})
+                                    "settings": f"paradedb/paradedb in Docker's Linux VM: {settings}"})
     print("ParadeDB pg_search, English tokenizer, k1 1.2, b 0.75")
     print(HEADER)
     for name in a.sets.split(","):

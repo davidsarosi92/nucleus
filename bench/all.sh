@@ -59,6 +59,23 @@ paradedb() { # paradedb start|stop
     docker stop nucleus-paradedb >/dev/null
   fi
 }
+paradedb_memory() { # paradedb_memory SHARED_BUFFERS MAINTENANCE_WORK_MEM WORKERS | reset
+  # MS MARCO's index build outgrows Docker's 4 GB VM with the image's
+  # settings (shared_buffers ~2.4 GB, five workers of ~620 MB): the kernel
+  # kills a backend.  beir.py records the settings a run had.
+  local q="docker exec nucleus-paradedb psql -U postgres -qAt -c"
+  if [ "$1" = reset ]; then
+    $q "ALTER SYSTEM RESET shared_buffers"
+    $q "ALTER SYSTEM RESET maintenance_work_mem"
+    $q "ALTER SYSTEM RESET max_parallel_maintenance_workers"
+  else
+    $q "ALTER SYSTEM SET shared_buffers = '$1'"
+    $q "ALTER SYSTEM SET maintenance_work_mem = '$2'"
+    $q "ALTER SYSTEM SET max_parallel_maintenance_workers = $3"
+  fi
+  docker restart nucleus-paradedb >/dev/null
+  sleep 5
+}
 
 step_build() {
   cargo build --release -p nucleus-cli -p nucleus-embedded
@@ -142,9 +159,11 @@ step_bm25-snippets() {
 step_msmarco() {
   need target/text-data/beir-msmarco "python3 bench/text/data.py msmarco"
   paradedb start
+  paradedb_memory 1GB 512MB 2
   m msmarco "$LONG" --also "paradedb=$PY bench/text/beir.py paradedb --sets msmarco --split dev --queries 1000" -- \
     $CAP 8000 "$PY" bench/text/beir.py nucleus "$N" --sets msmarco --split dev --queries 1000 \
     --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1
+  paradedb_memory reset
   paradedb stop
 }
 step_hybrid() {
@@ -182,7 +201,7 @@ step_recall() {
     env RECALL_BENCH=1 cargo test --release -q -p nucleus-sql --test recall_bench -- --ignored --nocapture
 }
 step_erasure() {
-  m erasure "$RUNS" -- env ERASURE_DIR=target/erasure-bench cargo test --release -q -p nucleus-sql \
+  m erasure "$RUNS" -- env ROWS=100000 cargo test --release -q -p nucleus-sql \
     --test erasure_bench -- --ignored --nocapture
 }
 
