@@ -8878,11 +8878,17 @@ put it but `text`, which it can neither query nor index.
   constraint's text parsed, its JSON literal read, the compiled schema
   found by its bytes); a 700-character `CHECK` of no JSON costs +2.5 µs
   the same way.  Folding literal casts was tried and changed nothing
-  (the literal is a JSON value already when bound).  *Next:* keep a
-  table's bound writer (checks, defaults, generated columns) across
-  statements, keyed by the table's catalog version — for every table,
-  not only JSON; close the remaining gap to `jsonschema`; the benchmark
-  page.
+  (the literal is a JSON value already when bound).  *Done
+  (2026-11-17)*: a table's bound writer — its checks, defaults,
+  generated columns, embedding columns and index keys — is kept across
+  statements in the session's catalog cache (`Part::Writer`), dropped
+  by any catalog commit and by `SET` (a session's `who` can change what
+  a default reads); a column being converted (§M14.18 O5) binds afresh.
+  The `CHECK`'s cost on single-row `INSERT`s: +6.0 µs a row → +1.3–1.6
+  (two A/B runs of `bench/json/schema.py` against the binary before;
+  the load without a check unchanged, 1.78–1.82 s).  *Next:* close the
+  remaining gap to `jsonschema`; `JSON_TABLE`'s row loop (2.6×
+  PostgreSQL's time where a document gives many rows).
 
 ### §M14.16 — Migrations and code generation ✅
 

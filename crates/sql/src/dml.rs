@@ -575,43 +575,27 @@ impl EntrySorter {
     }
 }
 
-/// What writes to one table need, bound once per statement.
-pub struct Writer {
-    /// The table.
-    pub table: Table,
+/// What a table's writer binds of the table's definition, kept for the
+/// session's next statements while the catalog holds
+/// ([`crate::catalog_cache`]; PLAN.md §M14.15: bound per statement, the
+/// `CHECK`s parsed and bound again cost a single-row `INSERT` 6 µs).
+struct Bound {
+    /// The definition bound (an entry serves this one only).
+    table: Table,
     checks: Vec<(String, Expr)>,
     defaults: Vec<Option<Expr>>,
     /// The stored generated columns and their expressions, in order.
     generated: Vec<(usize, Expr)>,
     /// The embedding columns and the columns their texts are made of.
     embeddings: Vec<(usize, Vec<usize>)>,
-    /// Its chunk tables, kept current with its texts (§M14.22 E7), and
-    /// the registry their writes need.
-    chunked: Vec<crate::chunk_tables::Chunked>,
-    registry: Option<Box<Registry>>,
-    /// Its index entries.
-    pub keys: IndexKeys,
-    /// How its rows are stored.
-    pub storage: std::sync::Arc<dyn crate::storage::TableStorage>,
-    /// A partitioned table: how, and its partitions' writers (rows go to
-    /// them).
-    partitions: Option<(crate::partition::Spec, Vec<Writer>)>,
-    /// A column's type being changed (`crate::retype`): what its writes
-    /// keep beside their own.
-    shadow: Option<crate::retype::Shadow>,
-    /// A partition: the key a row must have — its partitioning, its bound,
-    /// and (a default partition) its siblings' bounds.
-    bound: Option<(
-        crate::partition::Spec,
-        crate::partition::PartBound,
-        Vec<crate::partition::PartBound>,
-    )>,
+    keys: Arc<IndexKeys>,
 }
 
-impl Writer {
-    /// Binds the table's `CHECK` and `DEFAULT` expressions.
-    pub fn new(txn: &dyn KvTxn, reg: &Registry, table: Table) -> Result<Self> {
-        let scope = table_scope(&table);
+impl Bound {
+    /// Binds `table`'s `CHECK`, `DEFAULT` and generated expressions and
+    /// its indexes' mappings (on `view`, a column's type being changed).
+    fn new(txn: &dyn KvTxn, reg: &Registry, table: &Table, view: &Table) -> Result<Self> {
+        let scope = table_scope(table);
         let mut binder = Binder::new(txn, reg);
         let mut checks = Vec::new();
         for (name, text) in &table.checks {
@@ -642,8 +626,63 @@ impl Writer {
                 None => {}
             }
         }
+        Ok(Self {
+            table: table.clone(),
+            checks,
+            defaults,
+            generated,
+            embeddings,
+            keys: Arc::new(IndexKeys::new(txn, reg, view)?),
+        })
+    }
+}
+
+/// What writes to one table need, bound once per statement (what does
+/// not change while the catalog holds, once per session: [`Bound`]).
+pub struct Writer {
+    /// The table.
+    pub table: Table,
+    parts: Arc<Bound>,
+    /// Its chunk tables, kept current with its texts (§M14.22 E7), and
+    /// the registry their writes need.
+    chunked: Vec<crate::chunk_tables::Chunked>,
+    registry: Option<Box<Registry>>,
+    /// Its index entries.
+    pub keys: Arc<IndexKeys>,
+    /// How its rows are stored.
+    pub storage: std::sync::Arc<dyn crate::storage::TableStorage>,
+    /// A partitioned table: how, and its partitions' writers (rows go to
+    /// them).
+    partitions: Option<(crate::partition::Spec, Vec<Writer>)>,
+    /// A column's type being changed (`crate::retype`): what its writes
+    /// keep beside their own.
+    shadow: Option<crate::retype::Shadow>,
+    /// A partition: the key a row must have — its partitioning, its bound,
+    /// and (a default partition) its siblings' bounds.
+    bound: Option<(
+        crate::partition::Spec,
+        crate::partition::PartBound,
+        Vec<crate::partition::PartBound>,
+    )>,
+}
+
+impl Writer {
+    /// Binds the table's `CHECK` and `DEFAULT` expressions.
+    pub fn new(txn: &dyn KvTxn, reg: &Registry, table: Table) -> Result<Self> {
         let shadow = crate::retype::Shadow::of(txn, reg, &table)?;
-        let keys = IndexKeys::new(txn, reg, shadow.as_ref().map_or(&table, |s| &s.view))?;
+        let parts = match &shadow {
+            // A column's type being changed: bound afresh (its view is
+            // the conversion's state, not the definition's alone).
+            Some(s) => Arc::new(Bound::new(txn, reg, &table, &s.view)?),
+            None => crate::catalog_cache::memo_fitting(
+                txn,
+                crate::catalog_cache::Part::Writer,
+                &table.name,
+                |b: &Arc<Bound>| b.table == table,
+                || Bound::new(txn, reg, &table, &table).map(Arc::new),
+            )?,
+        };
+        let keys = Arc::clone(&parts.keys);
         let storage = crate::storage::of(&table)?;
         catalog::validate_table(txn, &table.name)?;
         let chunked = if table.referenced_by.is_empty() {
@@ -680,10 +719,7 @@ impl Writer {
         };
         Ok(Self {
             table,
-            checks,
-            defaults,
-            generated,
-            embeddings,
+            parts,
             chunked,
             registry,
             keys,
@@ -705,7 +741,7 @@ impl Writer {
     /// computed (from the row's other columns), then
     /// [`validate`](Self::validate)d.
     pub fn complete(&self, row: &mut Row, ctx: &Ctx) -> Result<()> {
-        for (c, e) in &self.generated {
+        for (c, e) in &self.parts.generated {
             let v = e.eval(&Env {
                 row,
                 outer: None,
@@ -722,7 +758,7 @@ impl Writer {
 
     /// The default value of column `c`.
     pub fn default_of(&self, c: usize, ctx: &Ctx) -> Result<Value> {
-        match &self.defaults[c] {
+        match &self.parts.defaults[c] {
             None => Ok(Value::Null),
             Some(e) => assign(
                 ctx.txn,
@@ -753,7 +789,7 @@ impl Writer {
             outer: None,
             ctx,
         };
-        for (name, check) in &self.checks {
+        for (name, check) in &self.parts.checks {
             if check.eval(&env)?.truth()? == Some(false) {
                 return Err(Error::check_violation(format!(
                     "new row for relation \"{}\" violates check constraint \"{name}\"",
@@ -902,14 +938,17 @@ impl RowBuilder {
     /// volatile (`nextval`, `random()`) nor with subqueries.
     pub fn parallel_safe(&self) -> bool {
         let w = &self.writer;
-        w.defaults
+        w.parts
+            .defaults
             .iter()
             .flatten()
             .all(crate::vector::parallel_safe)
-            && w.generated
+            && w.parts
+                .generated
                 .iter()
                 .all(|(_, e)| crate::vector::parallel_safe(e))
-            && w.checks
+            && w.parts
+                .checks
                 .iter()
                 .all(|(_, e)| crate::vector::parallel_safe(e))
             && self.check.as_ref().is_none_or(crate::vector::parallel_safe)
@@ -1525,7 +1564,7 @@ fn store_batch(
                 }
             }
         }
-        if !w.embeddings.is_empty() {
+        if !w.parts.embeddings.is_empty() {
             embedded.push(pk_suffix(t, &key).to_vec());
         }
         if !w.chunked.is_empty() {
@@ -1565,7 +1604,7 @@ fn store_batch(
     }
     // A job for each new row's vectors (its text made by the workers).
     for pk in embedded.iter().take(dup.unwrap_or(stored)) {
-        for &(c, _) in &w.embeddings {
+        for &(c, _) in &w.parts.embeddings {
             crate::embedding::enqueue_row(txn, t, c, pk).map_err(none)?;
         }
     }
@@ -1663,7 +1702,7 @@ pub fn update_rows(
         w.keys
             .keep(txn, t, Some((old_pk, old)), Some((new_pk, new)))?;
         // A changed text is a job; a moved row takes its job along.
-        for (c, reads) in &w.embeddings {
+        for (c, reads) in &w.parts.embeddings {
             if old_pk != new_pk {
                 crate::embedding::moved(txn, t, *c, old_pk, new_pk)?;
             }

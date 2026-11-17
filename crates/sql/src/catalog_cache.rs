@@ -59,6 +59,9 @@ pub(crate) enum Part {
     Plan,
     /// A statement's parameter types and result columns, by its text.
     Describe,
+    /// What a table's writer binds of its definition, by the table's
+    /// name (`crate::dml::Writer`).
+    Writer,
 }
 
 /// An entry kept by a statement's text ([`crate::by_text`]).
