@@ -120,6 +120,31 @@ class Results(unittest.TestCase):
         self.assertIn("ms", method.table(a))
         self.assertIn("logical CPUs", method.describe(env))
 
+    def test_a_plan_kept_tells_whether_it_changed(self):
+        import common
+        explained = [["Hash Join (rows=40)"], ["  ->  Seq Scan on t (rows=12)"]]
+
+        class System:
+            explain = "EXPLAIN "
+
+            def results(self, sql):
+                assert sql.startswith("EXPLAIN SELECT"), sql
+                return explained
+
+        p = common.plan_of(System(), "SELECT 1;")
+        self.assertEqual(p["plan"], "Hash Join\n  ->  Seq Scan on t")
+        explained[0] = ["Hash Join (rows=55) or lookups up to 448 rows"]
+        self.assertEqual(common.plan_of(System(), "SELECT 1")["plan"].split("\n")[0],
+                         "Hash Join or lookups up to N rows")
+        explained[0] = ["Hash Join (rows=55)"]  # another sample, the same plan
+        self.assertEqual(common.plan_of(System(), "SELECT 1")["hash"], p["hash"])
+        explained[0] = ["Nested Loop (rows=55)"]
+        q = common.plan_of(System(), "SELECT 1")
+        first, second = {"plans": {"pg": {"Q1": p}}}, {"plans": {"pg": {"Q1": q}}}
+        self.assertTrue(method.plan_changed(first, second, "Q1", "pg"))
+        self.assertFalse(method.plan_changed(first, first, "Q1", "pg"))
+        self.assertIsNone(method.plan_changed(first, {}, "Q1", "pg"))
+
 
 if __name__ == "__main__":
     unittest.main()

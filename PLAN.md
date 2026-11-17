@@ -10747,6 +10747,11 @@ simple parameterization, MySQL's former query cache — what not to do).
   2.6 → 4.5 s in P1's three runs) — each query's plan (`EXPLAIN (COSTS
   OFF)`, hashed) goes into the results, so a change in its time shows
   whether its plan changed with it.
+  *Done 2026-11-17*: the `\timing` and the buffering (`78e04c8`); the
+  plans kept (`bench/common.py`'s `plan_of`: PostgreSQL's `EXPLAIN
+  (COSTS OFF)`, nucleus's `EXPLAIN` with its estimates and its adaptive
+  joins' thresholds masked, hashed; `method.py reproduce` prints "its
+  plan changed").  Next in R1: the per-statement split.
 - **R2 — the point read**: what R1 shows — likely a plan kept for a
   statement's shape with its literals as parameters, and a short path
   for a primary key's equality; target ≤ PostgreSQL's time.

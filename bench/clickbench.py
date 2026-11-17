@@ -115,7 +115,8 @@ def main():
         env["cold"] = COLD
         env["clickbench"] = COMMIT
         load_samples = loads(systems, lambda s: load(s, schema, path, s.name == "nucleus (column)"), a.runs)
-        samples, answers = queries_by_method(systems, queries, a.runs, a.timeout, a.retries)
+        plans = {}
+        samples, answers = queries_by_method(systems, queries, a.runs, a.timeout, a.retries, plans)
     finally:
         for s in systems:
             s.close()
@@ -125,7 +126,7 @@ def main():
     report(f"ClickBench, {a.rows:,} rows", samples, load_samples, checks, env, baseline, "load (COPY, ANALYZE; PostgreSQL VACUUM ANALYZE)")
     if a.out:
         method.write(a.out, "clickbench", env, samples + load_samples,
-                     {"baseline": baseline, "rows": a.rows, "checks": checks})
+                     {"baseline": baseline, "rows": a.rows, "checks": checks, "plans": plans})
     if any("DIFFERENT" in c for c in checks.values()):
         sys.exit("some results differ")
 

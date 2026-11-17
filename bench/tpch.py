@@ -109,7 +109,8 @@ def main():
         env = method.environment({s.name: s.describe() for s in systems}, data=[data], where=systems[0].work)
         env["cold"] = COLD
         load_samples = loads(systems, lambda s: load(s, data, s.name == "nucleus (column)"), a.runs)
-        samples, answers = queries_by_method(systems, queries, a.runs, a.timeout, a.retries)
+        plans = {}
+        samples, answers = queries_by_method(systems, queries, a.runs, a.timeout, a.retries, plans)
     finally:
         for s in systems:
             s.close()
@@ -119,7 +120,8 @@ def main():
     report(f"TPC-H SF {a.sf:g}", samples, load_samples, checks, env, None if a.no_pg else "postgresql")
     if a.out:
         method.write(a.out, "tpch", env, samples + load_samples,
-                     {"baseline": None if a.no_pg else "postgresql", "sf": a.sf, "checks": checks})
+                     {"baseline": None if a.no_pg else "postgresql", "sf": a.sf, "checks": checks,
+                      "plans": plans})
     if any("DIFFERENT" in c for c in checks.values()):
         sys.exit("some results differ")
 

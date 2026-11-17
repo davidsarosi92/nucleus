@@ -3,6 +3,7 @@ the two systems driven through their own clients, each query's best time
 from the client's `\\timing`, results compared between the systems, and
 the Markdown report."""
 
+import hashlib
 import math
 import os
 import re
@@ -215,6 +216,8 @@ class NucleusSystem:
     can_restart = True
     # After a bulk load: the statistics.
     after_load = "ANALYZE"
+    # A query's plan, its estimates stripped (`plan_of`).
+    explain = "EXPLAIN "
 
     def __init__(self, binary, name="nucleus", embedded=False):
         self.binary, self.embedded = binary, embedded
@@ -276,6 +279,7 @@ class PostgresSystem:
     restarted)."""
 
     name = "postgresql"
+    explain = "EXPLAIN (COSTS OFF) "
     # After a bulk load, as its documentation has it ("Populating a
     # Database"): the statistics, and the visibility map and hint bits set
     # once, not by the first queries.
@@ -351,13 +355,35 @@ def loads(systems, load, runs=method.RUNS):
             for n, t in times.items()]
 
 
-def queries_by_method(systems, queries, runs=method.RUNS, timeout=600, retries=method.RETRIES):
+# A plan node's estimates: what `ANALYZE`'s sample moves without the plan
+# changing (nucleus's `(rows=40)` and an adaptive join's threshold, `or
+# lookups up to 448 rows`; PostgreSQL's are off by `COSTS OFF`).
+ESTIMATES = re.compile(r"\s*\((?:cost|rows)=[^)]*\)")
+THRESHOLDS = re.compile(r"(lookups up to )\d+( rows)")
+
+
+def plan_of(system, sql):
+    """`sql`'s plan on `system` as its `EXPLAIN` prints it, the estimates
+    stripped, and the plan's hash; None where it has none."""
+    try:
+        rows = system.results(system.explain + one_line(sql).rstrip(";"))
+    except Exception:  # a system without `EXPLAIN`, a query it cannot explain
+        return None
+    if not rows:
+        return None
+    text = "\n".join(THRESHOLDS.sub(r"\1N\2", ESTIMATES.sub("", str(r[0]))).rstrip() for r in rows)
+    return {"hash": hashlib.sha1(text.encode()).hexdigest()[:12], "plan": text}
+
+
+def queries_by_method(systems, queries, runs=method.RUNS, timeout=600, retries=method.RETRIES, plans=None):
     """Each query `runs` rounds, the systems in turn (A, B, then B, A, …): each
     restarted, then the query cold and warm in a session under a
     statement timeout of `timeout` s; the rounds again (at most `retries`
     times) while one spreads past the bound.  A query that fails or times
     out on a system is not run there again.  Returns the samples and each
-    system's answer to each query (None where it failed)."""
+    system's answer to each query (None where it failed); `plans`, a
+    dict, gets each system's plan of each query (`plan_of`): a time that
+    moves between runs shows whether its plan moved with it."""
     samples, answers = [], {s.name: {} for s in systems}
     limit = f"SET statement_timeout = {int(timeout * 1000)}"
     for q, sql in queries.items():
@@ -389,6 +415,10 @@ def queries_by_method(systems, queries, runs=method.RUNS, timeout=600, retries=m
                                              attempts=attempt))
         for s in systems:
             answers[s.name][q] = None if s.name in failed else s.results(sql)
+            if plans is not None and s.name not in failed:
+                p = plan_of(s, sql)
+                if p:
+                    plans.setdefault(s.name, {})[q] = p
         line = ", ".join(f"{n} {method.median(t):.1f}" for (n, p), t in got.items() if p == "warm" and n not in failed)
         print(f"  {q}: {line or 'failed'}", file=sys.stderr, flush=True)
     return samples, answers

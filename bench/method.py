@@ -635,6 +635,16 @@ def reproduce(first, second):
     return missed
 
 
+def plan_changed(first, second, name, system):
+    """Whether `name`'s plan on `system` differs between two results files
+    that kept plans (bench/common.py's `plan_of`); None where one did not."""
+    a = (first.get("plans") or {}).get(system, {}).get(name)
+    b = (second.get("plans") or {}).get(system, {}).get(name)
+    if not a or not b:
+        return None
+    return a["hash"] != b["hash"]
+
+
 def cli_run(argv):
     """method.py run NAME OUT [--runs N] [--retries K] [--retry-budget S] [--data PATH]…
     [--where DIR] [--also LABEL=COMMAND]… -- COMMAND…"""
@@ -690,7 +700,8 @@ def main(argv):
         missed = reproduce(first, second)
         total = len(first["samples"])
         for name, phase, system in missed:
-            print(f"not reproduced: {name} ({phase}) on {system}")
+            moved = " — its plan changed" if plan_changed(first, second, name, system) else ""
+            print(f"not reproduced: {name} ({phase}) on {system}{moved}")
         print(f"{total - len(missed)} of {total} reproduced")
         return 1 if missed else 0
     print(__doc__, file=sys.stderr)

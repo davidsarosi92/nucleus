@@ -7873,6 +7873,21 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-17 — §M14.33 R1, measuring it fairly:** `nucleus sql`'s
+  `\timing` stops when the results are in, before they are printed, as
+  `psql`'s does; its output is buffered when it is not a terminal.
+  `bench/tpch.py` and `bench/clickbench.py` keep each system's plan of
+  each query (`EXPLAIN`, estimates stripped, hashed) in the results, and
+  `method.py reproduce` says where a time moved with its plan.
+- **2026-11-17 — §M14.31 P1c–P1d, every number by the method:** every
+  section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
+  method 2 — a difference within 10 % not claimed, rounds started when
+  the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-17 — §M14.28 L2–L3a, the LSM engine:** memtables, runs with
+  Bloom filters, range tombstones, lazy leveling; `CREATE TABLE … WITH
+  (engine = lsm)` and `default_table_engine`.
+- **2026-11-17 — §M14.15, a table's bound writer kept** across
+  statements in the catalog cache (a `CHECK`ed insert +6.0 → +1.3–1.6 µs).
 - **2026-11-16 — §M14.31 P1a–P1b, the measuring method:**
   `bench/method.py` (medians, bootstrap intervals, spread, runs again,
   interleaving, the environment, results files, `show`, `reproduce`,

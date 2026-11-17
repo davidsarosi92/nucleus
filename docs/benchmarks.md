@@ -23,8 +23,10 @@ apart (`≈` otherwise: a number moves by that much between sessions on
 one machine — Kalibera and Jones, 2013); a round starts only when the
 machine's other work is under 2.5 cores (what it waited is kept in the
 results); a second run reproduces a number when it is not apart from
-the first by the same test; every answer is checked against the other
-system's.  PostgreSQL runs natively in a
+the first by the same test, and on TPC-H and ClickBench each system's
+plan of each query is kept beside its times, so a time that moved shows
+whether its plan moved with it; every answer is checked against the
+other system's.  PostgreSQL runs natively in a
 cluster of its own, tuned for the machine (`bench/pg.py`), what it runs
 with recorded beside the results.
 
