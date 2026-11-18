@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ✅ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅, L4a–L4c ✅; L4d–L5 next |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅, L4a–L4d ✅; L4e–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ✅ E1 (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
@@ -4153,9 +4153,34 @@ recovery time after a crash mid-compaction.
     false positive costing a cached block, a few MiB of filters a
     million keys is not worth a run's bits depending on where it lands;
     taken up again where filters' memory shows at scale.
-  - **L4d — MVCC-aware compaction**: a compaction filter dropping the
-    versions vacuum would and a table's `DROP` / `DELETE` of all as a
-    range, not key-by-key tombstones.
+  - **L4d — MVCC-aware compaction ✅ (the filter)**: *Built*: a merge
+    drops the versions no snapshot sees, with the filter commits already
+    use on the B+tree leaves they rewrite (RocksDB's compaction filter;
+    the transaction layer's `Collect`): `Store::set_compaction_filter`
+    takes a maker the transaction layer sets at open, giving a filter
+    as of when a merge begins (the watermark only rises, so later
+    snapshots read above it); the merge shows it 512 entries at a time,
+    the ones with values (a storage tombstone passes as it is, a key a
+    range tombstone hides was passed over already).  Above the last
+    level older versions of a key may lie in runs not merged, so there
+    `LeafFilter::drops_above` keeps a key's newest tombstone at or below
+    the watermark — dropping it would let an older version read as live;
+    a merge into the last level drops it with the rest.  *Tested*
+    (`crates/txn/tests/lsm_versions.rs`): a key written 48 times keeps 1
+    version (48 without the filter); a snapshot held keeps the version
+    it reads and those after (31 of 40); a deleted key whose versions
+    lie in a tier below stays deleted through merges above the last
+    level (dropping its tombstone there resurrects it by the third
+    round).  *Measured*: an SQL table updated whole five times ends the
+    same size either way (27 MB) — vacuum gets there too; what the
+    filter saves is vacuum's reads and tombstones for what a merge
+    rewrites anyway.  *Next* (its own step, both engines): `DROP TABLE`
+    and `TRUNCATE` as a range — today a key-by-key delete in the
+    dropping transaction (O(rows), where PostgreSQL unlinks a file):
+    the prefix recorded as dropped at the commit, removed whole
+    (`Tables::remove_range`: the B+tree's pages freed, an LSM range
+    tombstone) once the watermark passes it, snapshots and branches
+    before it still reading the rows.
   - **L4e — sealed runs**: an encrypted database's runs and manifests
     sealed under the page key, so `engine = lsm` is no longer refused
     there.

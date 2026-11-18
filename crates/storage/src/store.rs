@@ -465,6 +465,9 @@ struct Branch {
     /// The layer above's note on the branch ([`Store::tag`]), recorded at
     /// each checkpoint.
     tag: AtomicU64,
+    /// What its engines' compactions may drop
+    /// ([`Store::set_compaction_filter`]).
+    filter: Mutex<Option<engines::FilterMaker>>,
 }
 
 impl Branch {
@@ -664,6 +667,7 @@ fn open_branch(
         info,
         tree: RwLock::new(tree),
         writers_waiting: std::sync::atomic::AtomicUsize::new(0),
+        filter: Mutex::new(None),
         wal,
         deferred: Mutex::new(deferred),
         writer: Mutex::new((applied, meta)),
@@ -1558,6 +1562,14 @@ impl Store {
         installed
     }
 
+    /// What this branch's engines' compactions may drop as garbage
+    /// (§M14.28 L4d): `make` gives a filter as of when a merge begins —
+    /// the transaction layer's versions no snapshot sees, as its commits
+    /// drop from the leaves they rewrite.
+    pub fn set_compaction_filter(&self, make: engines::FilterMaker) {
+        *self.b.filter.lock().unwrap_or_else(|e| e.into_inner()) = Some(make);
+    }
+
     fn begin_running<'a>(
         &'a self,
         running: MutexGuard<'a, ()>,
@@ -2010,6 +2022,16 @@ impl engines::JobRoom for Room<'_, '_> {
         !self.sh.poisoned.load(Ordering::Acquire)
             && !self.branch.dropped.load(Ordering::Acquire)
             && (self.go_on.borrow_mut())()
+    }
+
+    fn filter(&self) -> Option<Box<dyn crate::btree::LeafFilter + Send>> {
+        let make = self
+            .branch
+            .filter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        make()
     }
 }
 

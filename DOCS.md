@@ -826,8 +826,14 @@ as the largest store's `StoreOptions::lsm_cache_bytes`, 64 MiB by
 default; `nucleus-kv` gives a quarter of `cache_bytes`).  Lookups and
 scans fill it, compactions read through it without filling it; blocks
 are keyed by a run's number in the process, so a run reopened after a
-crash is never served another's.  Left to L4d–L4e: compaction that
-drops versions vacuum would, sealed runs.
+crash is never served another's.  **Versions dropped by merges** (L4d):
+`Store::set_compaction_filter` takes a maker of a `LeafFilter` as of
+when a merge begins — the transaction layer sets its `Collect`, the
+filter its commits apply to the B+tree leaves they rewrite — and a merge
+shows it 512 entries at a time (those with values); above the last
+level it asks `drops_above`, which keeps a key's newest tombstone at or
+below the watermark (older versions may be in runs not merged).  Left
+to L4e: sealed runs.
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -8088,6 +8094,10 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L4d, versions dropped by LSM merges:** the
+  transaction layer's commit filter (`Collect`) applied to compactions
+  (`Store::set_compaction_filter`, `LeafFilter::drops_above` above the
+  last level).
 - **2026-11-18 — §M14.28 L4c, the LSM tree's block cache:** blocks
   decoded once and searched in place, kept in a CLOCK cache for the
   process (`StoreOptions::lsm_cache_bytes`); a lookup 3.3 → 2.5 µs.

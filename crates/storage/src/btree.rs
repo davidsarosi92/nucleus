@@ -121,6 +121,12 @@ pub struct LeafEntry<'a> {
 pub trait LeafFilter: Sync {
     /// Marks in `drop` (all false on entry) the `entries` to go.
     fn drops(&self, entries: &[LeafEntry], drop: &mut [bool]);
+    /// [`drops`](Self::drops) where older entries of the same keys may lie
+    /// elsewhere — an LSM tree's runs merged above its last level
+    /// (§M14.28 L4d): an entry that is garbage only because nothing older
+    /// is left (a key's last tombstone) stays.  Nothing dropped unless the
+    /// filter says.
+    fn drops_above(&self, _entries: &[LeafEntry], _drop: &mut [bool]) {}
 }
 
 impl BTree {

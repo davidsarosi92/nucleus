@@ -706,6 +706,18 @@ impl Engine {
             engine.inner.last_time.store(time, Ordering::Release);
         }
         engine.inner.refresh_time_floor()?;
+        // The LSM trees' compactions drop what commits drop from the
+        // leaves they rewrite (§M14.28 L4d): the versions no snapshot sees
+        // as of when a merge begins (the watermark only rises).
+        let weak = Arc::downgrade(&engine.inner);
+        engine.inner.store.set_compaction_filter(Arc::new(move || {
+            let inner = weak.upgrade()?;
+            let f: Box<dyn LeafFilter + Send> = Box::new(Collect {
+                wm: inner.current_watermark(),
+                intents: !read(&inner.unresolved).is_empty(),
+            });
+            Some(f)
+        }));
         let mut all = lock(&engine.inner.branches);
         all.retain(|_, e| e.strong_count() > 0);
         all.insert(id, Arc::downgrade(&engine.inner));
@@ -2097,6 +2109,22 @@ struct Collect {
 
 impl LeafFilter for Collect {
     fn drops(&self, entries: &[LeafEntry], drop: &mut [bool]) {
+        self.mark(entries, drop, true);
+    }
+
+    /// Above an LSM tree's last level (§M14.28 L4d): older versions of a
+    /// key may be in runs not merged, so a key's newest tombstone at or
+    /// below the watermark stays — dropped, they would read as live.
+    fn drops_above(&self, entries: &[LeafEntry], drop: &mut [bool]) {
+        self.mark(entries, drop, false);
+    }
+}
+
+impl Collect {
+    /// [`LeafFilter::drops`]; a key's newest tombstone at or below the
+    /// watermark goes only when `whole` (nothing older of the key is
+    /// elsewhere).
+    fn mark(&self, entries: &[LeafEntry], drop: &mut [bool], whole: bool) {
         // `escape(user) 00 00`: what a key's versions share.
         fn run_of(key: &[u8]) -> Option<&[u8]> {
             let n = key.len().checked_sub(mvcc::OVERHEAD)?;
@@ -2132,7 +2160,7 @@ impl LeafFilter for Collect {
                 // An intent's timestamp is above any watermark.
                 if u64::MAX - at <= self.wm {
                     let tombstone = e.inline == Some(&[0][..]);
-                    if kept || (tombstone && end < entries.len() && !hidden) {
+                    if kept || (whole && tombstone && end < entries.len() && !hidden) {
                         drop[j] = true;
                     }
                     kept = true;

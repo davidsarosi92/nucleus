@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nucleus_platform::{FileSystem, OpenMode};
 
@@ -113,7 +114,18 @@ pub trait JobRoom {
     /// ([`crate::StoreOptions::compaction_bytes_per_sec`]); false when the
     /// job is to stop.
     fn wrote(&self, bytes: u64) -> bool;
+    /// What a merge may drop as garbage the layer above knows of (the
+    /// transaction layer's versions no snapshot sees, §M14.28 L4d): made
+    /// now, for this job.
+    fn filter(&self) -> Option<Box<dyn crate::btree::LeafFilter + Send>> {
+        None
+    }
 }
+
+/// Makes a compaction's [`crate::btree::LeafFilter`] as of now
+/// ([`crate::Store::set_compaction_filter`]); `None`: drop nothing.
+pub type FilterMaker =
+    Arc<dyn Fn() -> Option<Box<dyn crate::btree::LeafFilter + Send>> + Send + Sync>;
 
 /// A scan's entries, the key first and the value only when asked.
 pub trait Entries {

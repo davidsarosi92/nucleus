@@ -56,8 +56,11 @@
 //! **Reads** go through a block cache for the process ([`CACHE`],
 //! §M14.28 L4c): a block decoded once, searched in place.
 //!
-//! What L4c leaves (PLAN.md §M14.28 L4d–L4e): compaction that drops
-//! versions vacuum would, runs sealed under the page key.
+//! A merge drops what the layer above knows to be garbage (its
+//! [`LeafFilter`], §M14.28 L4d: versions no snapshot sees); above the last
+//! level it keeps what is garbage only because nothing older is left.
+//!
+//! What L4d leaves (PLAN.md §M14.28 L4e): runs sealed under the page key.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -66,6 +69,7 @@ use std::sync::{Arc, Mutex};
 
 use nucleus_platform::{File, FileSystem, OpenMode};
 
+use crate::btree::{LeafEntry, LeafFilter};
 use crate::crc32c::crc32c;
 use crate::engines::{Done, Engine, Entries, Job, JobRoom, Ops, Saver};
 use crate::{Error, PageId, Result, lz};
@@ -1282,10 +1286,13 @@ fn merge_runs(
     name: &str,
     runs: &[Arc<Run>],
     keep: bool,
+    filter: Option<&dyn LeafFilter>,
     wrote: &dyn Fn(u64) -> bool,
 ) -> Result<Option<Arc<Run>>> {
     /// Bytes between two calls of `wrote`.
     const STEP: u64 = 1 << 20;
+    /// Entries the filter is shown at a time (as a B+tree leaf).
+    const CHUNK: usize = 512;
     let srcs = runs
         .iter()
         .map(|r| {
@@ -1302,14 +1309,56 @@ fn merge_runs(
     let mut m = Merged::new(srcs, ranges, false, keep);
     let mut w = RunWriter::new(fs, dir, name)?;
     let mut told = 0;
-    while let Some((k, v)) = m.next_entry()? {
-        w.add(&k, &v)?;
+    let mut chunk: Vec<(Vec<u8>, Val)> = Vec::with_capacity(CHUNK);
+    let mut drop = Vec::with_capacity(CHUNK);
+    loop {
+        let next = m.next_entry()?;
+        let end = next.is_none();
+        if let Some(e) = next {
+            chunk.push(e);
+        }
+        if chunk.len() < CHUNK && !end {
+            continue;
+        }
+        // The garbage the layer above knows of dropped (§M14.28 L4d): it
+        // sees the entries with values (tombstones pass as they are); a
+        // merge above the last level keeps what only nothing older left
+        // makes garbage.
+        drop.clear();
+        drop.resize(chunk.len(), false);
+        if let Some(f) = filter {
+            let live: Vec<usize> = (0..chunk.len()).filter(|&i| chunk[i].1.is_some()).collect();
+            let entries: Vec<LeafEntry> = live
+                .iter()
+                .map(|&i| LeafEntry {
+                    key: &chunk[i].0,
+                    inline: chunk[i].1.as_deref(),
+                })
+                .collect();
+            let mut gone = vec![false; entries.len()];
+            if keep {
+                f.drops_above(&entries, &mut gone);
+            } else {
+                f.drops(&entries, &mut gone);
+            }
+            for (j, &i) in live.iter().enumerate() {
+                drop[i] = gone[j];
+            }
+        }
+        for (i, (k, v)) in chunk.drain(..).enumerate() {
+            if !drop[i] {
+                w.add(&k, &v)?;
+            }
+        }
         if w.at >= told + STEP {
             if !wrote(w.at - told) {
                 w.abandon()?;
                 return Ok(None);
             }
             told = w.at;
+        }
+        if end {
+            break;
         }
     }
     let mut ranges = Ranges::default();
@@ -1606,7 +1655,16 @@ impl Engine for LsmEngine {
             all.extend(bottom.iter().cloned());
             let name = room.name()?;
             let wrote = |n| room.wrote(n);
-            let run = merge_runs(room.fs(), room.dir(), &name, &all, keep, &wrote)?;
+            let filter = room.filter();
+            let run = merge_runs(
+                room.fs(),
+                room.dir(),
+                &name,
+                &all,
+                keep,
+                filter.as_deref().map(|f| f as &dyn LeafFilter),
+                &wrote,
+            )?;
             if run.is_none() && !room.wrote(0) {
                 return Ok(None); // stopped
             }
