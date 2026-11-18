@@ -58,8 +58,11 @@ enum Sub {
     Bool(bool),
     /// The keywords that check something, in the order they are checked
     /// (and their problems told): only those the schema has, those of a
-    /// kind of value together — a document's value meets few of them.
-    Rules(Vec<Kw>),
+    /// kind of value together — a document's value meets few of them;
+    /// and whether one reads the value's structure (`enum`, `const`, a
+    /// `$ref`, the applicators and `type` but for a decimal do not: the
+    /// value is then not decoded).
+    Rules(Vec<Kw>, bool),
 }
 
 enum Kw {
@@ -496,7 +499,11 @@ impl<'a> Compiler<'a> {
         if nullable && let Some(t) = &mut r.types {
             *t |= NULL;
         }
-        Ok(Sub::Rules(lower(r)))
+        let kws = lower(r);
+        let decode = kws
+            .iter()
+            .any(|k| matches!(k, Kw::Number(_) | Kw::Str(_) | Kw::Array(_) | Kw::Object(_)));
+        Ok(Sub::Rules(kws, decode))
     }
 }
 
@@ -661,6 +668,11 @@ impl Schema {
 
     /// Checks `b` against subschema `i`, at `path`; the problems into
     /// `out` where it is given (all of them), else stopping at the first.
+    ///
+    /// Kept small — `type`, `enum`, `const` and `$ref` here, the rest of
+    /// a kind of value in a function of its own, problems told by a cold
+    /// one — so a call, made for each value of a document, saves few
+    /// registers and takes little stack.
     fn check<'d>(
         &self,
         i: usize,
@@ -674,17 +686,100 @@ impl Schema {
                 "a JSON Schema check went too deep (a $ref loop?)",
             ));
         }
-        let rules = match &self.nodes[i] {
+        let (rules, decode) = match &self.nodes[i] {
             Sub::Bool(true) => return Ok(true),
-            Sub::Bool(false) => {
-                report(out, path, "no value is allowed here".into());
-                return Ok(false);
-            }
-            Sub::Rules(r) => r,
+            Sub::Bool(false) => return Ok(told(out, path, || "no value is allowed here".into())),
+            Sub::Rules(r, decode) => (r, *decode),
         };
-        let n = form::root(b)?;
+        // Read only by the keywords that need it (`decode`), else a
+        // stand-in never looked at.
+        let n = if decode { form::root(b)? } else { Node::Null };
         let mut ok = true;
-        // A failed rule: noted, and the end where nothing is collected.
+        for kw in rules {
+            let good = match kw {
+                Kw::Type(t) => {
+                    let kind = if decode {
+                        kind_of(&n)
+                    } else {
+                        kind_of_bytes(b)?
+                    };
+                    t & kind != 0
+                        || told(out, path, || {
+                            format!("expected {}, got {}", type_names(*t), type_names(kind))
+                        })
+                }
+                Kw::Enum(values) => {
+                    values.iter().any(|v| same(v, b))
+                        || told(out, path, || {
+                            let shown: Vec<String> = values.iter().map(|v| show(v)).collect();
+                            format!("{} is not one of {}", show(b), shown.join(", "))
+                        })
+                }
+                Kw::Const(c) => {
+                    same(c, b) || told(out, path, || format!("{} is not {}", show(b), show(c)))
+                }
+                Kw::Ref(t) => self.check(*t, b, path, out, depth + 1)?,
+                Kw::Number(r) => match n {
+                    Node::Int(_) | Node::Dec(_) => numeric(r, &n, b, path, out)?,
+                    _ => true,
+                },
+                Kw::Str(r) => match n {
+                    Node::Str(s) => string(r, s, b, path, out),
+                    _ => true,
+                },
+                Kw::Array(r) => match &n {
+                    Node::Array(a) => self.array(r, a, path, out, depth)?,
+                    _ => true,
+                },
+                Kw::Object(r) => match &n {
+                    Node::Object(o) => self.object(r, o, b, path, out, depth)?,
+                    _ => true,
+                },
+                _ => self.applicator(kw, b, path, out, depth)?,
+            };
+            if !good {
+                ok = false;
+                if out.is_none() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(ok)
+    }
+
+    /// `b` (or, with `seg`, a part of it at that step) checked against
+    /// subschema `s`; the path extended only where problems are told.
+    #[inline]
+    fn sub<'d>(
+        &self,
+        s: usize,
+        b: &'d [u8],
+        seg: Option<Seg<'d>>,
+        path: &mut Vec<Seg<'d>>,
+        out: &mut Option<&mut Vec<String>>,
+        depth: usize,
+    ) -> Result<bool> {
+        match seg {
+            Some(seg) if out.is_some() => {
+                path.push(seg);
+                let good = self.check(s, b, path, out, depth + 1);
+                path.pop();
+                good
+            }
+            _ => self.check(s, b, path, out, depth + 1),
+        }
+    }
+
+    #[inline(never)]
+    fn array<'d>(
+        &self,
+        r: &ArrayRules,
+        a: &form::Array<'d>,
+        path: &mut Vec<Seg<'d>>,
+        out: &mut Option<&mut Vec<String>>,
+        depth: usize,
+    ) -> Result<bool> {
+        let mut ok = true;
         macro_rules! fail {
             ($($msg:tt)*) => {{
                 ok = false;
@@ -694,23 +789,9 @@ impl Schema {
                 report(out, path, format!($($msg)*));
             }};
         }
-        // A part checked against subschema `s` (at `path`, extended by
-        // `seg` where given) failed: noted, the end where nothing is
-        // collected.
         macro_rules! sub {
-            ($s:expr, $b:expr) => {{
-                if !self.check($s, $b, path, out, depth + 1)? {
-                    ok = false;
-                    if out.is_none() {
-                        return Ok(false);
-                    }
-                }
-            }};
-            ($s:expr, $b:expr, $seg:expr) => {{
-                path.push($seg);
-                let good = self.check($s, $b, path, out, depth + 1)?;
-                path.pop();
-                if !good {
+            ($s:expr, $k:expr) => {{
+                if !self.sub($s, a.bytes($k)?, Some(Seg::Index($k)), path, out, depth)? {
                     ok = false;
                     if out.is_none() {
                         return Ok(false);
@@ -718,271 +799,378 @@ impl Schema {
                 }
             }};
         }
-        for kw in rules {
-            match kw {
-                Kw::Type(t) => {
-                    let kind = kind_of(&n);
-                    if t & kind == 0 {
-                        fail!("expected {}, got {}", type_names(*t), type_names(kind));
-                    }
+        let len = a.len() as u64;
+        if let Some(m) = r.min_items
+            && len < m
+        {
+            fail!("{len} items, fewer than {m}");
+        }
+        if let Some(m) = r.max_items
+            && len > m
+        {
+            fail!("{len} items, more than {m}");
+        }
+        if r.unique_items
+            && let Some((first, k)) = duplicate(a)?
+        {
+            fail!("items {first} and {k} are equal");
+        }
+        for (k, &s) in r.prefix_items.iter().enumerate().take(a.len()) {
+            sub!(s, k);
+        }
+        if let Some(s) = r.items {
+            for k in r.prefix_items.len()..a.len() {
+                sub!(s, k);
+            }
+        }
+        if let Some(s) = r.contains {
+            let mut found = 0u64;
+            for k in 0..a.len() {
+                if self.check(s, a.bytes(k)?, path, &mut None, depth + 1)? {
+                    found += 1;
                 }
-                Kw::Enum(values) => {
-                    if !values.iter().any(|v| v == b) {
-                        let shown: Vec<String> = values.iter().map(|v| show(v)).collect();
-                        fail!("{} is not one of {}", show(b), shown.join(", "));
-                    }
-                }
-                Kw::Const(c) => {
-                    if c != b {
-                        fail!("{} is not {}", show(b), show(c));
-                    }
-                }
-                Kw::Ref(t) => sub!(*t, b),
-                Kw::Number(r) => {
-                    if !matches!(n, Node::Int(_) | Node::Dec(_)) {
-                        continue;
-                    }
-                    use std::cmp::Ordering::{Greater, Less};
-                    let mut key = None;
-                    if let Some(m) = &r.minimum
-                        && m.order(&n, b, &mut key)? == Less
-                    {
-                        fail!("{} is less than the minimum {}", show(b), m.text);
-                    }
-                    if let Some(m) = &r.maximum
-                        && m.order(&n, b, &mut key)? == Greater
-                    {
-                        fail!("{} is greater than the maximum {}", show(b), m.text);
-                    }
-                    if let Some(m) = &r.exclusive_minimum
-                        && m.order(&n, b, &mut key)? != Greater
-                    {
-                        fail!("{} is not greater than {}", show(b), m.text);
-                    }
-                    if let Some(m) = &r.exclusive_maximum
-                        && m.order(&n, b, &mut key)? != Less
-                    {
-                        fail!("{} is not less than {}", show(b), m.text);
-                    }
-                    if let Some((text, m)) = &r.multiple_of
-                        && !multiple_of(&n, &form::root(m)?)
-                    {
-                        fail!("{} is not a multiple of {text}", show(b));
-                    }
-                }
-                Kw::Str(r) => {
-                    let Node::Str(s) = n else { continue };
-                    if r.min_length.is_some() || r.max_length.is_some() {
-                        // Characters: the bytes that do not continue one.
-                        let len = s.iter().filter(|&&c| (c as i8) >= -0x40).count() as u64;
-                        if let Some(m) = r.min_length
-                            && len < m
-                        {
-                            fail!("{} is {len} characters long, fewer than {m}", show(b));
-                        }
-                        if let Some(m) = r.max_length
-                            && len > m
-                        {
-                            fail!("{} is {len} characters long, more than {m}", show(b));
-                        }
-                    }
-                    if let Some((p, re)) = &r.pattern
-                        && !re.is_match(s)
-                    {
-                        fail!("{} does not match the pattern {p}", show(b));
-                    }
-                }
-                Kw::Array(r) => {
-                    let Node::Array(a) = &n else { continue };
-                    let len = a.len() as u64;
-                    if let Some(m) = r.min_items
-                        && len < m
-                    {
-                        fail!("{len} items, fewer than {m}");
-                    }
-                    if let Some(m) = r.max_items
-                        && len > m
-                    {
-                        fail!("{len} items, more than {m}");
-                    }
-                    if r.unique_items
-                        && let Some((first, k)) = duplicate(a)?
-                    {
-                        fail!("items {first} and {k} are equal");
-                    }
-                    for (k, &s) in r.prefix_items.iter().enumerate().take(a.len()) {
-                        sub!(s, a.bytes(k)?, Seg::Index(k));
-                    }
-                    if let Some(s) = r.items {
-                        for k in r.prefix_items.len()..a.len() {
-                            sub!(s, a.bytes(k)?, Seg::Index(k));
-                        }
-                    }
-                    if let Some(s) = r.contains {
-                        let mut found = 0u64;
-                        for k in 0..a.len() {
-                            if self.check(s, a.bytes(k)?, path, &mut None, depth + 1)? {
-                                found += 1;
-                            }
-                        }
-                        let least = r.min_contains.unwrap_or(1);
-                        if found < least {
-                            fail!("{found} items match contains, fewer than {least}");
-                        }
-                        if let Some(most) = r.max_contains
-                            && found > most
-                        {
-                            fail!("{found} items match contains, more than {most}");
-                        }
-                    }
-                }
-                Kw::Object(r) => {
-                    let Node::Object(o) = &n else { continue };
-                    let len = o.len() as u64;
-                    if let Some(m) = r.min_properties
-                        && len < m
-                    {
-                        fail!("{len} properties, fewer than {m}");
-                    }
-                    if let Some(m) = r.max_properties
-                        && len > m
-                    {
-                        fail!("{len} properties, more than {m}");
-                    }
-                    if out.is_some() {
-                        // Each missing one named, in the schema's order.
-                        for name in &r.required {
-                            if o.find(name)?.is_none() {
-                                fail!("the required property {} is missing", quoted(name));
-                            }
-                        }
-                    } else {
-                        // Those among `properties` are counted on the walk.
-                        for name in &r.required_other {
-                            if o.find(name)?.is_none() {
-                                return Ok(false);
-                            }
-                        }
-                    }
-                    for (name, needs) in &r.dependent_required {
-                        if o.find(name)?.is_some() {
-                            for need in needs {
-                                if o.find(need)?.is_none() {
-                                    fail!(
-                                        "the property {} requires {}, which is missing",
-                                        quoted(name),
-                                        quoted(need)
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    for (name, s) in &r.dependent_schemas {
-                        if o.find(name)?.is_some() {
-                            sub!(*s, b);
-                        }
-                    }
-                    let mut j = 0;
-                    let mut required_seen = 0;
-                    for k in 0..o.len() {
-                        let key = o.key_bytes(k)?;
-                        let value = o.value_bytes(k)?;
-                        if let Some(s) = r.property_names {
-                            let mut name = Vec::new();
-                            form::put_str(&mut name, form::text_of(key)?);
-                            if !self.check(s, &name, &mut Vec::new(), &mut None, depth + 1)? {
-                                fail!("the property name {} is not allowed", quoted_bytes(key));
-                            }
-                        }
-                        let mut matched = false;
-                        // Both in the keys' order: a walk along.
-                        while j < r.properties.len()
-                            && form::key_order(r.properties[j].0.as_bytes(), key)
-                                == std::cmp::Ordering::Less
-                        {
-                            j += 1;
-                        }
-                        if j < r.properties.len() && r.properties[j].0.as_bytes() == key {
-                            matched = true;
-                            let (_, s, required) = r.properties[j];
-                            j += 1;
-                            required_seen += usize::from(required);
-                            sub!(s, value, Seg::Key(key));
-                        }
-                        for (_, re, s) in &r.pattern_properties {
-                            if re.is_match(key) {
-                                matched = true;
-                                sub!(*s, value, Seg::Key(key));
-                            }
-                        }
-                        if !matched && let Some(s) = r.additional_properties {
-                            if matches!(self.nodes[s], Sub::Bool(false)) {
-                                fail!("the property {} is not allowed", quoted_bytes(key));
-                                continue;
-                            }
-                            sub!(s, value, Seg::Key(key));
-                        }
-                    }
-                    if required_seen < r.required_known && out.is_none() {
-                        return Ok(false);
-                    }
-                }
-                Kw::AllOf(list) => {
-                    for &s in list {
-                        sub!(s, b);
-                    }
-                }
-                Kw::AnyOf(list) => {
-                    let mut any = false;
-                    for &s in list {
-                        if self.check(s, b, path, &mut None, depth + 1)? {
-                            any = true;
-                            break;
-                        }
-                    }
-                    if !any {
-                        fail!("{} matches none of anyOf's {} schemas", show(b), list.len());
-                    }
-                }
-                Kw::OneOf(list) => {
-                    let mut fits = 0;
-                    for &s in list {
-                        if self.check(s, b, path, &mut None, depth + 1)? {
-                            fits += 1;
-                        }
-                    }
-                    if fits != 1 {
-                        fail!(
-                            "{} matches {fits} of oneOf's schemas, not exactly one",
-                            show(b)
-                        );
-                    }
-                }
-                Kw::Not(s) => {
-                    if self.check(*s, b, path, &mut None, depth + 1)? {
-                        fail!("{} matches the schema of not", show(b));
-                    }
-                }
-                Kw::If(c, then, otherwise) => {
-                    let branch = if self.check(*c, b, path, &mut None, depth + 1)? {
-                        then
-                    } else {
-                        otherwise
-                    };
-                    if let Some(s) = branch {
-                        sub!(*s, b);
-                    }
-                }
+            }
+            let least = r.min_contains.unwrap_or(1);
+            if found < least {
+                fail!("{found} items match contains, fewer than {least}");
+            }
+            if let Some(most) = r.max_contains
+                && found > most
+            {
+                fail!("{found} items match contains, more than {most}");
             }
         }
         Ok(ok)
     }
+
+    #[inline(never)]
+    fn object<'d>(
+        &self,
+        r: &ObjectRules,
+        o: &form::Object<'d>,
+        b: &'d [u8],
+        path: &mut Vec<Seg<'d>>,
+        out: &mut Option<&mut Vec<String>>,
+        depth: usize,
+    ) -> Result<bool> {
+        let mut ok = true;
+        macro_rules! fail {
+            ($($msg:tt)*) => {{
+                ok = false;
+                if out.is_none() {
+                    return Ok(false);
+                }
+                report(out, path, format!($($msg)*));
+            }};
+        }
+        macro_rules! sub {
+            ($s:expr, $b:expr, $seg:expr) => {{
+                if !self.sub($s, $b, $seg, path, out, depth)? {
+                    ok = false;
+                    if out.is_none() {
+                        return Ok(false);
+                    }
+                }
+            }};
+        }
+        let len = o.len() as u64;
+        if let Some(m) = r.min_properties
+            && len < m
+        {
+            fail!("{len} properties, fewer than {m}");
+        }
+        if let Some(m) = r.max_properties
+            && len > m
+        {
+            fail!("{len} properties, more than {m}");
+        }
+        if out.is_some() {
+            // Each missing one named, in the schema's order.
+            for name in &r.required {
+                if o.find(name)?.is_none() {
+                    fail!("the required property {} is missing", quoted(name));
+                }
+            }
+        } else {
+            // Those among `properties` are counted on the walk.
+            for name in &r.required_other {
+                if o.find(name)?.is_none() {
+                    return Ok(false);
+                }
+            }
+        }
+        for (name, needs) in &r.dependent_required {
+            if o.find(name)?.is_some() {
+                for need in needs {
+                    if o.find(need)?.is_none() {
+                        fail!(
+                            "the property {} requires {}, which is missing",
+                            quoted(name),
+                            quoted(need)
+                        );
+                    }
+                }
+            }
+        }
+        for (name, s) in &r.dependent_schemas {
+            if o.find(name)?.is_some() {
+                sub!(*s, b, None);
+            }
+        }
+        let mut j = 0;
+        let mut required_seen = 0;
+        for k in 0..o.len() {
+            let key = o.key_bytes(k)?;
+            let value = o.value_bytes(k)?;
+            if let Some(s) = r.property_names {
+                let mut name = Vec::new();
+                form::put_str(&mut name, form::text_of(key)?);
+                if !self.check(s, &name, &mut Vec::new(), &mut None, depth + 1)? {
+                    fail!("the property name {} is not allowed", quoted_bytes(key));
+                }
+            }
+            let mut matched = false;
+            // Both in the keys' order (shorter first, then by bytes): a
+            // walk along.
+            while j < r.properties.len() {
+                let p = r.properties[j].0.as_bytes();
+                if p.len() > key.len() {
+                    break;
+                }
+                if p.len() == key.len() {
+                    if same(p, key) {
+                        matched = true;
+                        break;
+                    }
+                    if p > key {
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            if matched {
+                let (_, s, required) = r.properties[j];
+                j += 1;
+                required_seen += usize::from(required);
+                sub!(s, value, Some(Seg::Key(key)));
+            }
+            for (_, re, s) in &r.pattern_properties {
+                if re.is_match(key) {
+                    matched = true;
+                    sub!(*s, value, Some(Seg::Key(key)));
+                }
+            }
+            if !matched && let Some(s) = r.additional_properties {
+                if matches!(self.nodes[s], Sub::Bool(false)) {
+                    fail!("the property {} is not allowed", quoted_bytes(key));
+                    continue;
+                }
+                sub!(s, value, Some(Seg::Key(key)));
+            }
+        }
+        if required_seen < r.required_known && out.is_none() {
+            return Ok(false);
+        }
+        Ok(ok)
+    }
+
+    /// `allOf`, `anyOf`, `oneOf`, `not`, `if`.
+    #[inline(never)]
+    fn applicator<'d>(
+        &self,
+        kw: &Kw,
+        b: &'d [u8],
+        path: &mut Vec<Seg<'d>>,
+        out: &mut Option<&mut Vec<String>>,
+        depth: usize,
+    ) -> Result<bool> {
+        Ok(match kw {
+            Kw::AllOf(list) => {
+                let mut ok = true;
+                for &s in list {
+                    if !self.check(s, b, path, out, depth + 1)? {
+                        ok = false;
+                        if out.is_none() {
+                            return Ok(false);
+                        }
+                    }
+                }
+                ok
+            }
+            Kw::AnyOf(list) => {
+                let mut any = false;
+                for &s in list {
+                    if self.check(s, b, path, &mut None, depth + 1)? {
+                        any = true;
+                        break;
+                    }
+                }
+                any || told(out, path, || {
+                    format!("{} matches none of anyOf's {} schemas", show(b), list.len())
+                })
+            }
+            Kw::OneOf(list) => {
+                let mut fits = 0;
+                for &s in list {
+                    if self.check(s, b, path, &mut None, depth + 1)? {
+                        fits += 1;
+                    }
+                }
+                fits == 1
+                    || told(out, path, || {
+                        format!(
+                            "{} matches {fits} of oneOf's schemas, not exactly one",
+                            show(b)
+                        )
+                    })
+            }
+            Kw::Not(s) => {
+                !self.check(*s, b, path, &mut None, depth + 1)?
+                    || told(out, path, || {
+                        format!("{} matches the schema of not", show(b))
+                    })
+            }
+            Kw::If(c, then, otherwise) => {
+                let branch = if self.check(*c, b, path, &mut None, depth + 1)? {
+                    then
+                } else {
+                    otherwise
+                };
+                match branch {
+                    Some(s) => self.check(*s, b, path, out, depth + 1)?,
+                    None => true,
+                }
+            }
+            _ => true,
+        })
+    }
+}
+
+/// A problem: told at `path` where problems are kept; `false`, as the
+/// check it ends.
+#[cold]
+#[inline(never)]
+fn told(out: &mut Option<&mut Vec<String>>, path: &[Seg], msg: impl FnOnce() -> String) -> bool {
+    if out.is_some() {
+        report(out, path, msg());
+    }
+    false
+}
+
+#[inline(never)]
+fn numeric(
+    r: &NumberRules,
+    n: &Node,
+    b: &[u8],
+    path: &[Seg],
+    out: &mut Option<&mut Vec<String>>,
+) -> Result<bool> {
+    use std::cmp::Ordering::{Greater, Less};
+    let mut ok = true;
+    macro_rules! fail {
+        ($($msg:tt)*) => {{
+            ok = false;
+            if out.is_none() {
+                return Ok(false);
+            }
+            report(out, path, format!($($msg)*));
+        }};
+    }
+    let mut key = None;
+    if let Some(m) = &r.minimum
+        && m.order(n, b, &mut key)? == Less
+    {
+        fail!("{} is less than the minimum {}", show(b), m.text);
+    }
+    if let Some(m) = &r.maximum
+        && m.order(n, b, &mut key)? == Greater
+    {
+        fail!("{} is greater than the maximum {}", show(b), m.text);
+    }
+    if let Some(m) = &r.exclusive_minimum
+        && m.order(n, b, &mut key)? != Greater
+    {
+        fail!("{} is not greater than {}", show(b), m.text);
+    }
+    if let Some(m) = &r.exclusive_maximum
+        && m.order(n, b, &mut key)? != Less
+    {
+        fail!("{} is not less than {}", show(b), m.text);
+    }
+    if let Some((text, m)) = &r.multiple_of
+        && !multiple_of(n, &form::root(m)?)
+    {
+        fail!("{} is not a multiple of {text}", show(b));
+    }
+    Ok(ok)
+}
+
+#[inline(never)]
+fn string(
+    r: &StrRules,
+    s: &[u8],
+    b: &[u8],
+    path: &[Seg],
+    out: &mut Option<&mut Vec<String>>,
+) -> bool {
+    let mut ok = true;
+    if r.min_length.is_some() || r.max_length.is_some() {
+        // Characters: the bytes that do not continue one.
+        let len = s.iter().filter(|&&c| (c as i8) >= -0x40).count() as u64;
+        if let Some(m) = r.min_length
+            && len < m
+        {
+            ok = told(out, path, || {
+                format!("{} is {len} characters long, fewer than {m}", show(b))
+            });
+            if out.is_none() {
+                return false;
+            }
+        }
+        if let Some(m) = r.max_length
+            && len > m
+        {
+            ok = told(out, path, || {
+                format!("{} is {len} characters long, more than {m}", show(b))
+            });
+            if out.is_none() {
+                return false;
+            }
+        }
+    }
+    if let Some((p, re)) = &r.pattern
+        && !re.is_match(s)
+    {
+        ok = told(out, path, || {
+            format!("{} does not match the pattern {p}", show(b))
+        });
+    }
+    ok
 }
 
 /// A step of a path into a document: a key (its bytes), an index.
 enum Seg<'d> {
     Key(&'d [u8]),
     Index(usize),
+}
+
+/// Whether `a` and `b` are the same bytes: short ones (most keys and
+/// enumerated values) by a few word loads, not a call of `memcmp`.
+#[inline]
+fn same(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let w8 = |x: &[u8], at: usize| u64::from_le_bytes(x[at..at + 8].try_into().expect("8"));
+    let w4 = |x: &[u8], at: usize| u32::from_le_bytes(x[at..at + 4].try_into().expect("4"));
+    match n {
+        0 => true,
+        1..=3 => a[0] == b[0] && a[n / 2] == b[n / 2] && a[n - 1] == b[n - 1],
+        4..=7 => w4(a, 0) == w4(b, 0) && w4(a, n - 4) == w4(b, n - 4),
+        8..=16 => w8(a, 0) == w8(b, 0) && w8(a, n - 8) == w8(b, n - 8),
+        _ => a == b,
+    }
 }
 
 /// The first two equal items of `a` (their positions), if any.
@@ -1050,6 +1238,21 @@ fn show(b: &[u8]) -> String {
     } else {
         s
     }
+}
+
+/// [`kind_of`] the node `b` holds, from its header byte but for a
+/// decimal (an integer or not by its exponent).
+fn kind_of_bytes(b: &[u8]) -> Result<u8> {
+    let h = *b.first().ok_or_else(form::malformed)?;
+    Ok(match h >> 4 {
+        form::NULL => NULL,
+        form::FALSE | form::TRUE => BOOLEAN,
+        form::INT => INTEGER,
+        form::STR => STRING,
+        form::ARR => ARRAY,
+        form::OBJ => OBJECT,
+        _ => kind_of(&form::root(b)?),
+    })
 }
 
 fn kind_of(n: &Node) -> u8 {

@@ -226,6 +226,7 @@ fn count(b: &[u8], at: &mut usize) -> Result<usize> {
 }
 
 /// The node at the start of `b` and how many bytes it takes.
+#[inline]
 pub fn node(b: &[u8]) -> Result<(Node<'_>, usize)> {
     let h = *b.first().ok_or_else(malformed)?;
     let (kind, low) = (h >> 4, h & 0x0f);
@@ -332,6 +333,7 @@ pub fn text_of(b: &[u8]) -> Result<&str> {
 }
 
 /// The node `b` holds (its bytes exactly).
+#[inline]
 pub fn root(b: &[u8]) -> Result<Node<'_>> {
     let (n, len) = node(b)?;
     if len != b.len() {

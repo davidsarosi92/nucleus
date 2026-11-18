@@ -9241,9 +9241,30 @@ put it but `text`, which it can neither query nor index.
   a default reads); a column being converted (§M14.18 O5) binds afresh.
   The `CHECK`'s cost on single-row `INSERT`s: +6.0 µs a row → +1.3–1.6
   (two A/B runs of `bench/json/schema.py` against the binary before;
-  the load without a check unchanged, 1.78–1.82 s).  *Next:* close the
-  remaining gap to `jsonschema`.  (`JSON_TABLE`'s row loop: done
-  2026-11-18, J3c — under PostgreSQL's time.)
+  the load without a check unchanged, 1.78–1.82 s).  *Done
+  (2026-11-18), the gap to `jsonschema`:* profiled (`sample` over
+  `bench/json/src/bin/schema.rs`) — no one hot spot: the check's own
+  frame (1.5 KB of stack and ten register pairs saved, for each value of
+  a document), the value decoded for every subschema, the path's `Vec`
+  growing for problems never told.  Each change measured alone (`fits`,
+  ns a document): the path kept only where problems are told 384 → 350;
+  a value decoded only for keywords that read its structure (`enum`,
+  `const`, `$ref`, the applicators and `type` from the header byte)
+  350 → 294; `form::node` / `root` inlined 294 → 285; the check split —
+  `type`, `enum`, `const`, `$ref` in it, each kind's keywords and the
+  applicators in functions of their own, problems told by a cold one
+  (frame 0x1a0 bytes, six pairs) — 285 → 275; short keys and enumerated
+  values compared by word loads, not `memcmp` (without it, 304–324).
+  Tried, not taken: an ordered compare by big-endian word loads in the
+  properties' walk (no gain).  *Measured* (`bash bench/all.sh
+  json-schema`): fits 378 → 275 ns (`jsonschema` 148), errors 474 → 398
+  ns (253), compiling unchanged (18 µs against 23).  The gap left (1.9×)
+  is reading the binary form in place — offset tables, LEB128 counts, a
+  node decoded for each subschema — against `serde_json`'s tree of
+  pointers built beforehand; a `CHECK` gets the value as text or bytes,
+  where `jsonschema` would need that tree built first (a parse of the
+  document, ~1 µs here).  (`JSON_TABLE`'s row loop: done 2026-11-18,
+  J3c — under PostgreSQL's time.)
 
 ### §M14.16 — Migrations and code generation ✅
 

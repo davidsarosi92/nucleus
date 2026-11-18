@@ -1662,12 +1662,12 @@ compiled once and held, as a `CHECK` uses it):
 
 | json-schema | nucleus | jsonschema |
 |---|---:|---:|
-| fits (a document), ns | 378 [376–378] ±0% | 144 [144–145] ±0% |
-| errors (a document), ns | 474 [474–476] ±0% | 247 [246–255] ±2% |
-| compile (the schema), µs | 16.8 [16.7–18.2] ±4% | 22.1 [21.9–22.4] ±1% |
-| compiled, kept, ns | 187 [186–188] ±1% | — |
+| fits (a document), ns | 275 [272–280] ±1% | 148 [142–153] ±3% |
+| errors (a document), ns | 398 [396–401] ±0% | 253 [251–260] ±1% |
+| compile (the schema), µs | 18.1 [17.9–20.2] ±5% | 22.6 [22.3–23.2] ±1% |
+| compiled, kept, ns | 188 [185–189] ±1% | — |
 
-Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus 7ff7b48e3+changes — 2026-11-17T07:38:48+00:00
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus a8a0111b0+changes — 2026-11-18T10:04:04+00:00
 
 In SQL (`bash bench/all.sh json-schema-pg`; `bench/json/schema.py`,
 90,000 rows): `INSERT … SELECT` into a table with `CHECK

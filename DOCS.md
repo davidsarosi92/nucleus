@@ -8161,6 +8161,10 @@ checks `psql` with and without TLS.
 - **2026-11-18 — §M14.15, lateral table functions on the workers:**
   `TableFunction::parallel_safe`; `JSON_TABLE` over 50,000 performances
   (1.79 million rows) 0.824 → 0.298 s (PostgreSQL 18's 0.321).
+- **2026-11-18 — §M14.15, JSON Schema checks faster:** the path kept
+  only for problems told, a value decoded only for keywords that read
+  it, the check split by kind of value; `json_matches_schema` 378 → 275
+  ns a tool call (`jsonschema` 0.61: 148).
 - **2026-11-18 — short range scans:** `Access::serves` (a filter the
   key range applies keeps a `LIMIT`ed scan on one thread) and KV chunks
   growing from 64 entries (`nucleus_kv::FIRST_CHUNK`); YCSB E's scans on
