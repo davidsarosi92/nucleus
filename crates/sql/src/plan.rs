@@ -369,6 +369,68 @@ impl Access {
         }
     }
 
+    /// Whether `pred` is one of the conditions this key range applies
+    /// as it reads — `part = e` of its prefix, its bounds on the next
+    /// part — over `table`'s primary key or a secondary index of columns:
+    /// a filter of such conditions alone lets through every row the range
+    /// reads (the filter checks them again; a `LIMIT` then bounds the
+    /// rows read, [`crate::vector`]'s choice of one thread).
+    pub fn serves(&self, table: &Table, pred: &Expr) -> bool {
+        use crate::ast::BinaryOp;
+        let Access::Key {
+            index,
+            prefix,
+            lower,
+            upper,
+        } = self
+        else {
+            return false;
+        };
+        let cols: &[usize] = match index {
+            None => &table.primary_key,
+            Some(i) => {
+                let ix = &table.indexes[*i];
+                if ix.has_exprs() || ix.mapped() {
+                    return false;
+                }
+                &ix.columns
+            }
+        };
+        let Expr::Binary(op, a, b) = pred else {
+            return false;
+        };
+        // `col op e`, or `e op col` read the other way round.
+        let (col, op, e) = match (&**a, &**b) {
+            (Expr::Column(c), e) => (*c, *op, e),
+            (e, Expr::Column(c)) => (
+                *c,
+                match op {
+                    BinaryOp::Lt => BinaryOp::Gt,
+                    BinaryOp::LtEq => BinaryOp::GtEq,
+                    BinaryOp::Gt => BinaryOp::Lt,
+                    BinaryOp::GtEq => BinaryOp::LtEq,
+                    op => *op,
+                },
+                e,
+            ),
+            _ => return false,
+        };
+        if let Some(k) = cols.iter().position(|&c| c == col)
+            && k < prefix.len()
+        {
+            return op == BinaryOp::Eq && prefix[k] == *e;
+        }
+        if cols.get(prefix.len()) != Some(&col) {
+            return false;
+        }
+        let is = |b: &Bound<Expr>, incl: BinaryOp, excl: BinaryOp| match b {
+            Bound::Included(x) => op == incl && x == e,
+            Bound::Excluded(x) => op == excl && x == e,
+            Bound::Unbounded => false,
+        };
+        is(lower, BinaryOp::GtEq, BinaryOp::Gt) || is(upper, BinaryOp::LtEq, BinaryOp::Lt)
+    }
+
     /// Whether its rows carry the ranked function's value past the
     /// table's columns ([`MethodRank::value`]).
     pub fn valued(&self) -> bool {

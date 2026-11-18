@@ -162,8 +162,9 @@ pub type KvIter<'a> = Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>;
 /// A scan read a chunk of entries at a time ([`KvTxn::scan_chunks`]).
 pub trait KvChunks {
     /// Replaces `out`'s entries with the next ones — about
-    /// [`CHUNK_ENTRIES`], fewer once they take [`CHUNK_BYTES`]; false at
-    /// the end.
+    /// [`CHUNK_ENTRIES`], fewer once they take [`CHUNK_BYTES`] (the
+    /// first [`FIRST_CHUNK`], each next twice the last); false at the
+    /// end.
     fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool>;
 
     /// [`next_chunk`](Self::next_chunk) of at most `entries` entries whose
@@ -223,17 +224,42 @@ pub trait KvChunks {
 
 /// Entries a chunk holds at most.
 pub const CHUNK_ENTRIES: usize = 1024;
+/// A scan's first chunk's entries (and the first after a seek): a query
+/// that wants a few rows — a `LIMIT`, YCSB's short scans — reads a few,
+/// not a whole chunk; each chunk after holds twice the last, up to
+/// [`CHUNK_ENTRIES`] (§M14.28 L5: 50 rows of 108 bytes from a key in
+/// 60 µs, 18 µs once this was so).
+pub const FIRST_CHUNK: usize = 64;
+
+/// The entries of a scan's chunks: [`FIRST_CHUNK`] first, doubling up to
+/// [`CHUNK_ENTRIES`].
+#[derive(Clone, Copy)]
+struct Growing(usize);
+
+impl Growing {
+    fn new() -> Self {
+        Self(FIRST_CHUNK)
+    }
+
+    /// The next chunk's entries.
+    fn next(&mut self) -> usize {
+        let n = self.0;
+        self.0 = (n * 2).min(CHUNK_ENTRIES);
+        n
+    }
+}
 /// The bytes after which a chunk ends early.
 pub const CHUNK_BYTES: usize = 1 << 18;
 
 /// Chunks over a scan's iterator: what a transaction that has no chunked
 /// scan of its own gives.
-struct IterChunks<'a>(KvIter<'a>);
+struct IterChunks<'a>(KvIter<'a>, Growing);
 
 impl KvChunks for IterChunks<'_> {
     fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool> {
         out.clear();
-        while out.len() < CHUNK_ENTRIES && out.bytes() < CHUNK_BYTES {
+        let n = self.1.next();
+        while out.len() < n && out.bytes() < CHUNK_BYTES {
             let Some(e) = self.0.next() else { break };
             let (k, v) = e?;
             out.push(&k, &v);
@@ -243,11 +269,11 @@ impl KvChunks for IterChunks<'_> {
 }
 
 /// An engine scan's chunks.
-struct ScanChunks<'a>(nucleus_txn::Scan<'a>);
+struct ScanChunks<'a>(nucleus_txn::Scan<'a>, Growing);
 
 impl KvChunks for ScanChunks<'_> {
     fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool> {
-        Ok(self.0.next_chunk(out, CHUNK_ENTRIES, CHUNK_BYTES)?)
+        Ok(self.0.next_chunk(out, self.1.next(), CHUNK_BYTES)?)
     }
 
     fn next_chunk_where(
@@ -270,6 +296,7 @@ impl KvChunks for ScanChunks<'_> {
 
     fn seek(&mut self, key: &[u8]) -> Result<bool> {
         self.0.seek(key);
+        self.1 = Growing::new();
         Ok(true)
     }
 
@@ -723,7 +750,7 @@ impl KvRead for Locked<'_> {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
-        Ok(Box::new(IterChunks(self.scan(start, end)?)))
+        Ok(Box::new(IterChunks(self.scan(start, end)?, Growing::new())))
     }
 
     fn scan_chunks_validated<'a>(
@@ -731,7 +758,10 @@ impl KvRead for Locked<'_> {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
-        Ok(Box::new(IterChunks(self.scan_validated(start, end)?)))
+        Ok(Box::new(IterChunks(
+            self.scan_validated(start, end)?,
+            Growing::new(),
+        )))
     }
 }
 
@@ -765,7 +795,7 @@ pub trait KvTxn: Send {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
-        Ok(Box::new(IterChunks(self.scan(start, end)?)))
+        Ok(Box::new(IterChunks(self.scan(start, end)?, Growing::new())))
     }
 
     /// [`scan_chunks`](Self::scan_chunks), validated as
@@ -775,7 +805,10 @@ pub trait KvTxn: Send {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
-        Ok(Box::new(IterChunks(self.scan_validated(start, end)?)))
+        Ok(Box::new(IterChunks(
+            self.scan_validated(start, end)?,
+            Growing::new(),
+        )))
     }
 
     /// The transaction's reads for other threads to share while it is
@@ -1605,7 +1638,10 @@ impl KvTxn for LocalTxn {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
-        Ok(Box::new(ScanChunks(self.0.scan(start, end)?)))
+        Ok(Box::new(ScanChunks(
+            self.0.scan(start, end)?,
+            Growing::new(),
+        )))
     }
 
     fn scan_chunks_validated<'a>(
@@ -1613,7 +1649,10 @@ impl KvTxn for LocalTxn {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
-        Ok(Box::new(ScanChunks(self.0.scan_validated(start, end)?)))
+        Ok(Box::new(ScanChunks(
+            self.0.scan_validated(start, end)?,
+            Growing::new(),
+        )))
     }
 
     fn shared(&self) -> Option<&dyn KvRead> {

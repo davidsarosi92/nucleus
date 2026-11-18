@@ -1417,7 +1417,9 @@ distributed implementation will provide (§F3).
   at commit at any isolation level, §5.2), `scan_chunks` /
   `scan_chunks_validated` (the same entries a `Chunk` at a time — up to
   `CHUNK_ENTRIES` keys and values packed into one buffer the caller
-  reuses, so a large read allocates nothing per entry; provided over
+  reuses, so a large read allocates nothing per entry — the first chunk,
+  and the first after a seek, `FIRST_CHUNK` (64) entries, each next twice
+  the last, so a query that wants a few rows reads a few; provided over
   `scan`, the local implementation fills chunks straight from the
   engine; a chunk scan may also `seek` forward to a key — `false` where
   it cannot — and fill a chunk with only the keys a `want` predicate
@@ -2603,7 +2605,9 @@ runs in rounds of a morsel per worker, each round's rows given in morsel
 order — one that only projects, too, unless a `LIMIT` stops it within
 65 536 rows (`vector::SERIAL_ROWS`: then it streams on the statement's
 thread, a round's morsels would read more; the limit marks the chain
-below it).  So the result is a single pass's — groups in the order first
+below it) — a filter counts there only if it drops rows: one whose
+conditions are all the scan's key range's own (`Access::serves`: `k >=
+$1` over a scan from `$1`) does not.  So the result is a single pass's — groups in the order first
 seen, rows in key order, the first error the one a single pass meets, a
 `LIMIT` stopping after the round it needs.  `UPDATE` and `DELETE` find
 their rows the same way (vectorized, in parallel when they can be) when

@@ -3043,18 +3043,32 @@ impl<'a> Pipeline<'a> {
 
 /// Whether the chain `plan` gains from running on workers: it filters or
 /// joins, or many of its rows are read (no `LIMIT` stops it within
-/// [`SERIAL_ROWS`]: decoding them is the work).
+/// [`SERIAL_ROWS`]: decoding them is the work).  A filter of the key
+/// range's own conditions ([`Access::serves`]) drops no row: under a
+/// `LIMIT` the range is read on one thread, as far as the limit (a
+/// parallel round would read a morsel a worker first: §M14.28 L5's
+/// YCSB E, 50 rows from a key in 2.5 ms instead of ~60 µs).
 fn filters_or_probes(plan: &Plan, ctx: &Ctx) -> bool {
     let bounded = ctx
         .bounds
         .borrow()
         .get(&(plan as *const Plan as usize))
         .is_some_and(|&k| k <= SERIAL_ROWS);
-    chain(plan, Some(&ctx.join_tables.borrow())).is_some_and(|(_, steps)| {
+    chain(plan, Some(&ctx.join_tables.borrow())).is_some_and(|(scan, steps)| {
+        let served = |f: &Expr| {
+            let Plan::Scan { table, access, .. } = scan else {
+                return false;
+            };
+            let mut parts = Vec::new();
+            crate::binder::conjuncts(f.clone(), &mut parts);
+            parts.iter().all(|p| access.serves(table, p))
+        };
         !bounded
-            || steps
-                .iter()
-                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Probe(_) | Step::Lookup(_)))
+            || steps.iter().any(|(s, _)| match s {
+                Step::Filter(f) => !served(f),
+                Step::Probe(_) | Step::Lookup(_) => true,
+                _ => false,
+            })
     })
 }
 
