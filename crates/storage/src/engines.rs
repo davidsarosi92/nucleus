@@ -60,6 +60,20 @@ pub trait Engine: Send + Sync {
     }
     /// Removes every entry in `[start, end)`.
     fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()>;
+    /// Up to `parts - 1` keys inside `(start, end)` cutting it into parts
+    /// of about equal size, each of at least `min_blocks` of the engine's
+    /// blocks; ascending ([`BTree::split_keys`]'s, for a parallel scan's
+    /// morsels).  None by default: one part.
+    fn split_keys(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+        min_blocks: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        let _ = (start, end, parts, min_blocks);
+        Ok(Vec::new())
+    }
     /// Whether it holds no entry.
     fn is_empty(&self) -> bool;
     /// A copy, for a branch made from this one's.
@@ -678,14 +692,26 @@ impl Tables {
         min_leaves: usize,
     ) -> Result<Vec<Vec<u8>>> {
         let end_b = end.map_or(Bound::Unbounded, Bound::Excluded);
-        let routed = self
-            .pieces(Bound::Included(start), end_b)
-            .iter()
-            .any(|p| p.engine.is_some());
-        if routed {
-            return Ok(Vec::new());
+        let pieces = self.pieces(Bound::Included(start), end_b);
+        match pieces.as_slice() {
+            // Within one engine's range (a table of its own): its keys.
+            [
+                Piece {
+                    start: s,
+                    end: e,
+                    engine: Some(i),
+                },
+            ] => {
+                let e = match e {
+                    Bound::Included(k) | Bound::Excluded(k) => Some(k.as_slice()),
+                    Bound::Unbounded => None,
+                };
+                self.engines[*i].split_keys(bound_key(s, start), e, parts, min_leaves)
+            }
+            // Across engines: one part.
+            p if p.iter().any(|p| p.engine.is_some()) => Ok(Vec::new()),
+            _ => self.tree.split_keys(start, end, parts, min_leaves),
         }
-        self.tree.split_keys(start, end, parts, min_leaves)
     }
 
     /// Where these tables and `base`'s may differ: [`BTree::diff_ranges`]

@@ -59,6 +59,9 @@
 //! A merge drops what the layer above knows to be garbage (its
 //! [`LeafFilter`], §M14.28 L4d: versions no snapshot sees); above the last
 //! level it keeps what is garbage only because nothing older is left.
+//! A scan is cut into parts for workers ([`Engine::split_keys`]) at its
+//! runs' blocks' first keys and its memtables' sampled keys.
+//!
 //! A commit's filter drops it from the memtable too
 //! ([`Engine::apply_filtered`], §M14.28 L5), among the versions of the
 //! keys it writes.
@@ -67,7 +70,7 @@
 //! [`SealedFs`](crate::sealed::SealedFs), §M14.28 L4e): nothing here
 //! knows.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -318,6 +321,11 @@ fn read_all(file: &dyn File, at: u64, len: usize) -> Result<Vec<u8>> {
 #[derive(Clone, Default)]
 struct Memtable {
     points: BTreeMap<Vec<u8>, Val>,
+    /// About every [`SPLIT_STRIDE`]th key put in `points` (those whose
+    /// hash it divides), where a scan may be cut into parts
+    /// ([`Engine::split_keys`]) without walking `points`; a key since
+    /// removed stays (a cut needs no entry).
+    sample: BTreeSet<Vec<u8>>,
     /// Keys above every key of `points`, ascending (shared with a spill
     /// writing them).
     tail: Arc<Vec<(Vec<u8>, Val)>>,
@@ -325,6 +333,10 @@ struct Memtable {
     tail_bytes: usize,
     ranges: Ranges,
 }
+
+/// A memtable's entries counted as one block when a scan is cut into
+/// parts ([`Engine::split_keys`]): about a block's of small rows.
+const SPLIT_STRIDE: usize = 64;
 
 /// The bytes of a memtable's ascending tail past which it is spilled as a
 /// run (a few KiB in the unit tests, so the model test spills often).
@@ -350,6 +362,9 @@ impl Memtable {
     /// The tail moved into the map.
     fn untail(&mut self) {
         let tail = std::mem::take(&mut self.tail);
+        for (k, _) in tail.iter() {
+            self.sampled(k);
+        }
         self.points.extend(Arc::unwrap_or_clone(tail));
         self.tail_bytes = 0;
     }
@@ -363,7 +378,16 @@ impl Memtable {
         if self.tail.first().is_some_and(|(f, _)| key >= f.as_slice()) {
             self.untail();
         }
+        self.sampled(key);
         self.points.insert(key.to_vec(), v);
+    }
+
+    /// `key`, put in `points`, kept in `sample` if it is one of the keys
+    /// sampled.
+    fn sampled(&mut self, key: &[u8]) {
+        if hash64(key).is_multiple_of(SPLIT_STRIDE as u64) {
+            self.sample.insert(key.to_vec());
+        }
     }
 
     /// What `filter` finds garbage among the entries sharing a prefix
@@ -815,11 +839,29 @@ enum Src<'a> {
 }
 
 impl Src<'_> {
-    fn next(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+    /// The next entry into `key` and `val` (their buffers reused); false
+    /// at the end.
+    fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Val) -> Result<bool> {
         match self {
-            Src::Mem(it) => Ok(it.next().map(|(k, v)| (k.clone(), v.clone()))),
-            Src::Run(r) => r.next(),
+            Src::Mem(it) => Ok(it.next().is_some_and(|(k, v)| {
+                set_entry(key, val, k, v.as_deref());
+                true
+            })),
+            Src::Run(r) => r.next_into(key, val),
         }
+    }
+}
+
+/// `k` and `v` into `key` and `val`, their buffers reused.
+fn set_entry(key: &mut Vec<u8>, val: &mut Val, k: &[u8], v: Option<&[u8]>) {
+    key.clear();
+    key.extend_from_slice(k);
+    match (v, val.as_mut()) {
+        (Some(v), Some(buf)) => {
+            buf.clear();
+            buf.extend_from_slice(v);
+        }
+        (v, _) => *val = v.map(<[u8]>::to_vec),
     }
 }
 
@@ -910,10 +952,10 @@ impl<'a> RunScan<'a> {
         }
     }
 
-    fn next(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+    fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Val) -> Result<bool> {
         loop {
             if self.done {
-                return Ok(None);
+                return Ok(false);
             }
             if let Some(d) = &self.block {
                 let j = if self.rev {
@@ -939,9 +981,10 @@ impl<'a> RunScan<'a> {
                 };
                 if !inside {
                     self.done = true;
-                    return Ok(None);
+                    return Ok(false);
                 }
-                return Ok(Some((k.to_vec(), d.value(j).map(<[u8]>::to_vec))));
+                set_entry(key, val, k, d.value(j));
+                return Ok(true);
             }
             let i = if self.rev {
                 if self.next == 0 {
@@ -1176,16 +1219,27 @@ impl BlockCache {
     }
 }
 
+/// A source's next entry in a merge (its buffers reused).
+#[derive(Clone, Default)]
+struct Head {
+    key: Vec<u8>,
+    val: Val,
+    /// Whether it holds one (else the source is done).
+    some: bool,
+}
+
 /// Sources merged, newest first: what a reader sees.
 struct Merged<'a> {
     srcs: Vec<Src<'a>>,
-    heads: Vec<Option<(Vec<u8>, Val)>>,
+    heads: Vec<Head>,
     /// Each source's range tombstones (they hide older sources' keys).
     ranges: Vec<&'a Ranges>,
     rev: bool,
     /// Tombstones and hidden keys passed over (a compaction keeps them).
     keep_tombstones: bool,
     started: bool,
+    /// The entry given last.
+    key: Vec<u8>,
     cur: Val,
 }
 
@@ -1194,20 +1248,32 @@ impl<'a> Merged<'a> {
         let n = srcs.len();
         Merged {
             srcs,
-            heads: vec![None; n],
+            heads: vec![Head::default(); n],
             ranges,
             rev,
             keep_tombstones,
             started: false,
+            key: Vec::new(),
             cur: None,
         }
     }
 
-    /// The next entry: its key and value (a tombstone only when kept).
-    fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+    /// The next entry, into `key` and `cur` (a tombstone only when kept);
+    /// false at the end.  The entry's buffers are swapped with the
+    /// source's head's, so no entry is copied but into them.
+    fn advance(&mut self) -> Result<bool> {
+        // One source: nothing to merge, its entries straight in.
+        if let [src] = self.srcs.as_mut_slice() {
+            while src.next_into(&mut self.key, &mut self.cur)? {
+                if self.cur.is_some() || self.keep_tombstones {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
         if !self.started {
             for (h, src) in self.heads.iter_mut().zip(&mut self.srcs) {
-                *h = src.next()?;
+                h.some = src.next_into(&mut h.key, &mut h.val)?;
             }
             self.started = true;
         }
@@ -1216,51 +1282,58 @@ impl<'a> Merged<'a> {
             // holding it.
             let mut best: Option<usize> = None;
             for (i, h) in self.heads.iter().enumerate() {
-                let Some((k, _)) = h else { continue };
+                if !h.some {
+                    continue;
+                }
                 best = match best {
                     None => Some(i),
                     Some(b) => {
-                        let bk = &self.heads[b].as_ref().expect("a head").0;
-                        let better = if self.rev { k > bk } else { k < bk };
-                        if better { Some(i) } else { Some(b) }
+                        let bk = &self.heads[b].key;
+                        let better = if self.rev { h.key > *bk } else { h.key < *bk };
+                        Some(if better { i } else { b })
                     }
                 };
             }
             let Some(b) = best else {
-                return Ok(None);
+                return Ok(false);
             };
-            let (key, val) = self.heads[b].take().expect("a head");
-            self.heads[b] = self.srcs[b].next()?;
+            std::mem::swap(&mut self.key, &mut self.heads[b].key);
+            std::mem::swap(&mut self.cur, &mut self.heads[b].val);
+            let h = &mut self.heads[b];
+            h.some = self.srcs[b].next_into(&mut h.key, &mut h.val)?;
             // The same key in older sources: passed over.
             for (h, src) in self.heads.iter_mut().zip(&mut self.srcs).skip(b + 1) {
-                if h.as_ref().is_some_and(|h| h.0 == key) {
-                    *h = src.next()?;
+                if h.some && h.key == self.key {
+                    h.some = src.next_into(&mut h.key, &mut h.val)?;
                 }
             }
-            let hidden = self.ranges[..b].iter().any(|r| r.covers(&key));
-            if hidden {
+            if self.ranges[..b].iter().any(|r| r.covers(&self.key)) {
                 continue;
             }
-            if val.is_none() && !self.keep_tombstones {
+            if self.cur.is_none() && !self.keep_tombstones {
                 continue;
             }
-            return Ok(Some((key, val)));
+            return Ok(true);
         }
+    }
+
+    /// The next entry, owned (a compaction's).
+    fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Val)>> {
+        Ok(self
+            .advance()?
+            .then(|| (self.key.clone(), self.cur.clone())))
     }
 }
 
 impl Entries for Merged<'_> {
     fn next_key_into(&mut self, key: &mut Vec<u8>) -> Result<bool> {
-        match self.next_entry()? {
-            Some((k, v)) => {
-                *key = k;
-                self.cur = v;
-                Ok(true)
-            }
-            None => {
-                self.cur = None;
-                Ok(false)
-            }
+        if self.advance()? {
+            // Its buffer given, the caller's taken for the next.
+            std::mem::swap(key, &mut self.key);
+            Ok(true)
+        } else {
+            self.cur = None;
+            Ok(false)
         }
     }
 
@@ -1622,6 +1695,45 @@ impl Engine for LsmEngine {
         Ok(())
     }
 
+    /// The runs' blocks' first keys and every [`SPLIT_STRIDE`]th key of the
+    /// memtables, evenly chosen: a block of any run, or as many entries in
+    /// memory, about as much reading as another (§M14.28 L5 — without
+    /// them an LSM table's scans ran on one thread, `count(*)` of a
+    /// million rows 98 ms against the B+tree's 6.4).
+    fn split_keys(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+        min_blocks: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        if end.is_some_and(|e| e <= start) {
+            return Ok(Vec::new());
+        }
+        let inside = |k: &[u8]| k > start && end.is_none_or(|e| k < e);
+        let mut keys: Vec<&[u8]> = self
+            .levels
+            .runs()
+            .flat_map(|r| r.index.iter().map(|b| b.first.as_slice()))
+            .filter(|k| inside(k))
+            .collect();
+        let span = (
+            Bound::Excluded(start),
+            end.map_or(Bound::Unbounded, Bound::Excluded),
+        );
+        for m in self.mems() {
+            let tail = &m.tail[m.tail_span(span.0, span.1)];
+            keys.extend(tail.iter().step_by(SPLIT_STRIDE).map(|(k, _)| k.as_slice()));
+            keys.extend(m.sample.range::<[u8], _>(span).map(Vec::as_slice));
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        let parts = parts.min((keys.len() + 1) / min_blocks.max(1)).max(1);
+        Ok((1..parts)
+            .map(|j| keys[j * keys.len() / parts].to_vec())
+            .collect())
+    }
+
     fn apply_filtered(&mut self, ops: &Ops, filter: &dyn LeafFilter) -> Result<()> {
         self.apply(ops)?;
         self.mem.drop_garbage(ops, filter);
@@ -1920,6 +2032,23 @@ mod tests {
             let mut rev = collect(e, &s, &t, true);
             rev.reverse();
             assert_eq!(rev, want, "{ctx}: reverse scan {s:?} {t:?}");
+        }
+        // Cut into parts: inside the range, ascending, as many as asked.
+        for parts in [2, 5, 9] {
+            let (s, t) = (
+                key(rng.below(KEYS / 2)),
+                key(KEYS / 2 + rng.below(KEYS / 2)),
+            );
+            let cuts = e.split_keys(&s, Some(&t), parts, 1).unwrap();
+            assert!(cuts.len() < parts, "{ctx}: {} cuts", cuts.len());
+            assert!(
+                cuts.windows(2).all(|w| w[0] < w[1]),
+                "{ctx}: cuts out of order"
+            );
+            assert!(
+                cuts.iter().all(|c| *c > s && *c < t),
+                "{ctx}: a cut outside"
+            );
         }
         // Within one prefix, as a point read reads a user key's versions:
         // from its first, or from one of them, up to the next user key.

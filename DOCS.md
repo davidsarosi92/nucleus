@@ -842,6 +842,15 @@ shows it, as `drops_above`, the memtable's entries sharing the `escape(user)
 a few versions in memory, as in a B+tree leaf, not one a write until a
 save (a read steps over each one kept: 5000 versions of a key made its
 read 12 → 420 µs).  The memtable's ascending tail is left as it is.
+**Scans in parallel** (L5): `Engine::split_keys` cuts a range into parts
+for a parallel scan's morsels — the B+tree's leaf separators where no
+route is, and within one engine's range that engine's: the LSM tree's
+runs' blocks' first keys and its memtables' sampled keys (a key put in
+the map is kept in a sample when its hash is a multiple of 64; the
+ascending tail every 64th, by index), evenly chosen; across engines one
+part.  A merge reads its sources into buffers it reuses (a source's head
+swapped with the entry given, the key swapped with the caller's), and
+one source is read straight, unmerged.
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -8124,6 +8133,9 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L5, LSM tables' scans in parallel:**
+  `Engine::split_keys`; the merge's buffers reused.  `count(*)` of a
+  million rows 98 → 16 ms (the B+tree's 6.7).
 - **2026-11-18 — `left()` and `right()`:** the functions, as in
   PostgreSQL (the words reserved for joins taken as function names
   before a parenthesis; until now a syntax error).
