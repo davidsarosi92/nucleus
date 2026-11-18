@@ -821,3 +821,51 @@ fn a_removal_rebalances_prefixed_leaves_into_pieces_that_fit() {
         assert_eq!(tree.get(&key(b'b', i)).unwrap(), Some(vec![b'b']));
     }
 }
+
+/// `seek_group` finds what a range from each key finds first, where that
+/// entry is in the key's leaf (issue #1): keys present and not, past the
+/// last, values inline, compressed and in overflow pages.
+#[test]
+fn a_group_sought_together_finds_each_ones_first_entry() {
+    use nucleus_storage::btree::Found;
+    harness::run("btree_seek_group", 4, |seed| {
+        let p = platform(seed);
+        let mut tree = new_tree(&p, 512);
+        let rng = SplitMix64::new(seed);
+        let value = |i: u64| match i % 7 {
+            0 => vec![b'z'; 5000],                  // overflow pages
+            1 => vec![b'c'; 1500],                  // compressed
+            _ => format!("value {i}").into_bytes(), // inline
+        };
+        for _ in 0..6000 {
+            let i = rng.below(20_000);
+            tree.insert(format!("key{i:06}").as_bytes(), &value(i))
+                .unwrap();
+        }
+        let mut found = Vec::<Found>::new();
+        for _ in 0..300 {
+            let n = 1 + rng.below(10) as usize;
+            let keys: Vec<Vec<u8>> = (0..n)
+                .map(|_| format!("key{:06}", rng.below(20_200)).into_bytes())
+                .collect();
+            let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+            tree.seek_group(&refs, &mut found).unwrap();
+            for (j, k) in keys.iter().enumerate() {
+                let first = tree
+                    .range(Bound::Included(k), Bound::Unbounded)
+                    .unwrap()
+                    .next()
+                    .transpose()
+                    .unwrap();
+                let f = &found[j];
+                if f.at {
+                    assert_eq!(Some((f.key.clone(), f.value.clone())), first, "{k:?}");
+                } else {
+                    // Past its leaf's last entry: the next leaf's first,
+                    // or none.
+                    assert!(first.as_ref().is_none_or(|(fk, _)| fk > k));
+                }
+            }
+        }
+    });
+}

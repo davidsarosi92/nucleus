@@ -42,6 +42,26 @@ use crate::page::{PAYLOAD_SIZE, Page, PageId};
 /// spent a third of its time so).
 pub const COMPRESS_MIN: usize = 1024;
 
+/// The bytes of each page [`BTree::seek_group`] reads before searching
+/// any: the header, the prefix and the slots of a node of up to ~165
+/// keys (more of a bigger one wait for their search).
+const GROUP_TOUCH: usize = 1024;
+
+/// The keys a caller of [`BTree::seek_group`] gives at once, at most:
+/// eight overlapped descents gained most (16 and 32 no more).
+pub const GROUP: usize = 8;
+
+/// An entry [`BTree::seek_group`] found.
+#[derive(Clone, Debug, Default)]
+pub struct Found {
+    /// Its key.
+    pub key: Vec<u8>,
+    /// Its value.
+    pub value: Vec<u8>,
+    /// Whether there is one in the leaf its key's descent ended in.
+    pub at: bool,
+}
+
 /// A key range `[lo, hi)`; `None` is unbounded.
 pub type KeyRange = (Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -374,6 +394,84 @@ impl BTree {
                 return Ok(Some(out));
             }
             return Ok(None);
+        }
+    }
+
+    /// For each of `keys` (a few, in any order), the first entry at or
+    /// after it, into `found[j]` (its buffers reused): its key and value,
+    /// and `at` false where that entry is not in the leaf the key's
+    /// descent ends in (past its last entry: a caller seeks that key
+    /// alone).  The descents go a level at a time — each level's pages
+    /// fetched, and their first lines (header, prefix, slots) read, for
+    /// the whole group before any is searched — so that the misses of
+    /// pages not in the cache overlap rather than follow one another
+    /// (group prefetching: Chen, Ailamaki, Gibbons and Mowry, ICDE 2004;
+    /// AMAC, Kocberber et al., VLDB 2015): a lookup a group of eight in
+    /// a 2-million-row tree ~780 → ~570 ns.
+    pub fn seek_group(&self, keys: &[&[u8]], found: &mut Vec<Found>) -> Result<()> {
+        found.resize_with(keys.len().max(found.len()), Found::default);
+        let mut ids: Vec<PageId> = vec![self.root; keys.len()];
+        let mut overflow = Vec::new();
+        loop {
+            let refs = ids
+                .iter()
+                .map(|&id| self.pool.fetch(id))
+                .collect::<Result<Vec<_>>>()?;
+            let pages: Vec<_> = refs.iter().map(|r| r.read()).collect();
+            let mut touch = 0u8;
+            for page in &pages {
+                let p = page.payload();
+                let mut at = 0;
+                while at < GROUP_TOUCH.min(p.len()) {
+                    touch ^= p[at];
+                    at += 64;
+                }
+            }
+            std::hint::black_box(touch);
+            let mut leaves = 0;
+            for (j, page) in pages.iter().enumerate() {
+                let id = ids[j];
+                let corrupt = |reason| Error::Corrupt { page: id, reason };
+                let v = View::new(page).map_err(corrupt)?;
+                if !v.is_leaf() {
+                    ids[j] = v
+                        .child(v.child_index(keys[j]).map_err(corrupt)?)
+                        .map_err(corrupt)?;
+                    continue;
+                }
+                leaves += 1;
+                let i = v.search(keys[j], false).map_err(corrupt)?;
+                let f = &mut found[j];
+                f.at = i < v.len();
+                if !f.at {
+                    continue;
+                }
+                f.key.clear();
+                v.key(i).map_err(corrupt)?.append_to(&mut f.key);
+                f.value.clear();
+                match v.value(i).map_err(corrupt)? {
+                    ValRef::Overflow { first, len, raw } => overflow.push((j, id, first, len, raw)),
+                    other => self.read_ref(id, other, &mut f.value)?,
+                }
+            }
+            if leaves > 0 {
+                if leaves < pages.len() {
+                    return Err(Error::Corrupt {
+                        page: self.root,
+                        reason: "leaves at different depths",
+                    });
+                }
+                drop(pages);
+                drop(refs);
+                for (j, id, first, len, raw) in overflow {
+                    self.read_ref(
+                        id,
+                        ValRef::Overflow { first, len, raw },
+                        &mut found[j].value,
+                    )?;
+                }
+                return Ok(());
+            }
         }
     }
 

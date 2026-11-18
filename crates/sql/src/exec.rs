@@ -1177,25 +1177,105 @@ pub fn scan_some<'a>(
     } else {
         ctx.txn.scan(Bound::Included(&start), end_bound)?
     };
-    let base = table.index_prefix(0);
-    let mut labels = crate::enums::Labels::default();
-    // A sealed row whose key is destroyed reads as absent: its entries
-    // are passed over.
-    let sealed = table.storage == crate::sealed::SEALED;
-    Ok(Box::new(entries.filter_map(move |e| {
-        let found = (|| {
+    Ok(Box::new(IndexRows {
+        entries,
+        storage,
+        table,
+        ctx,
+        wanted,
+        base: table.index_prefix(0),
+        labels: crate::enums::Labels::default(),
+        // A sealed row whose key is destroyed reads as absent: its
+        // entries are passed over.
+        sealed: table.storage == crate::sealed::SEALED,
+        keys: Vec::new(),
+        rows: Vec::new(),
+        ready: std::collections::VecDeque::new(),
+        group: INDEX_GROUP_FIRST,
+        done: false,
+    }))
+}
+
+/// The rows a secondary index's first entries fetch together; each group
+/// after holds twice the last, up to [`nucleus_kv::GET_MANY`] — a lookup
+/// that wants one row (an existence check) fetches few past it.
+const INDEX_GROUP_FIRST: usize = 4;
+
+/// [`scan_some`] through a secondary index: its entries read a group at a
+/// time, the group's rows fetched by their primary keys together
+/// ([`crate::storage::TableStorage::get_many`]: their descents' cache misses overlap — a
+/// `lineitem` lookup's ~7 rows, TPC-H Q20), handed on in the entries'
+/// order.
+struct IndexRows<'a> {
+    entries: nucleus_kv::KvIter<'a>,
+    storage: std::sync::Arc<dyn crate::storage::TableStorage>,
+    table: &'a Table,
+    ctx: &'a Ctx<'a>,
+    wanted: Option<&'a [bool]>,
+    base: Vec<u8>,
+    labels: crate::enums::Labels,
+    sealed: bool,
+    keys: Vec<Vec<u8>>,
+    rows: Vec<Option<Row>>,
+    ready: std::collections::VecDeque<(Vec<u8>, Row)>,
+    group: usize,
+    done: bool,
+}
+
+impl IndexRows<'_> {
+    /// The next group's rows into `ready`.
+    fn fill(&mut self) -> Result<()> {
+        self.keys.clear();
+        while self.keys.len() < self.group {
+            let Some(e) = self.entries.next() else {
+                self.done = true;
+                break;
+            };
             crate::budget::charge_scan()?;
             let (_, pk) = e?;
-            let mut k = base.clone();
+            let mut k = Vec::with_capacity(self.base.len() + pk.len());
+            k.extend_from_slice(&self.base);
             k.extend_from_slice(&pk);
-            match storage.get(ctx.txn, table, &k, wanted, &mut labels)? {
-                Some(row) => Ok(Some((k, row))),
-                None if sealed => Ok(None),
-                None => Err(Error::internal("index entry without its row")),
+            self.keys.push(k);
+        }
+        self.group = (self.group * 2).min(nucleus_kv::GET_MANY);
+        if self.keys.is_empty() {
+            return Ok(());
+        }
+        self.storage.get_many(
+            self.ctx.txn,
+            self.table,
+            &self.keys,
+            self.wanted,
+            &mut self.labels,
+            &mut self.rows,
+        )?;
+        for (k, row) in self.keys.drain(..).zip(self.rows.drain(..)) {
+            match row {
+                Some(row) => self.ready.push_back((k, row)),
+                None if self.sealed => {}
+                None => return Err(Error::internal("index entry without its row")),
             }
-        })();
-        found.transpose()
-    })))
+        }
+        Ok(())
+    }
+}
+
+impl Iterator for IndexRows<'_> {
+    type Item = Result<(Vec<u8>, Row)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.ready.is_empty() {
+            if self.done {
+                return None;
+            }
+            if let Err(e) = self.fill() {
+                self.done = true;
+                return Some(Err(e));
+            }
+        }
+        self.ready.pop_front().map(Ok)
+    }
 }
 
 /// A key range's entries read a chunk at a time, each borrowed from the

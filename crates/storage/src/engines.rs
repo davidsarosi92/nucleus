@@ -665,6 +665,16 @@ impl Tables {
         }
     }
 
+    /// [`BTree::seek_group`] where no route is (true); false where there
+    /// are, `found` untouched: a caller seeks each key.
+    pub fn seek_group(&self, keys: &[&[u8]], found: &mut Vec<btree::Found>) -> Result<bool> {
+        if !self.routes.is_empty() {
+            return Ok(false);
+        }
+        self.tree.seek_group(keys, found)?;
+        Ok(true)
+    }
+
     /// The entries with keys in `(start, end)`, ascending.
     pub fn range(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Scan<'_>> {
         if self.routes.is_empty() {

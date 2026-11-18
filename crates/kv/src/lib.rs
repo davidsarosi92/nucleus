@@ -224,6 +224,10 @@ pub trait KvChunks {
 
 /// Entries a chunk holds at most.
 pub const CHUNK_ENTRIES: usize = 1024;
+
+/// The keys a [`KvTxn::get_many`] is worth giving at once (the B+tree's
+/// group of overlapped descents, [`nucleus_storage::btree::GROUP`]).
+pub const GET_MANY: usize = nucleus_storage::btree::GROUP;
 /// A scan's first chunk's entries (and the first after a seek): a query
 /// that wants a few rows — a `LIMIT`, YCSB's short scans — reads a few,
 /// not a whole chunk; each chunk after holds twice the last, up to
@@ -672,6 +676,14 @@ pub trait KvRead: Sync {
     fn read_ts(&self) -> Timestamp;
     /// [`KvTxn::get`].
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    /// [`KvTxn::get_many`].  By default a [`get`](Self::get) each.
+    fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
+        out.clear();
+        for k in keys {
+            out.push(self.get(k)?);
+        }
+        Ok(())
+    }
     /// [`KvTxn::scan`].
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
     /// [`KvTxn::get_validated`].
@@ -727,6 +739,10 @@ impl KvRead for Locked<'_> {
         self.lock().get(key)
     }
 
+    fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
+        self.lock().get_many(keys, out)
+    }
+
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
         let all: Vec<_> = self.lock().scan(start, end)?.collect();
         Ok(Box::new(all.into_iter()))
@@ -772,6 +788,18 @@ pub trait KvTxn: Send {
 
     /// The value of `key`, if any (including this transaction's writes).
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// [`get`](Self::get) for each of `keys` — a few, [`GET_MANY`] at
+    /// most at a time worth it — their values into `out` in their order:
+    /// a store may seek them together, their descents' cache misses
+    /// overlapped.  By default a `get` each.
+    fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
+        out.clear();
+        for k in keys {
+            out.push(self.get(k)?);
+        }
+        Ok(())
+    }
 
     /// The pairs with keys in `(start, end)`, ascending.
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
@@ -1577,6 +1605,10 @@ impl KvRead for LocalTxn {
         Ok(self.0.get(key)?)
     }
 
+    fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
+        Ok(self.0.get_many(keys, out)?)
+    }
+
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
         KvTxn::scan(self, start, end)
     }
@@ -1613,6 +1645,10 @@ impl KvTxn for LocalTxn {
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         Ok(self.0.get(key)?)
+    }
+
+    fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
+        Ok(self.0.get_many(keys, out)?)
     }
 
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {

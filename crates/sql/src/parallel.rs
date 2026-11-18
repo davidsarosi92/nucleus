@@ -31,6 +31,10 @@ impl KvTxn for SharedTxn<'_> {
         self.0.get(key)
     }
 
+    fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> nucleus_kv::Result<()> {
+        self.0.get_many(keys, out)
+    }
+
     fn scan<'a>(
         &'a self,
         start: Bound<&[u8]>,

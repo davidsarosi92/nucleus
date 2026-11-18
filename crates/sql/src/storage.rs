@@ -218,6 +218,26 @@ pub trait TableStorage: Send + Sync {
         labels: &mut Labels,
     ) -> Result<Option<Row>>;
 
+    /// [`get`](Self::get) for each of `keys` (a few: [`nucleus_kv::GET_MANY`]
+    /// at a time is worth it), their rows into `out` in their order.  By
+    /// default a `get` each; a storage over the transaction's keys may
+    /// fetch them together ([`KvTxn::get_many`]).
+    fn get_many(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        keys: &[Vec<u8>],
+        wanted: Option<&[bool]>,
+        labels: &mut Labels,
+        out: &mut Vec<Option<Row>>,
+    ) -> Result<()> {
+        out.clear();
+        for k in keys {
+            out.push(self.get(txn, t, k, wanted, labels)?);
+        }
+        Ok(())
+    }
+
     /// The rows under `keys` (sorted, each once), the columns `wanted`
     /// marks decoded, given to `f` in key order with their key's position
     /// — those there are: the rows an index found.  By default a lookup
@@ -569,6 +589,28 @@ impl TableStorage for RowStorage {
                 txn, t, key, &v, labels, wanted,
             )?)),
         }
+    }
+
+    fn get_many(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        keys: &[Vec<u8>],
+        wanted: Option<&[bool]>,
+        labels: &mut Labels,
+        out: &mut Vec<Option<Row>>,
+    ) -> Result<()> {
+        let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+        let mut values = Vec::with_capacity(keys.len());
+        txn.get_many(&refs, &mut values)?;
+        out.clear();
+        for (k, v) in keys.iter().zip(values) {
+            out.push(match v {
+                None => None,
+                Some(v) => Some(crate::large::read_some(txn, t, k, &v, labels, wanted)?),
+            });
+        }
+        Ok(())
     }
 
     /// By a merge with the table's scan: seeks where the keys lie far

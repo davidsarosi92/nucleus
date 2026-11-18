@@ -1600,6 +1600,87 @@ impl Inner {
         Ok(self.look(user, ts, me, false, None)?.1)
     }
 
+    /// [`read_at`](Self::read_at) for each of `users` (a group of up to
+    /// [`nucleus_storage::btree::GROUP`]), their values (`None`: no
+    /// version, or a tombstone) into `out`.  Where no intent is in sight
+    /// the group's newest versions at `ts` are sought together
+    /// ([`Tables::seek_group`]: their descents' misses overlap); a key
+    /// whose first version there is not one `ts` sees, or lies past its
+    /// leaf, is looked at alone.
+    fn read_many(
+        &self,
+        users: &[&[u8]],
+        ts: u64,
+        me: Option<u64>,
+        out: &mut Vec<Option<Vec<u8>>>,
+    ) -> Result<()> {
+        out.clear();
+        let all = (Bound::Unbounded, Bound::Unbounded);
+        let quiet = me.is_none()
+            && self.unresolved_over(all.0, all.1).is_empty()
+            && self.other_spans(None).is_empty();
+        if !quiet {
+            for u in users {
+                out.push(self.read_at(u, ts, me)?.flatten());
+            }
+            return Ok(());
+        }
+        thread_local! {
+            static GROUP: std::cell::RefCell<(Vec<Vec<u8>>, Vec<nucleus_storage::btree::Found>)> =
+                const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+        }
+        let tree = self.store.read()?;
+        GROUP.with(|g| {
+            let mut fresh = Default::default();
+            let mut held = g.try_borrow_mut();
+            let (froms, found) = match held.as_deref_mut() {
+                Ok(b) => b,
+                Err(_) => &mut fresh,
+            };
+            froms.resize_with(users.len().max(froms.len()), Vec::new);
+            for (from, user) in froms.iter_mut().zip(users) {
+                from.clear();
+                mvcc::escape_onto(user, from);
+                from.extend_from_slice(&[0, 0]);
+                from.extend_from_slice(&(u64::MAX - ts).to_be_bytes());
+            }
+            let keys: Vec<&[u8]> = froms[..users.len()].iter().map(Vec::as_slice).collect();
+            if !tree.seek_group(&keys, found)? {
+                for u in users {
+                    out.push(versions_at(&tree, u, ts, false)?.1.flatten());
+                }
+                return Ok(());
+            }
+            for (j, user) in users.iter().enumerate() {
+                let (from, f) = (&froms[j], &found[j]);
+                // `user`'s versions start with `from` but its timestamp.
+                let own = from.len() - 8;
+                let mine = f.at && f.key.starts_with(&from[..own]);
+                if mine && f.key.len() != from.len() {
+                    return Err(Error::Corrupt("undecodable version key"));
+                }
+                if f.at && !mine {
+                    // The first entry there is another key's: no version
+                    // `ts` sees (each newer one sorts before `from`).
+                    out.push(None);
+                    continue;
+                }
+                if mine {
+                    let vts = u64::MAX
+                        - u64::from_be_bytes(f.key[own..].try_into().expect("eight bytes"));
+                    if intent_of(vts).is_none() && vts <= ts {
+                        let v =
+                            decode_value(&f.value).ok_or(Error::Corrupt("bad version value"))?;
+                        out.push(v.map(<[u8]>::to_vec));
+                        continue;
+                    }
+                }
+                out.push(versions_at(&tree, user, ts, false)?.1.flatten());
+            }
+            Ok(())
+        })
+    }
+
     /// One look at `user`'s versions for transaction `me` reading at `ts`:
     /// whether writing it conflicts — a newer commit wrote it (a version,
     /// or an intent committed after `ts`), or another running transaction
@@ -2460,6 +2541,23 @@ impl Transaction {
     pub fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         lock(&self.reads).keys.insert(key.to_vec());
         self.get(key)
+    }
+
+    /// [`get`](Self::get) for each of `keys` (a few: a group of up to
+    /// [`nucleus_storage::btree::GROUP`] is sought together), their values
+    /// into `out` in their order.
+    pub fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
+        if self.isolation == Isolation::Serializable
+            || keys.iter().any(|k| self.writes.get(k).is_some())
+        {
+            out.clear();
+            for k in keys {
+                out.push(self.get(k)?);
+            }
+            return Ok(());
+        }
+        self.flush_unlogged()?;
+        self.engine.read_many(keys, self.start, self.spilled, out)
     }
 
     /// [`scan`](Self::scan), validated as [`get_validated`](Self::get_validated):

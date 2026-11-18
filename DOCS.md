@@ -545,12 +545,16 @@ outgrow a page), `range` / `range_rev` (bounds; going forward a
 range checks its end on a key before reading the key's value, so the first
 entry past the end — perhaps long, compressed, in overflow pages — is not
 read), `cursor`
-(`seek`, `seek_after`, `seek_near`, `seek_end`, `next_entry`, `prev_entry`), `destroy`,
+(`seek`, `seek_after`, `seek_near`, `seek_end`, `next_entry`, `prev_entry`),
+`seek_group` (up to `GROUP` = 8 keys' first entries, the descents a
+level at a time: each level's pages and their first kilobyte read for the
+whole group before any is searched, so that their cache misses overlap —
+group prefetching, AMAC; what a secondary index's row fetches use), `destroy`,
 `check` (ordering, separators, equal leaf depth, minimum fill, overflow
 lengths, no page used twice; returns the pages used).  `&self` reads,
 `&mut self` writes: callers wrap the tree in an `RwLock` (D11).  **Reads
 in place:** `get` and cursors read pages through `node::View` (binary
-search over the offset table, a key, a child or an entry checked as
+search over the slots' key heads, a key, a child or an entry checked as
 `decode` checks it) and copy out only the entry returned; a cursor keeps
 its leaf pinned and its path as page ids, and `seek_near` stays in its
 leaf when the key falls inside it (seeks to nearby keys in order — a
@@ -3777,7 +3781,8 @@ the table's primary index prefix and the row's primary key or hidden row
 id — and by ranges of row keys: `write(txn, t, key, row, old)`,
 `remove`, `exists(…, validated)` (primary key and foreign key checks),
 `get(…, wanted, labels)` (a secondary index's rows, which the index finds
-by row key), `rows(Scan)` (a range ascending, only the wanted columns
+by row key), `get_many` (a group of them at once: the row storage's
+through `KvTxn::get_many`, their descents overlapped), `rows(Scan)` (a range ascending, only the wanted columns
 decoded), `batches(Scan)` (the same a batch at a time for the vectorized
 executor — by default from `rows`), `check` (the integrity check's part:
 rows as stored, problems noted), `index_ids` (the key spaces it uses
@@ -8200,6 +8205,13 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — a lookup's rows fetched a group at a time (issue #1):**
+  a secondary index's entries fetch their rows by primary key up to
+  eight together (`KvTxn::get_many` → `Transaction::get_many` →
+  `BTree::seek_group`: the descents a level at a time, each level's
+  pages read for the whole group before any is searched, their cache
+  misses overlapped); TPC-H Q20 on one worker 218 → 180 ms, on ten 58.0
+  → 53.9 (PostgreSQL 59.7).
 - **2026-11-18 — B+tree nodes with key heads (issue #1, format version
   4):** each slot holds its key's first four bytes past the node's
   prefix, internal nodes store their keys' shared prefix once, beside

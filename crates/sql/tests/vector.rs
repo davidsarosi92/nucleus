@@ -2480,3 +2480,44 @@ fn case_by_batches_agrees() {
     .collect();
     assert_eq!(agree(&db, &queries), 3, "the error cases fail");
 }
+
+#[test]
+fn index_entries_fetch_their_rows_a_group_at_a_time() {
+    // A secondary index's entries fetch their rows by primary key a group
+    // at a time (issue #1): the rows, in the index's order, are what a
+    // scan finds — many to a value (several groups), some deleted and
+    // updated, a transaction's own uncommitted changes, `LIMIT`.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(68)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE g (id INT PRIMARY KEY, a INT, t TEXT); \
+         INSERT INTO g SELECT i, i % 40, repeat('x', i % 300) FROM generate_series(1, 4000) i; \
+         CREATE INDEX g_a ON g (a); \
+         DELETE FROM g WHERE id % 9 = 0; \
+         UPDATE g SET t = 'updated' WHERE id % 5 = 0; \
+         ANALYZE",
+    )
+    .unwrap();
+    let plan = outcome(&mut s, "EXPLAIN SELECT id, t FROM g WHERE a = 7").unwrap();
+    assert!(plan.iter().any(|l| l[0].contains("g_a")), "{plan:?}");
+    let check = |s: &mut Session| {
+        for a in [0, 7, 13, 39, 41] {
+            for tail in ["", " LIMIT 1", " LIMIT 11"] {
+                let q = format!("SELECT id, t FROM g WHERE a = {a} ORDER BY id{tail}");
+                let r = format!("SELECT id, t FROM g WHERE a + 0 = {a} ORDER BY id{tail}");
+                assert_eq!(outcome(s, &q).unwrap(), outcome(s, &r).unwrap(), "{q}");
+            }
+        }
+    };
+    check(&mut s);
+    s.execute("BEGIN; UPDATE g SET t = 'mine' WHERE id % 7 = 0; DELETE FROM g WHERE id % 11 = 0")
+        .unwrap();
+    check(&mut s);
+    s.execute("ROLLBACK").unwrap();
+    check(&mut s);
+}

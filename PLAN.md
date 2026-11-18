@@ -11550,6 +11550,28 @@ simple parameterization, MySQL's former query cache — what not to do).
      each level's pages fetched and their first kilobyte read for the
      whole group before any is searched (group prefetching, Chen et al.;
      AMAC, Kocberber et al., VLDB 2015): ~780 → ~570 ns a lookup.
+  3. *A lookup's rows fetched a group at a time.*  `BTree::seek_group`
+     descends up to eight keys a level at a time: each level's pages
+     fetched and their first kilobyte read for all before any is
+     searched, so the misses of pages not in the cache overlap where
+     they followed one another (Chen, Ailamaki, Gibbons and Mowry, ICDE
+     2004; AMAC: Kocberber, Falsafi and Grot, VLDB 2015; MySQL's MRR
+     batches a lookup's fetches for the same reason, by sorting them for
+     a disk).  Above it: `Tables::seek_group` (none where an engine's
+     routes are), `Inner::read_many` — where no intent is in sight, the
+     group's versions at the snapshot sought together, a key whose first
+     version there is not one it sees, or lies past its leaf, looked at
+     alone —, `Transaction::get_many` and `KvTxn::get_many` (a `get`
+     each by default; under serializable isolation, or with the
+     transaction's own writes among the keys, too), and
+     `TableStorage::get_many`.  A secondary index's scan reads its
+     entries a group at a time (4, then 8: an existence check fetches
+     few past its row) and fetches their rows together, handing them on
+     in the index's order.  Tried on the probe, not taken: 16 and 32 a
+     group (no faster than 8), the leaves' cells read for the group
+     before their values are copied (even).  Q20, the binaries run alone
+     in turn: one worker 218 → 180 ms, ten 58.0 → 53.9 (PostgreSQL's
+     59.7: 0.90×).
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:
