@@ -158,6 +158,22 @@ pub trait Entries {
     /// The value of the entry [`next_key_into`](Self::next_key_into) gave
     /// last.
     fn value_into(&mut self, val: &mut Vec<u8>) -> Result<()>;
+    /// Entries a batch at a time, as [`btree::Range::leaf_entries`] gives
+    /// a leaf's: each one's key into `key` (the one before in `prev`, the
+    /// two swapped), its value when at most `max` bytes long, to `each`,
+    /// which may decline one (it stays the next); false once they are
+    /// done.  `None` where the engine gives an entry at a time only — for
+    /// the rest of the scan then.
+    fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<Option<bool>> {
+        let _ = (key, prev, max, each);
+        Ok(None)
+    }
 }
 
 /// The engines there are.
@@ -855,6 +871,19 @@ impl Part<'_> {
             Part::Other(e) => e.value_into(val),
         }
     }
+
+    fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<Option<bool>> {
+        match self {
+            Part::Tree(r) => r.leaf_entries(key, prev, max, each),
+            Part::Other(e) => e.leaf_entries(key, prev, max, each),
+        }
+    }
 }
 
 /// A scan over several pieces, each opened when reached.
@@ -910,6 +939,33 @@ impl<'a> Pieces<'a> {
                 val.clear();
                 Ok(())
             }
+        }
+    }
+
+    /// [`Entries::leaf_entries`] of the piece reached, the next opened
+    /// when it is done.
+    fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<Option<bool>> {
+        if self.cur.is_none() {
+            let Some(p) = self.pieces.get(self.next) else {
+                return Ok(Some(false));
+            };
+            let part = self.open(p)?;
+            self.next += 1;
+            self.cur = Some(part);
+        }
+        let part = self.cur.as_mut().expect("a part");
+        match part.leaf_entries(key, prev, max, each)? {
+            Some(false) => {
+                self.cur = None;
+                Ok(Some(self.next < self.pieces.len()))
+            }
+            more => Ok(more),
         }
     }
 }
@@ -982,7 +1038,7 @@ impl Scan<'_> {
     ) -> Result<Option<bool>> {
         match self {
             Scan::Tree(r) => r.leaf_entries(key, prev, max, each),
-            Scan::Pieces(_) => Ok(None),
+            Scan::Pieces(p) => p.leaf_entries(key, prev, max, each),
         }
     }
 }

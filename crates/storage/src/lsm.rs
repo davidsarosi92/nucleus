@@ -834,7 +834,7 @@ impl<'f> RunWriter<'f> {
 
 /// One source's entries in `(start, end)`, one direction.
 enum Src<'a> {
-    Mem(Box<dyn Iterator<Item = (&'a Vec<u8>, &'a Val)> + 'a>),
+    Mem(std::iter::Peekable<Box<dyn Iterator<Item = (&'a Vec<u8>, &'a Val)> + 'a>>),
     Run(RunScan<'a>),
 }
 
@@ -850,6 +850,57 @@ impl Src<'_> {
             Src::Run(r) => r.next_into(key, val),
         }
     }
+
+    /// [`Entries::leaf_entries`] forward: a run's block, or up to
+    /// [`MEM_BATCH`] of a memtable's entries; tombstones passed over.
+    fn batch(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<bool> {
+        match self {
+            Src::Mem(it) => {
+                for _ in 0..MEM_BATCH {
+                    let Some(&(k, v)) = it.peek() else {
+                        return Ok(false);
+                    };
+                    if let Some(v) = v
+                        && !give(key, prev, k, v, max, each)?
+                    {
+                        return Ok(true);
+                    }
+                    it.next();
+                }
+                Ok(true)
+            }
+            Src::Run(r) => r.batch(key, prev, max, each),
+        }
+    }
+}
+
+/// A memtable's entries [`Src::batch`] gives a call.
+const MEM_BATCH: usize = 256;
+
+/// An entry `k`, `v` to `each` as [`Entries::leaf_entries`] gives it:
+/// false if declined (`key` and `prev` as they were).
+fn give(
+    key: &mut Vec<u8>,
+    prev: &mut Vec<u8>,
+    k: &[u8],
+    v: &[u8],
+    max: usize,
+    each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+) -> Result<bool> {
+    std::mem::swap(key, prev);
+    key.clear();
+    key.extend_from_slice(k);
+    if each(prev, key, (v.len() <= max).then_some(v))? {
+        return Ok(true);
+    }
+    std::mem::swap(key, prev);
+    Ok(false)
 }
 
 /// `k` and `v` into `key` and `val`, their buffers reused.
@@ -867,14 +918,17 @@ fn set_entry(key: &mut Vec<u8>, val: &mut Val, k: &[u8], v: Option<&[u8]>) {
 
 fn mem_scan<'a>(m: &'a Memtable, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bool) -> Src<'a> {
     if empty_bounds(start, end) {
-        return Src::Mem(Box::new(std::iter::empty()));
+        let it: Box<dyn Iterator<Item = _>> = Box::new(std::iter::empty());
+        return Src::Mem(it.peekable());
     }
     let r = m.points.range::<[u8], _>((start, end));
     let t = m.tail[m.tail_span(start, end)].iter().map(|(k, v)| (k, v));
     if rev {
-        Src::Mem(Box::new(t.rev().chain(r.rev())))
+        let it: Box<dyn Iterator<Item = _>> = Box::new(t.rev().chain(r.rev()));
+        Src::Mem(it.peekable())
     } else {
-        Src::Mem(Box::new(r.chain(t)))
+        let it: Box<dyn Iterator<Item = _>> = Box::new(r.chain(t));
+        Src::Mem(it.peekable())
     }
 }
 
@@ -986,17 +1040,57 @@ impl<'a> RunScan<'a> {
                 set_entry(key, val, k, d.value(j));
                 return Ok(true);
             }
+            self.load()?;
+        }
+    }
+
+    /// Forward, the rest of the block reached (the next read if none) to
+    /// `each` ([`Src::batch`]); false once the range is done.
+    fn batch(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<bool> {
+        while self.block.is_none() && !self.done {
+            self.load()?;
+        }
+        let Some(d) = self.block.clone() else {
+            return Ok(false);
+        };
+        while self.at < d.len() {
+            let k = d.key(self.at);
+            if !below(&self.end, k) {
+                self.done = true;
+                return Ok(false);
+            }
+            if let Some(v) = d.value(self.at)
+                && !give(key, prev, k, v, max, each)?
+            {
+                return Ok(true);
+            }
+            self.at += 1;
+        }
+        self.block = None;
+        Ok(true)
+    }
+
+    /// The next block read (`done` if none is left), from where the range
+    /// starts in it if it is the first.
+    fn load(&mut self) -> Result<()> {
+        {
             let i = if self.rev {
                 if self.next == 0 {
                     self.done = true;
-                    continue;
+                    return Ok(());
                 }
                 self.next -= 1;
                 self.next
             } else {
                 if self.next >= self.run.index.len() {
                     self.done = true;
-                    continue;
+                    return Ok(());
                 }
                 self.next += 1;
                 self.next - 1
@@ -1025,6 +1119,7 @@ impl<'a> RunScan<'a> {
             self.first = false;
             self.block = Some(d);
         }
+        Ok(())
     }
 }
 
@@ -1343,6 +1438,23 @@ impl Entries for Merged<'_> {
             val.extend_from_slice(v);
         }
         Ok(())
+    }
+
+    /// One source's, forward, a batch at a time ([`Src::batch`]); several
+    /// sources merged give an entry at a time.
+    fn leaf_entries(
+        &mut self,
+        key: &mut Vec<u8>,
+        prev: &mut Vec<u8>,
+        max: usize,
+        each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
+    ) -> Result<Option<bool>> {
+        match self.srcs.as_mut_slice() {
+            [src] if !self.rev && !self.keep_tombstones => {
+                Ok(Some(src.batch(key, prev, max, each)?))
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -1676,11 +1788,22 @@ impl Engine for LsmEngine {
     ) -> Result<Box<dyn Entries + 'a>> {
         let mut srcs = Vec::new();
         let mut ranges = Vec::new();
-        for m in self.mems() {
+        // Sources that hold nothing here left out (one source is read
+        // unmerged): an empty memtable, a run whose keys are all outside
+        // and that has no range tombstone (which would hide older runs').
+        for m in self.mems().filter(|m| !m.is_empty()) {
             srcs.push(mem_scan(m, start, end, reverse));
             ranges.push(&m.ranges);
         }
+        let (s, e) = (start.map(<[u8]>::to_vec), end.map(<[u8]>::to_vec));
         for r in self.levels.runs() {
+            let outside = r
+                .index
+                .first()
+                .is_none_or(|f| !below(&e, &f.first) || !above(&s, &r.last));
+            if outside && r.ranges.is_empty() {
+                continue;
+            }
             srcs.push(Src::Run(RunScan::new(r, start, end, reverse, true)));
             ranges.push(&r.ranges);
         }
@@ -2009,6 +2132,62 @@ mod tests {
         out
     }
 
+    /// Batches [`collect_batched`] was given (the path is taken).
+    static BATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A forward scan read a batch at a time where it can be
+    /// ([`Entries::leaf_entries`]), each entry declined now and then (read
+    /// on its own then, as the transaction layer reads a large value).
+    fn collect_batched(
+        e: &LsmEngine,
+        s: &Bound<Vec<u8>>,
+        t: &Bound<Vec<u8>>,
+        rng: &SplitMix64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut it = e.scan(borrow(s), borrow(t), false).unwrap();
+        let mut out = Vec::new();
+        let (mut k, mut prev, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        loop {
+            let mut declined = false;
+            let mut each = |p: &[u8], key: &[u8], val: Option<&[u8]>| {
+                if rng.below(50) == 0 {
+                    declined = true;
+                    return Ok(false);
+                }
+                assert!(
+                    out.last()
+                        .is_none_or(|(l, _): &(Vec<u8>, _)| l.as_slice() == p)
+                );
+                out.push((key.to_vec(), val.expect("a value fits").to_vec()));
+                Ok(true)
+            };
+            let got = it
+                .leaf_entries(&mut k, &mut prev, usize::MAX, &mut each)
+                .unwrap();
+            if got.is_some() {
+                BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            match got {
+                Some(true) if !declined => {}
+                Some(false) => return out,
+                Some(true) => {
+                    // The declined entry, on its own.
+                    assert!(it.next_key_into(&mut k).unwrap());
+                    it.value_into(&mut v).unwrap();
+                    out.push((k.clone(), v.clone()));
+                    prev.clone_from(&k);
+                }
+                None => {
+                    while it.next_key_into(&mut k).unwrap() {
+                        it.value_into(&mut v).unwrap();
+                        out.push((k.clone(), v.clone()));
+                    }
+                    return out;
+                }
+            }
+        }
+    }
+
     fn check(e: &LsmEngine, model: &Model, rng: &SplitMix64, ctx: &str) {
         for _ in 0..300 {
             let i = rng.below(KEYS);
@@ -2029,6 +2208,11 @@ mod tests {
                     .collect()
             };
             assert_eq!(collect(e, &s, &t, false), want, "{ctx}: scan {s:?} {t:?}");
+            assert_eq!(
+                collect_batched(e, &s, &t, rng),
+                want,
+                "{ctx}: batched {s:?} {t:?}"
+            );
             let mut rev = collect(e, &s, &t, true);
             rev.reverse();
             assert_eq!(rev, want, "{ctx}: reverse scan {s:?} {t:?}");
@@ -2239,6 +2423,8 @@ mod tests {
         // Compactions reached the last level with two tiers above it.
         assert!(deep > 0, "never a last level with two tiers above");
         assert!(spills > 0, "never a spill");
+        let batches = BATCHES.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(batches > 0, "never a scan a batch at a time");
     }
 
     /// The block cache keeps within its bytes, finds what it holds, and
