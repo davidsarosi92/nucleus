@@ -47,6 +47,8 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
     (Func::IsDistinctFrom, &["__is_distinct_from"], 2..=2),
     (Func::Replace, &["replace"], 3..=3),
     (Func::Repeat, &["repeat"], 2..=2),
+    (Func::Left, &["left"], 2..=2),
+    (Func::Right, &["right"], 2..=2),
     (Func::Strpos, &["strpos"], 2..=2),
     (Func::Sqrt, &["sqrt"], 1..=1),
     (Func::Power, &["power", "pow"], 2..=2),
@@ -410,6 +412,8 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
         | Func::Concat
         | Func::Replace
         | Func::Repeat
+        | Func::Left
+        | Func::Right
         | Func::Version
         | Func::CurrentUser
         | Func::SessionUser

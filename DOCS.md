@@ -2156,7 +2156,7 @@ linear-time), `CASE`, `CAST` / `::`, typed literals (`INTERVAL '90' DAY`,
 value cut below it, as in PostgreSQL), `E'…'` strings,
 `COLLATE` (accepted, ignored: text compares bytewise), `OPERATOR(op)`,
 `$n`, `extract(field FROM x)`.  Functions: `lower upper length trim substr
-replace strpos concat coalesce nullif greatest least abs round trunc floor
+left right replace repeat strpos concat coalesce nullif greatest least abs round trunc floor
 ceil sign mod sqrt power regexp_replace version now current_timestamp
 current_date localtimestamp clock_timestamp extract date_part date_trunc
 make_date age justify_days justify_hours justify_interval to_timestamp
@@ -8124,6 +8124,9 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — `left()` and `right()`:** the functions, as in
+  PostgreSQL (the words reserved for joins taken as function names
+  before a parenthesis; until now a syntax error).
 - **2026-11-18 — §M14.28 L5, versions dropped by commits from the LSM
   memtable:** `Engine::apply_filtered`; YCSB A on an LSM table 5 726 →
   10 530 operations a second, a read's p99 531 → 25 µs.

@@ -146,6 +146,10 @@ pub enum Func {
     Replace,
     /// `repeat(text, n)`.
     Repeat,
+    /// `left(text, n)`: the first `n` characters (all but the last `-n`).
+    Left,
+    /// `right(text, n)`: the last `n` characters (all but the first `-n`).
+    Right,
     /// `position(sub in text)` / `strpos(text, sub)`.
     Strpos,
     /// `sqrt(x)`.
@@ -241,6 +245,8 @@ impl Func {
             Func::IsDistinctFrom => "is_distinct_from",
             Func::Replace => "replace",
             Func::Repeat => "repeat",
+            Func::Left => "left",
+            Func::Right => "right",
             Func::Strpos => "strpos",
             Func::Sqrt => "sqrt",
             Func::Power => "power",
@@ -1620,6 +1626,17 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 return Err(Error::out_of_range("requested length too large"));
             }
             Value::Text(s.repeat(n))
+        }
+        Func::Left | Func::Right => {
+            let s = text(&args[0])?;
+            let (n, len) = (int(&args[1])?, s.chars().count() as i64);
+            // The characters kept: `n` of them, or all but `-n`.
+            let k = if n >= 0 { n.min(len) } else { (len + n).max(0) } as usize;
+            Value::Text(if f == Func::Left {
+                s.chars().take(k).collect()
+            } else {
+                s.chars().skip(len as usize - k).collect()
+            })
         }
         Func::Strpos => {
             if let (Value::Bytea(s), Value::Bytea(sub)) = (&args[0], &args[1]) {

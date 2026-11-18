@@ -3579,7 +3579,11 @@ impl<'a> Parser<'a> {
                     self.expect_op(")")?;
                     Expr::ArraySubquery(Box::new(q))
                 }
-                _ if RESERVED.contains(&w.as_str()) => {
+                // `left(…)` and `right(…)` are functions, as in PostgreSQL
+                // (the words reserved for joins).
+                _ if RESERVED.contains(&w.as_str())
+                    && !(matches!(w.as_str(), "left" | "right") && self.peek_op("(")) =>
+                {
                     self.pos -= 1;
                     return Err(self.error("expected an expression"));
                 }

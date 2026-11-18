@@ -79,6 +79,13 @@ SELECT replace(trim('  a-b-c  '), '-', '+')
 ----
 a+b+c
 
+# left/right: functions despite the join words; a negative n keeps all
+# but that many.
+query TTTTTT
+SELECT left('nucleus', 3), left('nucleus', -2), right('tükör', 2), right('nucleus', -5), left('ab', 9), right(NULL, 1)
+----
+nuc nucle ör us ab NULL
+
 query BB
 SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL
 ----
