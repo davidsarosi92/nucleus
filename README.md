@@ -45,11 +45,10 @@ compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
 results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  Against a
 native PostgreSQL 18 tuned for the same machine, on TPC-H (SF 1) column
-tables take 0.47× its time in the geometric mean, on ClickBench (a
-million rows) 0.17×; reads by key even with it (0.98×, the server on
-its Unix socket as `psql` reaches PostgreSQL); row tables' scans and
-joins are still behind (1.27× and 1.10×) — §M14.33's next steps —;
-loads level or faster, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
+tables take 0.46× its time in the geometric mean, on ClickBench (a
+million rows) 0.16×, row tables 0.65× and 0.57× (§M14.33); reads by key
+even with it (1.02×, the server on its Unix socket as `psql` reaches
+PostgreSQL); loads within 1.4×, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
 768-dimension vectors in 38 ms, faster than numpy's brute force and 5.6×

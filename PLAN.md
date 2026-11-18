@@ -290,7 +290,7 @@ are marked ✅.
 | | M14.29 | Security and assurance: `SECURITY.md`, fuzzing in CI, Elle's checks on one node (OSS-Fuzz and an audit are §M26's) | ✅ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed), S5 ✅ Elle (2026-11-15: strict serializable, strong snapshot isolation) |
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
-| | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ⬜ planned 2026-11-17 (after §M14.31 P1, before §M14.28 L3b) |
+| | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -10710,7 +10710,7 @@ release.
 environment, its runs, its spread and the script that made it; and a
 second run on the same machine reproduces each within its interval.
 
-### §M14.33 — Row tables and reads by key against a tuned PostgreSQL ⬜
+### §M14.33 — Row tables and reads by key against a tuned PostgreSQL ✅
 
 Planned 2026-11-17, when §M14.31 P1 put PostgreSQL native and tuned
 for the machine (`bench/pg.py`: 8 GB of buffers, its parallel workers)
@@ -11069,10 +11069,27 @@ simple parameterization, MySQL's former query cache — what not to do).
   secondary index's fetches, each a descent of the primary B+tree —
   Q20 1.46× (#1: page hints in index entries, sorted batched fetches,
   cheaper inner-node search).
+  *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
+  clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
+  0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
+  faster on 12 of 22 — Q6 1.68×, Q20 1.58×, Q12 1.36×, Q8 1.19×, Q10
+  1.14×, Q5 1.13× the highest; column tables 0.46×.  ClickBench's row
+  table 0.57× (1.10× before R3; cold 0.76×), faster on all 43 but Q0
+  (0.99×); the column table 0.16×.  Reads by key 1.02× (24.5 ms against
+  24.0, the intervals overlapping; 0.98× and 0.94× in the runs before;
+  cold 0.85×).  The loads: TPC-H rows 1.40× (29.9 s against 21.5),
+  columns 1.10×, ClickBench 1.11× and 0.98×; the suite's `DELETE` of a
+  tenth 1.45× — both within their targets (2×) and for the sweep before
+  F1's whole run (what is left of the load is listed above).  Every
+  answer the same (TPC-H 22 of 22; ClickBench all but ties at a
+  `LIMIT`).
 
 **Done when:** reads by key ≤ 1× PostgreSQL's time and the row tables'
 geometric means ≤ 1× on TPC-H and ClickBench, by §M14.31's method,
-every answer still the same.
+every answer still the same.  *Met 2026-11-18* (R4's end, above):
+the row geometric means 0.65× and 0.57×; reads by key even — 1.02×
+with the intervals overlapping, which the method reports as no
+difference (`≈`), and under 1× in the two runs before.
 
 ## §F2 — NoSQL layer
 

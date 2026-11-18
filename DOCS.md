@@ -7929,6 +7929,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-18 — §M14.33 done:** the suite, TPC-H and ClickBench run
+  again against the native, tuned PostgreSQL (`docs/benchmarks.md`):
+  row tables' geometric means 0.65× (TPC-H) and 0.57× (ClickBench),
+  column tables' 0.46× and 0.16×, reads by key even (1.02×, the
+  intervals overlapping), every answer the same.
 - **2026-11-18 — §M14.33 R4, the load's vacuum:** a checkpoint writes
   its pages sorted, a run of neighbours (up to 1 MiB) a call, not a page
   a call in the cache's order; a vacuum's sweep copies no entry (keys
