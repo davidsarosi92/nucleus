@@ -46,11 +46,16 @@
 //! run is durable with the next manifest; until then a crash opens the
 //! last one, whose runs [`Engine::files`] keeps.
 //!
-//! What L4a leaves (PLAN.md §M14.28 L4b–L4e): flushing the memtable by
-//! size between checkpoints (it is flushed at each checkpoint, so its
-//! memory is bounded by the checkpoint interval), bulk loads as runs, a
-//! block cache, Monkey's allocation of Bloom bits by level, compaction
-//! that drops versions vacuum would, runs sealed under the page key.
+//! **Bulk loads** (§M14.28 L4b): keys written in ascending order past all
+//! the memtable holds (an index build's, a fresh range's) are appended to
+//! a sorted tail, and past [`SPILL`] the loader writes that tail as a run
+//! ([`Engine::spill`]) — a load is not held in memory whole.  Otherwise
+//! the memtable is flushed at each checkpoint, so its memory is bounded
+//! by the checkpoint interval.
+//!
+//! What L4b leaves (PLAN.md §M14.28 L4c–L4e): a block cache, Monkey's
+//! allocation of Bloom bits by level, compaction that drops versions
+//! vacuum would, runs sealed under the page key.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -281,19 +286,90 @@ fn read_all(file: &dyn File, at: u64, len: usize) -> Result<Vec<u8>> {
 // ------------------------------------------------------------ memtable
 
 /// Writes not yet in a run.
+///
+/// Keys written in ascending order past every key it holds — a bulk load
+/// into a fresh range, an index built (D16 writes come so) — go to a
+/// sorted vector at its end, appended, not into the map: no search, no
+/// node a key (§M14.28 L4b).  A key that falls among them moves them into
+/// the map first.  Grown past [`SPILL`], the vector is written as a run
+/// ([`Engine::spill`]), so a load is not held in memory whole.
 #[derive(Clone, Default)]
 struct Memtable {
     points: BTreeMap<Vec<u8>, Val>,
+    /// Keys above every key of `points`, ascending (shared with a spill
+    /// writing them).
+    tail: Arc<Vec<(Vec<u8>, Val)>>,
+    /// The bytes of `tail`'s keys and values.
+    tail_bytes: usize,
     ranges: Ranges,
+}
+
+/// The bytes of a memtable's ascending tail past which it is spilled as a
+/// run (a few KiB in the unit tests, so the model test spills often).
+pub const SPILL: usize = if cfg!(test) { 1 << 10 } else { 64 << 20 };
+
+fn entry_bytes(k: &[u8], v: &Val) -> usize {
+    k.len() + v.as_ref().map_or(0, Vec::len)
 }
 
 impl Memtable {
     fn is_empty(&self) -> bool {
-        self.points.is_empty() && self.ranges.is_empty()
+        self.points.is_empty() && self.tail.is_empty() && self.ranges.is_empty()
+    }
+
+    /// The last key it holds.
+    fn last(&self) -> Option<&[u8]> {
+        match self.tail.last() {
+            Some((k, _)) => Some(k),
+            None => self.points.last_key_value().map(|(k, _)| k.as_slice()),
+        }
+    }
+
+    /// The tail moved into the map.
+    fn untail(&mut self) {
+        let tail = std::mem::take(&mut self.tail);
+        self.points.extend(Arc::unwrap_or_clone(tail));
+        self.tail_bytes = 0;
     }
 
     fn put(&mut self, key: &[u8], v: Val) {
+        if self.last().is_none_or(|l| key > l) {
+            self.tail_bytes += entry_bytes(key, &v);
+            Arc::make_mut(&mut self.tail).push((key.to_vec(), v));
+            return;
+        }
+        if self.tail.first().is_some_and(|(f, _)| key >= f.as_slice()) {
+            self.untail();
+        }
         self.points.insert(key.to_vec(), v);
+    }
+
+    /// The tail's entries in `(start, end)`: their positions.
+    fn tail_span(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> std::ops::Range<usize> {
+        let t = &self.tail;
+        let a = match start {
+            Bound::Included(s) => t.partition_point(|(k, _)| k.as_slice() < s),
+            Bound::Excluded(s) => t.partition_point(|(k, _)| k.as_slice() <= s),
+            Bound::Unbounded => 0,
+        };
+        let b = match end {
+            Bound::Included(e) => t.partition_point(|(k, _)| k.as_slice() <= e),
+            Bound::Excluded(e) => t.partition_point(|(k, _)| k.as_slice() < e),
+            Bound::Unbounded => t.len(),
+        };
+        a..b.max(a)
+    }
+
+    /// Whether it holds a point or a range tombstone in `[first, last]`.
+    fn touches(&self, first: &[u8], last: &[u8]) -> bool {
+        let span = (Bound::Included(first), Bound::Included(last));
+        self.points.range::<[u8], _>(span).next().is_some()
+            || !self.tail_span(span.0, span.1).is_empty()
+            || self
+                .ranges
+                .0
+                .iter()
+                .any(|(s, e)| s.as_slice() <= last && e.as_slice() > first)
     }
 
     fn remove_range(&mut self, start: &[u8], end: &[u8]) {
@@ -308,7 +384,22 @@ impl Memtable {
         for k in keys {
             self.points.remove(&k);
         }
+        let span = self.tail_span(Bound::Included(start), Bound::Excluded(end));
+        if !span.is_empty() {
+            let gone: usize = Arc::make_mut(&mut self.tail)
+                .drain(span)
+                .map(|(k, v)| entry_bytes(&k, &v))
+                .sum();
+            self.tail_bytes -= gone;
+        }
         self.ranges.add(start, end);
+    }
+
+    /// Every point, ascending.
+    fn entries(&self) -> impl Iterator<Item = (&Vec<u8>, &Val)> {
+        self.points
+            .iter()
+            .chain(self.tail.iter().map(|(k, v)| (k, v)))
     }
 
     /// `newer` written over this one.
@@ -316,14 +407,17 @@ impl Memtable {
         for (s, e) in &newer.ranges.0 {
             self.remove_range(s, e);
         }
-        for (k, v) in &newer.points {
-            self.points.insert(k.clone(), v.clone());
+        for (k, v) in newer.entries() {
+            self.put(k, v.clone());
         }
     }
 
     fn lookup(&self, key: &[u8]) -> Option<Val> {
         if let Some(v) = self.points.get(key) {
             return Some(v.clone());
+        }
+        if let Ok(i) = self.tail.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
+            return Some(self.tail[i].1.clone());
         }
         self.ranges.covers(key).then_some(None)
     }
@@ -471,7 +565,11 @@ struct RunWriter<'f> {
     path: std::path::PathBuf,
     name: String,
     file: Box<dyn File>,
+    /// Bytes written so far, `out` among them.
     at: u64,
+    /// What is written and not yet in the file: one large write instead of
+    /// one a block.
+    out: Vec<u8>,
     block: Vec<u8>,
     first: Option<Vec<u8>>,
     index: Vec<BlockRef>,
@@ -495,6 +593,7 @@ impl<'f> RunWriter<'f> {
             name: name.to_owned(),
             file,
             at: 0,
+            out: Vec::new(),
             block: Vec::new(),
             first: None,
             index: Vec::new(),
@@ -528,8 +627,22 @@ impl<'f> RunWriter<'f> {
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.file.write_all_at(bytes, self.at)?;
+        /// Bytes gathered before they go to the file.
+        const OUT: usize = 1 << 20;
+        self.out.extend_from_slice(bytes);
         self.at += bytes.len() as u64;
+        if self.out.len() >= OUT {
+            self.flush_out()?;
+        }
+        Ok(())
+    }
+
+    fn flush_out(&mut self) -> Result<()> {
+        if !self.out.is_empty() {
+            let from = self.at - self.out.len() as u64;
+            self.file.write_all_at(&self.out, from)?;
+            self.out.clear();
+        }
         Ok(())
     }
 
@@ -600,6 +713,7 @@ impl<'f> RunWriter<'f> {
         foot.extend_from_slice(&self.entries.to_le_bytes());
         foot.extend_from_slice(RUN_MAGIC);
         self.write(&foot)?;
+        self.flush_out()?;
         self.file.sync()?;
         let size = self.at;
         drop(self.file);
@@ -639,10 +753,11 @@ fn mem_scan<'a>(m: &'a Memtable, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bo
         return Src::Mem(Box::new(std::iter::empty()));
     }
     let r = m.points.range::<[u8], _>((start, end));
+    let t = m.tail[m.tail_span(start, end)].iter().map(|(k, v)| (k, v));
     if rev {
-        Src::Mem(Box::new(r.rev()))
+        Src::Mem(Box::new(t.rev().chain(r.rev())))
     } else {
-        Src::Mem(Box::new(r))
+        Src::Mem(Box::new(r.chain(t)))
     }
 }
 
@@ -995,6 +1110,14 @@ enum Place {
     NewTier,
 }
 
+/// A spill's result ([`Engine::install`]): the first `n` entries of the
+/// memtable's tail, the last of them `last`, written as `run`.
+struct Spilled {
+    n: usize,
+    last: Vec<u8>,
+    run: Option<Arc<Run>>,
+}
+
 /// A compaction's result ([`Engine::install`]).
 struct Compacted {
     /// The tier merged: its oldest runs, these.
@@ -1187,8 +1310,20 @@ impl Engine for LsmEngine {
             if let Some(m) = sealed.as_deref().filter(|m| !m.is_empty()) {
                 // Tombstones kept while older runs may hold what they hide.
                 let keep = !levels.is_empty();
-                let mut w = RunWriter::new(fs, dir, &format!("run-{name}-0"))?;
-                for (k, v) in &m.points {
+                // `run-{name}-0`, or the first such name no file has: two
+                // checkpoints may share an LSN (writes without the WAL
+                // between them), and the earlier one's run is live.
+                let mut file = format!("run-{name}-0");
+                for n in 1.. {
+                    if !fs.exists(&dir.join(&file))?
+                        && !fs.exists(&dir.join(format!("{file}.tmp")))?
+                    {
+                        break;
+                    }
+                    file = format!("run-{name}-{n}");
+                }
+                let mut w = RunWriter::new(fs, dir, &file)?;
+                for (k, v) in m.entries() {
                     if v.is_some() || keep {
                         w.add(k, v)?;
                     }
@@ -1239,8 +1374,56 @@ impl Engine for LsmEngine {
         }))
     }
 
+    fn spill(&self) -> Option<Job> {
+        let m = &self.mem;
+        if m.tail_bytes < SPILL {
+            return None;
+        }
+        let (first, last) = (m.tail.first()?.0.clone(), m.tail.last()?.0.clone());
+        // Below the memtable, the run must not be hidden by its range
+        // tombstones, nor hide what the memtable set apart holds: neither
+        // may touch its keys (a load into a fresh range never does).
+        if m.ranges.0.iter().any(|(s, e)| *s <= last && *e > first)
+            || self
+                .sealed
+                .as_ref()
+                .is_some_and(|s| s.touches(&first, &last))
+        {
+            return None;
+        }
+        let tail = Arc::clone(&m.tail);
+        Some(Box::new(move |room: &dyn JobRoom| {
+            let name = room.name()?;
+            let mut w = RunWriter::new(room.fs(), room.dir(), &name)?;
+            for (k, v) in tail.iter() {
+                w.add(k, v)?;
+            }
+            let run = w.finish(Ranges::default())?;
+            let done: Done = Box::new(Spilled {
+                n: tail.len(),
+                last,
+                run,
+            });
+            Ok(Some(done))
+        }))
+    }
+
     fn install(&mut self, done: Done) -> Result<()> {
-        let Ok(c) = done.downcast::<Compacted>() else {
+        let c = match done.downcast::<Spilled>() {
+            Ok(sp) => {
+                self.settle();
+                let t = &self.mem.tail;
+                if t.len() >= sp.n && sp.n > 0 && t[sp.n - 1].0 == sp.last {
+                    let tail = Arc::make_mut(&mut self.mem.tail);
+                    let gone: usize = tail.drain(..sp.n).map(|(k, v)| entry_bytes(&k, &v)).sum();
+                    self.mem.tail_bytes -= gone;
+                    Self::put_first(&mut self.levels, sp.run);
+                }
+                return Ok(());
+            }
+            Err(d) => d,
+        };
+        let Ok(c) = c.downcast::<Compacted>() else {
             return Ok(());
         };
         self.settle();
@@ -1392,6 +1575,7 @@ mod tests {
     #[test]
     fn reads_as_a_model_through_flushes_compactions_and_reloads() {
         let mut deep = 0;
+        let mut spills = 0;
         for seed in 1..=8u64 {
             let p = SimPlatform::new(seed);
             let fs = p.fs();
@@ -1427,6 +1611,13 @@ mod tests {
                             };
                         }
                         e.apply(&ops).unwrap();
+                        // A tail grown past SPILL written out, as a bulk
+                        // load's writer does.
+                        while let Some(j) = e.spill() {
+                            let d = j(&room).unwrap().expect("a spill");
+                            e.install(d).unwrap();
+                            spills += 1;
+                        }
                     }
                     6 => {
                         // Narrow, so the data grows and the levels deepen.
@@ -1482,6 +1673,34 @@ mod tests {
                                 e = LsmEngine::load(fs, dir, &path).unwrap();
                             }
                         }
+                        // A bulk load: keys ascending from a random one,
+                        // batch after batch (into the memtable's tail when
+                        // above what it holds), spilled as it grows.
+                        if rng.below(3) == 0 {
+                            let mut i = rng.below(KEYS);
+                            for _ in 0..4 {
+                                let n = 1 + rng.below(30);
+                                let ops: Vec<(Vec<u8>, Val)> = (i..(i + n).min(KEYS))
+                                    .map(|j| (key(j), Some(vec![j as u8; 8 + (j % 32) as usize])))
+                                    .collect();
+                                i += n;
+                                for (k, v) in &ops {
+                                    model.insert(k.clone(), v.clone().unwrap());
+                                }
+                                e.apply(&ops).unwrap();
+                                while let Some(j) = e.spill() {
+                                    let d = j(&room).unwrap().expect("a spill");
+                                    e.install(d).unwrap();
+                                    spills += 1;
+                                }
+                            }
+                            check(&e, &model, &rng, &format!("seed {seed} step {step} load"));
+                            while let Some(j) = e.job() {
+                                if let Some(d) = j(&room).unwrap() {
+                                    e.install(d).unwrap();
+                                }
+                            }
+                        }
                     }
                     _ => {
                         let f = e.fork();
@@ -1494,6 +1713,7 @@ mod tests {
         }
         // Compactions reached the last level with two tiers above it.
         assert!(deep > 0, "never a last level with two tiers above");
+        assert!(spills > 0, "never a spill");
     }
 
     /// The filter: no false negatives, about 1 % false positives.

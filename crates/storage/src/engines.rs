@@ -74,6 +74,14 @@ pub trait Engine: Send + Sync {
     fn job(&self) -> Option<Job> {
         None
     }
+    /// Work the writer does before it goes on — an LSM tree's memtable,
+    /// grown by a bulk load, written as a run (§M14.28 L4b) — planned and
+    /// run with the branch's writer lock held (nothing changes the engine
+    /// meanwhile but background installs), the readers going on; `None`
+    /// when nothing is due.
+    fn spill(&self) -> Option<Job> {
+        None
+    }
     /// A job's result taken in, under the branch's write lock.
     fn install(&mut self, _done: Done) -> Result<()> {
         Ok(())

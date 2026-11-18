@@ -808,9 +808,19 @@ Its run is durable with the next checkpoint's manifest; a crash before
 opens the last manifest, whose runs are kept.  The transaction layer
 runs `Store::compact` on a thread of its own (`nucleus-compact`), woken
 after each checkpoint; without threads to spare, after the checkpoint
-where it falls due.  Left to L4b–L4e: bulk loads as runs, flushing by
-size between checkpoints, a block cache, Bloom bits by level, compaction
-that drops versions vacuum would, sealed runs.
+where it falls due.  **Bulk loads** (L4b): keys a memtable is given in
+ascending order past all it holds — D16's writes into a fresh range
+always come so — are appended to a sorted vector at its end instead of
+its map (a key among them moves them into the map); past 64 MiB
+(`lsm::SPILL`) the vector is spilled as a run by the loader in
+`Store::write_unlogged` (`Engine::spill`: the writer lock held, readers
+going on; installed below the memtable when nothing of the memtable's
+range tombstones or of the memtable set apart touches its keys), so a
+load is not held in memory whole.  A run's file is written in 1 MiB
+writes.  A flush takes the first free name `run-<branch>-<route>-<lsn>-<n>`
+(two checkpoints may share an LSN when only unlogged writes came
+between).  Left to L4c–L4e: a block cache, Bloom bits by level,
+compaction that drops versions vacuum would, sealed runs.
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -8071,6 +8081,11 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L4b, bulk loads into the LSM tree:** the
+  memtable's ascending tail, spilled as a run past 64 MiB by the loader
+  (`Engine::spill`); a run's writes gathered to 1 MiB; LZ4's speed-ups
+  in `lz::compress`; a flush's run name free when two checkpoints share
+  an LSN.  A three-million-row index build 1174 → 527 MB at peak.
 - **2026-11-18 — §M14.28 L4a, the LSM tree's work off the writers:** a
   checkpoint's engine saves run in `Checkpoint::finish`, not under every
   writer's lock (`Engine::saver`); compaction is a background job

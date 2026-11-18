@@ -1160,6 +1160,15 @@ impl Store {
             batch,
             Vec::new(),
         );
+        drop(tree);
+        // A bulk load grown past what an engine holds in memory (an LSM
+        // tree's memtable, §M14.28 L4b): written out now, by the loader,
+        // the writer lock still held and the readers going on.  A failure
+        // leaves the engine as it was.
+        let mut go_on = || true;
+        let go_on: &mut dyn FnMut() -> bool = &mut go_on;
+        let go_on = std::cell::RefCell::new(go_on);
+        while self.run_job(|e| e.spill(), &go_on, false)? {}
         Ok(())
     }
 
@@ -1478,59 +1487,70 @@ impl Store {
         sh.check()?;
         let _one = sh.compacting.lock().unwrap_or_else(|e| e.into_inner());
         let go_on = std::cell::RefCell::new(go_on);
+        let b = &self.b;
         let mut done = 0;
-        {
-            let b = &self.b;
-            loop {
-                if b.dropped.load(Ordering::Acquire) || !(go_on.borrow_mut())() {
-                    break;
-                }
-                let job = {
-                    let t = b.tree.read().unwrap_or_else(|e| e.into_inner());
-                    t.routes
-                        .iter()
-                        .zip(&t.engines)
-                        .find_map(|(r, e)| e.job().map(|j| (r.id, j)))
-                };
-                let Some((route, job)) = job else { break };
-                let room = Room {
-                    sh,
-                    edir: engines::engines_dir(&sh.dir),
-                    branch: b,
-                    route,
-                    names: Default::default(),
-                    go_on: &go_on,
-                    since: sh.platform.clock().now(),
-                    bytes: Default::default(),
-                };
-                let result = job(&room);
-                {
-                    let mut in_flight = sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
-                    let installed = match result {
-                        Ok(Some(d)) => {
-                            let mut t = b.tree.write().unwrap_or_else(|e| e.into_inner());
-                            let at = t.routes.iter().position(|r| r.id == route);
-                            match at {
-                                Some(i) if !b.dropped.load(Ordering::Acquire) => {
-                                    t.engines[i].install(d).map(|()| true)
-                                }
-                                _ => Ok(false),
-                            }
-                        }
-                        Ok(None) => Ok(false),
-                        Err(e) => Err(e),
-                    };
-                    for n in room.names.take() {
-                        in_flight.remove(&n);
-                    }
-                    if !installed? {
-                        return Ok(done);
-                    }
-                }
-                done += 1;
+        while !b.dropped.load(Ordering::Acquire) && (go_on.borrow_mut())() {
+            if !self.run_job(|e| e.job(), &go_on, true)? {
+                break;
             }
+            done += 1;
         }
         Ok(done)
+    }
+
+    /// The first job `plan` finds among the branch's engines (planned
+    /// under its read lock), run with no lock of the store's — `paced` by
+    /// [`StoreOptions::compaction_bytes_per_sec`] — and installed under
+    /// its write lock; whether one was installed.
+    fn run_job(
+        &self,
+        plan: impl Fn(&dyn Engine) -> Option<engines::Job>,
+        go_on: &std::cell::RefCell<&mut dyn FnMut() -> bool>,
+        paced: bool,
+    ) -> Result<bool> {
+        let sh = &*self.shared;
+        let b = &self.b;
+        let job = {
+            let t = b.tree.read().unwrap_or_else(|e| e.into_inner());
+            t.routes
+                .iter()
+                .zip(&t.engines)
+                .find_map(|(r, e)| plan(&**e).map(|j| (r.id, j)))
+        };
+        let Some((route, job)) = job else {
+            return Ok(false);
+        };
+        let room = Room {
+            sh,
+            edir: engines::engines_dir(&sh.dir),
+            branch: b,
+            route,
+            names: Default::default(),
+            go_on,
+            paced,
+            since: sh.platform.clock().now(),
+            bytes: Default::default(),
+        };
+        let result = job(&room);
+        let mut in_flight = sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        let installed = match result {
+            Ok(Some(d)) => {
+                let mut t = b.tree.write().unwrap_or_else(|e| e.into_inner());
+                let at = t.routes.iter().position(|r| r.id == route);
+                match at {
+                    Some(i) if !b.dropped.load(Ordering::Acquire) => {
+                        t.engines[i].install(d).map(|()| true)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
+        };
+        for n in room.names.take() {
+            in_flight.remove(&n);
+        }
+        installed
     }
 
     fn begin_running<'a>(
@@ -1932,6 +1952,9 @@ struct Room<'a, 'g> {
     /// The files it named: in flight until it is installed.
     names: std::cell::RefCell<Vec<String>>,
     go_on: &'a std::cell::RefCell<&'g mut dyn FnMut() -> bool>,
+    /// Whether it keeps to the I/O budget (a compaction does; a spill, on
+    /// the writer's path, does not).
+    paced: bool,
     /// When it began, and the bytes it wrote since: its pace.
     since: std::time::Duration,
     bytes: std::cell::Cell<u64>,
@@ -1971,7 +1994,7 @@ impl engines::JobRoom for Room<'_, '_> {
         let total = self.bytes.get() + bytes;
         self.bytes.set(total);
         let budget = self.sh.opts.compaction_bytes_per_sec;
-        if budget > 0 && bytes > 0 {
+        if self.paced && budget > 0 && bytes > 0 {
             let clock = self.sh.platform.clock();
             let due = self.since + std::time::Duration::from_secs_f64(total as f64 / budget as f64);
             let now = clock.now();

@@ -34,28 +34,92 @@ fn put_len(out: &mut Vec<u8>, mut n: usize) {
     out.push(n as u8);
 }
 
+fn read64(b: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
+}
+
+/// How far `input` at `a` and at `b` (`a < b`) agree, up to `max` bytes:
+/// eight at a time, the first differing byte found from the XOR's
+/// trailing zeros (LZ4's `LZ4_count`).
+fn agree(input: &[u8], a: usize, b: usize, max: usize) -> usize {
+    let mut len = 0;
+    while len + 8 <= max {
+        let x = read64(input, a + len) ^ read64(input, b + len);
+        if x != 0 {
+            return len + (x.trailing_zeros() / 8) as usize;
+        }
+        len += 8;
+    }
+    while len < max && input[a + len] == input[b + len] {
+        len += 1;
+    }
+    len
+}
+
+thread_local! {
+    /// The hash table, kept between calls: an entry is a position plus
+    /// the call's base, so entries of earlier calls (below it) read as
+    /// empty and the table is never cleared — a 4 KiB block would
+    /// otherwise pay for clearing 16 KiB.
+    static TABLE: std::cell::RefCell<(Vec<u32>, u32)> =
+        std::cell::RefCell::new((vec![0; 1 << HASH_BITS], 0));
+}
+
 /// `input` compressed (appended to `out`).
+///
+/// LZ4's greedy parse, with its speed-ups: a match extended eight bytes at
+/// a time and backwards over the literals before it, and the search
+/// stepping faster through input that has not matched for a while (a
+/// step of one more byte every 64 misses), so input that does not
+/// compress costs little.
 pub fn compress(input: &[u8], out: &mut Vec<u8>) {
+    TABLE.with(|t| {
+        let (table, base) = &mut *t.borrow_mut();
+        let n = input.len();
+        if n >= (u32::MAX / 2) as usize || *base as usize + n + 1 >= u32::MAX as usize {
+            table.fill(0);
+            *base = 0;
+        }
+        let b = *base;
+        *base += n as u32 + 1;
+        compress_with(input, out, table, b);
+    })
+}
+
+fn compress_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32], base: u32) {
     let n = input.len();
-    let mut table = vec![0u32; 1 << HASH_BITS]; // position + 1 (0: none)
     let mut anchor = 0;
     let mut i = 0;
+    let mut misses = 0usize;
     let limit = n.saturating_sub(LAST_LITERALS + MIN_MATCH);
     while i < limit {
         let h = hash(read32(input, i));
-        let cand = table[h] as usize;
-        table[h] = i as u32 + 1;
-        if cand == 0
-            || i - (cand - 1) > u16::MAX as usize
-            || read32(input, cand - 1) != read32(input, i)
-        {
-            i += 1;
+        let entry = table[h];
+        table[h] = base + i as u32 + 1;
+        let cand = if entry > base {
+            Some((entry - base - 1) as usize)
+        } else {
+            None
+        };
+        let Some(mut m) =
+            cand.filter(|&c| i - c <= u16::MAX as usize && read32(input, c) == read32(input, i))
+        else {
+            i += 1 + (misses >> 6);
+            misses += 1;
             continue;
-        }
-        let m = cand - 1;
-        let mut len = MIN_MATCH;
-        let max = n - LAST_LITERALS - i;
-        while len < max && input[m + len] == input[i + len] {
+        };
+        misses = 0;
+        let mut len = MIN_MATCH
+            + agree(
+                input,
+                m + MIN_MATCH,
+                i + MIN_MATCH,
+                n - LAST_LITERALS - i - MIN_MATCH,
+            );
+        // Backwards over the literals the match also covers.
+        while i > anchor && m > 0 && input[i - 1] == input[m - 1] {
+            i -= 1;
+            m -= 1;
             len += 1;
         }
         // The sequence: literals since the anchor, then the match.
@@ -223,6 +287,60 @@ mod tests {
         for n in 0..300 {
             roundtrip(&text[..n]);
             roundtrip(&noise[..n]);
+        }
+    }
+
+    /// Inputs mixing runs, repeats at every distance (some past the 64 KiB
+    /// offsets reach), noise and sorted keys sharing prefixes, at many
+    /// sizes, one call after another (the hash table kept between them):
+    /// each round-trips, and the reference decoder agrees.
+    #[test]
+    fn mixed_inputs_round_trip_call_after_call() {
+        let mut x = 7u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..400 {
+            let size = match round % 4 {
+                0 => (next() % 64) as usize,
+                1 => (next() % 5000) as usize,
+                2 => 4096,
+                _ => (next() % 200_000) as usize,
+            };
+            let mut data = Vec::with_capacity(size);
+            while data.len() < size {
+                match next() % 4 {
+                    0 => {
+                        let b = next() as u8;
+                        let n = (next() % 40) as usize;
+                        data.extend(std::iter::repeat_n(b, n));
+                    }
+                    1 if !data.is_empty() => {
+                        let from = (next() as usize) % data.len();
+                        let n = ((next() % 300) as usize).min(data.len() - from);
+                        data.extend_from_within(from..from + n);
+                    }
+                    2 => {
+                        let k = format!("key-{:012}-", data.len() / 7);
+                        data.extend_from_slice(k.as_bytes());
+                    }
+                    _ => {
+                        for _ in 0..(next() % 30) {
+                            data.push(next() as u8);
+                        }
+                    }
+                }
+            }
+            data.truncate(size);
+            roundtrip(&data);
+            let mut c = Vec::new();
+            compress(&data, &mut c);
+            let mut want = Vec::new();
+            reference(&c, data.len(), &mut want).expect("the reference decodes");
+            assert_eq!(want, data, "round {round}");
         }
     }
 

@@ -309,3 +309,75 @@ fn commits_across_engines_survive_a_crash_at_every_io_point() {
         });
     }
 }
+
+/// A bulk load into the LSM tree without the WAL (D16, as an index build
+/// writes): ascending batches past what its memtable holds are written
+/// out as runs by the loader (§M14.28 L4b) — read meanwhile, kept by the
+/// checkpoint after it, lost by a crash before one (as unlogged writes
+/// are), the store whole either way.
+#[test]
+fn a_bulk_load_spills_its_memtable_as_runs() {
+    for crash in [false, true] {
+        let p = Arc::new(SimPlatform::new(3));
+        let (store, _) = open(&p).unwrap();
+        store.add_engine(b"k", b"l", EngineKind::Lsm).unwrap();
+        store
+            .commit(&Batch {
+                meta: 1,
+                ops: vec![(b"k-before".to_vec(), Some(b"logged".to_vec()))],
+            })
+            .unwrap();
+        store.checkpoint().unwrap();
+        // 96 MiB in 16 KiB values, ascending, 64 a batch.
+        let n = 6 * 1024;
+        let value = |i: usize| vec![(i % 251) as u8; 16 << 10];
+        for chunk in (0..n).collect::<Vec<_>>().chunks(64) {
+            let ops = chunk
+                .iter()
+                .map(|&i| (format!("k-load-{i:06}").into_bytes(), Some(value(i))))
+                .collect();
+            store.write_unlogged(&Batch { meta: 1, ops }).unwrap();
+        }
+        let runs = |p: &SimPlatform| -> Vec<String> {
+            p.fs()
+                .list_dir(Path::new("/db/engines"))
+                .unwrap()
+                .into_iter()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("run-") && n.contains("-c"))
+                .collect()
+        };
+        assert!(!runs(&p).is_empty(), "no spill before the checkpoint");
+        let check = |store: &Store| {
+            for i in [0, 1, n / 2, n - 1] {
+                let k = format!("k-load-{i:06}").into_bytes();
+                assert_eq!(store.get(&k).unwrap(), Some(value(i)), "key {i}");
+            }
+            let m = contents(store);
+            assert_eq!(m.len(), n + 1);
+            assert_eq!(
+                m.get(&b"k-before"[..]).map(Vec::as_slice),
+                Some(&b"logged"[..])
+            );
+        };
+        check(&store);
+        if crash {
+            drop(store);
+            p.sim_fs().crash();
+            let (store, _) = open(&p).unwrap();
+            let m = contents(&store);
+            assert_eq!(m.len(), 1, "unlogged writes are lost by a crash");
+            assert_eq!(
+                m.get(&b"k-before"[..]).map(Vec::as_slice),
+                Some(&b"logged"[..])
+            );
+            assert!(runs(&p).is_empty(), "a spilled run left: {:?}", runs(&p));
+        } else {
+            store.checkpoint().unwrap();
+            drop(store);
+            p.sim_fs().crash();
+            let (store, _) = open(&p).unwrap();
+            check(&store);
+        }
+    }
+}
