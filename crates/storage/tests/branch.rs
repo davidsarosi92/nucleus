@@ -45,6 +45,7 @@ fn opts() -> StoreOptions {
         page_key: ENCRYPTED.get().then(|| PageCipher::new([3; 32])),
         previous_page_key: None,
         compaction_bytes_per_sec: 0,
+        lsm_cache_bytes: nucleus_storage::lsm::BLOCK_CACHE_BYTES,
     }
 }
 

@@ -250,13 +250,28 @@ fn run(kind: Option<EngineKind>) {
         assert!(store.get(k).unwrap().is_some());
     }
     let get_us = t.elapsed().as_secs_f64() * 1e6 / sample.len() as f64;
+    // Lookups of keys the table lacks (the filters' work: each run's
+    // false positive costs a block read).
+    let other = SplitMix64::new(11);
+    let absent: Vec<Vec<u8>> = (0..sample.len())
+        .map(|_| {
+            let mut k = b"t".to_vec();
+            k.extend_from_slice(&other.next_u64().to_be_bytes());
+            k
+        })
+        .collect();
+    let t = Instant::now();
+    for k in &absent {
+        assert!(store.get(k).unwrap().is_none());
+    }
+    let absent_us = t.elapsed().as_secs_f64() * 1e6 / absent.len() as f64;
     let rows = (MORE * (9 + VALUE as u64)) as f64;
     let (w, d, e) = (after.0 - before.0, after.1 - before.1, after.2 - before.2);
     let total = (w + d + e) as f64;
     println!(
         "{name}: {MORE} rows, 100 a commit, into {ROWS}: {secs:.1} s; written {:.1} MiB \
          (WAL {:.1}, data file {:.1}, engines {:.1}) = {:.1} bytes a byte of rows; \
-         a lookup {get_us:.1} µs; a commit p99 {p99:.2} ms, the slowest {max:.1} ms",
+         a lookup {get_us:.1} µs, of a key not there {absent_us:.2} µs; a commit p99 {p99:.2} ms, the slowest {max:.1} ms",
         total / 1048576.0,
         w as f64 / 1048576.0,
         d as f64 / 1048576.0,
@@ -271,6 +286,11 @@ fn run(kind: Option<EngineKind>) {
     metric(&format!("{name}: write amplification"), total / rows, "x");
     metric(&format!("{name}: 1M random rows, 100 a commit"), secs, "s");
     metric(&format!("{name}: a point lookup after"), get_us, "µs");
+    metric(
+        &format!("{name}: a lookup of a key not there"),
+        absent_us,
+        "µs",
+    );
     metric(&format!("{name}: a commit, p99"), p99, "ms");
     metric(&format!("{name}: the slowest commit"), max, "ms");
     drop(store);

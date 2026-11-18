@@ -53,9 +53,11 @@
 //! the memtable is flushed at each checkpoint, so its memory is bounded
 //! by the checkpoint interval.
 //!
-//! What L4b leaves (PLAN.md §M14.28 L4c–L4e): a block cache, Monkey's
-//! allocation of Bloom bits by level, compaction that drops versions
-//! vacuum would, runs sealed under the page key.
+//! **Reads** go through a block cache for the process ([`CACHE`],
+//! §M14.28 L4c): a block decoded once, searched in place.
+//!
+//! What L4c leaves (PLAN.md §M14.28 L4d–L4e): compaction that drops
+//! versions vacuum would, runs sealed under the page key.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -435,6 +437,8 @@ struct BlockRef {
 
 /// An immutable sorted run in its file.
 pub(crate) struct Run {
+    /// Its number in this process, for the block cache.
+    id: u64,
     name: String,
     file: Box<dyn File>,
     index: Vec<BlockRef>,
@@ -486,6 +490,7 @@ impl Run {
         }
         let ranges = Ranges::decode(&mut r)?;
         Ok(Arc::new(Run {
+            id: next_run_id(),
             name: name.to_owned(),
             file,
             index,
@@ -496,8 +501,8 @@ impl Run {
         }))
     }
 
-    /// Block `i`'s entries.
-    fn block(&self, i: usize) -> Result<Vec<(Vec<u8>, Val)>> {
+    /// Block `i`, read, checked and decoded.
+    fn read_block(&self, i: usize) -> Result<Decoded> {
         let b = &self.index[i];
         let stored = read_all(&*self.file, b.offset, b.len as usize)?;
         if stored.len() < 9 {
@@ -510,30 +515,31 @@ impl Run {
         let codec = body[0];
         let raw_len = u32::from_le_bytes(body[1..5].try_into().expect("4")) as usize;
         let payload = &body[5..];
-        let raw;
-        let data: &[u8] = match codec {
-            0 => payload,
+        let data = match codec {
+            0 => payload.to_vec(),
             1 => {
                 let mut out = Vec::new();
                 lz::decompress(payload, raw_len, &mut out)
                     .ok_or(corrupt("an LSM block does not decompress"))?;
-                raw = out;
-                &raw
+                out
             }
             _ => return Err(corrupt("an LSM block's codec is unknown")),
         };
-        let mut r = Reader(data);
-        let mut out = Vec::new();
-        while !r.0.is_empty() {
-            let k = r.bytes()?.to_vec();
-            let v = match r.u8()? {
-                0 => Some(r.bytes()?.to_vec()),
-                1 => None,
-                _ => return Err(corrupt("an LSM entry's kind is unknown")),
-            };
-            out.push((k, v));
+        Decoded::new(data)
+    }
+
+    /// Block `i`, from the block cache (put there when `fill`: lookups and
+    /// scans, not compactions).
+    fn block(&self, i: usize, fill: bool) -> Result<Arc<Decoded>> {
+        let key = (self.id, i as u32);
+        if let Some(d) = CACHE.get(key) {
+            return Ok(d);
         }
-        Ok(out)
+        let d = Arc::new(self.read_block(i)?);
+        if fill {
+            CACHE.put(key, Arc::clone(&d));
+        }
+        Ok(d)
     }
 
     /// The block that would hold `key`.
@@ -549,9 +555,9 @@ impl Run {
             && self.bloom.may(h)
             && let Some(i) = self.block_of(key)
         {
-            let entries = self.block(i)?;
-            if let Ok(j) = entries.binary_search_by(|e| e.0.as_slice().cmp(key)) {
-                return Ok(Some(entries[j].1.clone()));
+            let d = self.block(i, true)?;
+            if let Ok(j) = d.find(key) {
+                return Ok(Some(d.value(j).map(<[u8]>::to_vec)));
             }
         }
         Ok(self.ranges.covers(key).then_some(None))
@@ -720,6 +726,7 @@ impl<'f> RunWriter<'f> {
         self.fs.rename(&self.tmp, &self.path)?;
         let file = self.fs.open(&self.path, OpenMode::ReadOnly)?;
         Ok(Some(Arc::new(Run {
+            id: next_run_id(),
             name: self.name,
             file,
             index: self.index,
@@ -794,14 +801,21 @@ struct RunScan<'a> {
     start: Bound<Vec<u8>>,
     end: Bound<Vec<u8>>,
     rev: bool,
+    /// Whether the blocks read go into the block cache.
+    fill: bool,
     /// The next block to read (forward) or the one past it (reverse).
     next: usize,
-    buf: std::vec::IntoIter<(Vec<u8>, Val)>,
+    /// The block being read, and the next entry of it (forward) or the
+    /// one past it (reverse).
+    block: Option<Arc<Decoded>>,
+    at: usize,
+    /// Whether the block is the first read (where the range starts).
+    first: bool,
     done: bool,
 }
 
 impl<'a> RunScan<'a> {
-    fn new(run: &'a Run, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bool) -> Self {
+    fn new(run: &'a Run, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bool, fill: bool) -> Self {
         let own = |b: Bound<&[u8]>| b.map(<[u8]>::to_vec);
         let next = if rev {
             match end {
@@ -819,8 +833,11 @@ impl<'a> RunScan<'a> {
             start: own(start),
             end: own(end),
             rev,
+            fill,
             next,
-            buf: Vec::new().into_iter(),
+            block: None,
+            at: 0,
+            first: true,
             done: empty_bounds(start, end),
         }
     }
@@ -830,20 +847,33 @@ impl<'a> RunScan<'a> {
             if self.done {
                 return Ok(None);
             }
-            for (k, v) in self.buf.by_ref() {
-                let (inside, past) = if self.rev {
-                    (above(&self.start, &k), !below(&self.end, &k))
+            if let Some(d) = &self.block {
+                let j = if self.rev {
+                    if self.at == 0 {
+                        self.block = None;
+                        continue;
+                    }
+                    self.at -= 1;
+                    self.at
                 } else {
-                    (below(&self.end, &k), !above(&self.start, &k))
+                    if self.at >= d.len() {
+                        self.block = None;
+                        continue;
+                    }
+                    self.at += 1;
+                    self.at - 1
                 };
-                if past {
-                    continue; // before the range in this direction
-                }
+                let k = d.key(j);
+                let inside = if self.rev {
+                    above(&self.start, k)
+                } else {
+                    below(&self.end, k)
+                };
                 if !inside {
                     self.done = true;
                     return Ok(None);
                 }
-                return Ok(Some((k, v)));
+                return Ok(Some((k.to_vec(), d.value(j).map(<[u8]>::to_vec))));
             }
             let i = if self.rev {
                 if self.next == 0 {
@@ -860,12 +890,221 @@ impl<'a> RunScan<'a> {
                 self.next += 1;
                 self.next - 1
             };
-            let mut entries = self.run.block(i)?;
-            if self.rev {
-                entries.reverse();
-            }
-            self.buf = entries.into_iter();
+            let d = self.run.block(i, self.fill)?;
+            // The first block: from where the range starts in it.
+            self.at = if self.rev {
+                if self.first {
+                    match &self.end {
+                        Bound::Unbounded => d.len(),
+                        Bound::Included(e) => d.find(e).map_or_else(|p| p, |p| p + 1),
+                        Bound::Excluded(e) => d.find(e).unwrap_or_else(|p| p),
+                    }
+                } else {
+                    d.len()
+                }
+            } else if self.first {
+                match &self.start {
+                    Bound::Unbounded => 0,
+                    Bound::Included(s) => d.find(s).unwrap_or_else(|p| p),
+                    Bound::Excluded(s) => d.find(s).map_or_else(|p| p, |p| p + 1),
+                }
+            } else {
+                0
+            };
+            self.first = false;
+            self.block = Some(d);
         }
+    }
+}
+
+// ------------------------------------------------------------ blocks
+
+/// A block decoded: its entries' bytes as stored (a key, a kind, a value)
+/// and where each entry starts — searched and read in place, no entry
+/// copied until it is returned.
+pub(crate) struct Decoded {
+    data: Vec<u8>,
+    /// Each entry's key: (start, length); its kind byte follows the key.
+    keys: Vec<(u32, u32)>,
+}
+
+impl Decoded {
+    /// `data` checked whole: every entry's lengths within it, every kind
+    /// known.
+    fn new(data: Vec<u8>) -> Result<Self> {
+        let mut keys = Vec::new();
+        let mut r = Reader(&data);
+        while !r.0.is_empty() {
+            let at = data.len() - r.0.len();
+            let k = r.bytes()?;
+            keys.push(((at + 4) as u32, k.len() as u32));
+            match r.u8()? {
+                0 => {
+                    r.bytes()?;
+                }
+                1 => {}
+                _ => return Err(corrupt("an LSM entry's kind is unknown")),
+            }
+        }
+        Ok(Decoded { data, keys })
+    }
+
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn key(&self, j: usize) -> &[u8] {
+        let (a, n) = self.keys[j];
+        &self.data[a as usize..(a + n) as usize]
+    }
+
+    fn value(&self, j: usize) -> Option<&[u8]> {
+        let (a, n) = self.keys[j];
+        let at = (a + n) as usize;
+        match self.data[at] {
+            0 => {
+                let n = u32::from_le_bytes(self.data[at + 1..at + 5].try_into().expect("4"));
+                Some(&self.data[at + 5..at + 5 + n as usize])
+            }
+            _ => None,
+        }
+    }
+
+    /// Where `key` is (`Ok`), or would go (`Err`).
+    fn find(&self, key: &[u8]) -> std::result::Result<usize, usize> {
+        let (mut lo, mut hi) = (0, self.keys.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.key(mid).cmp(key) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Ok(mid),
+            }
+        }
+        Err(lo)
+    }
+
+    /// Bytes it holds in memory.
+    fn bytes(&self) -> usize {
+        self.data.len() + self.keys.len() * 8 + 64
+    }
+}
+
+static RUN_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_run_id() -> u64 {
+    RUN_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The block cache (PLAN.md §M14.28 L4c): runs' blocks decoded, shared by
+/// every LSM tree of the process — a block read once is not read, checked
+/// and decompressed again while it stays.  CLOCK replacement (a block
+/// used since the hand passed it gets a second chance), in shards each
+/// under its own lock, within [`set_block_cache_bytes`].  Compactions
+/// read through it without filling it.
+pub(crate) static CACHE: BlockCache = BlockCache::new();
+
+const SHARDS: usize = 16;
+
+pub(crate) struct BlockCache {
+    shards: [Mutex<Shard>; SHARDS],
+    /// Bytes it may hold, all shards together.
+    capacity: std::sync::atomic::AtomicUsize,
+}
+
+struct Shard {
+    map: Option<std::collections::HashMap<(u64, u32), usize>>,
+    slots: Vec<Slot>,
+    hand: usize,
+    bytes: usize,
+}
+
+struct Slot {
+    key: (u64, u32),
+    block: Arc<Decoded>,
+    used: bool,
+}
+
+/// What the block cache holds at most, unless set: 64 MiB.
+pub const BLOCK_CACHE_BYTES: usize = 64 << 20;
+
+/// Sets what the block cache holds at most: the largest a store asked
+/// for ([`crate::StoreOptions::lsm_cache_bytes`]), [`BLOCK_CACHE_BYTES`]
+/// until one does.
+pub fn set_block_cache_bytes(bytes: usize) {
+    CACHE
+        .capacity
+        .fetch_max(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl BlockCache {
+    const fn new() -> Self {
+        BlockCache {
+            shards: [const {
+                Mutex::new(Shard {
+                    map: None,
+                    slots: Vec::new(),
+                    hand: 0,
+                    bytes: 0,
+                })
+            }; SHARDS],
+            capacity: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn shard(&self, key: (u64, u32)) -> std::sync::MutexGuard<'_, Shard> {
+        let h = mix(key.0 ^ (u64::from(key.1) << 32)) as usize % SHARDS;
+        self.shards[h].lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn get(&self, key: (u64, u32)) -> Option<Arc<Decoded>> {
+        let mut s = self.shard(key);
+        let i = *s.map.as_ref()?.get(&key)?;
+        let slot = &mut s.slots[i];
+        slot.used = true;
+        Some(Arc::clone(&slot.block))
+    }
+
+    fn put(&self, key: (u64, u32), block: Arc<Decoded>) {
+        let cap = match self.capacity.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => BLOCK_CACHE_BYTES,
+            c => c,
+        } / SHARDS;
+        let size = block.bytes();
+        if size > cap {
+            return;
+        }
+        let mut guard = self.shard(key);
+        let s = &mut *guard;
+        let map = s.map.get_or_insert_with(Default::default);
+        if map.contains_key(&key) {
+            return;
+        }
+        // Room made: the hand goes round, clearing the used and taking
+        // the first not used since.
+        while s.bytes + size > cap && !s.slots.is_empty() {
+            if s.hand >= s.slots.len() {
+                s.hand = 0;
+            }
+            if s.slots[s.hand].used {
+                s.slots[s.hand].used = false;
+                s.hand += 1;
+                continue;
+            }
+            let gone = s.slots.swap_remove(s.hand);
+            map.remove(&gone.key);
+            s.bytes -= gone.block.bytes();
+            if s.hand < s.slots.len() {
+                map.insert(s.slots[s.hand].key, s.hand);
+            }
+        }
+        s.bytes += size;
+        map.insert(key, s.slots.len());
+        s.slots.push(Slot {
+            key,
+            block,
+            used: false,
+        });
     }
 }
 
@@ -1049,7 +1288,15 @@ fn merge_runs(
     const STEP: u64 = 1 << 20;
     let srcs = runs
         .iter()
-        .map(|r| Src::Run(RunScan::new(r, Bound::Unbounded, Bound::Unbounded, false)))
+        .map(|r| {
+            Src::Run(RunScan::new(
+                r,
+                Bound::Unbounded,
+                Bound::Unbounded,
+                false,
+                false,
+            ))
+        })
         .collect();
     let ranges = runs.iter().map(|r| &r.ranges).collect();
     let mut m = Merged::new(srcs, ranges, false, keep);
@@ -1248,7 +1495,7 @@ impl Engine for LsmEngine {
             ranges.push(&m.ranges);
         }
         for r in self.levels.runs() {
-            srcs.push(Src::Run(RunScan::new(r, start, end, reverse)));
+            srcs.push(Src::Run(RunScan::new(r, start, end, reverse, true)));
             ranges.push(&r.ranges);
         }
         Ok(Box::new(Merged::new(srcs, ranges, reverse, false)))
@@ -1714,6 +1961,43 @@ mod tests {
         // Compactions reached the last level with two tiers above it.
         assert!(deep > 0, "never a last level with two tiers above");
         assert!(spills > 0, "never a spill");
+    }
+
+    /// The block cache keeps within its bytes, finds what it holds, and
+    /// gives a block used since the hand passed a second chance.
+    #[test]
+    fn the_block_cache_keeps_within_its_bytes() {
+        let c = BlockCache::new();
+        c.capacity
+            .store(SHARDS * 10_000, std::sync::atomic::Ordering::Relaxed);
+        let block = |n: usize| {
+            let mut data = Vec::new();
+            put_bytes(&mut data, &vec![b'k'; n]);
+            data.push(1);
+            Arc::new(Decoded::new(data).unwrap())
+        };
+        // One run's blocks: the shards they fall in each keep within
+        // 10 000 bytes.
+        for i in 0..2000u32 {
+            c.put((1, i), block(900));
+            if i % 3 == 0 {
+                // Used: kept over the others as the hand passes.
+                assert!(c.get((1, i)).is_some());
+            }
+        }
+        for s in &c.shards {
+            let s = s.lock().unwrap();
+            assert!(s.bytes <= 10_000, "a shard holds {}", s.bytes);
+            assert_eq!(s.map.as_ref().map_or(0, |m| m.len()), s.slots.len());
+            for (i, slot) in s.slots.iter().enumerate() {
+                assert_eq!(s.map.as_ref().unwrap()[&slot.key], i);
+            }
+        }
+        let held = (0..2000u32).filter(|&i| c.get((1, i)).is_some()).count();
+        assert!(held > 100 && held < 200, "{held} held");
+        let d = c.get((1, 1999)).expect("the last put is held");
+        assert_eq!(d.key(0), &[b'k'; 900][..]);
+        assert_eq!(d.value(0), None);
     }
 
     /// The filter: no false negatives, about 1 % false positives.

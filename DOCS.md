@@ -819,8 +819,15 @@ range tombstones or of the memtable set apart touches its keys), so a
 load is not held in memory whole.  A run's file is written in 1 MiB
 writes.  A flush takes the first free name `run-<branch>-<route>-<lsn>-<n>`
 (two checkpoints may share an LSN when only unlogged writes came
-between).  Left to L4c–L4e: a block cache, Bloom bits by level,
-compaction that drops versions vacuum would, sealed runs.
+between).  **The block cache** (L4c): a block read is decoded once —
+its bytes and each entry's key offset, searched in place — and kept in
+one cache for the process (`lsm::CACHE`: CLOCK in 16 shards, as large
+as the largest store's `StoreOptions::lsm_cache_bytes`, 64 MiB by
+default; `nucleus-kv` gives a quarter of `cache_bytes`).  Lookups and
+scans fill it, compactions read through it without filling it; blocks
+are keyed by a run's number in the process, so a run reopened after a
+crash is never served another's.  Left to L4d–L4e: compaction that
+drops versions vacuum would, sealed runs.
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -1449,7 +1456,7 @@ distributed implementation will provide (§F3).
 
 `Database` is the local implementation: `Database::open(dir, Options)` on
 the real file system, `open_on(platform, dir, Options)` on any platform;
-`checkpoint`, `vacuum`, `latest`, `pages` (the data file's pages and the free ones among them), `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used),
+`checkpoint`, `vacuum`, `latest`, `pages` (the data file's pages and the free ones among them), `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used; LSM tables' block cache takes a quarter of it again, filled only as they are read),
 `checkpoint_wal_bytes` (1 GiB — 64 MiB on 32-bit targets), `wal_segment_bytes` (16 MiB), `history`
 (0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
 before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
@@ -8081,6 +8088,9 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L4c, the LSM tree's block cache:** blocks
+  decoded once and searched in place, kept in a CLOCK cache for the
+  process (`StoreOptions::lsm_cache_bytes`); a lookup 3.3 → 2.5 µs.
 - **2026-11-18 — §M14.28 L4b, bulk loads into the LSM tree:** the
   memtable's ascending tail, spilled as a run past 64 MiB by the loader
   (`Engine::spill`); a run's writes gathered to 1 MiB; LZ4's speed-ups

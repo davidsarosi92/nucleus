@@ -96,6 +96,9 @@ pub struct StoreOptions {
     /// an LSM tree's compaction) writes at most, so it leaves the disk to
     /// the writers (PLAN.md §M14.28 L4a); 0: no limit.
     pub compaction_bytes_per_sec: u64,
+    /// The bytes the LSM trees' block cache holds at most (§M14.28 L4c:
+    /// one cache for the process, as large as the largest store asks).
+    pub lsm_cache_bytes: usize,
 }
 
 impl Default for StoreOptions {
@@ -106,6 +109,7 @@ impl Default for StoreOptions {
             page_key: None,
             previous_page_key: None,
             compaction_bytes_per_sec: 0,
+            lsm_cache_bytes: crate::lsm::BLOCK_CACHE_BYTES,
         }
     }
 }
@@ -680,6 +684,7 @@ impl Store {
         opts: &StoreOptions,
     ) -> Result<(Self, Recovery)> {
         let fs = platform.fs();
+        crate::lsm::set_block_cache_bytes(opts.lsm_cache_bytes);
         // One process at a time: the lock is held as long as the store.
         ensure_dir(fs, dir)?;
         let lock = fs.lock(&dir.join("LOCK")).map_err(|e| {

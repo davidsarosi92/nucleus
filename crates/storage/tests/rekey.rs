@@ -31,6 +31,7 @@ fn opts(key: PageCipher, previous: Option<PageCipher>) -> StoreOptions {
         page_key: Some(key),
         previous_page_key: previous,
         compaction_bytes_per_sec: 0,
+        lsm_cache_bytes: nucleus_storage::lsm::BLOCK_CACHE_BYTES,
     }
 }
 
