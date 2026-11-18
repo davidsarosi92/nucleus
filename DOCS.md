@@ -2468,7 +2468,7 @@ other columns wanted for the rows it keeps only (*late
 materialization*, `BatchSource::next_batch_tested`): `SELECT * … WHERE
 url LIKE '%x%'` builds its hundred columns for the few rows that match.
 It runs when the other columns cost — one of variable length, or four
-or more — and stops once more than half of a scan's first two batches
+or more, a decimal counting as two — and stops once more than half of a scan's first two batches
 pass; a filter that fails has its rows decoded whole, to fail or be
 decided a row at a time as before.  Otherwise a row table's batch decodes
 each row where the store keeps it (`KvChunks::visit`: the leaf held, the
@@ -2538,7 +2538,8 @@ node of a row's expression takes a small frame (480 bytes, not 1.7 kB).
 Text is a column of offsets and bytes
 (Arrow's layout), `char(n)` the same as stored (blank-padded), a vector
 of its own from row and column storage alike; dates and times their
-integers.  The kernels
+integers (a date compared with a timestamp as microseconds, the date at
+midnight, as a row's comparison has it).  The kernels
 (`nucleus-kernels`) are dense loops over every position of a batch,
 written so the compiler vectorizes them and compiled once per CPU level —
 AVX2 and AVX-512 on x86-64, chosen at run time by feature detection;
@@ -8175,6 +8176,12 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — a row table's scan, cheaper rows (issue #2):** a date
+  compared with a timestamp in a kernel, decimals of 64-bit mantissas
+  read from a row without a check each, a decimal counted as two
+  columns for late materialization, a scan's keys compared from the
+  end; TPC-H Q6 on row tables 159 → 138 ms (PostgreSQL 93.0; one
+  worker 921 → ~712).
 - **2026-11-18 — semi joins on a unique side look the outer table up
   (issue #1):** `optimizer::lookups`; TPC-H Q20 on row tables ~10 %
   faster (one worker 285 → 258 ms).

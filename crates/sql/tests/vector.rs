@@ -933,6 +933,58 @@ fn parallel_writes_agree() {
 /// lists, `substr` and `LIKE` over them; an uncorrelated subquery in a
 /// filter — the same in row and column tables at every batch size.
 #[test]
+fn dates_against_timestamps_and_decimals_agree() {
+    // A date compared with a timestamp (TPC-H Q6's `l_shipdate < date …
+    // + interval '1' year`) by the kernel, as microseconds; decimals read
+    // from rows whatever their mantissa's width and scale; a filter on
+    // three columns tested before the fourth (a decimal) is read.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(14)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 0);
+        s.execute(&format!(
+            "CREATE TABLE w (id INT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ, \
+               q NUMERIC(15,2), p NUMERIC, x NUMERIC(38,0)) WITH (storage = {storage}); \
+             INSERT INTO w SELECT i, \
+               CASE WHEN i % 17 = 0 THEN NULL ELSE DATE '1993-12-01' + i % 500 END, \
+               CASE WHEN i % 19 = 0 THEN NULL \
+                 ELSE TIMESTAMP '1994-01-01 00:00' + (i % 700) * interval '13 hours' END, \
+               TIMESTAMPTZ '1994-06-01 00:00+00' + (i % 300) * interval '1 day', \
+               CASE WHEN i % 23 = 0 THEN NULL ELSE (i % 5000) / 100.0 END, \
+               CASE WHEN i % 3 = 0 THEN (i % 97) / 7.0 ELSE (i % 89) / 4.0 END, \
+               CASE WHEN i % 7 = 0 THEN 1000000000000000000000000000000::numeric + i ELSE i END \
+             FROM generate_series(1, 4000) i"
+        ))
+        .unwrap();
+        let queries: Vec<String> = [
+            "SELECT count(*) FROM w WHERE d < DATE '1994-01-01' + interval '1' year",
+            "SELECT count(*) FROM w WHERE d >= TIMESTAMP '1994-03-01 12:00'",
+            "SELECT count(*) FROM w WHERE d = TIMESTAMP '1994-03-01 00:00'",
+            "SELECT count(*) FROM w WHERE d <> TIMESTAMP '1994-03-01 00:00'",
+            "SELECT count(*) FROM w WHERE TIMESTAMP '1994-03-01 12:00' > d",
+            "SELECT count(*) FROM w WHERE d <= tz",
+            "SELECT count(*) FROM w WHERE ts > d",
+            "SELECT count(*) FROM w WHERE ts < DATE '1994-04-01'",
+            "SELECT count(*) FROM w WHERE tz >= DATE '1994-09-01'",
+            "SELECT count(*), sum(p), sum(x) FROM w WHERE d >= DATE '1994-01-01' \
+               AND d < DATE '1994-01-01' + interval '1' year AND q BETWEEN 5 AND 30",
+            "SELECT sum(p * q) FROM w WHERE d >= DATE '1994-01-01' \
+               AND d < DATE '1994-01-01' + interval '1' year \
+               AND q BETWEEN 0.06 - 0.01 AND 30 + 0.01 AND id < 3000",
+            "SELECT id, p, x FROM w WHERE q < 2 ORDER BY id",
+        ]
+        .iter()
+        .map(|q| q.to_string())
+        .collect();
+        assert_eq!(agree(&db, &queries), 0, "{storage}");
+    }
+}
+
+#[test]
 fn char_text_in_lists_and_substr_agree() {
     for storage in ["row", "column"] {
         let db = Database::open_on(

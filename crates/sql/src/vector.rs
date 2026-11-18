@@ -1432,21 +1432,43 @@ fn in_list(
     Ok(Rc::try_unwrap(out).unwrap_or_else(|v| (*v).clone()))
 }
 
-/// `x op y` for a date / time vector `x` and a value of its kind.
+/// `x op y` for a date / time vector `x` and a value of its kind — or a
+/// date against a timestamp, as microseconds (the date at midnight), as
+/// [`Value::sql_cmp`] compares them (TPC-H Q6's `l_shipdate < date
+/// '1994-01-01' + interval '1' year`).
 fn cmp_time(op: BinaryOp, x: &Vector, y: &Vector, len: usize) -> Option<Vector> {
     let Vector::Time(kind, d, xn) = x else {
         return None;
     };
-    let (rhs, yn) = match y {
-        Vector::Time(k, e, yn) if k == kind => (Rhs::Col(&e[..]), yn.as_deref()),
-        Vector::Const(v) => match TimeKind::of(v) {
-            Some((k, c)) if k == *kind => (Rhs::Const(c), None),
-            _ => return None,
-        },
+    let (other, rhs, yn) = match y {
+        Vector::Time(k, e, yn) => (*k, Rhs::Col(&e[..]), yn.as_deref()),
+        Vector::Const(v) => {
+            let (k, c) = TimeKind::of(v)?;
+            (k, Rhs::Const(c), None)
+        }
         _ => return None,
     };
     let mut out = vec![false; len];
-    kernels::cmp_i64(cmp_of(op), &d[..len], rhs, &mut out);
+    if other == *kind {
+        kernels::cmp_i64(cmp_of(op), &d[..len], rhs, &mut out);
+    } else if *kind != TimeKind::Time && other != TimeKind::Time {
+        let micros = |k: TimeKind, v: i64| match k {
+            TimeKind::Date => crate::datetime::date_to_ts(v as i32),
+            _ => v,
+        };
+        let a: Vec<i64> = d[..len].iter().map(|&v| micros(*kind, v)).collect();
+        match rhs {
+            Rhs::Const(c) => {
+                kernels::cmp_i64(cmp_of(op), &a, Rhs::Const(micros(other, c)), &mut out)
+            }
+            Rhs::Col(e) => {
+                let b: Vec<i64> = e[..len].iter().map(|&v| micros(other, v)).collect();
+                kernels::cmp_i64(cmp_of(op), &a, Rhs::Col(&b), &mut out)
+            }
+        }
+    } else {
+        return None;
+    }
     Some(Vector::Bool(out, either_null(xn.as_deref(), yn, len)))
 }
 
@@ -2137,18 +2159,18 @@ impl crate::storage::BatchSource for RowBatches<'_> {
         let first_of = |c: usize| first.get(c).copied().unwrap_or(false);
         // Only when what it spares costs: a value of variable length (or
         // looked up), or a few columns — a number or two decoded costs
-        // less than a second look at the rows kept.
+        // less than a second look at the rows kept (a decimal counts as
+        // two: TPC-H Q6's one, after its filter's three, is decoded with
+        // them; Q14's and Q15's integer and two decimals after the test).
         let (rest, costly) = self
             .kinds
             .iter()
             .enumerate()
             .filter(|&(c, k)| *k != Kind::Skip && !first_of(c))
             .fold((0, false), |(n, costly), (_, k)| {
-                let varying = matches!(
-                    k,
-                    Kind::Text | Kind::Char | Kind::Values | Kind::Enum | Kind::Numeric
-                );
-                (n + 1, costly || varying)
+                let varying = matches!(k, Kind::Text | Kind::Char | Kind::Values | Kind::Enum);
+                let weight = if *k == Kind::Numeric { 2 } else { 1 };
+                (n + weight, costly || varying)
             });
         if !costly && rest < LATE_COLUMNS {
             return Ok(self.next_batch(max)?.map(|b| {
@@ -2458,6 +2480,18 @@ fn decode_into(
                 let hi = r.u64().map_err(bad)?;
                 let m = (i128::from(hi as i64) << 64) | i128::from(lo);
                 let scale = r.u8().map_err(bad)?;
+                // A mantissa of 64 bits at the column's scale goes in as it
+                // is (checked when the row was written; a scale in range).
+                if let Builder::Dec(s, d, nulls) = col
+                    && hi as i64 == (lo as i64) >> 63
+                    && u32::from(scale) <= crate::decimal::MAX_DIGITS
+                    && s.is_none_or(|s| s == u32::from(scale))
+                {
+                    *s = Some(u32::from(scale));
+                    d.push(lo as i64);
+                    nulls.push(false);
+                    continue;
+                }
                 let d = crate::decimal::Decimal::new(m, u32::from(scale)).map_err(bad)?;
                 col.push_decimal(d);
             }

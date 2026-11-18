@@ -3428,7 +3428,7 @@ impl Scan<'_> {
             }
             let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
             let escaped = &k[..n - 10];
-            if !(prev.len() == n && prev.starts_with(escaped)) {
+            if !(prev.len() == n && same_from_end(&prev[..n - 10], escaped)) {
                 taken = false;
             }
             let seen = taken;
@@ -4128,6 +4128,25 @@ impl Iterator for Scan<'_> {
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+/// Whether `a` and `b` are the same bytes, compared from the end eight at a
+/// time: a scan's neighbouring keys differ last (a table's rows by their
+/// keys), where `memcmp` from the start reads the prefix they share first.
+#[inline]
+fn same_from_end(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut n = a.len();
+    while n >= 8 {
+        let word = |s: &[u8]| u64::from_ne_bytes(s[n - 8..n].try_into().expect("eight bytes"));
+        if word(a) != word(b) {
+            return false;
+        }
+        n -= 8;
+    }
+    a[..n] == b[..n]
 }
 
 #[cfg(test)]

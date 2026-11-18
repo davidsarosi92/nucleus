@@ -11473,6 +11473,43 @@ simple parameterization, MySQL's former query cache — what not to do).
   `lineitem`'s primary B+tree where PostgreSQL's TID reads one heap
   page; the shared root's latch and counters cost ~7 % of the CPU at
   ten workers.  Issue #1 stays open for it.
+  *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
+  921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
+  with the binaries alternated in both orders:
+  1. *A date against a timestamp in a kernel.*  `l_shipdate < date
+     '1994-01-01' + interval '1' year` compares a date with a timestamp
+     (PostgreSQL's `date + interval` is one), which no kernel took: a
+     `Value` a row, ~10 % of the query.  `cmp_time` now takes a date
+     against a timestamp (either kind) as microseconds, the date at
+     midnight — what `Value::sql_cmp` does.  Q6 155 → 140 ms (ten
+     workers), 921 → 840 (one).
+  2. *Decimals read as they are.*  A row's decimal went through
+     `Decimal::new` (its range checked) before its mantissa was taken;
+     a 64-bit mantissa at the column's scale now goes into the vector
+     as it is (checked when written).  840 → 793 ms on one worker.
+  3. *Late materialization's choice.*  Q6's one other column, a decimal
+     (`l_extendedprice`), sent its rows the late way — copied into a
+     chunk to be decoded after the test; a decimal now counts as two
+     columns against `LATE_COLUMNS` (four): Q6's is decoded with its
+     filter's three in the page (127 against 138 ms; the copy was 17 %
+     of the time), Q14's and Q15's integer and two decimals stay late
+     (counted as one each they were 3–6 % slower, as R4 step 7 found).
+  4. *Keys compared from the end.*  The leaf walk tells a key's older
+     versions by comparing each key with the one before (`memcmp`, 6 %
+     of the time: neighbouring row keys share all but their last
+     bytes); compared from the end eight bytes at a time, Q6 −3–4 %.
+  Tried, not taken: a table of each tag's width to pass a row's values
+  (`skip_value`) and `#[inline]` on the encoding's reader — each 5–7 %
+  slower: rows of one layout make the `match`'s branches predicted, so
+  the CPU runs ahead through them, where the table's loads chain each
+  value's offset to the one before.  By §M14.31's method (SF 1, row
+  tables, `bench/tpch.py --runs 3`): Q6 159 → 138 ms against
+  PostgreSQL's 93.0, 1.70× → 1.48×; the geometric mean 0.66× → 0.64×,
+  every answer the same (22 of 22).  One worker ~712 ms,
+  ~120 ns a row: decoding the four columns is 55 % of it, the leaf walk
+  23 %, the filter 15 %.  What is left is issue #2's other directions
+  (a fixed-width column's offset cached, PostgreSQL's `attcacheoff`;
+  less per-entry work in the leaf walk); the issue stays open for them.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
