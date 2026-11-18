@@ -135,6 +135,14 @@ impl Aead {
         }
     }
 
+    /// The keys for `nonce`, derived once ([`Derived`]).
+    pub(crate) fn derive(&self, nonce: &[u8; 12]) -> Derived {
+        match &self.kind {
+            Kind::ChaCha(key) => Derived::ChaCha(siv::Derived::new(key, nonce)),
+            Kind::Aes(key) => Derived::Aes(Box::new(aes::Derived::new(key, nonce))),
+        }
+    }
+
     /// Opens in place what [`seal_in_place`](Self::seal_in_place) sealed:
     /// `false`, `data` zeroed, if it is not what was sealed.
     pub fn open_in_place(
@@ -147,6 +155,34 @@ impl Aead {
         match &self.kind {
             Kind::ChaCha(key) => siv::open_in_place(key, nonce, aad, data, tag),
             Kind::Aes(key) => aes::open_in_place(key, nonce, aad, data, tag),
+        }
+    }
+}
+
+/// An [`Aead`]'s keys for one nonce, derived once: messages sealed
+/// under that nonce again — told apart by their associated data — skip
+/// the derivation (a sealed file's chunks, [`crate::sealed`]).  Sealing
+/// under it gives the bytes [`Aead::seal_in_place`] gives with the nonce.
+pub(crate) enum Derived {
+    ChaCha(siv::Derived),
+    Aes(Box<aes::Derived>),
+}
+
+impl Derived {
+    /// Seals `data` in place; its tag.
+    pub(crate) fn seal_in_place(&self, aad: &[u8], data: &mut [u8]) -> [u8; 16] {
+        match self {
+            Derived::ChaCha(d) => d.seal_in_place(aad, data),
+            Derived::Aes(d) => d.seal_in_place(aad, data),
+        }
+    }
+
+    /// Opens in place what [`seal_in_place`](Self::seal_in_place) sealed:
+    /// `false`, `data` zeroed, if it is not what was sealed.
+    pub(crate) fn open_in_place(&self, aad: &[u8], data: &mut [u8], tag: &[u8; 16]) -> bool {
+        match self {
+            Derived::ChaCha(d) => d.open_in_place(aad, data, tag),
+            Derived::Aes(d) => d.open_in_place(aad, data, tag),
         }
     }
 }

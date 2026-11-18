@@ -93,6 +93,48 @@ fn crypt(k: &Keys, t: &[u8; TAG_LEN], data: &mut [u8]) {
     chacha20(&k.enc, counter, &nonce, data);
 }
 
+/// The keys derived from a key and one nonce (step 1), derived once for
+/// many messages sealed under that nonce — each told apart by its
+/// associated data (a sealed file's chunks, PLAN.md §M14.28 issue #3).
+/// Sealing under it gives the bytes [`seal_in_place`] gives under the key
+/// and the nonce.  Zeroed when dropped.
+pub struct Derived {
+    k: Keys,
+}
+
+impl Derived {
+    /// The keys of `key` for `nonce`.
+    pub fn new(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN]) -> Self {
+        Self {
+            k: keys(key, nonce),
+        }
+    }
+
+    /// Seals `data` in place under the nonce: its tag.
+    pub fn seal_in_place(&self, aad: &[u8], data: &mut [u8]) -> [u8; TAG_LEN] {
+        let t = tag(&self.k, aad, data);
+        crypt(&self.k, &t, data);
+        t
+    }
+
+    /// Opens in place what [`seal_in_place`](Self::seal_in_place) sealed:
+    /// `false`, `data` zeroed, if it is not what was sealed.
+    pub fn open_in_place(&self, aad: &[u8], data: &mut [u8], t: &[u8; TAG_LEN]) -> bool {
+        crypt(&self.k, t, data);
+        if crate::constant_time_eq(&tag(&self.k, aad, data), t) {
+            return true;
+        }
+        data.fill(0);
+        false
+    }
+}
+
+impl std::fmt::Debug for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("siv::Derived(..)")
+    }
+}
+
 /// Seals `data` in place under `key` and `nonce`, `aad` authenticated
 /// beside it: `data` becomes the ciphertext; the tag is returned.
 pub fn seal_in_place(
@@ -101,10 +143,7 @@ pub fn seal_in_place(
     aad: &[u8],
     data: &mut [u8],
 ) -> [u8; TAG_LEN] {
-    let k = keys(key, nonce);
-    let t = tag(&k, aad, data);
-    crypt(&k, &t, data);
-    t
+    Derived::new(key, nonce).seal_in_place(aad, data)
 }
 
 /// Opens in place what [`seal_in_place`] sealed: `true` with `data` the
@@ -117,13 +156,7 @@ pub fn open_in_place(
     data: &mut [u8],
     t: &[u8; TAG_LEN],
 ) -> bool {
-    let k = keys(key, nonce);
-    crypt(&k, t, data);
-    if crate::constant_time_eq(&tag(&k, aad, data), t) {
-        return true;
-    }
-    data.fill(0);
-    false
+    Derived::new(key, nonce).open_in_place(aad, data, t)
 }
 
 #[cfg(test)]

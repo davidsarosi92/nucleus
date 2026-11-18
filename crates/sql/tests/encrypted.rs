@@ -125,7 +125,9 @@ fn values_written_through_sql_are_in_no_file_of_an_encrypted_database() {
             }
             assert!(
                 hits.iter()
-                    .any(|h| h.starts_with(NEEDLES[4]) && h.contains("/engines/run-")),
+                    // Windows' separators too.
+                    .any(|h| h.starts_with(NEEDLES[4])
+                        && h.replace('\\', "/").contains("/engines/run-")),
                 "the LSM tree's runs: {hits:#?}"
             );
         }

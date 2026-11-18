@@ -168,7 +168,13 @@ fn run(kind: Option<EngineKind>, sealed: bool, small: bool) {
     if sealed {
         name.push_str(", encrypted");
     }
-    let dir = std::env::temp_dir().join(format!("nucleus-lsm-wamp-{}", std::process::id()));
+    // A directory a run: the tests of this file may run at once.
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nucleus-lsm-wamp-{}-{}",
+        std::process::id(),
+        RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     let p = Arc::new(Plat(CountingFs {
         inner: RealPlatform::new().unwrap(),

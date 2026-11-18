@@ -7080,11 +7080,15 @@ A table of the LSM engine lives in its runs, files of their own: the
 engines' files go through a file system that seals them
 (`nucleus_storage::sealed`, §M14.28 L4e) — a 32-byte header (magic,
 the key's generation, the cipher, a random file nonce, the chunk size),
-then 4 KiB chunks each sealed under the database key by the pages'
-cipher, its tag first: the file's nonce and the chunk's index the
-nonce, the header, the index and whether it is the last chunk the
-associated data (the STREAM construction), so a file cut short at a
-chunk's end, a chunk moved or a header changed does not open.  A file
+then 1 KiB chunks each sealed under the database key by the pages'
+cipher, its tag first: one nonce for the file's chunks (its random nonce
+and `0xFFFF_FFFF`, the message keys derived from it once a file —
+`aes::Derived`, `siv::Derived`), the header, the chunk's index and
+whether it is the last chunk the associated data (the STREAM
+construction), so a file cut short at a chunk's end, a chunk moved or a
+header changed does not open.  A first-version file (`ncseal\0\x01`,
+4 KiB chunks, the file's nonce and the chunk's index each chunk's
+nonce) is read as it was written.  A file
 is written once, in order (its last chunk sealed again as it grows),
 and read anywhere — a read opens the chunks it spans, read at once.
 Not caught: a whole file put in place of another of the same database.
@@ -8165,6 +8169,12 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — sealed engine files, keys derived once (issue #3):**
+  one nonce a file, its message keys derived once, 1 KiB chunks
+  (format version 2; version 1 read); a lookup on an encrypted LSM
+  table 5.3 → 4.0 µs (in the clear 2.4).  Test fixes for CI: the
+  `lsm_wamp` runs in directories of their own, `encrypted.rs`'s path
+  check with Windows' separators.
 - **2026-11-18 — short range scans:** `Access::serves` (a filter the
   key range applies keeps a `LIMIT`ed scan on one thread) and KV chunks
   growing from 64 entries (`nucleus_kv::FIRST_CHUNK`); YCSB E's scans on

@@ -161,6 +161,92 @@ pub fn open_with(
     soft::open(&key.rk, nonce, aad, data, tag)
 }
 
+/// The message keys RFC 8452 derives from a key and one nonce (§4: the
+/// authentication key `H`, the encryption key's round keys), derived once
+/// for many messages sealed under that nonce — each told apart by its
+/// associated data (PLAN.md §M14.28, issue #3: a sealed file's chunks).
+/// Sealing under it gives the bytes [`seal_in_place`] gives under the key
+/// and the nonce; it only skips the six blocks and the key schedule a
+/// message.  Zeroed when dropped.
+pub struct Derived {
+    h: u128,
+    enc: [u128; 15],
+    nonce: [u8; NONCE_LEN],
+    hw: bool,
+}
+
+impl Derived {
+    /// The keys of `key` for `nonce`, by the instructions where the CPU
+    /// has them.
+    pub fn new(key: &Key, nonce: &[u8; NONCE_LEN]) -> Self {
+        Self::with(hardware(), key, nonce)
+    }
+
+    /// [`new`](Self::new) by the instructions (`hw`, which the CPU must
+    /// have) or the portable copy.
+    #[doc(hidden)]
+    pub fn with(hw: bool, key: &Key, nonce: &[u8; NONCE_LEN]) -> Self {
+        assert!(!hw || hardware(), "the CPU lacks AES instructions");
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        #[allow(unsafe_code)]
+        if hw {
+            // SAFETY: the CPU has the instructions (`hardware`, checked above).
+            let (h, enc) = unsafe { hard::derive(&key.rk, nonce) };
+            return Self {
+                h,
+                enc,
+                nonce: *nonce,
+                hw,
+            };
+        }
+        let (h, enc) = soft::derive(&key.rk, nonce);
+        Self {
+            h,
+            enc,
+            nonce: *nonce,
+            hw: false,
+        }
+    }
+
+    /// Seals `data` in place under the nonce: its tag.
+    pub fn seal_in_place(&self, aad: &[u8], data: &mut [u8]) -> [u8; TAG_LEN] {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        #[allow(unsafe_code)]
+        if self.hw {
+            // SAFETY: made with the instructions only where the CPU has them.
+            return unsafe { hard::seal_derived(self.h, &self.enc, &self.nonce, aad, data) };
+        }
+        soft::seal_derived(self.h, &self.enc, &self.nonce, aad, data)
+    }
+
+    /// Opens in place what [`seal_in_place`](Self::seal_in_place) sealed:
+    /// `false`, `data` zeroed, if it is not what was sealed.
+    pub fn open_in_place(&self, aad: &[u8], data: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        #[allow(unsafe_code)]
+        if self.hw {
+            // SAFETY: made with the instructions only where the CPU has them.
+            return unsafe { hard::open_derived(self.h, &self.enc, &self.nonce, aad, data, tag) };
+        }
+        soft::open_derived(self.h, &self.enc, &self.nonce, aad, data, tag)
+    }
+}
+
+impl std::fmt::Debug for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("aes::Derived(..)")
+    }
+}
+
+impl Drop for Derived {
+    fn drop(&mut self) {
+        self.h = 0;
+        self.enc.fill(0);
+        std::hint::black_box(&self.h);
+        std::hint::black_box(&self.enc);
+    }
+}
+
 /// Equal in time independent of where they differ.
 fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
     let mut d = 0u8;
@@ -213,7 +299,7 @@ macro_rules! construction {
         }
 
         $(#[$a])*
-        fn derive(rk: &[u128; 15], nonce: &[u8; 12]) -> (u128, [u128; 15]) {
+        pub(super) fn derive(rk: &[u128; 15], nonce: &[u8; 12]) -> (u128, [u128; 15]) {
             let mut n = [0u8; 16];
             n[4..].copy_from_slice(nonce);
             let base = u128::from_le_bytes(n);
@@ -256,8 +342,20 @@ macro_rules! construction {
             data: &mut [u8],
         ) -> [u8; 16] {
             let (h, enc) = derive(rk, nonce);
-            let tag = tag_of(h, &enc, nonce, aad, data);
-            ctr_xor(&enc, tag | (1u128 << 127), data);
+            seal_derived(h, &enc, nonce, aad, data)
+        }
+
+        /// [`seal`] under the keys [`derive`] gave for `nonce`.
+        $(#[$a])*
+        pub(super) fn seal_derived(
+            h: u128,
+            enc: &[u128; 15],
+            nonce: &[u8; 12],
+            aad: &[u8],
+            data: &mut [u8],
+        ) -> [u8; 16] {
+            let tag = tag_of(h, enc, nonce, aad, data);
+            ctr_xor(enc, tag | (1u128 << 127), data);
             tag.to_le_bytes()
         }
 
@@ -270,9 +368,22 @@ macro_rules! construction {
             tag: &[u8; 16],
         ) -> bool {
             let (h, enc) = derive(rk, nonce);
+            open_derived(h, &enc, nonce, aad, data, tag)
+        }
+
+        /// [`open`] under the keys [`derive`] gave for `nonce`.
+        $(#[$a])*
+        pub(super) fn open_derived(
+            h: u128,
+            enc: &[u128; 15],
+            nonce: &[u8; 12],
+            aad: &[u8],
+            data: &mut [u8],
+            tag: &[u8; 16],
+        ) -> bool {
             let t = u128::from_le_bytes(*tag);
-            ctr_xor(&enc, t | (1u128 << 127), data);
-            if super::ct_eq(&tag_of(h, &enc, nonce, aad, data).to_le_bytes(), tag) {
+            ctr_xor(enc, t | (1u128 << 127), data);
+            if super::ct_eq(&tag_of(h, enc, nonce, aad, data).to_le_bytes(), tag) {
                 return true;
             }
             data.fill(0);
@@ -950,6 +1061,36 @@ mod tests {
             // SAFETY: detected.
             unsafe { hard::ctr_xor(&rk, first, &mut h) };
             assert_eq!(h, a);
+        }
+    }
+
+    /// Keys derived once seal and open as the key and the nonce do, in
+    /// every copy; a message under another nonce does not open.
+    #[test]
+    fn derived_keys_seal_as_the_key_does() {
+        let key = Key::new(&[7; 32]);
+        let nonce = [3u8; 12];
+        for hw in copies() {
+            let d = Derived::with(hw, &key, &nonce);
+            for (aad, len) in [
+                (&b""[..], 0),
+                (b"chunk 1", 17),
+                (b"chunk 2", 1024),
+                (b"x", 4096),
+            ] {
+                let mut a = sample(len);
+                let mut b = sample(len);
+                let ta = seal_with(hw, &key, &nonce, aad, &mut a);
+                let tb = d.seal_in_place(aad, &mut b);
+                assert_eq!((ta, &a), (tb, &b));
+                assert!(d.open_in_place(aad, &mut b, &tb));
+                assert_eq!(b, sample(len));
+                assert!(open_with(hw, &key, &nonce, aad, &mut a, &ta));
+                let mut sealed = sample(len);
+                let tag = d.seal_in_place(aad, &mut sealed);
+                let other = Derived::with(hw, &key, &[4; 12]);
+                assert!(!other.open_in_place(aad, &mut sealed, &tag));
+            }
         }
     }
 

@@ -4233,12 +4233,25 @@ recovery time after a crash mid-compaction.
     and AES-256-GCM-SIV costs 0.28 µs a message whatever its length
     (RFC 8452's key derivation: six blocks and a key schedule a nonce)
     plus 0.17 µs a KiB; 1 KiB chunks measured the same (5.2 µs).
-    *Not taken yet*: deriving a file's keys once (one nonce a file, the
-    chunk's index in the associated data — RFC 8452 allows a nonce
-    again, leaking only equal messages, which the index rules out) would
-    drop the 0.28 µs a chunk and let chunks shrink to ~1 KiB: a lookup
-    ~4 µs.  It needs a derived-key form of both ciphers'
-    (`nucleus_kernels::aes`, `nucleus_crypto::siv`): issue #3.
+    *Done (2026-11-18), issue #3*: a file's keys derived once — one
+    nonce a file (its random nonce and `0xFFFF_FFFF`), the chunk's index
+    in the associated data as it was — and chunks of 1 KiB.  Both
+    ciphers have a derived-key form (`nucleus_kernels::aes::Derived`,
+    `nucleus_crypto::siv::Derived`, sealing the bytes the key and the
+    nonce seal: tested equal, every copy); the file format's version 2
+    (`ncseal\0\x02`), a first-version file (a nonce a chunk) still read.
+    *Why it is sound:* the ciphers are deterministic and misuse
+    resistant — under one nonce they leak only equal (associated data,
+    message) pairs, and the index rules those out; two chunks share key
+    stream only if their tags (127 bits that count) come within 64
+    counter blocks of each other: for a file's at most 2^32 chunks, a
+    chance under 2^-56.  *Prior art:* RFC 8452 §4 (the derivation a
+    nonce), Tink's streaming AEAD (a key derived once a stream, the
+    segment's index in its nonce).  *Measured* (`lsm_wamp` `…_sealed`,
+    A/B against the binary before, same session): a lookup 5.2–5.8 →
+    4.0–4.1 µs (in the clear 2.4), of a key not there 0.15–0.18 → 0.13
+    µs, load 5.3–5.7 → 5.1–5.4 s, the files +1 % (a tag a KiB: 515 →
+    520 MiB).  512-byte chunks: 5.2 µs (not taken).
 - **L5 — the verdict ✅** (2026-11-18): the benchmarks above; where the
   LSM is recommended, recorded here with the numbers.  *Measured* on
   this machine (APFS, Apple M2 Pro; the LSM tree's block cache a quarter
@@ -4331,8 +4344,8 @@ recovery time after a crash mid-compaction.
   batch, not an entry — `count after writes`); deletes and short scans
   (`delete 10%`, YCSB E: the merge's per-scan setup over every run, and
   a seek in each); cold reads (keep blocks compressed in the OS cache,
-  decompress into the block cache in bigger pieces); the sealed files'
-  key derivation (issue #3).
+  decompress into the block cache in bigger pieces).  (The sealed
+  files' key derivation, issue #3: done 2026-11-18, L4e.)
 
 **Done when:** the study is written here — the workloads and their
 measured amplifications, the design behind the KV contract, the

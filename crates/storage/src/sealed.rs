@@ -9,29 +9,35 @@
 //! each on its own, so a read of a block opens the one or two chunks it
 //! falls in — the STREAM construction of online authenticated encryption
 //! (Hoang, Reyhanitabar, Rogaway, Vizár, CRYPTO 2015; Tink's streaming
-//! AEAD): a chunk's place is its nonce, and whether it is the last is
-//! in its associated data, so a file cut short at a chunk's end does not
-//! open (its new last chunk was sealed as not last), nor does a chunk
-//! moved within it.
+//! AEAD): a chunk's place and whether it is the last are in its
+//! associated data, so a file cut short at a chunk's end does not open
+//! (its new last chunk was sealed as not last), nor does a chunk moved
+//! within it.
 //!
 //! On disk a sealed file is
 //!
 //! | Offset | Size | Field |
 //! |-------:|-----:|-------|
-//! | 0  | 8  | magic `ncseal\0\x01` |
+//! | 0  | 8  | magic `ncseal\0\x02` (`\x01`: the first version) |
 //! | 8  | 4  | the key's generation (K3f), little-endian |
 //! | 12 | 4  | the cipher's code |
-//! | 16 | 8  | the file's nonce: random, the first half of each chunk's |
+//! | 16 | 8  | the file's nonce: random |
 //! | 24 | 4  | the chunk's size |
 //! | 28 | 4  | zero |
 //! | 32 | …  | the chunks: each its 16-byte tag, then its bytes encrypted |
 //!
 //! every chunk the chunk's size but the last, which holds 0 to that
-//! (an empty file is one empty chunk).  A chunk's nonce is the file's
-//! nonce and its index; its associated data the header, its index and
-//! whether it is the last.  The ciphers are the pages' — deterministic
-//! and misuse resistant —, so a chunk written again under its nonce (the
-//! last, as a file grows) gives nothing away but that it is the same.
+//! (an empty file is one empty chunk).  Every chunk is sealed under one
+//! nonce, the file's nonce and `0xFFFF_FFFF`; a chunk's associated data
+//! is the header, its index and whether it is the last.  The ciphers are
+//! the pages' — deterministic and misuse resistant —, so the chunks
+//! sharing a nonce give nothing away but where two are the same (the
+//! same index, bytes and lastness: the last chunk written again as a file
+//! grows), and the message keys a nonce derives (RFC 8452 §4: six AES
+//! blocks and a key schedule, ~0.28 µs) are derived once a file, not
+//! once a chunk (issue #3).  A first-version file (`\x01`) has a nonce a
+//! chunk — the file's nonce and the chunk's index — and is read as it
+//! was written.
 //!
 //! Not caught by the seal: a whole file put in place of another of the
 //! same database, as a whole data file put back as it was.
@@ -49,16 +55,29 @@ use std::sync::{Arc, Mutex, RwLock};
 use nucleus_platform::{File, FileSystem, Lock, OpenMode, Platform};
 
 use crate::PageCipher;
+use crate::cipher::Derived;
 
-const MAGIC: &[u8; 8] = b"ncseal\0\x01";
+const MAGIC: &[u8; 8] = b"ncseal\0\x02";
+/// The first version's magic: a nonce a chunk.
+const MAGIC_V1: &[u8; 8] = b"ncseal\0\x01";
 /// The header's size.
 const HEADER: u64 = 32;
 /// A new file's chunk's bytes (but the last's); a file's own is in its
 /// header.
-pub const CHUNK: usize = 4096;
+pub const CHUNK: usize = 1024;
 /// A chunk of [`CHUNK`] bytes on disk: its tag and its bytes.
 #[cfg(test)]
 const SEALED: u64 = CHUNK as u64 + 16;
+
+/// A file's one nonce (its header's version 2): the file's random nonce
+/// and `0xFFFF_FFFF` — no first-version chunk's nonce (whose last four
+/// bytes are its index, under 2^32 − 1 chunks: a header's nonce is fresh
+/// anyway).
+fn file_nonce(header: &[u8; HEADER as usize]) -> [u8; 12] {
+    let mut n = [0xFF; 12];
+    n[..8].copy_from_slice(&header[16..24]);
+    n
+}
 
 fn invalid(path: Option<&Path>, what: &str) -> io::Error {
     let msg = match path {
@@ -128,7 +147,7 @@ impl SealedFs {
         let mut h = [0u8; HEADER as usize];
         f.read_exact_at(&mut h, 0)
             .map_err(|_| invalid(Some(path), "not a sealed file"))?;
-        if &h[..8] != MAGIC {
+        if &h[..8] != MAGIC && &h[..8] != MAGIC_V1 {
             return Err(invalid(Some(path), "not a sealed file"));
         }
         Ok(u32::from_le_bytes(h[8..12].try_into().expect("4")))
@@ -245,6 +264,9 @@ struct SealedFile {
     inner: Box<dyn File>,
     /// The key it is sealed under, alone.
     key: PageCipher,
+    /// The keys of its one nonce, derived once; `None` in a first-version
+    /// file (a nonce a chunk).
+    derived: Option<Derived>,
     header: [u8; HEADER as usize],
     /// Its chunks' size (but the last's).
     chunk: u64,
@@ -281,9 +303,11 @@ impl SealedFile {
             header[16..24].copy_from_slice(&nonce.to_le_bytes());
             header[24..28].copy_from_slice(&(CHUNK as u32).to_le_bytes());
             inner.write_all_at(&header, 0)?;
+            let derived = Some(key.aead().derive(&file_nonce(&header)));
             let f = Self {
                 inner,
                 key,
+                derived,
                 header,
                 chunk: CHUNK as u64,
                 state: Mutex::new(State {
@@ -300,7 +324,7 @@ impl SealedFile {
             .read_exact_at(&mut header, 0)
             .map_err(|_| invalid(Some(path), "not a sealed file (in the clear?)"))?;
         let chunk = u64::from(u32::from_le_bytes(header[24..28].try_into().expect("4")));
-        if &header[..8] != MAGIC
+        if (&header[..8] != MAGIC && &header[..8] != MAGIC_V1)
             || header[28..] != [0; 4]
             || !chunk.is_power_of_two()
             || !(512..=1 << 20).contains(&chunk)
@@ -322,9 +346,11 @@ impl SealedFile {
             return Err(invalid(Some(path), "sealed with another cipher"));
         }
         let len = plain_len(disk, chunk).ok_or_else(|| invalid(Some(path), "cut short"))?;
+        let derived = (&header[..8] == MAGIC).then(|| key.aead().derive(&file_nonce(&header)));
         Ok(Self {
             inner,
             key,
+            derived,
             header,
             chunk,
             state: Mutex::new(State {
@@ -368,7 +394,10 @@ impl SealedFile {
         let at = out.len();
         out.extend_from_slice(&[0; 16]);
         out.extend_from_slice(bytes);
-        let tag = self.key.aead().seal_in_place(&n, &a, &mut out[at + 16..]);
+        let tag = match &self.derived {
+            Some(d) => d.seal_in_place(&a, &mut out[at + 16..]),
+            None => self.key.aead().seal_in_place(&n, &a, &mut out[at + 16..]),
+        };
         out[at..at + 16].copy_from_slice(&tag);
         Ok(())
     }
@@ -402,11 +431,14 @@ impl SealedFile {
             let body = at + 16..(at + sealed as usize).min(buf.len());
             let tag: [u8; 16] = buf[at..at + 16].try_into().expect("16");
             let (n, a) = self.nonce_aad(i, i + 1 == chunks)?;
-            if !self
-                .key
-                .aead()
-                .open_in_place(&n, &a, &mut buf[body.clone()], &tag)
-            {
+            let opened = match &self.derived {
+                Some(d) => d.open_in_place(&a, &mut buf[body.clone()], &tag),
+                None => self
+                    .key
+                    .aead()
+                    .open_in_place(&n, &a, &mut buf[body.clone()], &tag),
+            };
+            if !opened {
                 return Err(invalid(
                     None,
                     "a sealed file's chunk does not open: damaged, moved, or sealed under another key",
@@ -650,6 +682,44 @@ mod tests {
         assert!(read(&other, Path::new("/e/good")).is_err(), "another key");
         assert!(read(&fs, &put("clear", &data)).is_err(), "in the clear");
         assert_eq!(read(&fs, Path::new("/e/good")).unwrap(), data);
+    }
+
+    /// A first-version file — a nonce a chunk, the file's and the
+    /// chunk's index — made by hand, still opens; with the second
+    /// version's magic it does not.
+    #[test]
+    fn first_version_files_open() {
+        let p = platform();
+        let raw = p.fs();
+        raw.create_dir_all(Path::new("/e")).unwrap();
+        let key = PageCipher::new([3; 32]);
+        let fs = SealedFs::new(Arc::clone(&p), Some(key.clone()));
+        let data = bytes(2 * CHUNK + 5, 2);
+        let mut header = [0u8; HEADER as usize];
+        header[..8].copy_from_slice(MAGIC_V1);
+        header[8..12].copy_from_slice(&key.generation().to_le_bytes());
+        header[12..16].copy_from_slice(&key.code().to_le_bytes());
+        header[16..24].copy_from_slice(&42u64.to_le_bytes());
+        header[24..28].copy_from_slice(&(CHUNK as u32).to_le_bytes());
+        let mut file = header.to_vec();
+        let chunks: Vec<&[u8]> = data.chunks(CHUNK).collect();
+        for (i, c) in chunks.iter().enumerate() {
+            let mut n = [0u8; 12];
+            n[..8].copy_from_slice(&header[16..24]);
+            n[8..].copy_from_slice(&(i as u32).to_le_bytes());
+            let mut a = header.to_vec();
+            a.extend_from_slice(&(i as u64).to_le_bytes());
+            a.push(u8::from(i + 1 == chunks.len()));
+            let mut b = c.to_vec();
+            let tag = key.aead().seal_in_place(&n, &a, &mut b);
+            file.extend_from_slice(&tag);
+            file.extend_from_slice(&b);
+        }
+        write(raw, Path::new("/e/v1"), &[&file]);
+        assert_eq!(read(&fs, Path::new("/e/v1")).unwrap(), data);
+        file[..8].copy_from_slice(MAGIC);
+        write(raw, Path::new("/e/v2"), &[&file]);
+        assert!(read(&fs, Path::new("/e/v2")).is_err());
     }
 
     /// A new key: new files under it, old ones still open (by the key

@@ -118,7 +118,7 @@ fn all_engine_files_under(p: &Arc<SimPlatform>, generation: u32) {
             .unwrap();
         let mut b = vec![0; f.size().unwrap() as usize];
         f.read_exact_at(&mut b, 0).unwrap();
-        assert_eq!(&b[..8], b"ncseal\0\x01", "{name:?}");
+        assert_eq!(&b[..8], b"ncseal\0\x02", "{name:?}");
         assert_eq!(
             u32::from_le_bytes(b[8..12].try_into().unwrap()),
             generation,
