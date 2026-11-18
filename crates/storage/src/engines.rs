@@ -48,6 +48,16 @@ pub trait Engine: Send + Sync {
     ) -> Result<Box<dyn Entries + 'a>>;
     /// Applies `ops` (sorted, each key once).
     fn apply(&mut self, ops: &Ops) -> Result<()>;
+    /// [`apply`](Self::apply), then what `filter` finds garbage among the
+    /// written keys' other entries the engine holds in memory dropped — a
+    /// commit's [`LeafFilter`], as the B+tree's leaves it rewrites see it
+    /// (§M14.28 L5).  Older entries of the keys may lie elsewhere, so it is
+    /// shown them as [`LeafFilter::drops_above`].  Not logged, as the
+    /// B+tree's drops are not.
+    fn apply_filtered(&mut self, ops: &Ops, filter: &dyn LeafFilter) -> Result<()> {
+        let _ = filter;
+        self.apply(ops)
+    }
     /// Removes every entry in `[start, end)`.
     fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()>;
     /// Whether it holds no entry.
@@ -719,8 +729,10 @@ impl Tables {
             to_tree(&mut self.tree, &tree_ops)?;
         }
         for (e, ops) in self.engines.iter_mut().zip(&engine_ops) {
-            if !ops.is_empty() {
-                e.apply(ops)?;
+            match filter {
+                _ if ops.is_empty() => {}
+                Some(f) => e.apply_filtered(ops, f)?,
+                None => e.apply(ops)?,
             }
         }
         Ok(())

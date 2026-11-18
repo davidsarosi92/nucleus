@@ -835,6 +835,13 @@ filter its commits apply to the B+tree leaves they rewrite — and a merge
 shows it 512 entries at a time (those with values); above the last
 level it asks `drops_above`, which keeps a key's newest tombstone at or
 below the watermark (older versions may be in runs not merged).
+**Versions dropped by commits** (L5): a commit's filter reaches the
+engines too (`Engine::apply_filtered`, `apply` by default); the LSM tree
+shows it, as `drops_above`, the memtable's entries sharing the `escape(user)
+00 00` prefix of each key written — so a key written over and over keeps
+a few versions in memory, as in a B+tree leaf, not one a write until a
+save (a read steps over each one kept: 5000 versions of a key made its
+read 12 → 420 µs).  The memtable's ascending tail is left as it is.
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -8117,6 +8124,13 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L5, versions dropped by commits from the LSM
+  memtable:** `Engine::apply_filtered`; YCSB A on an LSM table 5 726 →
+  10 530 operations a second, a read's p99 531 → 25 µs.
+- **2026-11-18 — short range scans:** `Access::serves` (a filter the
+  key range applies keeps a `LIMIT`ed scan on one thread) and KV chunks
+  growing from 64 entries (`nucleus_kv::FIRST_CHUNK`); YCSB E's scans on
+  a B+tree 2.5 ms → ~25 µs.
 - **2026-11-18 — §M14.28 L4e, the engines' files sealed:** an encrypted
   database's runs, manifests, map files and routes sealed in 4 KiB
   chunks (`nucleus_storage::sealed`); `engine = lsm` no longer refused

@@ -1,7 +1,8 @@
 //! An LSM tree's compactions drop the versions no snapshot sees (PLAN.md
 //! §M14.28 L4d), as commits drop them from the B+tree leaves they
 //! rewrite: a key written over and over keeps a few versions, not all —
-//! and a snapshot held keeps the version it reads.
+//! and a snapshot held keeps the version it reads.  Commits drop them from
+//! the memtable too (§M14.28 L5), before any save.
 
 use std::ops::Bound;
 use std::path::Path;
@@ -121,4 +122,62 @@ fn a_deleted_key_stays_deleted_through_merges() {
         "{} entries of k3 left",
         stored(&e, b"k3")
     );
+}
+
+/// Commits drop from the memtable what no snapshot sees, as from the
+/// B+tree's leaves: a key written over and over between saves keeps a few
+/// versions in memory, not all (a read steps over each one kept) — a
+/// snapshot held keeps the version it reads, and a key deleted over older
+/// versions in a run stays deleted.
+#[test]
+fn commits_drop_versions_in_memory() {
+    let p: Arc<dyn Platform> = Arc::new(SimPlatform::new(3));
+    let e = Engine::open(p, Path::new("/db"), EngineOptions::default()).unwrap();
+    let t = e.begin();
+    assert!(t.add_engine(b"k", b"l", EngineKind::Lsm).unwrap());
+    t.commit().unwrap();
+    // k3's first versions in a run; the rest, and its deletion, in memory.
+    write(&e, b"k3", b"saved");
+    e.checkpoint().unwrap();
+    let mut old = None;
+    for i in 1..=200u32 {
+        write(&e, b"k1", format!("v{i}").as_bytes());
+        if i == 50 {
+            old = Some(e.begin());
+        }
+        if i == 100 {
+            let mut t = e.begin();
+            t.delete(b"k3").unwrap();
+            t.commit().unwrap();
+        } else if i < 100 {
+            write(&e, b"k3", format!("v{i}").as_bytes());
+        }
+    }
+    let old = old.unwrap();
+    assert_eq!(old.get(b"k1").unwrap().as_deref(), Some(&b"v50"[..]));
+    assert_eq!(old.get(b"k3").unwrap().as_deref(), Some(&b"v49"[..]));
+    assert_eq!(e.begin().get(b"k1").unwrap().as_deref(), Some(&b"v200"[..]));
+    assert_eq!(e.begin().get(b"k3").unwrap(), None);
+    let held = stored(&e, b"k1");
+    assert!(
+        (151..=152).contains(&held),
+        "{held} versions of k1 in memory with a snapshot held"
+    );
+    drop(old);
+    for i in 201..=205u32 {
+        write(&e, b"k1", format!("v{i}").as_bytes());
+        write(&e, b"k3x", b"other");
+    }
+    assert_eq!(e.begin().get(b"k1").unwrap().as_deref(), Some(&b"v205"[..]));
+    assert_eq!(e.begin().get(b"k3").unwrap(), None);
+    assert!(
+        stored(&e, b"k1") <= 2,
+        "{} versions of k1",
+        stored(&e, b"k1")
+    );
+    // Saved, merged, reopened: the same.
+    e.checkpoint().unwrap();
+    e.store().compact(&mut || true).unwrap();
+    assert_eq!(e.begin().get(b"k3").unwrap(), None);
+    assert_eq!(e.begin().get(b"k1").unwrap().as_deref(), Some(&b"v205"[..]));
 }

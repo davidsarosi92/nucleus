@@ -59,6 +59,9 @@
 //! A merge drops what the layer above knows to be garbage (its
 //! [`LeafFilter`], §M14.28 L4d: versions no snapshot sees); above the last
 //! level it keeps what is garbage only because nothing older is left.
+//! A commit's filter drops it from the memtable too
+//! ([`Engine::apply_filtered`], §M14.28 L5), among the versions of the
+//! keys it writes.
 //!
 //! On an encrypted database its files are sealed below it (the store's
 //! [`SealedFs`](crate::sealed::SealedFs), §M14.28 L4e): nothing here
@@ -121,6 +124,17 @@ fn hash64(b: &[u8]) -> u64 {
         h = mix(h ^ u64::from_le_bytes(w) ^ 0xa5a5_a5a5_0000_0000);
     }
     h
+}
+
+/// `key` up to and including its first `00 00` — the transaction
+/// layer's terminator, after which a version's timestamp follows
+/// (`nucleus_txn::mvcc`): what a user key's versions share —, else all
+/// of it.
+fn prefix(key: &[u8]) -> &[u8] {
+    match key.windows(2).position(|w| w == [0, 0]) {
+        Some(i) => &key[..i + 2],
+        None => key,
+    }
 }
 
 // ------------------------------------------------------------ the filter
@@ -350,6 +364,54 @@ impl Memtable {
             self.untail();
         }
         self.points.insert(key.to_vec(), v);
+    }
+
+    /// What `filter` finds garbage among the entries sharing a prefix
+    /// ([`prefix`]: a user key's versions) with a key of `ops`, dropped
+    /// from the map — as a B+tree drops it from the leaves a commit
+    /// rewrites.  Without it a key updated often keeps every version here
+    /// until a save, and a read of it steps over them all (YCSB A on a hot
+    /// key: 5000 versions, a read 12 → 420 µs).  Older entries of the key
+    /// may be in runs, so the filter sees them as above a last level; the
+    /// tail (a load's keys, written once) is left as it is.
+    fn drop_garbage(&mut self, ops: &Ops, filter: &dyn LeafFilter) {
+        let mut gone: Vec<Vec<u8>> = Vec::new();
+        let mut last: Option<&[u8]> = None;
+        for (k, _) in ops {
+            let p = prefix(k);
+            if p.len() == k.len() || last == Some(p) {
+                continue; // not a version, or its prefix seen
+            }
+            last = Some(p);
+            let mut end = p.to_vec();
+            *end.last_mut().expect("a prefix ends 00 00") = 1;
+            let live: Vec<(&Vec<u8>, &[u8])> = self
+                .points
+                .range::<[u8], _>((Bound::Included(p), Bound::Excluded(end.as_slice())))
+                .filter_map(|(k, v)| Some((k, v.as_deref()?)))
+                .collect();
+            if live.len() < 2 {
+                continue;
+            }
+            let entries: Vec<LeafEntry> = live
+                .iter()
+                .map(|&(key, v)| LeafEntry {
+                    key,
+                    inline: Some(v),
+                })
+                .collect();
+            let mut drop = vec![false; entries.len()];
+            filter.drops_above(&entries, &mut drop);
+            gone.extend(
+                live.iter()
+                    .zip(&drop)
+                    .filter(|&(_, &d)| d)
+                    .map(|((k, _), _)| (*k).clone()),
+            );
+        }
+        for k in gone {
+            self.points.remove(&k);
+        }
     }
 
     /// The tail's entries in `(start, end)`: their positions.
@@ -1560,6 +1622,12 @@ impl Engine for LsmEngine {
         Ok(())
     }
 
+    fn apply_filtered(&mut self, ops: &Ops, filter: &dyn LeafFilter) -> Result<()> {
+        self.apply(ops)?;
+        self.mem.drop_garbage(ops, filter);
+        Ok(())
+    }
+
     fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()> {
         self.settle();
         self.mem.remove_range(start, end);
@@ -1789,8 +1857,12 @@ mod tests {
     /// a flush many times, so compaction makes every level.
     const KEYS: u64 = 4000;
 
+    /// Keys shaped as the transaction layer's: a user key, `00 00`, a
+    /// version — four to a user key.  In order with `i`.
     fn key(i: u64) -> Vec<u8> {
-        format!("k{i:04}").into_bytes()
+        let mut k = format!("k{:04}", i / 4).into_bytes();
+        k.extend_from_slice(&[0, 0, (i % 4) as u8]);
+        k
     }
 
     fn bound(rng: &SplitMix64) -> Bound<Vec<u8>> {
@@ -1848,6 +1920,23 @@ mod tests {
             let mut rev = collect(e, &s, &t, true);
             rev.reverse();
             assert_eq!(rev, want, "{ctx}: reverse scan {s:?} {t:?}");
+        }
+        // Within one prefix, as a point read reads a user key's versions:
+        // from its first, or from one of them, up to the next user key.
+        for _ in 0..100 {
+            let i = rng.below(KEYS);
+            let p = &key(i)[..5];
+            let s = if rng.below(2) == 0 {
+                Bound::Included([p, &[0, 0]].concat())
+            } else {
+                Bound::Included(key(i))
+            };
+            let t = Bound::Excluded([p, &[0, 1]].concat());
+            let want: Vec<(Vec<u8>, Vec<u8>)> = model
+                .range::<[u8], _>((borrow(&s), borrow(&t)))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            assert_eq!(collect(e, &s, &t, false), want, "{ctx}: versions of {p:?}");
         }
     }
 
@@ -2100,6 +2189,14 @@ mod tests {
         let size = f.size().unwrap();
         f.write_at(b"\xff", size - FOOTER as u64 - 6).unwrap();
         assert!(Run::open(fs, dir, "r").is_err());
+    }
+
+    /// A key's prefix ends at its first `00 00`.
+    #[test]
+    fn prefixes_end_at_the_terminator() {
+        assert_eq!(prefix(b"ab\0\0\x07\0\0"), b"ab\0\0");
+        assert_eq!(prefix(b"a\0\xffb\0\0x"), b"a\0\xffb\0\0");
+        assert_eq!(prefix(b"abc"), b"abc");
     }
 
     #[test]
