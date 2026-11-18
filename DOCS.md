@@ -2942,7 +2942,13 @@ lookups count 1.2 times as much and its rows scanned a quarter (its
 scans read batches of the columns wanted, its lookups segments' values);
 the rows a lookup reads are all of its key value's, whatever the filter
 keeps — a semi or anti join's stop at the first match.  An inner join
-may look up its left side instead (the columns put back in order above).
+may look up its left side instead (the columns put back in order above),
+and so may a semi join whose right side has each key once (its columns
+the primary key of the one table it reads, `eager::unique`): an inner
+join then, each left row matching one right row at most, the left's
+columns kept (PostgreSQL turns such a semi join into an inner one, its
+inner side unique).  TPC-H Q20's subquery looks `partsupp` up by its
+parts.
 A lookup join's rows are estimated as the left side's times a lookup's.
 
 **Adaptive joins** (`adaptive`, last, after narrowing): an inner hash
@@ -8169,6 +8175,9 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — semi joins on a unique side look the outer table up
+  (issue #1):** `optimizer::lookups`; TPC-H Q20 on row tables ~10 %
+  faster (one worker 285 → 258 ms).
 - **2026-11-18 — sealed engine files, keys derived once (issue #3):**
   one nonce a file, its message keys derived once, 1 KiB chunks
   (format version 2; version 1 read); a lookup on an encrypted LSM

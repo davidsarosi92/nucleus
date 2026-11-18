@@ -263,7 +263,7 @@ fn padded_value(a: &Agg) -> Option<Value> {
 /// (through filters, projections, sorts), and the columns are, or hold,
 /// its primary key (not a unique index: its `NULL`s repeat, and group
 /// together).
-fn unique(plan: &Plan, cols: &[usize]) -> bool {
+pub(crate) fn unique(plan: &Plan, cols: &[usize]) -> bool {
     fn table_cols<'p>(
         plan: &'p Plan,
         cols: &[usize],

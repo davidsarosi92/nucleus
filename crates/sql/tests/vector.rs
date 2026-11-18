@@ -1992,6 +1992,68 @@ fn column_lookups_on_workers_agree() {
 
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn semi_joins_on_a_unique_side_look_up() {
+    // TPC-H Q20's subquery (issue #1): a semi join whose inner side has
+    // each key once (its primary key) runs as an inner join looking the
+    // outer table up by its index — the rows of the same query whose key
+    // is an expression (so a semi join hashed), with NULL keys, `on`
+    // beyond the keys, on workers.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(59)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE b (id INT PRIMARY KEY, k INT, v INT) WITH (storage = {storage}); \
+             CREATE TABLE u (id INT PRIMARY KEY, name TEXT, w INT); \
+             INSERT INTO b SELECT i, CASE WHEN i % 11 = 0 THEN NULL ELSE i * 37 % 3000 END, \
+               i % 100 FROM generate_series(1, 30000) i; \
+             INSERT INTO u SELECT i, 'n' || (i % 97), i % 50 FROM generate_series(0, 2999) i; \
+             CREATE INDEX b_k ON b (k); \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries = [
+            (
+                "SELECT b.id, b.v FROM b WHERE b.k IN (SELECT id FROM u WHERE name = 'n5') \
+                   ORDER BY b.id",
+                "SELECT b.id, b.v FROM b WHERE b.k IN (SELECT id + 0 FROM u WHERE name = 'n5') \
+                   ORDER BY b.id",
+            ),
+            (
+                "SELECT count(*), sum(b.v) FROM b WHERE EXISTS (SELECT 1 FROM u \
+                   WHERE u.id = b.k AND u.name = 'n7' AND u.w > b.v % 50)",
+                "SELECT count(*), sum(b.v) FROM b WHERE EXISTS (SELECT 1 FROM u \
+                   WHERE u.id + 0 = b.k AND u.name = 'n7' AND u.w > b.v % 50)",
+            ),
+        ];
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        for (q, reference) in queries {
+            // A column table's rows found by an index cost more than its
+            // scan hashed: the semi join stays.
+            let plan = outcome(&mut s, &format!("EXPLAIN {q}")).unwrap();
+            assert_eq!(
+                plan.iter().any(|l| l[0].contains("Index Nested Loop")),
+                storage == "row",
+                "{storage}: {plan:?}"
+            );
+            let want = outcome(&mut s, reference);
+            assert!(
+                want.as_ref().is_ok_and(|r| r[0][0] != "0"),
+                "{storage}: {want:?}"
+            );
+            assert_eq!(outcome(&mut s, q), want, "{storage}: {q}");
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn correlated_subqueries_on_workers_agree() {
     // TPC-H Q20's shape (§M14.20 W6): a filter, or a projection, whose
     // subquery runs for each row — over a join's rows, or a pipeline's —

@@ -1839,10 +1839,15 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
             let lookup = (kind != JoinType::Full)
                 .then(|| lookup_side(&left, &right, &left_keys, &right_keys, existence, st))
                 .flatten();
+            // A semi join whose right side has each key once (its table's
+            // primary key) is an inner join keeping the left's columns
+            // (PostgreSQL makes it one where the inner side is unique), so
+            // it may be turned the same way.
+            let semi_as_inner = kind == JoinType::Semi && unique_keys(&right, &right_keys);
             // An inner join may look the left side up instead (the larger,
             // which the reordering made the probe side), the columns put
             // back in order above.
-            let swapped = (kind == JoinType::Inner && lookup.is_none())
+            let swapped = ((kind == JoinType::Inner || semi_as_inner) && lookup.is_none())
                 .then(|| lookup_side(&right, &left, &right_keys, &left_keys, false, st))
                 .flatten();
             match (lookup, swapped) {
@@ -1856,15 +1861,17 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
                 (None, Some(looked_up)) => {
                     let (lw, rw) = (left.width(), right.width());
                     let back = |c: usize| Expr::Column(if c < lw { c + rw } else { c - lw });
+                    // A semi join gives the left's columns alone.
+                    let width = if kind == JoinType::Semi { lw } else { lw + rw };
                     Plan::Project {
                         input: Box::new(Plan::Join {
                             left: right,
                             right: Box::new(looked_up),
-                            kind,
+                            kind: JoinType::Inner,
                             on: on.map(|e| e.map_columns(&back)),
                             algo: JoinAlgo::Lookup,
                         }),
-                        exprs: (0..lw + rw).map(back).collect(),
+                        exprs: (0..width).map(back).collect(),
                     }
                 }
                 (None, None) => {
@@ -1890,6 +1897,19 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
         }
         other => other,
     }
+}
+
+/// Whether `keys` (columns) of `plan`'s rows are each row's alone: they
+/// hold the primary key of the one table it reads.
+fn unique_keys(plan: &Plan, keys: &[Expr]) -> bool {
+    let cols: Option<Vec<usize>> = keys
+        .iter()
+        .map(|k| match k {
+            Expr::Column(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    cols.is_some_and(|c| crate::eager::unique(plan, &c))
 }
 
 /// `right` (a scan, under a projection of columns) as a scan by an index

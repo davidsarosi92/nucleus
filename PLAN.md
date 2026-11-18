@@ -11450,6 +11450,29 @@ simple parameterization, MySQL's former query cache — what not to do).
   secondary index's fetches, each a descent of the primary B+tree —
   Q20 1.46× (#1: page hints in index entries, sorted batched fetches,
   cheaper inner-node search).
+  *Issue #1, a first step* (2026-11-18): Q20's `ps_partkey IN (SELECT
+  p_partkey FROM part WHERE p_name LIKE 'forest%')` was a semi join
+  hashing `part`'s few rows over a scan of `partsupp`.  A semi join
+  whose right side has each key once (its columns the primary key of
+  the one table it reads) is an inner join keeping the left's columns —
+  PostgreSQL makes it one where the inner side is unique — so it may
+  look the left side up by its index as an inner join may: `part`'s
+  rows look `partsupp` up.  Q20 on one worker 285 → 258 ms, on ten 87 →
+  79 / 93 → 84 (A/B, the binaries alternated, both orders); the other
+  21 queries even (Q9's 1.09× followed whichever binary ran second).
+  Tried, not taken: comparing keys a word (8 bytes) at a time in a
+  node's binary search and prefetching a leaf (128-byte lines) before
+  its search — a probe of 200,000 random lookups faster, Q20 and the
+  other 21 even, so reverted.  Not taken: page hints in index entries —
+  a hinted page may be a copy an older snapshot still holds (a branch's,
+  or one not yet freed), whose versions a check of the key's range
+  cannot tell stale (InnoDB's adaptive hash index is dropped with each
+  page it points into; ours would need the same).  What is left (SF 1,
+  10 workers, against PostgreSQL 18's single process): Q20 86.7 against
+  55.2 ms, 1.57× — each matched row's fetch ~2.4 µs, a descent of
+  `lineitem`'s primary B+tree where PostgreSQL's TID reads one heap
+  page; the shared root's latch and counters cost ~7 % of the CPU at
+  ten workers.  Issue #1 stays open for it.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
