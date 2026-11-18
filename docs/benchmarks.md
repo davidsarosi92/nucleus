@@ -80,37 +80,44 @@ cores) — a stronger baseline than the Docker image of the runs before
 gets PostgreSQL's `shared_buffers` as its page cache (`--cache`), and
 both systems `VACUUM ANALYZE` after a load (PLAN.md §M14.33 R3).
 
-**The suite** (`bash bench/all.sh suite`; `bench/run.py`, 1,000,000 rows,
-each statement cold — the server just restarted — and warm):
+**The suite** (`bash bench/all.sh suite`; `bench/run.py --engines
+btree,lsm`, 1,000,000 rows, each statement cold — the server just
+restarted — and warm; the table a B+tree's, and an LSM tree's, PLAN.md
+§M14.28 L5):
 
-| run | nucleus (ms) | postgresql (ms) | nucleus / postgresql |
-|---|---:|---:|---:|
-| load (INSERT … SELECT) | 941 [935–944] ±0% | 984 [942–1,014] ±3% | ≈ (0.96×) |
-| count(*) (cold) | 6.43 [6.27–6.89] ±4% | 26.6 [26.3–29.0] ±4% | 0.24× |
-| count(*) | 6.02 [5.67–6.16] ±3% | 16.0 [15.7–16.2] ±1% | 0.38× |
-| filtered count (cold) | 19.9 [19.6–20.1] ±1% | 20.1 [19.5–21.6] ±4% | ≈ (0.99×) |
-| filtered count | 9.38 [9.08–9.74] ±3% | 15.7 [15.5–16.2] ±2% | 0.60× |
-| sum (cold) | 12.7 [12.6–13.3] ±2% | 19.4 [19.2–21.0] ±4% | 0.66× |
-| sum | 8.55 [8.22–9.49] ±6% | 14.8 [14.3–15.5] ±3% | 0.58× |
-| group by (1000 groups) (cold) | 18.0 [16.7–18.2] ±4% | 35.9 [35.7–36.8] ±1% | 0.50× |
-| group by (1000 groups) | 13.8 [13.3–14.4] ±3% | 31.4 [30.7–32.2] ±2% | 0.44× |
-| sort (cold) | 74.7 [73.1–77.2] ±2% | 138 [138–139] ±0% | 0.54× |
-| sort | 69.8 [68.5–70.6] ±1% | 130 [129–132] ±1% | 0.54× |
-| self-join (cold) | 70.4 [69.8–73.4] ±2% | 118 [117–122] ±2% | 0.60× |
-| self-join | 63.0 [61.4–66.0] ±3% | 115 [113–121] ±3% | 0.55× |
-| point reads (1000 by key) (cold) | 25.4 [25.1–26.3] ±2% | 30.0 [29.8–32.1] ±3% | 0.85× |
-| point reads (1000 by key) | 24.5 [23.8–25.4] ±3% | 24.0 [23.4–25.1] ±3% | ≈ (1.02×) |
-| update 25% | 561 [557–588] ±2% | 877 [857–902] ±2% | 0.64× |
-| delete 10% | 94.7 [93.3–97.7] ±2% | 65.2 [64.8–65.9] ±1% | 1.45× |
-| count after writes | 9.71 [9.66–9.99] ±2% | 14.5 [14.2–15.2] ±3% | 0.67× |
+| run | nucleus (ms) | nucleus (lsm) (ms) | postgresql (ms) | nucleus / postgresql | nucleus (lsm) / postgresql |
+|---|---:|---:|---:|---:|---:|
+| load (INSERT … SELECT) | 967 [955–972] ±1% | 981 [978–992] ±1% | 1,029 [989–1,258] ±10% ⚠ | ≈ (0.94×) | ≈ (0.95×) |
+| count(*) (cold) | 6.54 [6.12–6.77] ±4% | 9.21 [8.26–11.8] ±14% ⚠ | 27.5 [27.1–28.4] ±2% | 0.24× | 0.33× |
+| count(*) | 6.04 [5.85–6.43] ±4% | 8.01 [7.82–8.96] ±6% | 16.3 [16.1–16.8] ±2% | 0.37× | 0.49× |
+| filtered count (cold) | 20.9 [19.2–21.5] ±5% | 35.7 [34.9–36.8] ±2% | 21.1 [20.9–21.3] ±1% | ≈ (0.99×) | 1.70× |
+| filtered count | 9.42 [9.02–9.95] ±4% | 11.3 [10.8–11.9] ±4% | 15.8 [15.5–15.9] ±1% | 0.60× | 0.72× |
+| sum (cold) | 13.7 [13.3–14.1] ±2% | 26.8 [25.9–27.2] ±2% | 20.8 [20.4–21.9] ±3% | 0.66× | 1.29× |
+| sum | 9.25 [8.31–9.44] ±5% | 9.46 [9.31–9.75] ±2% | 15.1 [14.8–17.2] ±7% | 0.61× | 0.63× |
+| group by (1000 groups) (cold) | 18.9 [18.9–19.4] ±1% | 31.1 [30.7–35.8] ±7% | 36.9 [35.6–37.9] ±2% | 0.51× | ≈ (0.84×) |
+| group by (1000 groups) | 13.9 [13.8–14.3] ±1% | 14.8 [14.5–15.4] ±2% | 31.8 [31.4–32.7] ±2% | 0.44× | 0.46× |
+| sort (cold) | 79.7 [74.8–85.3] ±5% | 89.6 [86.3–91.2] ±2% | 141 [140–141] ±0% | 0.57× | 0.64× |
+| sort | 72.2 [71.5–75.5] ±2% | 74.5 [71.3–77.0] ±3% | 131 [130–134] ±1% | 0.55× | 0.57× |
+| self-join (cold) | 74.7 [73.5–75.4] ±1% | 89.5 [88.3–90.7] ±1% | 125 [124–136] ±4% | 0.60× | 0.71× |
+| self-join | 64.6 [64.4–68.0] ±3% | 66.1 [65.2–66.2] ±1% | 117 [114–127] ±5% | 0.55× | 0.56× |
+| point reads (1000 by key) (cold) | 26.4 [25.5–26.8] ±2% | 27.3 [26.7–27.9] ±2% | 31.1 [30.4–39.3] ±11% ⚠ | 0.85× | 0.88× |
+| point reads (1000 by key) | 24.4 [24.1–26.8] ±5% | 25.1 [24.6–25.6] ±2% | 23.5 [23.2–23.7] ±1% | ≈ (1.04×) | ≈ (1.07×) |
+| update 25% | 573 [569–581] ±1% | 666 [660–708] ±3% | 911 [871–1,351] ±20% ⚠ | 0.63× | 0.73× |
+| delete 10% | 96.1 [94.5–96.9] ±1% | 155 [154–157] ±1% | 68.3 [67.5–69.8] ±1% | 1.41× | 2.27× |
+| count after writes | 9.86 [9.71–9.95] ±1% | 28.9 [26.9–31.5] ±6% | 15.4 [14.5–16.0] ±4% | 0.64× | 1.88× |
 
-Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus 0.1.0, postgresql 18.7 (Homebrew) — nucleus b7219825c+changes — 2026-11-18T01:31:42+00:00
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus 0.1.0, nucleus (lsm) 0.1.0, postgresql 18.7 (Homebrew) — nucleus c9dad1615+changes — 2026-11-18T09:18:53+00:00
 
 Against the native, tuned PostgreSQL, reads by key are even with its
 time (1.02×, the intervals overlapping; cold 0.85×; nucleus reached by
 its Unix socket, as `psql` reaches PostgreSQL — `nucleus server
 --socket`), the scans, groupings, sorts and joins 0.24–0.67×, and a
-`DELETE` of a tenth of the rows the one lag, 1.45× (Targets, below).
+`DELETE` of a tenth of the rows the one lag, 1.41× (Targets, below).
+An LSM table reads warm as the B+tree's or near it (count(*) 8.0 against
+6.0 ms, the rest within 1.07×); cold, after its blocks left the cache,
+1.3–1.9× (each block decompressed), after the writes 2.9× (several
+sources merged an entry at a time), and its `DELETE` 2.27× PostgreSQL's
+(PLAN.md §M14.28 L5's next steps).
 
 **Where a read by key goes** (`bash bench/all.sh phases`;
 `crates/sql/tests/statement_phases.rs`, PLAN.md §M14.33 R1): the
@@ -1725,6 +1732,42 @@ is the B+tree's cost an LSM tree's runs avoid (§M14.28 L2–L5).  The
 comparison with PostgreSQL and the runs on ext4 have no step yet
 (PLAN.md §M14.28's study).
 
+**An LSM table beside the B+tree** (`bash bench/all.sh wamp-lsm`;
+`wamp.py --engine=lsm`, phases 0–7: the steady state, then a million
+of its rows updated and a million deleted, 100 a transaction; with
+`--values=random` the text is 100 random hex digits, which the LSM
+tree's LZ4 runs cannot shrink as they do a letter repeated).  One run
+each so far (PLAN.md §M14.28 L5); the whole run's will replace them:
+
+| phase, random values | write amplification B+tree / LSM | time, s | restart, s | space amplification |
+|---|---:|---:|---:|---:|
+| bulk, keys in order | 3.35 / 3.65 | 54 / 54 | 0.95 / 2.52 | 1.51 / 1.14 |
+| bulk, random keys | 5.71 / 3.87 | 117 / 97 | 19.2 / 4.1 | 2.26 / 1.16 |
+| a row a transaction, keys in order | 153 / 151 | 23 / 22 | 1.5 / 0.3 | 2.22 / 1.13 |
+| a row a transaction, random keys | 216 / 151 | 22 / 20 | 2.4 / 0.4 | 2.21 / 1.13 |
+| 100 rows a transaction, random keys | 77 / 4.05 | 5.4 / 4.6 | 2.7 / 0.2 | 2.20 / 1.13 |
+| steady state, 5M rows | 79 / 4.05 | 725 / 246 | 134 / 8.3 | 3.12 / 1.13 |
+| 1M updates | 128 / 4.08 | 157 / 64 | 111 / 1.4 | 3.11 / 1.18 |
+| 1M deletes | 126 / 2.05 | 151 / 48 | 115 / 0.8 | 3.24 / 1.24 |
+
+The restart is the server's after a kill with no checkpoint: recovery
+(the B+tree's replays a GiB of WAL of random keys through its cache).
+
+**YCSB** (`bash bench/all.sh ycsb`; `crates/sql/tests/ycsb.rs`, PLAN.md
+§M14.28 L5): a million rows of a `bigint` key and 100 bytes of text,
+then 200,000 operations of each workload, keys by YCSB's scrambled
+Zipfian (θ = 0.99), each a statement in a transaction of its own, one
+client, in the process.  One run:
+
+| workload | B+tree ops/s | LSM ops/s | read or scan p50 / p99, µs, B+tree | LSM |
+|---|---:|---:|---:|---:|
+| A: 50 % reads, 50 % updates | 9 716 | 10 336 | 14.1 / 24.7 | 16.0 / 25.1 |
+| B: 95 % reads, 5 % updates | 32 330 | 32 227 | 12.0 / 24.6 | 13.9 / 23.0 |
+| E: 95 % scans of 1–100 rows, 5 % inserts | 18 963 | 13 516 | 26.8 / 58.1 | 36.0 / 77.8 |
+
+A write there takes ~170–660 µs, the device's: a barrier `fsync` after
+a millisecond idle costs ~640–770 µs on this SSD, back to back ~200 µs.
+
 ## Time travel
 
 The cost of recording each commit's time (`bash bench/all.sh history`;
@@ -1875,7 +1918,7 @@ native, tuned PostgreSQL 18.7:
 | column tables: no TPC-H or ClickBench query above 3× | the highest TPC-H Q20 2.78×, ClickBench Q23 1.70× | yes |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 0.65×, ClickBench 0.57× | yes |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.96×; TPC-H 1.40× row, 1.10× column; ClickBench 1.11×, 0.98× | yes |
-| updates and deletes ≤ 2× (`bench/run.py`) | update 0.64×, delete 1.45× | yes |
+| updates and deletes ≤ 2× (`bench/run.py`) | update 0.63×, delete 1.41× (an LSM table: 0.73×, 2.27×) | yes (the B+tree, the default) |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 0.24–0.99× (count(*) 0.38×, the filtered count cold 0.99×) | yes |
 | reads by key ≤ 1× (`bench/run.py`) | 1.02×, the intervals overlapping (24.5 ms against 24.0 for 1,000 reads; cold 0.85×) | yes |
 

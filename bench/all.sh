@@ -37,7 +37,7 @@ mkdir -p "$R"
 STEPS="suite phases tpch clickbench knn ann-sift ann-sift-int8 ann-filtered ann-dbpedia ann-related ann-sparse
 stats analyzers bm25 bm25-filters bm25-snippets msmarco hybrid hybrid-sparse tsearch tsearch-rank
 embed-speed embed-beir longmemeval recall erasure backup retype sealing page-crypto encrypted aead aes
-keys json json-pg json-index json-schema json-schema-pg wamp history branches python wasm browser"
+keys json json-pg json-index json-schema json-schema-pg wamp wamp-lsm ycsb history branches python wasm browser"
 
 need() { # need PATH HOW: a step's data, or how to get it
   [ -e "$1" ] || { echo "missing $1: $2" >&2; exit 1; }
@@ -91,7 +91,7 @@ step_build() {
 }
 
 # --- the suite, TPC-H, ClickBench (in-script method)
-step_suite() { python3 bench/run.py --nucleus "$N" --rows 1000000 --runs "$RUNS" --out "$R/suite.json"; }
+step_suite() { python3 bench/run.py --nucleus "$N" --rows 1000000 --runs "$RUNS" --engines btree,lsm --out "$R/suite.json"; }
 step_phases() {
   m phases "$RUNS" -- env PHASES_ROWS=1000000 cargo test --release -q -p nucleus-sql \
     --test statement_phases -- --ignored --nocapture
@@ -243,7 +243,14 @@ step_json-schema-pg() { m json-schema-pg "$RUNS" -- python3 bench/json/schema.py
 # --- writes
 step_wamp() {
   local db=$ROOT/target/wamp-db
-  m wamp "$LONG" -- python3 -I bench/wamp/wamp.py nucleus "$N" "$db" 21006 0,1,2,3,4,5
+  m wamp "$LONG" -- python3 -I bench/wamp/wamp.py nucleus "$N" "$db" 21006 0,1,2,3,4,5,6,7
+}
+step_wamp-lsm() {
+  local db=$ROOT/target/wamp-db
+  m wamp-lsm "$LONG" -- python3 -I bench/wamp/wamp.py --engine=lsm nucleus "$N" "$db" 21006 0,1,2,3,4,5,6,7
+}
+step_ycsb() {
+  m ycsb "$RUNS" -- $CAP 8000 cargo test --release -q -p nucleus-sql --test ycsb -- --ignored --nocapture
 }
 step_history() {
   m history "$RUNS" --label "no history" --also "history=env NUCLEUS_HISTORY=3600 target/release/examples/bench" -- \

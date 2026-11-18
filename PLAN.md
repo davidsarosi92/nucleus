@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ✅ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅, L4a–L4e ✅; L5 next |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ✅ L0–L5 (2026-11-18): LSM recommended for random-key writes into large tables, B+tree the default; follow-up steps proposed, to be agreed |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ✅ E1 (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
@@ -3625,7 +3625,7 @@ chosen and their order, the methods and their error bounds, the
 benchmarks — and the steps it leads to are planned as this milestone's
 own, agreed before they are built.
 
-### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; L0–L4e ✅; L5 next)
+### §M14.28 — B+tree or LSM tree, chosen per table ✅ (L0–L5; follow-up steps proposed in L5, to be agreed)
 
 **First a study, then the plan.**  Today every table lives in the one
 copy-on-write B+tree (D2, D10); an LSM tree was left for later, "as a
@@ -4239,8 +4239,100 @@ recovery time after a crash mid-compaction.
     drop the 0.28 µs a chunk and let chunks shrink to ~1 KiB: a lookup
     ~4 µs.  It needs a derived-key form of both ciphers'
     (`nucleus_kernels::aes`, `nucleus_crypto::siv`): issue #3.
-- **L5 — the verdict**: the benchmarks above; where the LSM is
-  recommended, recorded here with the numbers.
+- **L5 — the verdict ✅** (2026-11-18): the benchmarks above; where the
+  LSM is recommended, recorded here with the numbers.  *Measured* on
+  this machine (APFS, Apple M2 Pro; the LSM tree's block cache a quarter
+  of the page cache, 32 MiB against the B+tree's 128 — the LSM is not
+  favoured), each engine's tables made `WITH (engine = …)`:
+
+  *Writes* (`bench/wamp/wamp.py --engine=… --values=random`, one run
+  each; random values, since the default's repeated letter compresses to
+  almost nothing in the LSM's LZ4 runs — 0.18× of the rows' bytes —, a
+  flattery the B+tree's pages do not get):
+
+  | phase | write amplification B+tree / LSM | time, s | restart (recovery), s | space amplification |
+  |---|---:|---:|---:|---:|
+  | bulk, keys in order | 3.35 / 3.65 | 54 / 54 | 0.95 / 2.52 | 1.51 / 1.14 |
+  | bulk, random keys | 5.71 / 3.87 | 117 / 97 | 19.2 / 4.1 | 2.26 / 1.16 |
+  | a row a transaction, random keys | 216 / 151 | 22 / 20 | 2.4 / 0.4 | 2.21 / 1.13 |
+  | 100 rows a transaction, random keys | 77 / 4.05 | 5.4 / 4.6 | 2.7 / 0.2 | 2.20 / 1.13 |
+  | steady state, 5M rows 100 a transaction | **79 / 4.05** | **725 / 246** | **134 / 8.3** | 3.12 / 1.13 |
+  | 1M updates, 100 a transaction | 128 / 4.08 | 157 / 64 | 111 / 1.4 | 3.11 / 1.18 |
+  | 1M deletes, 100 a transaction | 126 / 2.05 | 151 / 48 | 115 / 0.8 | 3.24 / 1.24 |
+
+  With the repeated letter the LSM's steady state is 3.07× (185 s), its
+  updates 3.10×, deletes 2.05×; the B+tree's the same as above.  The
+  B+tree's steady state is 76–79× in these runs against 136× [123–138] in
+  §M14.31 P1d's whole run (2026-11-17) — not explained yet; the next
+  whole run will tell.  The restart is recovery after a kill (the
+  server stopped with no checkpoint, compactions running as they were):
+  the B+tree's replays a GiB of WAL of random keys through its cache,
+  the LSM's into a memtable.
+
+  *Reads and short scans* (`crates/sql/tests/ycsb.rs`: 1M rows, 200k
+  operations, YCSB's scrambled Zipfian θ = 0.99, checkpoints and
+  compactions running as they do, one client):
+
+  | workload | B+tree ops/s | LSM ops/s | read (scan) p50 / p99, µs, B+tree | LSM |
+  |---|---:|---:|---:|---:|
+  | A: 50 % reads, 50 % updates | 9 716 | 10 336 | 14.1 / 24.7 | 16.0 / 25.1 |
+  | B: 95 % reads, 5 % updates | 32 330 | 32 227 | 12.0 / 24.6 | 13.9 / 23.0 |
+  | E: 95 % scans of 1–100 rows, 5 % inserts | 18 963 | 13 516 | 26.8 / 58.1 | 36.0 / 77.8 |
+
+  Writes' latency there (~170–660 µs) is the device's: an
+  `F_BARRIERFSYNC` after ≥ 1 ms idle costs ~640–770 µs on this SSD, back
+  to back ~200 µs (a Python loop of 4 KiB appends: gap 0 → 220 µs, 1 ms
+  → 641, 3 ms → 769), the same for both engines.
+
+  *The §M14.11 suite on an LSM table* (`bench/run.py --engines
+  btree,lsm`, 1M rows, five rounds; PostgreSQL 18.7 native): warm, the
+  LSM's reads are the B+tree's or near — count(*) 8.0 ms (6.0; PostgreSQL
+  16.3), sum 9.5 (9.3), group by 14.8 (13.9), sort 74.5 (72.2), self-join
+  66.1 (64.6), point reads 25.1 (24.4), load 981 (967), update 25 % 666
+  (573; PostgreSQL 911).  Behind: cold reads (the block cache empty, each
+  block decompressed: filtered count 35.7 against 20.9, sum 26.8 / 13.7),
+  `count after writes` 28.9 / 9.9 (several sources merged an entry at a
+  time) and `delete 10%` 155 / 96 (PostgreSQL 68).
+
+  *Found and fixed on the way* (each its own commit, measured there):
+  short range scans on one thread under a `LIMIT` and KV chunks growing
+  from 64 entries (`d92d197`: YCSB E on the B+tree 2.5 ms → ~25 µs a
+  scan); the memtable kept every version of a hot key until a save, and
+  a read stepped over each (`b5c18da`: commits drop the versions no
+  snapshot sees there too, as from a B+tree leaf — RocksDB drops them at
+  flush; YCSB A 5 726 → 10 336 ops/s, read p99 531 → 25 µs); an LSM
+  table's scans ran on one thread (`00c699f`: `Engine::split_keys`) and
+  an entry at a time (`c9dad16`: `Entries::leaf_entries`, a block at a
+  time) — the suite's count(*) 99 → 8.0 ms.  *Tried, not taken*: a
+  prefix Bloom filter (RocksDB's prefix extractor) to pass over runs on
+  a point read's versions — no difference in YCSB (A 10 355 without,
+  9 379 with; B 31 654 / 32 363): the SQL layer's point read ends its
+  range at the next user key, so it never applied, and the runs are few.
+  `left()` / `right()` were a syntax error (`8caa4e2`), found writing the
+  random values.
+
+  *The verdict.*  **An LSM table is recommended where writes of random
+  keys go on into a table larger than the cache** — the steady state
+  writes 20× fewer bytes (4 against 79 a byte of rows), takes a third of
+  the time and restarts 16× faster; updates and deletes 31× and 61×
+  fewer bytes; the files take a third of the space.  Point reads and
+  hot-key reads are the B+tree's (YCSB A and B level), full scans warm
+  within 1.0–1.3×.  **The B+tree stays the default**, and is better
+  where reads dominate right after writes or cold (the merge of several
+  sources, a block decompressed), for short range scans (YCSB E 1.4×
+  fewer operations), deletes in place, and bulk loads in key order (3.35
+  against 3.65; a load into a fresh range is cheap in either).  Not
+  measured: Linux ext4 — `wamp.py nucleus-docker` counts the Docker
+  VM's whole disk, and other containers run in it here; left to the
+  F1-end whole run's machine.
+
+  *Steps it leads to* (proposed, **to be agreed before they are built**):
+  merged scans a batch at a time (each source's block, merged in a
+  batch, not an entry — `count after writes`); deletes and short scans
+  (`delete 10%`, YCSB E: the merge's per-scan setup over every run, and
+  a seek in each); cold reads (keep blocks compressed in the OS cache,
+  decompress into the block cache in bigger pieces); the sealed files'
+  key derivation (issue #3).
 
 **Done when:** the study is written here — the workloads and their
 measured amplifications, the design behind the KV contract, the

@@ -67,7 +67,7 @@
 | `monitoring` | — | Prometheus alert rules and their `promtool` tests, a Grafana dashboard, `test.sh` (the real Prometheus and OpenTelemetry Collector against a server; MIT, to copy from) (§8.39) | §M14.18 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
 | `docs/memory.md` | — | the guide to memory for AI applications: a knowledge base with citations, a memory per user, read records, erasure, backups — in SQL, Python, JavaScript and over MCP | §M14.24 ✅ |
-| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL; `bench/text/`, the full-text data), its latest results and targets | §M14.11, §M14.12 V4, §M14.21 |
+| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI, `--engines btree,lsm` a system a table engine; `wamp/wamp.py`, write amplification, `--engine=lsm`, `--values=random`; `crates/sql/tests/ycsb.rs`, YCSB A, B and E on either engine; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL; `bench/text/`, the full-text data), its latest results and targets | §M14.11, §M14.12 V4, §M14.21 |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
 each a folder built to leave the repository (its own README, changelog,
@@ -8138,6 +8138,12 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L5, the verdict:** YCSB A, B and E
+  (`crates/sql/tests/ycsb.rs`), `wamp.py` phases 6 and 7 (updates,
+  deletes), space amplification and the restart's time, `--engine=lsm`
+  and `--values=random`, `bench/run.py --engines`; `bench/all.sh` steps
+  `wamp-lsm` and `ycsb`.  An LSM table recommended for random-key writes
+  into tables larger than the cache; the B+tree stays the default.
 - **2026-11-18 — §M14.28 L5, LSM tables' scans in parallel:**
   `Engine::split_keys`; the merge's buffers reused; one source read a
   batch at a time (`Entries::leaf_entries`).  `count(*)` of a million

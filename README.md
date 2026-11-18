@@ -48,7 +48,12 @@ native PostgreSQL 18 tuned for the same machine, on TPC-H (SF 1) column
 tables take 0.46× its time in the geometric mean, on ClickBench (a
 million rows) 0.16×, row tables 0.65× and 0.57× (§M14.33); reads by key
 even with it (1.02×, the server on its Unix socket as `psql` reaches
-PostgreSQL); loads within 1.4×, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
+PostgreSQL); loads within 1.4×, every result the same.  A table that
+takes writes of random keys can be an LSM tree instead of a B+tree
+(`WITH (engine = lsm)`, §M14.28): in the steady state of 5M rows written
+100 a transaction it writes 4 bytes a byte of rows against the B+tree's
+79, in a third of the time, restarting 16× faster, with reads by key and
+warm scans the B+tree's.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
 768-dimension vectors in 38 ms, faster than numpy's brute force and 5.6×

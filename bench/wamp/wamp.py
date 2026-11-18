@@ -16,15 +16,33 @@ an ext4 volume, and counts the bytes the Docker VM's disk wrote, the
 file system's journal included (nothing else may run in Docker then).
 
 PHASES: phase numbers, comma-separated (default 0,1,2,3,4); 5 is the
-steady state, 5M rows 100 a transaction into the table phase 1 filled.
-The random keys of phases 3-5 fall among phase 1's.  Each phase's
-figures are printed as `@metric` lines too, for `bench/method.py run`,
-which repeats the whole script (PLAN.md §M14.31)."""
+steady state, 5M rows 100 a transaction into the table phase 1 filled;
+6 updates 1M of phase 1's rows, 7 deletes 1M of them, 100 a transaction
+(PLAN.md §M14.28 L5).  The random keys of phases 3-5 fall among phase
+1's.  `--engine=lsm` makes nucleus's tables LSM trees' (§M14.28);
+`--values=random` makes each row's text 100 random hex digits (md5s)
+instead of one letter repeated, which an engine that compresses (the LSM
+tree's runs, LZ4) shrinks to almost nothing.  Each
+phase's figures — and the space the files take per byte of rows left,
+and, for nucleus, how long the restart after it took (the server
+stopped without a checkpoint: recovery) — are printed as `@metric`
+lines too, for `bench/method.py run`, which repeats the whole script
+(PLAN.md §M14.31)."""
 import ctypes, os, re, subprocess, sys, time, random, socket
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "drivers", "python"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import method  # noqa: E402
 
+ENGINE = "btree"
+VALUES = "repeated"
+for a in list(sys.argv):
+    if a.startswith("--values="):
+        VALUES = a.split("=", 1)[1]
+        assert VALUES in ("repeated", "random"), VALUES
+        sys.argv.remove(a)
+    if a.startswith("--engine="):
+        ENGINE = a.split("=", 1)[1]
+        sys.argv.remove(a)
 N, CH, M = 10_000_000, 1_000_000, 100_000
 ROW = 8 + 100
 rnd = random.Random(7)
@@ -48,8 +66,11 @@ def keys(n):
 TRICKLE_RND = keys(M)
 BATCH_RND = keys(M)
 S = 5_000_000
-CHOSEN = [int(p) for p in sys.argv.pop().split(",")] if re.fullmatch(r"[0-5](,[0-5])*", sys.argv[-1]) else [0, 1, 2, 3, 4]
+CHOSEN = [int(p) for p in sys.argv.pop().split(",")] if re.fullmatch(r"[0-7](,[0-7])*", sys.argv[-1]) else [0, 1, 2, 3, 4]
 STEADY_RND = keys(S) if 5 in CHOSEN else []
+# Phase 1's keys, a million of them apart: updated (6), then deleted (7).
+U = 1_000_000
+CHANGED = [g * A % P for g in rnd.sample(range(1, N + 1), U)] if {6, 7} & set(CHOSEN) else []
 RANDOM_KEY = "(g * 2654435761) % 4294967311"
 
 def stable(read):
@@ -64,13 +85,32 @@ def stable(read):
 
 # The system as the results name it: the file system tells the runs apart.
 SYSTEM = {"nucleus": "nucleus", "nucleus-docker": "nucleus (ext4)", "pg": "postgresql (ext4)"}[sys.argv[1]]
+if ENGINE != "btree" and sys.argv[1] != "pg":
+    SYSTEM = SYSTEM.replace("nucleus", f"nucleus {ENGINE}")
+if VALUES == "random":
+    SYSTEM += ", random values"
 
-def report(name, rows, secs, wrote, files):
+
+def text(letter):
+    """A row's 100 bytes of text: `letter` repeated, or random."""
+    if VALUES == "random":
+        return ("md5(random()::text) || md5(random()::text) || md5(random()::text) || "
+                "substr(md5(random()::text), 1, 4)")
+    return f"repeat('{letter}', 100)"
+
+def report(name, rows, secs, wrote, files, live=None, recovery=None):
     method.emit(f"{name}: write amplification", wrote / (rows * ROW), unit="x", system=SYSTEM, phase="write")
     method.emit(f"{name}: time", secs, unit="s", system=SYSTEM, phase="write")
     method.emit(f"{name}: files", files / 2**20, unit="MiB", system=SYSTEM, phase="write")
+    extra = ""
+    if live:
+        method.emit(f"{name}: space amplification", files / (live * ROW), unit="x", system=SYSTEM, phase="write")
+        extra += f"  space amp {files / (live * ROW):5.2f}"
+    if recovery is not None:
+        method.emit(f"{name}: recovery", recovery, unit="s", system=SYSTEM, phase="write")
+        extra += f"  recovery {recovery:5.1f} s"
     print(f"{name:46} {rows:>9} rows {secs:7.1f} s  written {wrote / 2**20:8.0f} MiB"
-          f"  write amp {wrote / (rows * ROW):6.1f}  files {files / 2**20:7.0f} MiB", flush=True)
+          f"  write amp {wrote / (rows * ROW):6.1f}  files {files / 2**20:7.0f} MiB{extra}", flush=True)
 
 PHASES = [
     ("bulk, 1M rows a transaction, keys in order", N),
@@ -79,6 +119,8 @@ PHASES = [
     ("a row a transaction, random keys", M),
     ("100 rows a transaction, random keys", M),
     ("100 rows a transaction, random keys, 5M rows", S),
+    ("100 rows a transaction, updates", U),
+    ("100 rows a transaction, deletes", U),
 ]
 
 def sh(*a, **k):
@@ -163,8 +205,9 @@ if sys.argv[1] in ("nucleus", "nucleus-docker"):
         cleanup = lambda: subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
     s = start()
     c = connect()
+    with_engine = f" WITH (engine = {ENGINE})" if ENGINE != "btree" else ""
     for t in ("seq", "rnd"):
-        c.execute(f"CREATE TABLE {t} (k BIGINT PRIMARY KEY, v TEXT)")
+        c.execute(f"CREATE TABLE {t} (k BIGINT PRIMARY KEY, v TEXT){with_engine}")
     c.close(); stop(s)
     def phase(i):
         s = start()
@@ -173,29 +216,39 @@ if sys.argv[1] in ("nucleus", "nucleus-docker"):
         if i < 2:
             t, key = ("seq", "g") if i == 0 else ("rnd", RANDOM_KEY)
             for j in range(N // CH):
-                c.execute(f"INSERT INTO {t} SELECT {key}, repeat('x', 100) FROM generate_series({j * CH + 1}, {(j + 1) * CH}) g")
+                c.execute(f"INSERT INTO {t} SELECT {key}, {text('x')} FROM generate_series({j * CH + 1}, {(j + 1) * CH}) g")
         elif i < 4:
             t, keys = ("seq", TRICKLE_SEQ) if i == 2 else ("rnd", TRICKLE_RND)
             for j in range(0, M, 1000):
-                c.pipeline([(f"INSERT INTO {t} VALUES ($1, repeat('y', 100))", [k]) for k in keys[j:j + 1000]])
-        else:
+                c.pipeline([(f"INSERT INTO {t} VALUES ($1, {text('y')})", [k]) for k in keys[j:j + 1000]])
+        elif i < 6:
             keys = BATCH_RND if i == 4 else STEADY_RND
             for j in range(0, len(keys), 100):
-                c.execute_many("INSERT INTO rnd VALUES ($1, repeat('z', 100))", [[k] for k in keys[j:j + 100]])
+                c.execute_many(f"INSERT INTO rnd VALUES ($1, {text('z')})", [[k] for k in keys[j:j + 100]])
+        else:
+            sql = (f"UPDATE rnd SET v = {text('u')} WHERE k = $1" if i == 6
+                   else "DELETE FROM rnd WHERE k = $1")
+            for j in range(0, U, 100):
+                c.execute_many(sql, [[k] for k in CHANGED[j:j + 100]])
         secs = time.perf_counter() - t0
         w1 = stable(lambda: written(s))
+        live = sum(c.execute(f"SELECT count(*) FROM {t}").rows[0][0] for t in ("seq", "rnd"))
         c.close(); stop(s)
         # The pages the phase dirtied, made durable by recovery's checkpoint.
+        r0 = time.perf_counter()
         if sys.argv[1] == "nucleus":
             s = start()
+            recovery = time.perf_counter() - r0
             w2 = stable(lambda: written(s))
         else:
             # The container's counter goes on: what recovery adds to it.
             w = stable(lambda: written(s))
+            r0 = time.perf_counter()
             s = start()
+            recovery = time.perf_counter() - r0
             w2 = stable(lambda: written(s)) - w
         stop(s)
-        report(PHASES[i][0], PHASES[i][1], secs, (w1 - w0) + w2, size())
+        report(PHASES[i][0], PHASES[i][1], secs, (w1 - w0) + w2, size(), live, recovery)
         print(f"    (during {(w1 - w0) / 2**20:.0f} MiB, its checkpoint after {w2 / 2**20:.0f} MiB)", flush=True)
     try:
         for i in CHOSEN:
@@ -228,18 +281,23 @@ else:
             w0, t0 = stable(written), time.perf_counter()
             if i < 2:
                 t, key = ("seq", "g") if i == 0 else ("rnd", RANDOM_KEY)
-                psql(file="".join(f"INSERT INTO {t} SELECT {key}, repeat('x', 100) FROM generate_series({j * CH + 1}, {(j + 1) * CH}) g;\n" for j in range(N // CH)))
+                psql(file="".join(f"INSERT INTO {t} SELECT {key}, {text('x')} FROM generate_series({j * CH + 1}, {(j + 1) * CH}) g;\n" for j in range(N // CH)))
             elif i < 4:
                 t, keys = ("seq", TRICKLE_SEQ) if i == 2 else ("rnd", TRICKLE_RND)
-                psql(file="".join(f"INSERT INTO {t} VALUES ({k}, repeat('y', 100));\n" for k in keys))
-            else:
+                psql(file="".join(f"INSERT INTO {t} VALUES ({k}, {text('y')});\n" for k in keys))
+            elif i < 6:
                 keys = BATCH_RND if i == 4 else STEADY_RND
-                psql(file="".join("BEGIN;\n" + "".join(f"INSERT INTO rnd VALUES ({k}, repeat('z', 100));\n" for k in keys[j:j + 100]) + "COMMIT;\n" for j in range(0, len(keys), 100)))
+                psql(file="".join("BEGIN;\n" + "".join(f"INSERT INTO rnd VALUES ({k}, {text('z')});\n" for k in keys[j:j + 100]) + "COMMIT;\n" for j in range(0, len(keys), 100)))
+            else:
+                one = (f"UPDATE rnd SET v = {text('u')} WHERE k = {{}};\n" if i == 6
+                       else "DELETE FROM rnd WHERE k = {};\n")
+                psql(file="".join("BEGIN;\n" + "".join(one.format(k) for k in CHANGED[j:j + 100]) + "COMMIT;\n" for j in range(0, U, 100)))
             secs = time.perf_counter() - t0
             w1 = stable(written)
             psql("CHECKPOINT")
             w2 = stable(written)
-            report(name, rows, secs, w2 - w0, size())
+            live = sum(int(psql(f"SELECT count(*) FROM {t}").split()[-3]) for t in ("seq", "rnd"))
+            report(name, rows, secs, w2 - w0, size(), live)
             print(f"    (during {(w1 - w0) / 2**20:.0f} MiB, its checkpoint after {(w2 - w1) / 2**20:.0f} MiB)", flush=True)
     finally:
         subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)

@@ -5,13 +5,16 @@ statement by statement.
 
     bench/run.py --nucleus target/release/nucleus [--rows 1000000] [--runs 5]
                  [--pg-data target/bench-pg | --psql "psql …" | --no-pg]
-                 [--embedded] [--retries 2] [--out bench/results/run.json]
+                 [--embedded] [--engines btree,lsm] [--retries 2]
+                 [--out bench/results/run.json]
 
 nucleus runs as `nucleus server` on a fresh directory each round, driven by
 `nucleus sql -h` (--embedded: in-process, no server); PostgreSQL native on
 this machine, a cluster of its own under --pg-data tuned for it
 (bench/pg.py) — or one already running, through --psql (PG* variables),
-which cannot be restarted and so has no cold runs.  Each system's times
+which cannot be restarted and so has no cold runs.  --engines names
+nucleus's table engines (§M14.28: `btree`, the default, and `lsm`), each
+a system of its own, its table made `WITH (engine = …)`.  Each system's times
 come from its own client's `\\timing`, in one session kept open, so
 neither pays for a connection.
 
@@ -66,7 +69,7 @@ def one_round(system, n, check):
     `check`, each read's answer as well."""
     times, answers = {}, {}
     system.fresh(["b"])
-    system.session.time(CREATE)
+    system.session.time(CREATE + getattr(system, "create_with", ""))
     for name, sql, kind in WORKLOAD:
         if kind == "write":
             times[(name, "write")] = system.session.time(sql.format(n=n))
@@ -94,12 +97,20 @@ def main():
     ap.add_argument("--psql", default=None, help="a running PostgreSQL's psql command instead")
     ap.add_argument("--no-pg", action="store_true", help="nucleus only")
     ap.add_argument("--embedded", action="store_true", help="nucleus in-process, without a server")
+    ap.add_argument("--engines", default="btree",
+                    help="nucleus's table engines, comma-separated: each a system of its own")
     ap.add_argument("--retries", type=int, default=method.RETRIES,
                     help="times the rounds run again while one spreads past the bound")
     ap.add_argument("--out", "--json", dest="out", default=None, help="the results file")
     a = ap.parse_args()
 
-    systems = [NucleusSystem(a.nucleus, "nucleus (embedded)" if a.embedded else "nucleus", a.embedded)]
+    systems = []
+    for engine in a.engines.split(","):
+        notes = [n for n in ("embedded" if a.embedded else None, None if engine == "btree" else engine) if n]
+        s = NucleusSystem(a.nucleus, "nucleus" + (f" ({', '.join(notes)})" if notes else ""), a.embedded)
+        if engine != "btree":
+            s.create_with = f" WITH (engine = {engine})"
+        systems.append(s)
     try:
         if not a.no_pg:
             systems.append(PostgresSystem(a.pg_data, a.psql))
