@@ -92,18 +92,23 @@ use crate::page::{
 };
 
 /// The on-disk format version this code writes.  Version 2 (§M14.20 V5)
-/// added compressed values; this code reads version 1 too (a file's
-/// header says 2 from its next commit on, so older builds refuse it rather
-/// than misread it).
-pub const FORMAT_VERSION: u32 = 2;
+/// added compressed values, version 4 B+tree nodes with key heads and
+/// internal nodes with a key prefix ([`crate::node`]); this code reads
+/// versions 1 to 3 too (a file's header says 4 from its next commit on, so
+/// older builds refuse it rather than misread it).
+pub const FORMAT_VERSION: u32 = 4;
 
 /// The oldest format version this code reads.
 pub const OLDEST_FORMAT_VERSION: u32 = 1;
 
 /// The format version of an encrypted file (PLAN.md §M14.30 K2b): a
 /// file in the clear stays at [`FORMAT_VERSION`], so encryption alone
-/// makes older builds refuse a file.
-pub const ENCRYPTED_FORMAT_VERSION: u32 = 3;
+/// makes older builds refuse a file.  Version 3 had the nodes of version
+/// 2; version 5 has those of version 4.
+pub const ENCRYPTED_FORMAT_VERSION: u32 = 5;
+
+/// [`ENCRYPTED_FORMAT_VERSION`] before version 4's nodes: still read.
+const OLD_ENCRYPTED_FORMAT_VERSION: u32 = 3;
 
 /// Where the header's cipher fields start, in its payload.
 const CIPHER_AT: usize = 48 + 8 * META_SLOTS;
@@ -215,7 +220,11 @@ impl Header {
             )));
         }
         let cipher = read_u32(p, CIPHER_AT);
-        if (version == ENCRYPTED_FORMAT_VERSION) != (cipher != CIPHER_NONE) {
+        let encrypted = matches!(
+            version,
+            OLD_ENCRYPTED_FORMAT_VERSION | ENCRYPTED_FORMAT_VERSION
+        );
+        if encrypted != (cipher != CIPHER_NONE) {
             return Err(Error::NotADatabase(format!(
                 "format version {version} with cipher {cipher}"
             )));
@@ -1788,9 +1797,10 @@ mod tests {
     use nucleus_platform::Platform;
     use nucleus_platform::sim::SimPlatform;
 
-    /// A file of format version 1 (before compressed values) opens; its
-    /// next commit marks it version 2; a version this build does not know
-    /// is refused.
+    /// A file of format version 1 (before compressed values) or 2 (before
+    /// key heads) opens; its next commit marks it the current version; a
+    /// file in the clear marked encrypted, or a version this build does not
+    /// know, is refused.
     #[test]
     fn older_format_versions_open_and_newer_are_refused() {
         let p = SimPlatform::new(1);
@@ -1819,6 +1829,14 @@ mod tests {
         pager.close().unwrap();
         assert!(version().contains(&FORMAT_VERSION));
         assert_eq!(Pager::open(fs, path).unwrap().meta(0), 7);
+        set_version(2);
+        let pager = Pager::open(fs, path).unwrap();
+        pager.set_meta(0, 8).unwrap();
+        pager.sync().unwrap();
+        pager.close().unwrap();
+        assert!(version().contains(&FORMAT_VERSION));
+        set_version(OLD_ENCRYPTED_FORMAT_VERSION);
+        assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
         set_version(ENCRYPTED_FORMAT_VERSION);
         assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
         set_version(ENCRYPTED_FORMAT_VERSION + 1);

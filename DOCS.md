@@ -382,9 +382,10 @@ scan's workers queued on it — 14 % of TPC-H Q1's time on row tables).
 
 **Header** — pages 0 and 1; copy `seq % 2` holds sequence number `seq`; a
 commit writes the older copy, `open` takes the valid copy with the highest
-`seq`.  Payload: magic `NUCLEUS\0`, format version (2; version 1 files —
-before compressed values and key prefixes — are read, and say 2 from their
-next commit on, so an older build refuses them rather than misreads them),
+`seq`.  Payload: magic `NUCLEUS\0`, format version (4, 5 encrypted;
+files of versions 1 — before compressed values and key prefixes — and 2
+and 3 — before key heads — are read, and say 4 or 5 from their next
+commit on, so an older build refuses them rather than misreads them),
 page size, `seq`, page count, first free-list page, free count, 16 meta
 slots.
 
@@ -481,8 +482,17 @@ frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
 ### 4.4 B+tree (`btree::BTree`, `node`)
 
 Byte-string keys (≤ `MAX_KEY` = 1024) compared bytewise, values of any
-size.  **Node format:** kind, count, leftmost child, an offset table, cells
-packed from the end.  Leaf cell `klen u16, flags u8, vlen u32, key, value`;
+size.  **Node format** (format version 4): kind (5 leaf, 6 internal),
+count, the key prefix's length and offset, leftmost child, the key prefix
+all the node's keys share, then a slot a key — its cell's offset and its
+*head*, the first four bytes of the key past the prefix, big-endian —
+and cells packed from the end.  A search compares the slots' heads as
+integers and reads a cell only where a head ties with the key sought's
+(`View::search`; LeanStore's heads, prefix truncation in internal nodes
+as in leaves): a point lookup in a 2-million-row tree 1045 → ~800 ns.
+Nodes of versions 1–3 (kinds 1–3: no heads, a 12-byte header, an
+internal node without a prefix) are read as they are and rewritten in
+the new form when changed.  Leaf cell `klen u16, flags u8, vlen u32, key, value`;
 a cell over 2048 bytes moves its value to an overflow chain (`next u64,
 len u32, data`) and stores `first page, length`.  Internal cell `klen u16,
 child u64, key`; child `i` holds keys in `[keys[i-1], keys[i])`.
@@ -8190,6 +8200,13 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — B+tree nodes with key heads (issue #1, format version
+  4):** each slot holds its key's first four bytes past the node's
+  prefix, internal nodes store their keys' shared prefix once, beside
+  the header; a search compares integers and reads a cell only on a tie.
+  A point lookup in a 2-million-row tree in memory 1045 → ~800 ns; TPC-H
+  Q20 ~1–2 % (its cold leaves' misses stay).  Older files are read, and
+  marked version 4 (5 encrypted) by their next commit.
 - **2026-11-18 — a key's versions looked up without allocating (issue
   #1):** where no intent is in sight, `engine::versions_at` builds a
   look's bounds in buffers its thread keeps and reads a version's

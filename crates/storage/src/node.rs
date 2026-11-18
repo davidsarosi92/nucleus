@@ -1,15 +1,34 @@
 //! B+tree node format.
 //!
-//! A node is one page.  Payload layout (little-endian):
+//! A node is one page.  Payload layout (little-endian), as written since
+//! format version 4 (kinds 5 and 6; PLAN.md, issue #1):
 //!
 //! | Offset | Size | Field |
 //! |-------:|-----:|-------|
-//! | 0 | 1 | kind: 1 leaf, 2 internal, 3 leaf with a key prefix |
+//! | 0 | 1 | kind: 5 leaf, 6 internal |
 //! | 1 | 1 | reserved |
 //! | 2 | 2 | cell count `n` |
-//! | 4 | 8 | internal: the leftmost child; leaf: 0; a leaf with a key prefix: its length `u16` and offset `u16` |
-//! | 12 | 2 × n | cell offsets (from the payload start), in key order |
+//! | 4 | 2 | the key prefix's length `p` (0: none) |
+//! | 6 | 2 | the key prefix's offset (16) |
+//! | 8 | 8 | internal: the leftmost child; leaf: 0 |
+//! | 16 | p | the key prefix |
+//! | 16 + p | 6 × n | slots, in key order: a cell's offset (from the payload start) `u16` and its key's head `u32` |
 //! | … | | free space, then the cells, packed at the end |
+//!
+//! A key's head is the first four bytes of its rest — the key past the
+//! node's prefix — big-endian, zeros past its end ([`head`]): heads
+//! compare as their keys do wherever they differ, so a search compares
+//! integers in the slot array and reads a cell only where heads tie —
+//! LeanStore's heads (Leis et al., ICDE 2018).  The prefix every key of
+//! the node shares is stored once, in internal nodes as in leaves (prefix
+//! truncation: Bayer and Unterauer, 1977), beside the header: a search
+//! of a page not in the cache waits for the header's, the prefix's and the
+//! first slots' lines at once, not for a line at the page's end first.
+//!
+//! Nodes written before (format versions 1 to 3) are read as they are:
+//! kinds 1 (leaf), 2 (internal) and 3 (leaf with a key prefix), a 12-byte
+//! header — bytes 4–12 the leftmost child (internal), or the prefix's
+//! length and offset (kind 3) — and slots of the offset alone.
 //!
 //! Leaf cell: `klen u16, flags u8, vlen u32, key, value` — with flag 1
 //! (overflow) the value is `first page u64, total length u64` and the bytes
@@ -19,10 +38,10 @@
 //! length u64, length u64`.  Internal cell: `klen u16, child u64,
 //! key`; the child holds keys `≥ key` (and `<` the next cell's key).
 //!
-//! A leaf with a key prefix (format version 2, §M14.20 V5) stores the
-//! prefix all its keys share once, among the cells, and only the rest of
-//! each key in its cell: the keys of a table's rows share their table and
-//! index ids and the high bytes of their primary keys.
+//! A leaf's prefix (format version 2, §M14.20 V5; an internal node's
+//! since version 4) is what all its keys share, stored once, with only
+//! the rest of each key in its cell: the keys of a table's rows share
+//! their table and index ids and the high bytes of their primary keys.
 //!
 //! Overflow page payload: `next u64 (0 = last), len u32, data`.
 //!
@@ -53,7 +72,46 @@ pub const MIN_FILL: usize = PAYLOAD_SIZE / 4;
 /// Data bytes per overflow page.
 pub const OVERFLOW_CAPACITY: usize = PAYLOAD_SIZE - 12;
 
-const HEADER: usize = 12;
+/// A node's header (kinds 5 and 6).
+const HEADER: usize = 16;
+/// The header of a node written before format version 4 (kinds 1 to 3).
+const OLD_HEADER: usize = 12;
+/// A slot: its cell's offset `u16` and its key's [`head`] `u32`.
+pub const SLOT: usize = 6;
+/// A slot of a node written before format version 4: the offset alone.
+const OLD_SLOT: usize = 2;
+
+/// Where the node in payload `p` has its slots, and each slot's size:
+/// past the header and the key prefix (kinds 5 and 6), or the header.
+fn layout(p: &[u8]) -> (usize, usize) {
+    if p[0] >= 5 {
+        (HEADER + u16::from_le_bytes([p[4], p[5]]) as usize, SLOT)
+    } else {
+        (OLD_HEADER, OLD_SLOT)
+    }
+}
+
+/// Where the node in payload `p` keeps its leftmost child (internal).
+fn leftmost_at(p: &[u8]) -> usize {
+    if p[0] >= 5 { 8 } else { 4 }
+}
+
+/// A key's head: the first four bytes of `rest` (a key past its node's
+/// prefix), big-endian, zeros past its end.  Where two heads differ their
+/// keys differ the same way (a key that ends early has zeros where the
+/// other has bytes, and is less); where they tie the keys must be
+/// compared.
+#[inline]
+pub fn head(rest: &[u8]) -> u32 {
+    // No copy of a length known only now (a call to `memmove`, a tenth of
+    // a search's time).
+    if let Some(b) = rest.first_chunk::<4>() {
+        return u32::from_be_bytes(*b);
+    }
+    rest.iter()
+        .enumerate()
+        .fold(0, |h, (i, &b)| h | (b as u32) << (24 - 8 * i))
+}
 
 type Decode<T> = std::result::Result<T, &'static str>;
 
@@ -160,7 +218,7 @@ pub fn leaf_cell_size(key: &[u8], val: &Val) -> usize {
 
 /// [`leaf_cell_size`] of a value as a page holds it.
 pub fn cell_size(key: &[u8], val: ValRef) -> usize {
-    2 + 7 + key.len() + val.stored_len()
+    SLOT + 7 + key.len() + val.stored_len()
 }
 
 /// Writes a leaf of `entries` (in key order, borrowed: from a page being
@@ -179,16 +237,14 @@ pub fn encode_leaf(page: &mut Page, entries: &[(&[u8], ValRef)]) {
     };
     // The key prefix first, at the end; its length and offset in the
     // header.
-    p[0] = 1;
+    p[0] = 5;
     if plen > 0 {
-        end -= plen;
-        p[end..end + plen].copy_from_slice(&entries[0].0[..plen]);
+        p[HEADER..HEADER + plen].copy_from_slice(&entries[0].0[..plen]);
         p[4..6].copy_from_slice(&(plen as u16).to_le_bytes());
-        p[6..8].copy_from_slice(&(end as u16).to_le_bytes());
-        p[0] = 3;
+        p[6..8].copy_from_slice(&(HEADER as u16).to_le_bytes());
     }
     p[2..4].copy_from_slice(&(entries.len() as u16).to_le_bytes());
-    let mut slot = HEADER;
+    let mut slot = HEADER + plen;
     for (key, val) in entries {
         let key = &key[plen..];
         let vlen = val.stored_len();
@@ -219,7 +275,8 @@ pub fn encode_leaf(page: &mut Page, entries: &[(&[u8], ValRef)]) {
             }
         }
         p[slot..slot + 2].copy_from_slice(&(end as u16).to_le_bytes());
-        slot += 2;
+        p[slot + 2..slot + SLOT].copy_from_slice(&head(key).to_be_bytes());
+        slot += SLOT;
     }
     debug_assert!(slot <= end, "leaf overflows its page");
     p[slot..end].fill(0);
@@ -227,7 +284,7 @@ pub fn encode_leaf(page: &mut Page, entries: &[(&[u8], ValRef)]) {
 
 /// The encoded size of an internal node's cell of `key`.
 pub fn internal_cell_size(key: &[u8]) -> usize {
-    2 + 10 + key.len()
+    SLOT + 10 + key.len()
 }
 
 /// The length of the key prefix a leaf with these keys (ascending) is
@@ -272,7 +329,9 @@ impl Leaf {
 }
 
 impl Internal {
-    /// Encoded size in bytes.
+    /// Encoded size in bytes, at most: the keys' shared prefix, stored
+    /// once, is not counted off (so a node's size, as the tree's splits
+    /// and merges add it up, is a sum of its cells').
     pub fn size(&self) -> usize {
         HEADER
             + self
@@ -362,11 +421,21 @@ impl Node {
         let p = page.payload_mut();
         p.fill(0);
         let mut end = PAYLOAD_SIZE;
-        let mut slot = HEADER;
-        p[0] = 2;
+        p[0] = 6;
         p[2..4].copy_from_slice(&(node.keys.len() as u16).to_le_bytes());
-        write_u64(p, 4, node.children[0].0);
+        let plen = match (node.keys.first(), node.keys.last()) {
+            (Some(a), Some(b)) => key_prefix(a, b, node.keys.len()),
+            _ => 0,
+        };
+        if plen > 0 {
+            p[HEADER..HEADER + plen].copy_from_slice(&node.keys[0][..plen]);
+            p[4..6].copy_from_slice(&(plen as u16).to_le_bytes());
+            p[6..8].copy_from_slice(&(HEADER as u16).to_le_bytes());
+        }
+        let mut slot = HEADER + plen;
+        write_u64(p, 8, node.children[0].0);
         for (key, child) in node.keys.iter().zip(&node.children[1..]) {
+            let key = &key[plen..];
             let len = 10 + key.len();
             end -= len;
             let c = &mut p[end..end + len];
@@ -374,7 +443,8 @@ impl Node {
             c[2..10].copy_from_slice(&child.0.to_le_bytes());
             c[10..].copy_from_slice(key);
             p[slot..slot + 2].copy_from_slice(&(end as u16).to_le_bytes());
-            slot += 2;
+            p[slot + 2..slot + SLOT].copy_from_slice(&head(key).to_be_bytes());
+            slot += SLOT;
         }
         debug_assert!(slot <= end, "node overflows its page");
     }
@@ -383,26 +453,29 @@ impl Node {
     pub fn decode(page: &Page) -> Decode<Node> {
         let p = page.payload();
         let n = u16::from_le_bytes([p[2], p[3]]) as usize;
-        if HEADER + 2 * n > PAYLOAD_SIZE {
+        let (hdr, slot) = layout(p);
+        if hdr + slot * n > PAYLOAD_SIZE {
             return Err("node cell count out of range");
         }
         let cell = |i: usize| -> Decode<&[u8]> {
-            let off = u16::from_le_bytes([p[HEADER + 2 * i], p[HEADER + 2 * i + 1]]) as usize;
-            if off < HEADER + 2 * n || off >= PAYLOAD_SIZE {
+            let at = hdr + slot * i;
+            let off = u16::from_le_bytes([p[at], p[at + 1]]) as usize;
+            if off < hdr + slot * n || off >= PAYLOAD_SIZE {
                 return Err("node cell offset out of range");
             }
             Ok(&p[off..])
         };
+        // A slot's head must be its key's: a search trusts it.
+        let head_of = |i: usize, rest: &[u8]| -> Decode<()> {
+            let at = hdr + slot * i + 2;
+            if slot == SLOT && p[at..at + 4] != head(rest).to_be_bytes() {
+                return Err("node key head wrong");
+            }
+            Ok(())
+        };
+        let prefix = node_prefix(p)?;
         match (p[0], page.page_type()) {
-            (1 | 3, LEAF) => {
-                let prefix: &[u8] = if p[0] == 3 {
-                    let len = u16::from_le_bytes([p[4], p[5]]) as usize;
-                    let off = u16::from_le_bytes([p[6], p[7]]) as usize;
-                    p.get(off..off + len)
-                        .ok_or("leaf key prefix out of range")?
-                } else {
-                    &[]
-                };
+            (1 | 3 | 5, LEAF) => {
                 let mut entries = Vec::with_capacity(n);
                 for i in 0..n {
                     let c = cell(i)?;
@@ -415,6 +488,7 @@ impl Node {
                     if c.len() < 7 + klen + vlen {
                         return Err("leaf cell runs past the page");
                     }
+                    head_of(i, &c[7..7 + klen])?;
                     let mut key = Vec::with_capacity(prefix.len() + klen);
                     key.extend_from_slice(prefix);
                     key.extend_from_slice(&c[7..7 + klen]);
@@ -443,10 +517,10 @@ impl Node {
                 }
                 Ok(Node::Leaf(Leaf { entries }))
             }
-            (2, INTERNAL) => {
+            (2 | 6, INTERNAL) => {
                 let mut keys = Vec::with_capacity(n);
                 let mut children = Vec::with_capacity(n + 1);
-                children.push(PageId(read_u64(p, 4)));
+                children.push(PageId(read_u64(p, leftmost_at(p))));
                 for i in 0..n {
                     let c = cell(i)?;
                     if c.len() < 10 {
@@ -457,7 +531,11 @@ impl Node {
                         return Err("internal cell runs past the page");
                     }
                     children.push(PageId(read_u64(c, 2)));
-                    keys.push(c[10..10 + klen].to_vec());
+                    head_of(i, &c[10..10 + klen])?;
+                    let mut key = Vec::with_capacity(prefix.len() + klen);
+                    key.extend_from_slice(prefix);
+                    key.extend_from_slice(&c[10..10 + klen]);
+                    keys.push(key);
                 }
                 if keys.windows(2).any(|w| w[0] >= w[1]) {
                     return Err("internal keys out of order");
@@ -469,6 +547,21 @@ impl Node {
     }
 }
 
+/// The key prefix a node's payload `p` stores (empty where none: kinds 1
+/// and 2, or a length of 0).
+fn node_prefix(p: &[u8]) -> Decode<&[u8]> {
+    if !matches!(p[0], 3 | 5 | 6) {
+        return Ok(&[]);
+    }
+    let len = u16::from_le_bytes([p[4], p[5]]) as usize;
+    let off = u16::from_le_bytes([p[6], p[7]]) as usize;
+    // Kinds 5 and 6 keep it past the header, before the slots.
+    if p[0] >= 5 && len > 0 && off != HEADER {
+        return Err("node key prefix out of place");
+    }
+    p.get(off..off + len).ok_or("node key prefix out of range")
+}
+
 /// A node read in place, without decoding it: what a search needs (a
 /// separator, a child, an entry), each checked as [`Node::decode`] checks
 /// it.
@@ -478,8 +571,12 @@ pub struct View<'a> {
     /// Entries (a leaf) or keys (an internal node).
     n: usize,
     leaf: bool,
-    /// What every key of a leaf starts with (stored once).
+    /// What every key of the node starts with (stored once).
     prefix: &'a [u8],
+    /// Where the slots start, and each slot's size ([`SLOT`]: with the
+    /// key's head).
+    hdr: usize,
+    slot: usize,
 }
 
 /// A key as a page holds it: a prefix the page's keys share, and the rest.
@@ -540,23 +637,24 @@ impl<'a> View<'a> {
     pub fn new(page: &'a Page) -> Decode<Self> {
         let p = page.payload();
         let n = u16::from_le_bytes([p[2], p[3]]) as usize;
-        if HEADER + 2 * n > PAYLOAD_SIZE {
+        let (hdr, slot) = layout(p);
+        if hdr + slot * n > PAYLOAD_SIZE {
             return Err("node cell count out of range");
         }
         let leaf = match (p[0], page.page_type()) {
-            (1 | 3, LEAF) => true,
-            (2, INTERNAL) => false,
+            (1 | 3 | 5, LEAF) => true,
+            (2 | 6, INTERNAL) => false,
             _ => return Err("not a B+tree node"),
         };
-        let prefix: &[u8] = if p[0] == 3 {
-            let len = u16::from_le_bytes([p[4], p[5]]) as usize;
-            let off = u16::from_le_bytes([p[6], p[7]]) as usize;
-            p.get(off..off + len)
-                .ok_or("leaf key prefix out of range")?
-        } else {
-            &[]
-        };
-        Ok(View { p, n, leaf, prefix })
+        let prefix = node_prefix(p)?;
+        Ok(View {
+            p,
+            n,
+            leaf,
+            prefix,
+            hdr,
+            slot,
+        })
     }
 
     /// Whether it is a leaf.
@@ -575,8 +673,9 @@ impl<'a> View<'a> {
     }
 
     fn cell(&self, i: usize) -> Decode<&'a [u8]> {
-        let off = u16::from_le_bytes([self.p[HEADER + 2 * i], self.p[HEADER + 2 * i + 1]]) as usize;
-        if off < HEADER + 2 * self.n || off >= PAYLOAD_SIZE {
+        let at = self.hdr + self.slot * i;
+        let off = u16::from_le_bytes([self.p[at], self.p[at + 1]]) as usize;
+        if off < self.hdr + self.slot * self.n || off >= PAYLOAD_SIZE {
             return Err("node cell offset out of range");
         }
         Ok(&self.p[off..])
@@ -602,7 +701,7 @@ impl<'a> View<'a> {
     /// Child `i` of an internal node.
     pub fn child(&self, i: usize) -> Decode<PageId> {
         if i == 0 {
-            return Ok(PageId(read_u64(self.p, 4)));
+            return Ok(PageId(read_u64(self.p, leftmost_at(self.p))));
         }
         let c = self.cell(i - 1)?;
         if c.len() < 10 {
@@ -613,7 +712,50 @@ impl<'a> View<'a> {
 
     /// The child of an internal node that holds `key`.
     pub fn child_index(&self, key: &[u8]) -> Decode<usize> {
-        self.partition(|k| k.order(key).is_le())
+        self.search(key, true)
+    }
+
+    /// The first entry (or separator) whose key is not below `key` —
+    /// with `past`, not at or below it: a binary search over the slots'
+    /// heads, a cell read only where a head ties with `key`'s.
+    pub fn search(&self, key: &[u8], past: bool) -> Decode<usize> {
+        if self.slot != SLOT {
+            return self.partition(|k| {
+                let o = k.order(key);
+                if past { o.is_le() } else { o.is_lt() }
+            });
+        }
+        // `key` against the prefix all keys share: below or above them
+        // all, or the search among the rests.
+        let p = self.prefix;
+        let m = p.len().min(key.len());
+        match key[..m].cmp(&p[..m]) {
+            std::cmp::Ordering::Less => return Ok(0),
+            std::cmp::Ordering::Greater => return Ok(self.n),
+            std::cmp::Ordering::Equal if key.len() < p.len() => return Ok(0),
+            std::cmp::Ordering::Equal => {}
+        }
+        let rest = &key[p.len()..];
+        let h = head(rest);
+        let (mut lo, mut hi) = (0, self.n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let at = self.hdr + SLOT * mid + 2;
+            let hm =
+                u32::from_be_bytes([self.p[at], self.p[at + 1], self.p[at + 2], self.p[at + 3]]);
+            let below = if hm != h {
+                hm < h
+            } else {
+                let o = self.key(mid)?.rest.cmp(rest);
+                if past { o.is_le() } else { o.is_lt() }
+            };
+            if below {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
     }
 
     /// The first `i` whose key fails `pred` (keys for which it holds come
@@ -779,6 +921,13 @@ mod tests {
         let p = page.payload_mut();
         let at = p.windows(1).rposition(|w| w == b"2").unwrap();
         p[at] = b'0';
+        // Its slot's head is still the old key's: refused for that first
+        // (a search trusts heads) ...
+        assert_eq!(Node::decode(&page), Err("node key head wrong"));
+        // ... and, the head made the new key's, for the order.
+        let p = page.payload_mut();
+        let slots = HEADER + b"key-".len(); // past the prefix
+        p[slots + SLOT + 2..slots + 2 * SLOT].copy_from_slice(&head(b"0").to_be_bytes());
         assert_eq!(Node::decode(&page), Err("leaf keys out of order"));
         let internal = Node::Internal(Internal {
             keys: vec![b"t".to_vec(), b"m".to_vec()],
@@ -834,6 +983,75 @@ mod tests {
                     assert_eq!(k.is(other), whole == other);
                 }
                 assert_eq!(k.to_vec(), whole);
+            }
+        }
+    }
+
+    /// A search over the slots' heads finds what comparing whole keys
+    /// finds, in leaves and internal nodes: keys sharing a prefix, ties of
+    /// heads (rests alike in their first four bytes, rests shorter than
+    /// four, zeros), and keys sought below, inside, above and short of
+    /// the prefix.
+    #[test]
+    fn a_search_by_heads_finds_what_keys_compared_find() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let alphabet: [u8; 4] = [0, 1, b'a', 0xFF];
+        for round in 0..300 {
+            let plen = (next() % 6) as usize;
+            let prefix: Vec<u8> = (0..plen).map(|_| alphabet[(next() % 4) as usize]).collect();
+            let n = 1 + (next() % 120) as usize;
+            let mut keys: Vec<Vec<u8>> = (0..n)
+                .map(|_| {
+                    let mut k = prefix.clone();
+                    // Rests that often tie in their first bytes.
+                    let len = (next() % 9) as usize;
+                    k.extend((0..len).map(|_| alphabet[(next() % 4) as usize]));
+                    k
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            let n = keys.len();
+            let leaf = Node::Leaf(Leaf {
+                entries: keys
+                    .iter()
+                    .map(|k| (k.clone(), Val::Inline(vec![7])))
+                    .collect(),
+            });
+            let internal = (n >= 1).then(|| {
+                Node::Internal(Internal {
+                    keys: keys.clone(),
+                    children: (0..=n as u64).map(PageId).collect(),
+                })
+            });
+            for node in std::iter::once(leaf).chain(internal) {
+                let mut page = Page::new(PageType::UNUSED);
+                node.encode(&mut page);
+                assert_eq!(Node::decode(&page).unwrap(), node);
+                let v = View::new(&page).unwrap();
+                let mut sought: Vec<Vec<u8>> = keys.clone();
+                for _ in 0..40 {
+                    let len = (next() % 12) as usize;
+                    let mut k: Vec<u8> = if next() % 2 == 0 {
+                        prefix.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    k.extend((0..len).map(|_| alphabet[(next() % 4) as usize]));
+                    sought.push(k);
+                }
+                for k in &sought {
+                    for past in [false, true] {
+                        let want = keys.partition_point(|x| if past { x <= k } else { x < k });
+                        assert_eq!(v.search(k, past), Ok(want), "round {round}: {k:?} {past}");
+                    }
+                }
             }
         }
     }

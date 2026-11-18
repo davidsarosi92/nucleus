@@ -11525,6 +11525,31 @@ simple parameterization, MySQL's former query cache — what not to do).
      timestamp from its key's last eight bytes, and escapes a run
      between zeros at a time.  Q20 on one worker 234.5 → 220 ms (A/B,
      the means of both orders), on ten ~4 % faster.
+  2. *Nodes searched by key heads* (format version 4, kinds 5 and 6).
+     Taken from LeanStore (Leis et al., ICDE 2018): each slot holds,
+     beside its cell's offset, the first four bytes of its key past the
+     node's prefix, big-endian; a binary search compares those integers
+     in the slot array and reads a cell only where a head ties.  From
+     Bayer and Unterauer's prefix B-trees (1977) and Graefe's *Modern
+     B-Tree Techniques*: internal nodes store their keys' shared prefix
+     once too (their ~15 bytes of table and index ids were compared at
+     every probe).  The prefix lies beside the header, before the slots,
+     not at the page's end: one line fewer waited for a page not in the
+     cache (828 → ~785 ns below).  Measured with a probe of 400,000
+     random lookups in a 2-million-row tree in memory: 1045 → ~800 ns.
+     Q20, the binaries run alone in turn (s1, v3, s1, v3): one worker
+     225 → 222 ms, ten 58.6 → 58.1 — its `lineitem` leaves are not in
+     the cache, and their misses are what a fetch waits for, not the
+     comparisons.  Kept for every point read (the user's call).  Tried,
+     not taken: reading a node's slot lines all at once before its
+     search (Chen, Gibbons and Mowry's prefetching B+-trees, SIGMOD
+     2001) — no gain alone: the search's first misses are the same.  An
+     internal node's size is still counted without its prefix (sums of
+     cells), so splits and packing do not yet gain the room it saves.
+     Next, measured on the probe: lookups a group of eight at a time,
+     each level's pages fetched and their first kilobyte read for the
+     whole group before any is searched (group prefetching, Chen et al.;
+     AMAC, Kocberber et al., VLDB 2015): ~780 → ~570 ns a lookup.
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:

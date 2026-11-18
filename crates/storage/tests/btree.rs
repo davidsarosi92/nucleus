@@ -682,19 +682,20 @@ fn split_keys_by_scanning(
                 break;
             }
             for i in 0..=v.len() {
-                let lo = (i > 0).then(|| v.key(i - 1).unwrap().rest);
-                let hi = (i < v.len()).then(|| v.key(i).unwrap().rest);
-                let after_start = hi.is_none_or(|h| h > start);
-                let before_end = match (lo, end) {
-                    (Some(l), Some(e)) => l < e,
+                // Whole keys: an internal node's have a prefix too.
+                let lo = (i > 0).then(|| v.key(i - 1).unwrap().to_vec());
+                let hi = (i < v.len()).then(|| v.key(i).unwrap().to_vec());
+                let after_start = hi.is_none_or(|h| h.as_slice() > start);
+                let before_end = match (&lo, end) {
+                    (Some(l), Some(e)) => l.as_slice() < e,
                     _ => true,
                 };
                 if after_start && before_end {
                     next.push(v.child(i).unwrap());
                     if let Some(l) = lo
-                        && inside(l)
+                        && inside(&l)
                     {
-                        found.push(l.to_vec());
+                        found.push(l);
                     }
                 }
             }

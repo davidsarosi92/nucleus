@@ -31,8 +31,8 @@ use crate::buffer::{BufferPool, PageRef, READ_AHEAD};
 use crate::error::{Error, Result};
 use crate::node::{
     Internal, LEAF, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY,
-    Val, ValRef, View, balance_point, cell_size, decode_overflow, encode_leaf, encode_overflow,
-    internal_cell_size, key_prefix, leaf_cell_size, leaf_size,
+    SLOT, Val, ValRef, View, balance_point, cell_size, decode_overflow, encode_leaf,
+    encode_overflow, internal_cell_size, key_prefix, leaf_cell_size, leaf_size,
 };
 use crate::page::{PAYLOAD_SIZE, Page, PageId};
 
@@ -247,7 +247,7 @@ impl BTree {
         } else {
             Val::Inline(value.to_vec())
         };
-        if leaf_cell_size(key, &val) - 2 <= MAX_INLINE_CELL {
+        if leaf_cell_size(key, &val) - SLOT <= MAX_INLINE_CELL {
             return Ok(val);
         }
         let (stored, raw) = match val {
@@ -361,7 +361,7 @@ impl BTree {
                     .map_err(corrupt)?;
                 continue;
             }
-            let i = v.partition(|k| k.order(key).is_lt()).map_err(corrupt)?;
+            let i = v.search(key, false).map_err(corrupt)?;
             if i < v.len() && v.key(i).map_err(corrupt)?.is(key) {
                 let val = v.value(i).map_err(corrupt)?;
                 let mut out = Vec::new();
@@ -406,26 +406,25 @@ impl BTree {
                     leaves = true;
                     break;
                 }
-                // Child i holds the keys in [key(i - 1), key(i)) (an
-                // internal node's keys are whole: no prefix): from the
-                // child holding `start` (found by binary search) to the
-                // last that begins before `end`.
+                // Child i holds the keys in [key(i - 1), key(i)): from
+                // the child holding `start` (found by binary search) to
+                // the last that begins before `end`.
                 for i in v.child_index(start).map_err(corrupt)?..=v.len() {
                     let lo = if i == 0 {
                         None
                     } else {
-                        Some(v.key(i - 1).map_err(corrupt)?.rest)
+                        Some(v.key(i - 1).map_err(corrupt)?.to_vec())
                     };
-                    if let (Some(l), Some(e)) = (lo, end)
-                        && l >= e
+                    if let (Some(l), Some(e)) = (&lo, end)
+                        && l.as_slice() >= e
                     {
                         break;
                     }
                     next.push(v.child(i).map_err(corrupt)?);
                     if let Some(l) = lo
-                        && inside(l)
+                        && inside(&l)
                     {
-                        found.push(l.to_vec());
+                        found.push(l);
                     }
                 }
             }
@@ -1430,7 +1429,7 @@ impl<'t> Cursor<'t> {
         self.descend(
             self.tree.root,
             |v| v.child_index(key),
-            |v| v.partition(|k| k.order(key).is_lt()),
+            |v| v.search(key, false),
         )
     }
 
@@ -1454,7 +1453,7 @@ impl<'t> Cursor<'t> {
                     .order(key)
                     .is_lt()
             {
-                self.pos = v.partition(|k| k.order(key).is_lt()).map_err(corrupt)?;
+                self.pos = v.search(key, false).map_err(corrupt)?;
                 return Ok(());
             }
         }
@@ -1468,7 +1467,7 @@ impl<'t> Cursor<'t> {
         self.descend(
             self.tree.root,
             |v| v.child_index(key),
-            |v| v.partition(|k| k.order(key).is_le()),
+            |v| v.search(key, true),
         )
     }
 
