@@ -11473,6 +11473,34 @@ simple parameterization, MySQL's former query cache — what not to do).
   `lineitem`'s primary B+tree where PostgreSQL's TID reads one heap
   page; the shared root's latch and counters cost ~7 % of the CPU at
   ten workers.  Issue #1 stays open for it.
+  *Issue #1, the subquery unnested* (2026-11-18).  Profiled on one
+  worker after the step above: of Q20's ~245 ms, the primary key
+  fetches' descents ~76 ms, the rest of each fetch ~23 ms — and ~76 ms
+  the correlated subquery's own work each of its 8,876 runs (its plan
+  built, rows of `Value`s, its aggregate: ~8.6 µs a run, where
+  PostgreSQL's whole run, an index scan and ~7 heap fetches, is ~6 µs).
+  The engines that run Q20 fastest unnest it (HyPer, Umbra, DuckDB:
+  Neumann and Kemper, *Unnesting Arbitrary Queries*, BTW 2015; SQL
+  Server's Apply removal, Galindo-Legaria and Joshi, SIGMOD 2001);
+  PostgreSQL runs it per row, cheaply.  `unnest::grouped`: a comparison
+  with a scalar subquery aggregating one table's rows that match the
+  row on equalities becomes an inner join with that table, grouped by
+  the row, the comparison on the group's value — when the row's columns
+  compared are its own key (`eager::unique`, now through semi and anti
+  joins), and the aggregates and the value over them are NULL over no
+  rows (`sum`, `avg`, `min`, `max` and arithmetic on them — not
+  `count`, the "COUNT bug", Ganski and Wong 1987), so that a row no
+  table row matches, which has no group, is dropped as its comparison
+  with NULL would drop it.  Q20's `lineitem` rows are then found by an
+  index nested loop in a pipeline, on the workers, and aggregated there.
+  Q20 (ten workers, A/B) 83 → 66 ms; by the method 86.5 → 64.3 ms
+  against PostgreSQL's 59.7, ≈ (1.08×, the intervals overlapping); every
+  answer the same, the geometric mean 0.62×.  Where the row's columns
+  repeat (Q17's part over its lines) the subquery stays: its results
+  kept by those values cost less.  Next, measured: at ten workers the
+  CPU time is 3.2× one worker's; `BufferPool::fetch` grows 16× (the
+  root's and inner pages' shard lock, pins and latch: ~6 atomic writes a
+  level on lines every worker shares).
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:

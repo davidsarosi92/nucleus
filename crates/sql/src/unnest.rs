@@ -12,6 +12,20 @@
 //! condition, the rest stays its filter.  `NOT IN` stays a subquery (its
 //! NULLs differ from an anti join's).  The right side keeps only the
 //! columns the condition reads, so a join holds little of each row.
+//!
+//! A comparison with a scalar subquery that aggregates one table's rows
+//! matching the row — `ps_availqty > (SELECT 0.5 * sum(l_quantity) FROM
+//! lineitem WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey …)`,
+//! TPC-H Q20 — becomes a join and a grouping when those columns of the
+//! row are its own (a primary key: [`crate::eager::unique`]): the rows
+//! joined with the table's on the equalities, grouped by the row, the
+//! comparison on each group's aggregate (Galindo-Legaria and Joshi's
+//! Apply removal, SIGMOD 2001; Neumann and Kemper's unnesting, BTW 2015).
+//! A row no table row matches has no group, as it would have NULL: only
+//! for aggregates that give NULL over no rows (`sum`, `avg`, `min`,
+//! `max` — not `count`, the "COUNT bug") and a value that stays NULL
+//! (arithmetic on them).  Where the row's columns repeat, the subquery
+//! stays, its results kept by those values (`exec`).
 
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::binder::{conjunction, conjuncts};
@@ -70,7 +84,9 @@ fn placeholder() -> Plan {
 fn has_candidate(e: &Expr) -> bool {
     let mut parts = Vec::new();
     conjuncts(e.clone(), &mut parts);
-    parts.iter().any(|p| candidate(p).is_some())
+    parts
+        .iter()
+        .any(|p| candidate(p).is_some() || scalar_side(p).is_some())
 }
 
 /// The subquery of a conjunct that may unnest, and the join it would be.
@@ -100,7 +116,221 @@ fn joins(mut input: Plan, predicate: Expr) -> (Plan, Vec<Expr>) {
             None => rest.push(p),
         }
     }
-    (input, rest)
+    // Then the scalar subqueries, over the rows the semi joins kept.
+    let mut left = Vec::new();
+    for p in rest {
+        match grouped(&input, &p) {
+            Some(plan) => input = plan,
+            None => left.push(p),
+        }
+    }
+    (input, left)
+}
+
+/// The scalar subquery of a comparison `x op (SELECT …)` or `(SELECT …)
+/// op x`, and whether it is on the right.
+fn scalar_side(p: &Expr) -> Option<(&SubPlan, bool)> {
+    let Expr::Binary(op, l, r) = p else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::NotEq
+            | BinaryOp::Lt
+            | BinaryOp::LtEq
+            | BinaryOp::Gt
+            | BinaryOp::GtEq
+    ) {
+        return None;
+    }
+    let sub = |e: &Expr| {
+        matches!(e, Expr::Subquery(s)
+            if matches!(s.kind, SubKind::Scalar) && s.correlated && s.plan.outer_depth() == 1)
+    };
+    let plain = |e: &Expr| depth(e) == 0 && !e.has_subquery();
+    match (&**l, &**r) {
+        (x, Expr::Subquery(s)) if sub(r) && plain(x) => Some((s, true)),
+        (Expr::Subquery(s), x) if sub(l) && plain(x) => Some((s, false)),
+        _ => None,
+    }
+}
+
+/// Whether `f`, over aggregates' values, is NULL when they all are: an
+/// aggregate's value, or arithmetic on one with constants or others
+/// (division only by a constant other than zero — no division by zero for
+/// a row the subquery would not have run for).
+fn stays_null(f: &Expr) -> bool {
+    let constant = |e: &Expr| matches!(e, Expr::Literal(v) if !v.is_null());
+    let operand = |e: &Expr| constant(e) || stays_null(e);
+    match f {
+        Expr::Column(_) => true,
+        Expr::Unary(UnaryOp::Neg, e) | Expr::Cast(e, _) => stays_null(e),
+        Expr::Binary(BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul, a, b) => {
+            (stays_null(a) && operand(b)) || (operand(a) && stays_null(b))
+        }
+        Expr::Binary(BinaryOp::Div | BinaryOp::Mod, a, b) => match &**b {
+            Expr::Literal(v) => {
+                stays_null(a)
+                    && matches!(
+                        v.sql_cmp(&crate::types::Value::Int(0)),
+                        Ok(Some(o)) if o != std::cmp::Ordering::Equal
+                    )
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// `input` with the comparison `p` with a scalar subquery aggregating one
+/// table's rows that match it as a join and a grouping (the module's
+/// doc), its rows as before; `None` where it does not apply.
+fn grouped(input: &Plan, p: &Expr) -> Option<Plan> {
+    let (s, on_right) = scalar_side(p)?;
+    let Expr::Binary(op, l, r) = p else {
+        return None;
+    };
+    let other = if on_right { &**l } else { &**r };
+    // The value over one aggregation of all the rows (no `GROUP BY`: one
+    // row, always).
+    let (f, aggs, body) = match &s.plan {
+        Plan::Project { input, exprs } if exprs.len() == 1 => match &**input {
+            Plan::Aggregate { input, group, aggs } if group.is_empty() => {
+                (exprs[0].clone(), aggs, &**input)
+            }
+            _ => return None,
+        },
+        Plan::Aggregate { input, group, aggs } if group.is_empty() && aggs.len() == 1 => {
+            (Expr::Column(0), aggs, &**input)
+        }
+        _ => return None,
+    };
+    if depth(&f) > 0 || f.has_subquery() || !stays_null(&f) {
+        return None;
+    }
+    let null_over_none = |a: &crate::plan::Agg| {
+        matches!(a.func.name(), "sum" | "avg" | "min" | "max")
+            && a.order.is_empty()
+            && a.args.iter().all(|e| depth(e) == 0 && !e.has_subquery())
+    };
+    if aggs.is_empty() || !aggs.iter().all(null_over_none) {
+        return None;
+    }
+    let (table, parts) = match body {
+        Plan::Filter { input, predicate } => match &**input {
+            Plan::Scan { table, filter, .. } => {
+                let mut parts = Vec::new();
+                conjuncts(predicate.clone(), &mut parts);
+                if let Some(f) = filter {
+                    conjuncts(f.clone(), &mut parts);
+                }
+                (table, parts)
+            }
+            _ => return None,
+        },
+        Plan::Scan { table, filter, .. } => {
+            let mut parts = Vec::new();
+            if let Some(f) = filter {
+                conjuncts(f.clone(), &mut parts);
+            }
+            (table, parts)
+        }
+        _ => return None,
+    };
+    // The row's columns, each equal to an expression of the table's.
+    let (corr, local): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|p| depth(p) > 0);
+    if corr.is_empty() || local.iter().any(|p| depth(p) > 0) {
+        return None;
+    }
+    let mut pairs = Vec::new();
+    for c in &corr {
+        let Expr::Binary(BinaryOp::Eq, a, b) = c else {
+            return None;
+        };
+        let (outer, inner) = match (&**a, &**b) {
+            (Expr::Outer { depth: 1, index }, e) | (e, Expr::Outer { depth: 1, index }) => {
+                (*index, e)
+            }
+            _ => return None,
+        };
+        if depth(inner) > 0 || inner.has_subquery() {
+            return None;
+        }
+        pairs.push((outer, inner.clone()));
+    }
+    let mut keys: Vec<usize> = pairs.iter().map(|(k, _)| *k).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    if !crate::eager::unique(input, &keys) {
+        return None;
+    }
+    // The table's side: only the columns the equalities and the
+    // aggregates read.
+    let lw = input.width();
+    let mut cols: Vec<usize> = pairs
+        .iter()
+        .map(|(_, e)| e)
+        .chain(aggs.iter().flat_map(|a| a.args.iter()))
+        .flat_map(Expr::columns)
+        .collect();
+    cols.sort_unstable();
+    cols.dedup();
+    let at = |c: usize| cols.iter().position(|&x| x == c).expect("a read column");
+    let joined = |e: &Expr| e.map_columns(&|c| Expr::Column(lw + at(c)));
+    let on = conjunction(
+        pairs
+            .iter()
+            .map(|(k, e)| {
+                Expr::Binary(
+                    BinaryOp::Eq,
+                    Box::new(Expr::Column(*k)),
+                    Box::new(joined(e)),
+                )
+            })
+            .collect(),
+    )?;
+    let right = Plan::Project {
+        input: Box::new(Plan::Scan {
+            table: table.clone(),
+            access: Access::Full,
+            filter: conjunction(local),
+            estimate: None,
+        }),
+        exprs: cols.iter().map(|&c| Expr::Column(c)).collect(),
+    };
+    let aggs: Vec<crate::plan::Agg> = aggs
+        .iter()
+        .map(|a| crate::plan::Agg {
+            args: a.args.iter().map(joined).collect(),
+            ..a.clone()
+        })
+        .collect();
+    // Grouped by the whole row (its key makes each row a group).
+    let grouping = Plan::Aggregate {
+        input: Box::new(Plan::Join {
+            left: Box::new(input.clone()),
+            right: Box::new(unnest(right)),
+            kind: JoinType::Inner,
+            on: Some(on),
+            algo: JoinAlgo::NestedLoop,
+        }),
+        group: (0..lw).map(Expr::Column).collect(),
+        aggs,
+    };
+    let value = f.map_columns(&|c| Expr::Column(lw + c));
+    let (l, r) = if on_right {
+        (other.clone(), value)
+    } else {
+        (value, other.clone())
+    };
+    Some(Plan::Project {
+        input: Box::new(Plan::Filter {
+            input: Box::new(grouping),
+            predicate: Expr::Binary(*op, Box::new(l), Box::new(r)),
+        }),
+        exprs: (0..lw).map(Expr::Column).collect(),
+    })
 }
 
 /// The semi or anti join of `input` with `right` on `on`, moved down among

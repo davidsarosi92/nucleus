@@ -273,6 +273,12 @@ pub(crate) fn unique(plan: &Plan, cols: &[usize]) -> bool {
             Plan::Filter { input, .. } | Plan::Sort { input, .. } | Plan::Distinct { input } => {
                 table_cols(input, cols)
             }
+            // Some of its left side's rows, as they are.
+            Plan::Join {
+                left,
+                kind: JoinType::Semi | JoinType::Anti,
+                ..
+            } => table_cols(left, cols),
             Plan::Project { input, exprs } => {
                 let mapped = cols
                     .iter()

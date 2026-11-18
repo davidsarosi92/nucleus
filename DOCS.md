@@ -2917,7 +2917,21 @@ the columns the condition reads.  Once the inner joins are ordered, each
 semi and anti join moves down among them, as far as the columns it reads
 allow and while the rows it meets there are no more (a subquery filtering
 one table filters it before the joins that multiply it, after those that
-narrow it; without statistics, as deep as it goes).
+narrow it; without statistics, as deep as it goes).  A comparison with a
+scalar subquery aggregating one table's rows that match the row — TPC-H
+Q20's `ps_availqty > (SELECT 0.5 * sum(l_quantity) FROM lineitem WHERE
+l_partkey = ps_partkey AND l_suppkey = ps_suppkey …)` — becomes, after
+the semi and anti joins, an inner join of the rows with the table's on
+those equalities, grouped by the row's columns, the comparison on each
+group's value (Galindo-Legaria and Joshi's Apply removal; Neumann and
+Kemper's unnesting): when the row's columns compared are its own key (a
+primary key, through filters, projections, semi and anti joins:
+`eager::unique`), the aggregates give NULL over no rows (`sum`, `avg`,
+`min`, `max` — not `count`) and the value stays NULL with them
+(arithmetic; division by a constant other than zero), so a row nothing
+matches, which has no group, is dropped as its NULL comparison would
+drop it.  Otherwise the subquery stays, its results kept by the values
+it reads (TPC-H Q17's, whose part repeats over its lines).
 
 **Narrow rows** (`narrow`, last): the columns nothing above a join reads
 are cut from its inputs by projections, every reference above moved with
@@ -8176,6 +8190,10 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — scalar aggregate subqueries unnested (issue #1):** a
+  comparison with an aggregate of one table's rows matching the row's
+  own key becomes a join and a grouping (`unnest::grouped`); TPC-H Q20
+  86.5 → 64.3 ms (PostgreSQL 59.7, ≈ by the method).
 - **2026-11-18 — a row table's scan, cheaper rows (issue #2):** a date
   compared with a timestamp in a kernel, decimals of 64-bit mantissas
   read from a row without a check each, a decimal counted as two

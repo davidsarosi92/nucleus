@@ -2044,6 +2044,96 @@ fn column_lookups_on_workers_agree() {
 
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn scalar_aggregate_subqueries_unnest() {
+    // TPC-H Q20's `ps_availqty > (SELECT 0.5 * sum(l_quantity) … WHERE
+    // l_partkey = ps_partkey AND l_suppkey = ps_suppkey …)`: a comparison
+    // with an aggregate of the rows matching the row's own key becomes a
+    // join and a grouping (no subquery left in the plan) — the rows of the
+    // same query whose equality is on an expression of the row (`k + 0`,
+    // so the subquery runs per row), with rows matching none, NULLs in the
+    // table's columns, the subquery on either side, on workers.  `count`,
+    // and a row's columns that repeat, keep the subquery.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(67)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE o (a INT, b INT, q INT, w TEXT, PRIMARY KEY (a, b)) \
+               WITH (storage = {storage}); \
+             CREATE TABLE l (id INT PRIMARY KEY, a INT, b INT, x NUMERIC(10,2), y FLOAT, \
+               d DATE) WITH (storage = {storage}); \
+             INSERT INTO o SELECT i % 300, i / 300, i % 97, 'w' || (i % 7) \
+               FROM generate_series(0, 2999) i; \
+             INSERT INTO l SELECT i, CASE WHEN i % 41 = 0 THEN NULL ELSE i * 7 % 320 END, \
+               i % 11, CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 500) / 10.0 END, \
+               (i % 77) / 3.0, DATE '2020-01-01' + i % 700 \
+               FROM generate_series(1, 30000) i; \
+             CREATE INDEX l_ab ON l (a, b); \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries = [
+            "SELECT a, b, w FROM o WHERE q > (SELECT 0.5 * sum(x) FROM l \
+               WHERE l.a = o.a AND l.b = o.b AND d >= DATE '2020-06-01') ORDER BY a, b",
+            "SELECT count(*), sum(q) FROM o WHERE (SELECT avg(y) FROM l \
+               WHERE l.a = o.a AND l.b = o.b) < q / 2",
+            "SELECT a, b FROM o WHERE q = (SELECT max(id) % 97 FROM l \
+               WHERE l.b = o.b AND l.a = o.a) ORDER BY a, b",
+            "SELECT count(*) FROM o WHERE w <> 'w3' AND q <= (SELECT min(x) + max(y) FROM l \
+               WHERE l.a = o.a AND l.b = o.b AND y > 1)",
+        ];
+        let reference = |q: &str| q.replace("= o.a", "= o.a + 0");
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        for q in queries {
+            let plan = outcome(&mut s, &format!("EXPLAIN {q}")).unwrap();
+            assert!(
+                !plan.iter().any(|l| l[0].contains("Subquery")),
+                "{storage}: {plan:?}"
+            );
+            let r = reference(q);
+            let rplan = outcome(&mut s, &format!("EXPLAIN {r}")).unwrap();
+            assert!(
+                rplan.iter().any(|l| l[0].contains("Subquery")),
+                "{storage}: {rplan:?}"
+            );
+            let want = outcome(&mut s, &r);
+            // Rows, or a count of some.
+            assert!(
+                want.as_ref()
+                    .is_ok_and(|r| r.len() > 1 || r.first().is_some_and(|x| x[0] != "0")),
+                "{storage}: {want:?}"
+            );
+            assert_eq!(outcome(&mut s, q), want, "{storage}: {q}");
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+        }
+        // These keep the subquery.
+        for q in [
+            "SELECT count(*) FROM o WHERE q > (SELECT count(*) FROM l \
+               WHERE l.a = o.a AND l.b = o.b)",
+            "SELECT count(*) FROM o WHERE q > (SELECT sum(x) FROM l WHERE l.a = o.a)",
+            "SELECT count(*) FROM o WHERE q > (SELECT coalesce(sum(x), 0) FROM l \
+               WHERE l.a = o.a AND l.b = o.b)",
+            "SELECT count(*) FROM o WHERE q > (SELECT 5 FROM l \
+               WHERE l.a = o.a AND l.b = o.b LIMIT 1)",
+            "SELECT count(*) FROM o WHERE q > (SELECT sum(x) / 0 FROM l \
+               WHERE l.a = o.a AND l.b = o.b)",
+        ] {
+            let plan = outcome(&mut s, &format!("EXPLAIN {q}")).unwrap();
+            assert!(
+                plan.iter().any(|l| l[0].contains("Subquery")),
+                "{storage}: {plan:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn semi_joins_on_a_unique_side_look_up() {
     // TPC-H Q20's subquery (issue #1): a semi join whose inner side has
     // each key once (its primary key) runs as an inner join looking the
