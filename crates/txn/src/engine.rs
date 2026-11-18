@@ -1627,6 +1627,9 @@ impl Inner {
             .map(|(id, _)| id)
             .collect();
         let tree = self.store.read()?;
+        if unresolved.is_empty() && others.is_empty() && me.is_none() && gap.is_none() {
+            return versions_at(&tree, user, ts, conflict_only);
+        }
         let decode = |v: &[u8]| -> Result<Option<Vec<u8>>> {
             Ok(decode_value(v)
                 .ok_or(Error::Corrupt("bad version value"))?
@@ -4128,6 +4131,62 @@ impl Iterator for Scan<'_> {
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+/// [`Inner::look`] where no intent is in sight and no gap is wanted — every
+/// read of a key by its primary key outside a writing transaction: the
+/// newest version of `user` at or below `ts` (`conflict_only`: whether a
+/// version is newer than `ts`), its key bounds built in buffers a thread
+/// keeps and the walk's keys read into one, so a look allocates only what
+/// it returns.  A version's key is `user` escaped, `00 00` and its
+/// timestamp: whatever starts so is one, and its timestamp is its last
+/// eight bytes.
+fn versions_at(
+    tree: &Tables,
+    user: &[u8],
+    ts: u64,
+    conflict_only: bool,
+) -> Result<(bool, Option<Option<Vec<u8>>>)> {
+    thread_local! {
+        static BUFS: std::cell::RefCell<[Vec<u8>; 3]> = const {
+            std::cell::RefCell::new([Vec::new(), Vec::new(), Vec::new()])
+        };
+    }
+    BUFS.with(|bufs| {
+        let mut fresh = Default::default();
+        let mut held = bufs.try_borrow_mut();
+        let [from, to, key] = match held.as_deref_mut() {
+            Ok(b) => b,
+            Err(_) => &mut fresh, // a look inside a look: its own buffers
+        };
+        from.clear();
+        mvcc::escape_onto(user, from);
+        let own = from.len() + 2;
+        to.clear();
+        to.extend_from_slice(from);
+        to.extend_from_slice(&[0, 1]);
+        let start = if conflict_only { u64::MAX } else { ts };
+        from.extend_from_slice(&[0, 0]);
+        from.extend_from_slice(&(u64::MAX - start).to_be_bytes());
+        let mut scan = tree.range(Bound::Included(from), Bound::Excluded(to))?;
+        while scan.next_key_into(key)? {
+            if key.len() != own + 8 || key[..own] != from[..own] {
+                return Err(Error::Corrupt("undecodable version key"));
+            }
+            let vts = u64::MAX - u64::from_be_bytes(key[own..].try_into().expect("eight bytes"));
+            if intent_of(vts).is_some() || (!conflict_only && vts > ts) {
+                continue;
+            }
+            if conflict_only {
+                return Ok((vts > ts, None));
+            }
+            // The value read into `key`'s buffer: the key is done with.
+            scan.value_into(key)?;
+            let v = decode_value(key).ok_or(Error::Corrupt("bad version value"))?;
+            return Ok((false, Some(v.map(<[u8]>::to_vec))));
+        }
+        Ok((false, None))
+    })
 }
 
 /// Whether `a` and `b` are the same bytes, compared from the end eight at a

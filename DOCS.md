@@ -8190,6 +8190,11 @@ checks `psql` with and without TLS.
   only for problems told, a value decoded only for keywords that read
   it, the check split by kind of value; `json_matches_schema` 378 → 275
   ns a tool call (`jsonschema` 0.61: 148).
+- **2026-11-18 — a key's versions looked up without allocating (issue
+  #1):** where no intent is in sight, `engine::versions_at` builds a
+  look's bounds in buffers its thread keeps and reads a version's
+  timestamp from its key's end (nine allocations a fetch were three
+  escapes and copies); TPC-H Q20 on one worker 234.5 → 220 ms.
 - **2026-11-18 — scalar aggregate subqueries unnested (issue #1):** a
   comparison with an aggregate of one table's rows matching the row's
   own key becomes a join and a grouping (`unnest::grouped`); TPC-H Q20

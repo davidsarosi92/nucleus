@@ -37,15 +37,24 @@ pub const OVERHEAD: usize = 10;
 
 /// `user` with every `00` doubled to `00 FF`.
 pub fn escape(user: &[u8]) -> Vec<u8> {
-    let zeros = user.iter().filter(|&&b| b == 0).count();
-    let mut out = Vec::with_capacity(user.len() + zeros + OVERHEAD);
-    for &b in user {
-        out.push(b);
-        if b == 0 {
-            out.push(0xFF);
-        }
-    }
+    let mut out = Vec::new();
+    escape_onto(user, &mut out);
     out
+}
+
+/// [`escape`], appended to `out` (room for [`OVERHEAD`] more reserved).
+pub fn escape_onto(user: &[u8], out: &mut Vec<u8>) {
+    // A run between zeros at a time: user keys are a few such runs (the
+    // big-endian ids of tables and indexes, then values).
+    out.reserve(user.len() + user.len() / 4 + OVERHEAD);
+    let mut runs = user.split(|&b| b == 0);
+    if let Some(first) = runs.next() {
+        out.extend_from_slice(first);
+    }
+    for run in runs {
+        out.extend_from_slice(&[0, 0xFF]);
+        out.extend_from_slice(run);
+    }
 }
 
 /// The store key of `user`'s version at `ts`.

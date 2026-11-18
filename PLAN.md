@@ -11501,6 +11501,30 @@ simple parameterization, MySQL's former query cache — what not to do).
   CPU time is 3.2× one worker's; `BufferPool::fetch` grows 16× (the
   root's and inner pages' shard lock, pins and latch: ~6 atomic writes a
   level on lines every worker shares).
+  *Issue #1, the descent's cost* (2026-11-18).  Tried, not taken: each
+  worker keeping the inner pages it met — pinned and read under their
+  latch, or copied and read without one (LeanStore's and Umbra's
+  swizzled pointers, OLFIT's and optimistic lock coupling's latch-free
+  reads, in a throwaway form) — Q20 even on one worker and on ten (A/B,
+  both orders): the shared lines are not what costs.  What does, on one
+  worker (238 ms, against PostgreSQL's single process 66): the
+  `lineitem` lookups, 21 µs each of their 8,876 runs where PostgreSQL's
+  are 6 µs, ~7 primary key fetches a run; of the CPU ~52 % the B+tree's
+  in-page binary searches (a probe reads a slot, then the cell it points
+  to — two lines of a cold page — and compares the ~15 bytes every key
+  of an inner node shares before those that differ), ~40 % the rest of
+  each fetch and row.  Agreed order: the fetch's own costs first, then a
+  node format that searches without the cells, then sorted batched
+  fetches (MySQL's MRR) if still needed.
+  1. *A version's look in buffers a thread keeps.*  `Inner::look`, where
+     no intent is in sight (every read outside a writing transaction),
+     escaped its key three times and allocated nine times a fetch (its
+     bounds, the walk's key and value, the user key decoded to read a
+     timestamp); `engine::versions_at` builds the bounds in buffers a
+     thread keeps, reads the walk's keys into one and a version's
+     timestamp from its key's last eight bytes, and escapes a run
+     between zeros at a time.  Q20 on one worker 234.5 → 220 ms (A/B,
+     the means of both orders), on ten ~4 % faster.
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:
