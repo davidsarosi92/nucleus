@@ -161,8 +161,13 @@ fn row(rng: &SplitMix64) -> (Vec<u8>, Option<Vec<u8>>) {
     (k, Some(v))
 }
 
-fn run(kind: Option<EngineKind>) {
-    let name = kind.map_or("B+tree".to_owned(), |k| format!("{k:?}"));
+/// `sealed`: encrypted; `small`: the LSM tree's block cache as small as
+/// the page cache (16 MiB), so lookups read and open blocks.
+fn run(kind: Option<EngineKind>, sealed: bool, small: bool) {
+    let mut name = kind.map_or("B+tree".to_owned(), |k| format!("{k:?}"));
+    if sealed {
+        name.push_str(", encrypted");
+    }
     let dir = std::env::temp_dir().join(format!("nucleus-lsm-wamp-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let p = Arc::new(Plat(CountingFs {
@@ -171,6 +176,12 @@ fn run(kind: Option<EngineKind>) {
     }));
     let opts = StoreOptions {
         cache_pages: 2048, // 16 MiB: the table is ~8 times larger
+        lsm_cache_bytes: if small {
+            16 << 20
+        } else {
+            nucleus_storage::lsm::BLOCK_CACHE_BYTES
+        },
+        page_key: sealed.then(|| nucleus_storage::PageCipher::new([1; 32])),
         ..StoreOptions::default()
     };
     let (store, _) = Store::open(Arc::clone(&p) as Arc<dyn Platform>, &dir, &opts).unwrap();
@@ -300,6 +311,19 @@ fn run(kind: Option<EngineKind>) {
 #[test]
 #[ignore]
 fn what_the_lsm_tree_writes() {
-    run(None);
-    run(Some(EngineKind::Lsm));
+    run(None, false, false);
+    run(Some(EngineKind::Lsm), false, false);
+}
+
+/// The same, encrypted — the data file's pages and the LSM tree's files
+/// sealed (§M14.28 L4e) —, the LSM tree's block cache as small as the
+/// page cache; the LSM tree in the clear beside it.
+///
+/// `cargo test --release -p nucleus-storage --test lsm_wamp sealed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn what_the_lsm_tree_writes_sealed() {
+    run(None, true, true);
+    run(Some(EngineKind::Lsm), false, true);
+    run(Some(EngineKind::Lsm), true, true);
 }

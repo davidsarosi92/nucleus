@@ -60,7 +60,9 @@
 //! [`LeafFilter`], §M14.28 L4d: versions no snapshot sees); above the last
 //! level it keeps what is garbage only because nothing older is left.
 //!
-//! What L4d leaves (PLAN.md §M14.28 L4e): runs sealed under the page key.
+//! On an encrypted database its files are sealed below it (the store's
+//! [`SealedFs`](crate::sealed::SealedFs), §M14.28 L4e): nothing here
+//! knows.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;

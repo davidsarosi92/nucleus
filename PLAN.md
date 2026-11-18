@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ✅ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅, L4a–L4d ✅; L4e–L5 next |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅, L4a–L4e ✅; L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ✅ E1 (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
@@ -3625,7 +3625,7 @@ chosen and their order, the methods and their error bounds, the
 benchmarks — and the steps it leads to are planned as this milestone's
 own, agreed before they are built.
 
-### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; L0–L2 ✅, L3a–L3b ✅)
+### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; L0–L4e ✅; L5 next)
 
 **First a study, then the plan.**  Today every table lives in the one
 copy-on-write B+tree (D2, D10); an LSM tree was left for later, "as a
@@ -4181,9 +4181,64 @@ recovery time after a crash mid-compaction.
     (`Tables::remove_range`: the B+tree's pages freed, an LSM range
     tombstone) once the watermark passes it, snapshots and branches
     before it still reading the rows.
-  - **L4e — sealed runs**: an encrypted database's runs and manifests
-    sealed under the page key, so `engine = lsm` is no longer refused
-    there.
+  - **L4e — sealed engine files ✅**: an encrypted database's runs and
+    manifests — every engine's files, the routes too — sealed under the
+    page key, so `engine = lsm` is no longer refused there.  *Found*:
+    RocksDB's `EncryptedEnv` encrypts a file whole below its engine,
+    in CTR mode under a per-file prefix — unauthenticated, any byte
+    range readable; SQLCipher and PostgreSQL's TDE proposals seal pages.
+    *Taken*: the place (a file system below the engines, so no engine
+    knows — as nothing above the pager knows a page is sealed), not the
+    mode: chunks sealed one by one with the pages' misuse-resistant
+    AEAD, the STREAM construction of online authenticated encryption
+    (Hoang, Reyhanitabar, Rogaway, Vizár, CRYPTO 2015; Tink's streaming
+    AEAD): the chunk's index the nonce's second half, whether it is the
+    last in its associated data — a file cut short at a chunk's end, a
+    chunk moved or a header changed does not open.  *Built*
+    (`nucleus_storage::sealed`): `SealedFs` (the store's engines' file
+    system, the platform's own in the clear) and its files: a 32-byte
+    header (magic, the key's generation, the cipher, a random file
+    nonce, the chunk size: 4 KiB), then the chunks, each its tag and its
+    bytes; a file written once and in order (the last chunk sealed again
+    as it grows, which the SIV allows), each write one `pwrite`, each
+    read one `pread` of the chunks it spans, the chunks read last kept
+    opened for a scan's next block.  A new key (K3f): new files under it
+    at once; before the checkpoint that lets the old key go, each file
+    under it sealed again (a copy renamed over it), no compaction, no
+    checkpoint and no write's run begun before running meanwhile; a run
+    open keeps the key it opened with.  `Store::encrypt` seals the
+    engines' files beside themselves (`.sealing`) before the data file
+    and puts them in place after it; an open finishes either (in place
+    if encrypted, removed if not), and removes what a crash cut short
+    (`.tmp`, `.reseal`) — a map engine's `.tmp` was kept for ever
+    before.  *Tested*: the layer (every length about a chunk's edges in
+    pieces of every size; damaged, cut, moved, another key, in the
+    clear: refused; a new key); `tests/rekey.rs` with an LSM tree's and
+    a map engine's ranges — a crash at every I/O point of a new key, then
+    every engine's file under the new generation and the store open
+    under the new key alone (without the engines' resealing: it does not
+    open); `a_store_encrypted_and_a_crash_at_every_point` with both
+    engines (the planted value in their files in the clear, in no file
+    after; putting the copies in place left out: it fails);
+    `crates/sql/tests/encrypted.rs` with an LSM table and its index.
+    *Measured* (`lsm_wamp` `…_sealed`, 1M random rows 100 a commit into
+    1M, both caches 16 MiB): load 4.9 → 5.1 s, write amplification 6.0
+    either way (+0.7 % of tags), commit p99 0.51 → 0.55 ms, a lookup 2.5
+    → 5.3 µs, of a key not there 0.12 → 0.18 µs (the B+tree encrypted:
+    28 s, a lookup 3.7 µs).  First built with a `pwrite` a chunk: commit
+    p99 0.55 → 2.98 ms and the slowest commit 150 ms (the WAL's sealing
+    costs nothing: with the engines' files in the clear an encrypted
+    store's p99 was 0.55 ms) — one write a call fixed it.  A lookup's
+    extra 2.8 µs is the cipher's: a 3 KB block read spans ~1.7 chunks,
+    and AES-256-GCM-SIV costs 0.28 µs a message whatever its length
+    (RFC 8452's key derivation: six blocks and a key schedule a nonce)
+    plus 0.17 µs a KiB; 1 KiB chunks measured the same (5.2 µs).
+    *Not taken yet*: deriving a file's keys once (one nonce a file, the
+    chunk's index in the associated data — RFC 8452 allows a nonce
+    again, leaking only equal messages, which the index rules out) would
+    drop the 0.28 µs a chunk and let chunks shrink to ~1 KiB: a lookup
+    ~4 µs.  It needs a derived-key form of both ciphers'
+    (`nucleus_kernels::aes`, `nucleus_crypto::siv`): issue #3.
 - **L5 — the verdict**: the benchmarks above; where the LSM is
   recommended, recorded here with the numbers.
 

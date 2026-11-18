@@ -252,6 +252,22 @@ impl PageCipher {
         self.previous.as_deref()
     }
 
+    /// The key of generation `generation` — this one or the previous —
+    /// alone (an engine's sealed file, §M14.28 L4e).
+    pub(crate) fn of_generation(&self, generation: u32) -> Option<PageCipher> {
+        let k = if generation == self.generation {
+            self
+        } else {
+            self.previous().filter(|p| p.generation == generation)?
+        };
+        Some(k.clone().without_previous())
+    }
+
+    /// The cipher it seals with.
+    pub(crate) fn aead(&self) -> &Aead {
+        &self.aead
+    }
+
     /// The key whose parity `parity` is (a page's bit): this one or the
     /// previous.
     fn by_parity(&self, parity: u64) -> Option<&PageCipher> {

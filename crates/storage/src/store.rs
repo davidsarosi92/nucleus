@@ -392,6 +392,9 @@ pub fn valid_branch_name(name: &str) -> bool {
 /// the checkpoints.
 struct Shared {
     platform: Arc<dyn Platform>,
+    /// The engines' files' file system: sealed under the data file's key
+    /// on an encrypted database (§M14.28 L4e).
+    efs: crate::sealed::SealedFs,
     dir: PathBuf,
     opts: StoreOptions,
     pool: Arc<BufferPool>,
@@ -747,15 +750,26 @@ impl Store {
             pager.set_space(id, Some(sp));
         }
 
+        // The engines' files, sealed on an encrypted database (§M14.28
+        // L4e); copies an encryption cut short sealed put in place, or
+        // left aside in the clear.
+        let efs = crate::sealed::SealedFs::new(
+            Arc::clone(&platform),
+            pager.cipher().map(|c| (*c).clone()),
+        );
+        settle_engine_files(fs, dir, efs.sealed())?;
         // The engines of the store's routes (§M14.28 L1), each branch's
         // as its checkpoint saved them.
-        let routes = engines::read_routes(fs, dir)?;
+        let routes = {
+            let fs: &dyn FileSystem = &efs;
+            engines::read_routes(fs, dir)?
+        };
         let load = |id: u32, lsn: u64| -> Result<(Vec<Route>, Vec<Box<dyn Engine>>)> {
             let mut es = Vec::with_capacity(routes.len());
             for r in &routes {
                 let path = engines::engine_file(dir, id, r.id, lsn);
                 es.push(if fs.exists(&path)? {
-                    r.kind.load(fs, &engines::engines_dir(dir), &path)?
+                    r.kind.load(&efs, &engines::engines_dir(dir), &path)?
                 } else {
                     r.kind.empty()
                 });
@@ -818,6 +832,7 @@ impl Store {
         let store = Self {
             shared: Arc::new(Shared {
                 platform: Arc::clone(&platform),
+                efs,
                 dir: dir.to_path_buf(),
                 opts: opts.clone(),
                 pool,
@@ -956,7 +971,36 @@ impl Store {
                 Error::Io(e)
             }
         })?;
+        // The engines' files sealed beside themselves first (§M14.28 L4e),
+        // put in place once the data file is: an open of the store
+        // finishes either (`settle_engine_files`).
+        let edir = engines::engines_dir(dir);
+        let mut sealed = Vec::new();
+        if fs.exists(&edir)? {
+            let efs = crate::sealed::SealedFs::new(Arc::clone(&platform), Some(key.clone()));
+            for name in fs.list_dir(&edir)? {
+                let Some(name) = name.to_str() else { continue };
+                if name.ends_with(SEALING) {
+                    continue;
+                }
+                if name.ends_with(".tmp") {
+                    // A write a crash cut short, in the clear.
+                    fs.remove_file(&edir.join(name))?;
+                    continue;
+                }
+                let to = edir.join(format!("{name}{SEALING}"));
+                efs.seal_copy(&edir.join(name), &to)?;
+                sealed.push((to, edir.join(name)));
+            }
+            fs.sync_dir(&edir)?;
+        }
         let pages = crate::pager::encrypt_file(fs, &data, key)?;
+        for (from, to) in sealed {
+            fs.rename(&from, &to)?;
+        }
+        if fs.exists(&edir)? {
+            fs.sync_dir(&edir)?;
+        }
         for w in wal_dirs {
             for name in fs.list_dir(&w)? {
                 let n = name.to_string_lossy();
@@ -1254,11 +1298,6 @@ impl Store {
             ));
         }
         let sh = &*self.shared;
-        if sh.pool.pager().cipher().is_some() {
-            return Err(Error::Engine(
-                "an engine's files are in the clear for now: not on an encrypted database".into(),
-            ));
-        }
         let id = {
             let _running = self.running();
             let list: Vec<Arc<Branch>> = sh.branches().values().cloned().collect();
@@ -1289,7 +1328,7 @@ impl Store {
                 end: end.to_vec(),
             });
             new.sort_by(|a, b| a.start.cmp(&b.start));
-            engines::write_routes(sh.platform.fs(), &sh.dir, &new)?;
+            engines::write_routes(&sh.efs, &sh.dir, &new)?;
             for t in &mut all {
                 let mut old: BTreeMap<u32, Box<dyn Engine>> = std::mem::take(&mut t.routes)
                     .into_iter()
@@ -1339,6 +1378,7 @@ impl Store {
     fn share_cipher(&self) {
         let sh = &*self.shared;
         let c = sh.pool.pager().cipher();
+        sh.efs.set_cipher(c.as_ref().map(|c| (**c).clone()));
         for b in sh.branches().values() {
             b.wal.set_cipher(c.clone());
         }
@@ -1395,6 +1435,9 @@ impl Store {
                     }
                     checkpoints += 1;
                     if st == Rekey::Finishing {
+                        // The engines' files sealed under the old key
+                        // sealed again before the checkpoint lets it go.
+                        self.reseal_engine_files()?;
                         // No record under the old key in the segment the
                         // checkpoint starts the log at: the log under the
                         // new key alone would end at the first.
@@ -1424,6 +1467,41 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Seals again under the data file's new key every engine's file the
+    /// old one sealed (§M14.28 L4e): no compaction running meanwhile,
+    /// none of the writes' runs begun before (each branch's writer lock
+    /// taken once, a barrier), and no checkpoint — none writes a file
+    /// over one being copied or removes one; files written meanwhile are
+    /// under the new key.  The number sealed again.
+    fn reseal_engine_files(&self) -> Result<usize> {
+        let sh = &*self.shared;
+        let _no_compaction = sh.compacting.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_checkpoint = self.running();
+        let all: Vec<Arc<Branch>> = sh.branches().values().cloned().collect();
+        for b in &all {
+            drop(b.writer());
+        }
+        let edir = engines::engines_dir(&sh.dir);
+        let fs = sh.platform.fs();
+        if !sh.efs.sealed() || !fs.exists(&edir)? {
+            return Ok(0);
+        }
+        let mut n = 0;
+        for name in fs.list_dir(&edir)? {
+            let Some(name) = name.to_str() else { continue };
+            if name.ends_with(".tmp") || name.ends_with(".reseal") {
+                continue;
+            }
+            if sh.efs.reseal(&edir.join(name))? {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            fs.sync_dir(&edir)?;
+        }
+        Ok(n)
     }
 
     /// Removes from the files what the trees no longer hold (PLAN.md
@@ -1979,7 +2057,7 @@ struct Room<'a, 'g> {
 
 impl engines::JobRoom for Room<'_, '_> {
     fn fs(&self) -> &dyn FileSystem {
-        self.sh.platform.fs()
+        &self.sh.efs
     }
 
     fn dir(&self) -> &Path {
@@ -2063,7 +2141,7 @@ impl Checkpoint<'_> {
             // run), writes going on (§M14.28 L4a).
             let edir = engines::engines_dir(&s.dir);
             for Save { saver, path, name } in saves {
-                saver(s.platform.fs(), &edir, &path, &name)?;
+                saver(&s.efs, &edir, &path, &name)?;
             }
             // Nothing in the checkpoint may be less durable than the WALs.
             for (b, lsn) in &lsns {
@@ -2117,6 +2195,42 @@ fn settle(tree: &mut Tables, d: &mut Deferred) -> Result<()> {
         .map(|(k, v)| (k, Some(v)))
         .collect();
     tree.apply_sorted(&ops, None)
+}
+
+/// The suffix of an engine's file sealed while the store is encrypted
+/// ([`Store::encrypt`]), until the data file is.
+const SEALING: &str = ".sealing";
+
+/// The engines' files as the store's encryption left them: on an
+/// encrypted store, the sealed copies an encryption cut short made put
+/// in place of the files in the clear; on one in the clear, removed.
+/// Copies a new key's resealing left, and files a crash cut short
+/// (`.tmp`: no job runs yet), removed.
+fn settle_engine_files(fs: &dyn FileSystem, dir: &Path, encrypted: bool) -> Result<()> {
+    let edir = engines::engines_dir(dir);
+    if !fs.exists(&edir)? {
+        return Ok(());
+    }
+    let mut changed = false;
+    for name in fs.list_dir(&edir)? {
+        let Some(name) = name.to_str() else { continue };
+        let path = edir.join(name);
+        if let Some(base) = name.strip_suffix(SEALING) {
+            if encrypted {
+                fs.rename(&path, &edir.join(base))?;
+            } else {
+                fs.remove_file(&path)?;
+            }
+            changed = true;
+        } else if name.ends_with(".reseal") || name.ends_with(".tmp") {
+            fs.remove_file(&path)?;
+            changed = true;
+        }
+    }
+    if changed {
+        fs.sync_dir(&edir)?;
+    }
+    Ok(())
 }
 
 /// Removes the engines' files not of a branch's checkpoint in `keep`

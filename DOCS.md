@@ -756,8 +756,7 @@ replays the WAL after it.  A branch starts with a copy of its parent's
 engines (`Engine::fork`).  `diff_ranges` adds a routed range whole where
 either side's engine holds anything (an engine keeps no births).
 `add_engine` refuses (`Error::Engine`) an empty range, one meeting
-another route, one the B+tree holds entries in on any branch, and an
-encrypted database (the map engine's file is in the clear); it holds
+another route, and one the B+tree holds entries in on any branch; it holds
 every writer and tree while it writes the routes, then checkpoints.  The
 `Engine` trait: `get`, `scan(start, end, reverse)`, `apply(ops)`,
 `remove_range`, `is_empty`, `fork`, `prepare` and `saver` (the state as
@@ -767,7 +766,10 @@ background work (§M14.28 L4a).  `EngineKind::Map` is the
 trivial engine that proves the boundary — a sorted map saved whole at
 each checkpoint, not for tables of any size; the LSM tree (L2) is the
 engine the boundary is for.  With no route, every call goes straight to
-the B+tree.
+the B+tree.  On an encrypted database the engines' files — runs,
+manifests, the map engine's, the routes — are sealed by the file system
+the store hands them (`sealed::SealedFs`, §M14.28 L4e; *Encrypted data
+files* below), so no engine knows.
 
 **The LSM tree** (`lsm`, §M14.28 L2; `EngineKind::Lsm`).  Writes go to a
 memtable (puts, point tombstones, range tombstones for a removed range);
@@ -832,8 +834,7 @@ when a merge begins — the transaction layer sets its `Collect`, the
 filter its commits apply to the B+tree leaves they rewrite — and a merge
 shows it 512 entries at a time (those with values); above the last
 level it asks `drops_above`, which keeps a key's newest tombstone at or
-below the watermark (older versions may be in runs not merged).  Left
-to L4e: sealed runs.
+below the watermark (older versions may be in runs not merged).
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -855,7 +856,7 @@ once, one of each engine, may leave the B+tree one's keys in the LSM tree
 (table record version 22), `nc_catalog.tables.engine` shows it, and a
 restore routes an LSM table's range when its definition comes, before
 its keys (the catalog's sort first).  On an encrypted database the
-create is refused (`0A000`: the runs are in the clear until L4).
+runs are sealed (§M14.28 L4e).
 DROP TABLE, DELETE and a vacuum delete key by key — tombstones in the LSM
 tree, merged away by compaction; range tombstones there wait for L4's
 compaction by the oldest snapshot.
@@ -7046,6 +7047,21 @@ clear opened as encrypted is refused (`Error::Key`), not cut off as a
 torn tail.  Everything else of a database — column segments, text,
 sparse and HNSW indexes, the embedding queue, a transaction's spilled
 writes — lives in its key-value store, so in those pages and records.
+A table of the LSM engine lives in its runs, files of their own: the
+engines' files go through a file system that seals them
+(`nucleus_storage::sealed`, §M14.28 L4e) — a 32-byte header (magic,
+the key's generation, the cipher, a random file nonce, the chunk size),
+then 4 KiB chunks each sealed under the database key by the pages'
+cipher, its tag first: the file's nonce and the chunk's index the
+nonce, the header, the index and whether it is the last chunk the
+associated data (the STREAM construction), so a file cut short at a
+chunk's end, a chunk moved or a header changed does not open.  A file
+is written once, in order (its last chunk sealed again as it grows),
+and read anywhere — a read opens the chunks it spans, read at once.
+Not caught: a whole file put in place of another of the same database.
+`nucleus keys <dir> encrypt` seals the engines' files beside themselves
+(`.sealing`) before the data file, and puts them in place after it; an
+open finishes either way.
 What is not is scratch space (K2d): a sort's runs and a hash join's
 partitions past `work_mem`, in `<dir>/scratch`.  An encrypted database
 seals its scratch files too (`nucleus_kv`'s `SealedScratch`), each under
@@ -7121,8 +7137,11 @@ waits for the batch and reads again.  Batches start once the new key's
 first commit is durable — every page written under the old key until
 then is in it — and cover the pages the file had when the key was
 made; the header keeps how far they got from one commit to the next.
-Done, every branch's log moves to a new segment (its directory entry
-synced) and a checkpoint writes a header naming no previous key, so
+Done, the engines' files the old key sealed are sealed again (a copy
+renamed over each; no compaction or checkpoint meanwhile, a run open
+keeping the key it opened with), every branch's log moves to a new
+segment (its directory entry synced) and a checkpoint writes a header
+naming no previous key, so
 the log starts where no record is under the old key; the pager lets the
 old key go, and only then does the keyring drop `prev data`
 (`nucleus_server::reseal`, after a rotation it saw running — never
@@ -8094,6 +8113,10 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L4e, the engines' files sealed:** an encrypted
+  database's runs, manifests, map files and routes sealed in 4 KiB
+  chunks (`nucleus_storage::sealed`); `engine = lsm` no longer refused
+  there; a new key and `encrypt` seal them too.
 - **2026-11-18 — §M14.28 L4d, versions dropped by LSM merges:** the
   transaction layer's commit filter (`Collect`) applied to compactions
   (`Store::set_compaction_filter`, `LeafFilter::drops_above` above the

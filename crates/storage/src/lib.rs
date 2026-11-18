@@ -17,6 +17,7 @@ pub mod node;
 pub mod page;
 pub mod pager;
 pub mod scan;
+pub mod sealed;
 pub mod store;
 pub mod wal;
 

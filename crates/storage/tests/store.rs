@@ -640,6 +640,14 @@ fn a_store_keeps_its_cipher() {
 fn clear_store_for_encryption(p: &Arc<SimPlatform>) -> (Model, Model) {
     ENCRYPTED.set(false);
     let (store, _) = open(p).unwrap();
+    // Some keys an LSM tree's, some a map engine's: their files are
+    // sealed too (§M14.28 L4e).
+    store
+        .add_engine(b"k010", b"k020", nucleus_storage::EngineKind::Lsm)
+        .unwrap();
+    store
+        .add_engine(b"k024", b"k028", nucleus_storage::EngineKind::Map)
+        .unwrap();
     let planted = b"encrypt-me-planted-9d2c41e0";
     let put = |s: &Store, i: u64| {
         let mut v = planted.to_vec();
@@ -668,7 +676,8 @@ fn clear_store_for_encryption(p: &Arc<SimPlatform>) -> (Model, Model) {
 /// every I/O point of it: what opens afterwards is the store in the clear
 /// or encrypted — never neither — with everything in it, main and branch;
 /// encrypting again finishes it.  Encrypted, the planted value is in no
-/// file, and the store does not open without its key.
+/// file — the engines' files sealed too —, and the store does not open
+/// without its key.
 #[test]
 fn a_store_encrypted_and_a_crash_at_every_point() {
     // The key `opts` gives an encrypted store.
@@ -691,6 +700,10 @@ fn a_store_encrypted_and_a_crash_at_every_point() {
     let dry = sim(21);
     let want = clear_store_for_encryption(&dry);
     assert!(!files_holding(&dry, dir, planted).is_empty());
+    assert!(
+        !files_holding(&dry, &dir.join("engines"), planted).is_empty(),
+        "the engines' files hold it in the clear"
+    );
     let before = dry.sim_fs().op_count();
     let platform: Arc<dyn Platform> = Arc::clone(&dry) as Arc<dyn Platform>;
     let pages = Store::encrypt(Arc::clone(&platform), dir, &opts(), &key).unwrap();

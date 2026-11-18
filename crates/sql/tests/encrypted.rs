@@ -1,7 +1,8 @@
 //! An encrypted database end to end (PLAN.md §M14.30 K2b–K2d): values
 //! written through SQL into every kind of structure — a row table with a
 //! text index, a column table, JSON documents, a vector table with an
-//! HNSW index — are in some file of a database in the clear and in no
+//! HNSW index, an LSM tree's table (its runs sealed, §M14.28 L4e) — are
+//! in some file of a database in the clear and in no
 //! file of an encrypted one, checkpointed or only logged; a sort past
 //! `work_mem` meanwhile goes through sealed scratch files; the database
 //! reopens under its key with everything there.
@@ -14,11 +15,12 @@ use nucleus_platform::Platform;
 use nucleus_platform::sim::SimPlatform;
 use nucleus_sql::{Output, Session, Value};
 
-const NEEDLES: [&str; 4] = [
+const NEEDLES: [&str; 5] = [
     "rowtext-planted-7f3a19c2",
     "column-planted-5e81d0b4",
     "jsondoc-planted-c29e6a17",
     "vectag-planted-0b4d8f53",
+    "lsmrow-planted-3d0e7a95",
 ];
 
 fn open(p: &Arc<SimPlatform>, encrypted: bool) -> Database {
@@ -76,8 +78,9 @@ fn write(s: &mut Session, from: i64, to: i64) {
          INSERT INTO docs_json SELECT i, ('{{\"note\": \"{2} ' || i || '\"}}')::json \
            FROM generate_series({from}, {to}) i; \
          INSERT INTO items SELECT i, ARRAY[i, i % 7, 1]::vector(3), '{3} ' || i \
-           FROM generate_series({from}, {to}) i",
-        NEEDLES[0], NEEDLES[1], NEEDLES[2], NEEDLES[3]
+           FROM generate_series({from}, {to}) i; \
+         INSERT INTO logs SELECT i, '{4} ' || i FROM generate_series({from}, {to}) i",
+        NEEDLES[0], NEEDLES[1], NEEDLES[2], NEEDLES[3], NEEDLES[4]
     ))
     .unwrap();
 }
@@ -96,7 +99,9 @@ fn values_written_through_sql_are_in_no_file_of_an_encrypted_database() {
                  CREATE TABLE cols (k INT PRIMARY KEY, v TEXT) WITH (storage = column); \
                  CREATE TABLE docs_json (id INT PRIMARY KEY, doc JSON); \
                  CREATE TABLE items (id INT PRIMARY KEY, v vector(3), tag TEXT); \
-                 CREATE INDEX items_v ON items USING hnsw (v)",
+                 CREATE INDEX items_v ON items USING hnsw (v); \
+                 CREATE TABLE logs (id INT PRIMARY KEY, msg TEXT) WITH (engine = lsm); \
+                 CREATE INDEX logs_msg ON logs (msg)",
             )
             .unwrap();
             // Checkpointed into the data file, then more only in the log.
@@ -118,6 +123,11 @@ fn values_written_through_sql_are_in_no_file_of_an_encrypted_database() {
             for n in NEEDLES {
                 assert!(hits.iter().any(|h| h.starts_with(n)), "{n}: {hits:#?}");
             }
+            assert!(
+                hits.iter()
+                    .any(|h| h.starts_with(NEEDLES[4]) && h.contains("/engines/run-")),
+                "the LSM tree's runs: {hits:#?}"
+            );
         }
 
         let db = open(&p, encrypted);
@@ -126,11 +136,12 @@ fn values_written_through_sql_are_in_no_file_of_an_encrypted_database() {
         let counts = rows(
             &mut s,
             "SELECT (SELECT count(*) FROM docs), (SELECT count(*) FROM cols), \
-               (SELECT count(*) FROM docs_json), (SELECT count(*) FROM items)",
+               (SELECT count(*) FROM docs_json), (SELECT count(*) FROM items), \
+               (SELECT count(*) FROM logs)",
         );
         assert_eq!(
             counts,
-            vec![vec![Value::Int(3200); 4]],
+            vec![vec![Value::Int(3200); 5]],
             "encrypted: {encrypted}"
         );
         let near = rows(
@@ -143,6 +154,15 @@ fn values_written_through_sql_are_in_no_file_of_an_encrypted_database() {
             &format!("SELECT count(*) FROM docs WHERE body @@ '{}'", NEEDLES[0]),
         );
         assert_ne!(matched, vec![vec![Value::Int(0)]], "the text index answers");
+        let by_msg = rows(
+            &mut s,
+            &format!("SELECT id FROM logs WHERE msg = '{} 3150'", NEEDLES[4]),
+        );
+        assert_eq!(
+            by_msg,
+            vec![vec![Value::Int(3150)]],
+            "the LSM table's index"
+        );
     }
 }
 
