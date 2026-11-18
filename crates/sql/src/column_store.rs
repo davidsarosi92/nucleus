@@ -301,10 +301,49 @@ fn marker_key(t: &Table, key: &[u8]) -> Vec<u8> {
     moved(t, key, DELETED)
 }
 
+/// The directory key of row key `last` (or of a bound of row keys): its
+/// suffix after the table's prefix, or the whole key in a directory made
+/// before [`Table::relative_directory`].
 fn dir_key(t: &Table, last: &[u8]) -> Vec<u8> {
+    if t.relative_directory {
+        return moved(t, last, DIRECTORY);
+    }
     let mut k = t.index_prefix(DIRECTORY);
     k.extend_from_slice(last);
     k
+}
+
+/// A directory key's or entry's stored row key, whole.
+fn whole(t: &Table, stored: &[u8]) -> Vec<u8> {
+    if t.relative_directory {
+        [&t.index_prefix(0), stored].concat()
+    } else {
+        stored.to_vec()
+    }
+}
+
+/// `t` with its column copy's directory keyed relative to the table
+/// ([`Table::relative_directory`]), in `txn`: a directory made before
+/// rewritten — read validated, so a merge committed meanwhile fails one
+/// of the two — and the record written with the flag.  The table, as
+/// written.
+pub fn relativize(txn: &mut dyn KvTxn, t: &Table) -> Result<Table> {
+    let mut new = t.clone();
+    new.relative_directory = true;
+    if !t.relative_directory {
+        let p = t.index_prefix(DIRECTORY);
+        let end = prefix_end(&p).expect("directory prefix");
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = txn
+            .scan_validated(Bound::Included(&p), Bound::Excluded(&end))?
+            .collect::<nucleus_kv::Result<_>>()?;
+        for (k, v) in entries {
+            let seg = Segment::decode(t, &k[p.len()..], &v)?;
+            txn.delete(&k)?;
+            txn.put(&dir_key(&new, &seg.last), &seg.encode(&new))?;
+        }
+    }
+    crate::catalog::update_table(txn, &new)?;
+    Ok(new)
 }
 
 // -------------------------------------------------------------- directory
@@ -324,10 +363,15 @@ struct Segment {
 }
 
 impl Segment {
-    fn encode(&self) -> Vec<u8> {
+    fn encode(&self, t: &Table) -> Vec<u8> {
         let mut w = Writer::default();
-        w.u64(self.id).u32(self.first.len() as u32);
-        w.0.extend_from_slice(&self.first);
+        let first = if t.relative_directory {
+            &self.first[INDEX_PREFIX_LEN.min(self.first.len())..]
+        } else {
+            &self.first[..]
+        };
+        w.u64(self.id).u32(first.len() as u32);
+        w.0.extend_from_slice(first);
         w.u32(self.rows as u32).u32(self.stats.len() as u32);
         for (lo, hi, nulls) in &self.stats {
             w.value(lo).value(hi).u64(*nulls);
@@ -338,12 +382,13 @@ impl Segment {
         w.0
     }
 
-    fn decode(last: &[u8], b: &[u8]) -> Result<Self> {
+    /// The entry `b` under directory key suffix `last` of `t`'s.
+    fn decode(t: &Table, last: &[u8], b: &[u8]) -> Result<Self> {
         let mut r = Reader::new(b);
         let e = |_| bad("directory entry");
         let id = r.u64().map_err(e)?;
         let n = r.u32().map_err(e)? as usize;
-        let first = r.take(n).map_err(e)?.to_vec();
+        let first = whole(t, r.take(n).map_err(e)?);
         let rows = r.u32().map_err(e)? as usize;
         let cols = r.u32().map_err(e)? as usize;
         let mut stats = Vec::with_capacity(cols);
@@ -362,7 +407,7 @@ impl Segment {
         Ok(Segment {
             id,
             first,
-            last: last.to_vec(),
+            last: whole(t, last),
             rows,
             cols,
             stats,
@@ -412,7 +457,7 @@ fn segments(txn: &dyn KvTxn, t: &Table, start: &[u8], end: Option<&[u8]>) -> Res
     let mut out = Vec::new();
     for e in txn.scan(Bound::Included(&from), Bound::Excluded(&to))? {
         let (k, v) = e?;
-        let seg = Segment::decode(&k[p.len()..], &v)?;
+        let seg = Segment::decode(t, &k[p.len()..], &v)?;
         if end.is_some_and(|e| seg.first.as_slice() >= e) {
             break;
         }
@@ -447,7 +492,7 @@ fn segments_through(
     let mut out = Vec::new();
     for e in scan {
         let (k, v) = e?;
-        let seg = Segment::decode(&k[p.len()..], &v)?;
+        let seg = Segment::decode(t, &k[p.len()..], &v)?;
         if seg.first.as_slice() > hi {
             break; // read: the claim ends at this entry
         }
@@ -491,7 +536,7 @@ fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Arc<Segme
     let Some((k, v)) = txn.first(Bound::Included(&from), Bound::Excluded(&to))? else {
         return Ok(None);
     };
-    let seg = entry(&k[p.len()..], &v)?;
+    let seg = entry(t, &k[p.len()..], &v)?;
     Ok((seg.first.as_slice() <= key).then_some(seg))
 }
 
@@ -616,13 +661,16 @@ enum Decoded {
 const ENTRY: u16 = u16::MAX - 1;
 
 /// The directory entry `v` (its key's suffix `last`), decoded once for
-/// its segment and kept in the cache.
-fn entry(last: &[u8], v: &[u8]) -> Result<Arc<Segment>> {
+/// its segment and kept in the cache — as `t`'s: a segment moved with its
+/// table to another id (PLAN.md §M14.28 L3b) is decoded again there.
+fn entry(t: &Table, last: &[u8], v: &[u8]) -> Result<Arc<Segment>> {
     let id = Reader::new(v).u64().map_err(|_| bad("directory entry"))?;
-    if let Some(Decoded::Entry(seg)) = cache_get(&(id, ENTRY)) {
+    if let Some(Decoded::Entry(seg)) = cache_get(&(id, ENTRY))
+        && seg.first.get(1..5) == Some(&t.id.to_be_bytes()[..])
+    {
         return Ok(seg);
     }
-    let seg = Arc::new(Segment::decode(last, v)?);
+    let seg = Arc::new(Segment::decode(t, last, v)?);
     cache_insert((id, ENTRY), Decoded::Entry(Arc::clone(&seg)));
     Ok(seg)
 }
@@ -1035,13 +1083,11 @@ fn none_between(txn: &dyn KvTxn, t: &Table, first: &[u8], last: &[u8]) -> Result
     }
     // The first segment ending at or after `first` (the directory is keyed
     // by a segment's last key), if it starts by `last`.
-    let mut k = Vec::with_capacity(INDEX_PREFIX_LEN + first.len());
-    t.push_index_prefix(&mut k, DIRECTORY);
-    k.extend_from_slice(first);
+    let k = dir_key(t, first);
     if let Some((d, v)) = txn.first(
         Bound::Included(&k),
         Bound::Excluded(&t.index_end(DIRECTORY)),
-    )? && Segment::decode(&d[INDEX_PREFIX_LEN..], &v)?
+    )? && Segment::decode(t, &d[INDEX_PREFIX_LEN..], &v)?
         .first
         .as_slice()
         <= last
@@ -1194,7 +1240,7 @@ fn write_segment(
         cols: cols.iter().map(|&c| c as u16).collect(),
         stats,
     };
-    txn.put(&dir_key(t, &seg.last), &seg.encode())?;
+    txn.put(&dir_key(t, &seg.last), &seg.encode(t))?;
     Ok(())
 }
 
@@ -2085,9 +2131,9 @@ fn exists_plain(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<bool> {
     // by a segment's last key).
     let mut k = Vec::with_capacity(INDEX_PREFIX_LEN + key.len());
     t.push_index_prefix(&mut k, DIRECTORY);
-    k.extend_from_slice(key);
+    k.extend_from_slice(if t.relative_directory { suffix } else { key });
     let seg = match txn.first(Bound::Included(&k), Bound::Excluded(&end_of(DIRECTORY)))? {
-        Some((d, v)) => Some(entry(&d[INDEX_PREFIX_LEN..], &v)?),
+        Some((d, v)) => Some(entry(t, &d[INDEX_PREFIX_LEN..], &v)?),
         None => None,
     };
     // The key in the delta store.

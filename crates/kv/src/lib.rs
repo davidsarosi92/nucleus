@@ -514,6 +514,19 @@ pub trait Kv: Send + Sync {
         Ok(Rekey::Idle)
     }
 
+    /// Mirrors writes until the returned guard is dropped (PLAN.md
+    /// §M14.28 L3b): a transaction's write of a key under one of `pairs`'
+    /// source prefixes writes the same under its destination prefix too,
+    /// unchecked for conflicts there — so a copy of the source made into
+    /// the destination meanwhile, by transactions writing it directly
+    /// (whose writes are checked), ends equal to it.  Writes made before
+    /// are not mirrored: the caller makes their transactions fail.  The
+    /// default: refused.
+    fn mirror(&self, pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<Box<dyn std::any::Any + Send + Sync>> {
+        let _ = pairs;
+        Err(Error::Storage("this store does not mirror writes".into()))
+    }
+
     /// Watches the keys from `start` to `end` (exclusive) for
     /// [`KvTxn::watched_as_at`]: what a caller derives from them (a
     /// catalog) may be kept across transactions while none commits a
@@ -1411,6 +1424,10 @@ impl Kv for Database {
             .store()
             .reseal(RESEAL_BATCH, go_on)
             .map_err(nucleus_txn::Error::from)?)
+    }
+
+    fn mirror(&self, pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<Box<dyn std::any::Any + Send + Sync>> {
+        Ok(Box::new(self.engine.mirror(pairs.to_vec())?))
     }
 
     fn watch(&self, start: &[u8], end: &[u8]) {

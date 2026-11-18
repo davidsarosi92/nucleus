@@ -584,6 +584,7 @@ fn def_table(k: usize) -> Table {
         converting: None,
         memory: None,
         engine: Default::default(),
+        relative_directory: true,
     }
 }
 

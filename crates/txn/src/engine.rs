@@ -195,6 +195,11 @@ struct Inner {
     /// at which a range began to be watched) — raised under the commit
     /// lock before the commit is visible.
     watched_at: AtomicU64,
+    /// Key prefixes mirrored ([`Engine::mirror`]): (source, destination).
+    /// Changed under the commit lock (taken first).
+    mirrors: RwLock<Arc<Vec<(Vec<u8>, Vec<u8>)>>>,
+    /// How many pairs `mirrors` holds (writes look at it first).
+    mirroring: AtomicUsize,
     /// The platform (its clock gives commits their times).
     platform: Arc<dyn Platform>,
     /// The last commit time recorded (µs since the Unix epoch): the next
@@ -525,6 +530,34 @@ fn valid_range(start: &Bound<Vec<u8>>, end: &Bound<Vec<u8>>) -> bool {
     }
 }
 
+/// Writes mirrored ([`Engine::mirror`]) while it lives.
+pub struct Mirror {
+    engine: Arc<Inner>,
+    pairs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl std::fmt::Debug for Mirror {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mirror")
+            .field("pairs", &self.pairs.len())
+            .finish()
+    }
+}
+
+impl Drop for Mirror {
+    fn drop(&mut self) {
+        let _last = lock(&self.engine.commit);
+        let mut mirrors = write(&self.engine.mirrors);
+        let all: Vec<_> = mirrors
+            .iter()
+            .filter(|p| !self.pairs.contains(p))
+            .cloned()
+            .collect();
+        self.engine.mirroring.store(all.len(), Ordering::Release);
+        *mirrors = Arc::new(all);
+    }
+}
+
 /// A database of versioned keys.  Cloning gives another handle to the same
 /// engine.
 #[derive(Clone)]
@@ -611,6 +644,8 @@ impl Engine {
                 unlogged: Mutex::new(Vec::new()),
                 watched: RwLock::new(Vec::new()),
                 watched_at: AtomicU64::new(recovery.meta),
+                mirrors: RwLock::new(Arc::new(Vec::new())),
+                mirroring: AtomicUsize::new(0),
                 platform,
                 last_time: AtomicU64::new(0),
                 last_lsn: AtomicU64::new(0),
@@ -810,6 +845,45 @@ impl Engine {
         }
     }
 
+    /// Mirrors writes (PLAN.md §M14.28 L3b): until the returned guard is
+    /// dropped, a transaction writing a key under a pair's source prefix
+    /// writes the same under its destination prefix too (the rest of the
+    /// key kept) — a table's keys copied to another place while it is
+    /// written.  Applies to writes made from now on, in transactions
+    /// begun before too; what a transaction wrote before is not mirrored
+    /// (the caller makes such a transaction fail, by a key it read
+    /// validated).  A mirrored write is not checked for conflicts at its
+    /// destination: a newer write of the source wins there as it does at
+    /// the source — while a direct write at a destination (a copy's) is
+    /// checked as any write is, so it loses to a mirrored one committed
+    /// after it began.  No fresh range ([`Transaction::fresh`]) is taken
+    /// within a source.  Refused when a prefix meets one mirrored already.
+    pub fn mirror(&self, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Mirror> {
+        let _last = lock(&self.inner.commit);
+        let mut mirrors = write(&self.inner.mirrors);
+        let meets = |a: &[u8], b: &[u8]| a.starts_with(b) || b.starts_with(a);
+        for (i, (s, d)) in pairs.iter().enumerate() {
+            let taken = mirrors
+                .iter()
+                .chain(&pairs[..i])
+                .flat_map(|(a, b)| [a, b])
+                .any(|p| meets(p, s) || meets(p, d));
+            if taken || meets(s, d) || s.is_empty() || d.is_empty() {
+                return Err(Error::Storage(nucleus_storage::Error::Engine(
+                    "a mirrored prefix meets another one".into(),
+                )));
+            }
+        }
+        let mut all = Vec::clone(&mirrors);
+        all.extend(pairs.iter().cloned());
+        self.inner.mirroring.store(all.len(), Ordering::Release);
+        *mirrors = Arc::new(all);
+        Ok(Mirror {
+            engine: Arc::clone(&self.inner),
+            pairs,
+        })
+    }
+
     /// How many transactions are running.
     pub fn running(&self) -> usize {
         lock(&self.inner.active).values().sum()
@@ -951,6 +1025,7 @@ impl Engine {
             pending: Mutex::new(Pending::default()),
             gap: None,
             empty: Mutex::new(Vec::new()),
+            mirrors: None,
         })
     }
 
@@ -2100,6 +2175,9 @@ pub struct Transaction {
     /// one, its own writes alone decide a read.  `put_new`'s [`Gap`] is
     /// the stronger fact (no entry of anyone), for writes.
     empty: Mutex<Vec<(Bound<Vec<u8>>, Bound<Vec<u8>>)>>,
+    /// The mirrored prefixes its writes met ([`Engine::mirror`]), as they
+    /// were at its first such write.
+    mirrors: Option<Arc<Vec<(Vec<u8>, Vec<u8>)>>>,
 }
 
 /// Ranges a transaction remembers the store as empty in, at most.
@@ -2423,6 +2501,15 @@ impl Transaction {
     /// Declined (the writes logged) when the store holds an entry in the
     /// range, or another running transaction writes an overlapping one so.
     pub fn fresh(&mut self, start: &[u8], end: &[u8]) {
+        // Not within a mirrored prefix: its writes go through the write
+        // set, where they are mirrored.
+        if self.engine.mirroring.load(Ordering::Acquire) > 0
+            && read(&self.engine.mirrors).iter().any(|(from, _)| {
+                start.starts_with(from) || (start <= from.as_slice() && from.as_slice() < end)
+            })
+        {
+            return;
+        }
         self.fresh.push(Fresh {
             start: start.to_vec(),
             end: end.to_vec(),
@@ -2570,9 +2657,54 @@ impl Transaction {
         self.record(key, value)
     }
 
-    /// Holds a write (checked already), spilling when past the memory
-    /// allowed.
+    /// Holds a write (checked already) — and its mirror's, under a
+    /// mirrored prefix ([`Engine::mirror`]) — spilling when past the
+    /// memory allowed (after both: a spill checks the pair together).
     fn record(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        self.hold(key, value);
+        if self.engine.mirroring.load(Ordering::Acquire) > 0
+            && let Some(to) = self.mirrored(key)
+        {
+            self.hold(&to, value);
+        }
+        if self.write_bytes > self.engine.opts.txn_memory {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// `key`'s mirror, if it is under a mirrored source prefix.
+    fn mirrored(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        let now = Arc::clone(&read(&self.engine.mirrors));
+        let (from, to) = now.iter().find(|(from, _)| key.starts_with(from))?;
+        let mirror = [to.as_slice(), &key[from.len()..]].concat();
+        if !self.mirrors.as_ref().is_some_and(|m| Arc::ptr_eq(m, &now)) {
+            self.mirrors = Some(now);
+        }
+        Some(mirror)
+    }
+
+    /// Whether `key` is a mirrored write of this transaction's — under a
+    /// destination prefix, its source written too — which no conflict
+    /// check looks at ([`Engine::mirror`]).
+    fn is_mirror(&self, key: &[u8]) -> bool {
+        self.mirrors.as_ref().is_some_and(|m| {
+            m.iter().any(|(from, to)| {
+                key.starts_with(to)
+                    && self
+                        .writes
+                        .contains_key(&[from.as_slice(), &key[to.len()..]].concat())
+            })
+        })
+    }
+
+    /// Whether `key`'s write skips the conflict checks: fresh, or a mirror.
+    fn unchecked(&self, key: &[u8]) -> bool {
+        self.is_fresh(key) || (self.mirrors.is_some() && self.is_mirror(key))
+    }
+
+    /// Holds a write in the write set.
+    fn hold(&mut self, key: &[u8], value: Option<&[u8]>) {
         if !self.fresh.is_empty()
             && let Some(i) = self.fresh_index(key)
         {
@@ -2591,10 +2723,6 @@ impl Transaction {
             }
             None => self.write_bytes += size,
         }
-        if self.write_bytes > self.engine.opts.txn_memory {
-            self.spill()?;
-        }
-        Ok(())
     }
 
     /// Moves the writes held in memory into the store as intents (versions
@@ -2608,7 +2736,10 @@ impl Transaction {
             Some(id) => id,
             None => engine.next_id.fetch_add(1, Ordering::AcqRel),
         };
-        let mut keys = self.writes.keys().map(|k| (k.as_slice(), self.is_fresh(k)));
+        let mut keys = self
+            .writes
+            .keys()
+            .map(|k| (k.as_slice(), self.unchecked(k)));
         let conflict = engine.commit_conflict(&mut keys, self.start, Some(id))?;
         drop(keys);
         if let Some(key) = conflict {
@@ -2804,7 +2935,10 @@ impl Transaction {
             // Each key's conflict (spilled keys were checked as they
             // spilled, and every commit since has checked its keys against
             // them).
-            let mut keys = self.writes.keys().map(|k| (k.as_slice(), self.is_fresh(k)));
+            let mut keys = self
+                .writes
+                .keys()
+                .map(|k| (k.as_slice(), self.unchecked(k)));
             let conflict = engine.commit_conflict(&mut keys, self.start, spilled)?;
             drop(keys);
             if let Some(key) = conflict {

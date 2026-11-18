@@ -1750,8 +1750,16 @@ impl<'a> Parser<'a> {
     }
 
     fn table_options(&mut self) -> Result<Vec<(String, String)>> {
-        let mut options = Vec::new();
         if self.eat_kw("with") {
+            return self.option_list();
+        }
+        Ok(Vec::new())
+    }
+
+    /// `(key [= value], …)`: a table's options.
+    fn option_list(&mut self) -> Result<Vec<(String, String)>> {
+        let mut options = Vec::new();
+        {
             self.expect_op("(")?;
             loop {
                 let key = self.ident()?;
@@ -2646,6 +2654,11 @@ impl<'a> Parser<'a> {
                 table,
                 policy: Some((kinds, after)),
             });
+        }
+        if self.peek_kw("set") && matches!(self.peek_at(1), Some(Token::Op("("))) {
+            self.pos += 1;
+            let options = self.option_list()?;
+            return Ok(Statement::SetTableOptions { table, options });
         }
         if self.eat_kws(&["set", "storage"]) {
             let mut kinds = vec![self.ident()?];

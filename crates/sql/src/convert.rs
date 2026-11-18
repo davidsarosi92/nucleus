@@ -424,6 +424,10 @@ fn move_changed(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
 /// row, and its values stored out of line unless its delta row (same key)
 /// has them now.
 fn clean_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
+    // Where each part goes on: past the keys the parts before deleted,
+    // not over their tombstones again (no write puts a key behind it:
+    // the table's writes go to its delta store meanwhile).
+    let (mut rows_at, mut changed_at) = (None::<Vec<u8>>, None::<Vec<u8>>);
     loop {
         let removed = attempt(kv, |txn| {
             let t = fresh(txn, name)?;
@@ -431,7 +435,7 @@ fn clean_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
             let end = prefix_end(&p).expect("an index prefix");
             let rows: Vec<(Vec<u8>, Vec<u8>)> = txn
                 .scan(
-                    std::ops::Bound::Included(&p),
+                    std::ops::Bound::Included(rows_at.as_ref().unwrap_or(&p)),
                     std::ops::Bound::Excluded(&end),
                 )?
                 .take(CLEAN_KEYS)
@@ -454,7 +458,7 @@ fn clean_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
             let end = prefix_end(&p).expect("an index prefix");
             let changed: Vec<Vec<u8>> = txn
                 .scan(
-                    std::ops::Bound::Included(&p),
+                    std::ops::Bound::Included(changed_at.as_ref().unwrap_or(&p)),
                     std::ops::Bound::Excluded(&end),
                 )?
                 .take(CLEAN_KEYS)
@@ -463,11 +467,18 @@ fn clean_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
             for k in &changed {
                 txn.delete(k)?;
             }
-            Ok(rows.len() + changed.len())
+            let past = |k: &[u8]| [k, &[0]].concat();
+            Ok((
+                rows.len() + changed.len(),
+                rows.last().map(|(k, _)| past(k)),
+                changed.last().map(|k| past(k)),
+            ))
         })?;
-        if removed == 0 {
+        if removed.0 == 0 {
             break;
         }
+        rows_at = removed.1.or(rows_at);
+        changed_at = removed.2.or(changed_at);
     }
     switch(kv, name, COLUMN, CopyState::Ready, None)
 }
@@ -475,4 +486,259 @@ fn clean_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
 /// The storage a table of storage `name` uses (for the tests).
 pub fn storage_of(t: &Table) -> Result<Arc<dyn TableStorage>> {
     crate::storage::of(t)
+}
+
+/// Keys a part of a move copies or cleans (PLAN.md §M14.28 L3b), at
+/// first: a part that commits at once doubles the next, up to
+/// [`PART_MOST`]; one that meets writes of the same keys runs again with
+/// half, down to [`PART_LEAST`] — few keys where writers are busy, a
+/// commit's sync seldom where they are not.
+const PART_FIRST: usize = 1024;
+const PART_LEAST: usize = 64;
+const PART_MOST: usize = 1 << 16;
+/// Bytes a part takes, at most about.
+const PART_BYTES: usize = 16 << 20;
+
+/// Moves `name`'s keys into `to` (`ALTER TABLE … SET (engine = …)`,
+/// PLAN.md §M14.28 L3b), online: under a new table id whose key range is
+/// `to`'s.  A partitioned table moves each partition, and its own
+/// engine (its next partitions') changes.
+///
+/// 1. *The claim*: a transaction takes the new id, records it as the
+///    table's move ([`catalog::moving_to`]) and writes the table's record
+///    again — so a write that read the record before fails, and runs
+///    again under the mirror — while the store mirrors every write under
+///    the table's prefixes to the new id's ([`Kv::mirror`]).
+/// 2. *The copy*: the keys under the old prefixes go under the new ones,
+///    a part a transaction; a part that meets a mirrored write of a key
+///    it copies runs again, and a mirrored write committed after a part
+///    wins over it.
+/// 3. *The switch*: a transaction reads the record validated and writes
+///    it with the new id and engine — writes begun before fail, and run
+///    again on the new keys.
+/// 4. *The clean*: the old keys go, a part a transaction.
+///
+/// A move cut short (a crash; the mirror is the process's) leaves the
+/// table where it was, its copy stale: the next move, or `DROP TABLE`,
+/// removes it first.  Snapshots older than the switch read the old keys
+/// as they read every deleted key, until the vacuum takes them.
+pub fn set_engine(kv: &Arc<dyn Kv>, name: &str, to: catalog::TableEngine) -> Result<()> {
+    let t = attempt(kv, |txn| fresh(txn, name))?;
+    if t.partition_by.is_some() {
+        let parts = attempt(kv, |txn| crate::partition::partitions(txn, &t))?;
+        for p in parts {
+            set_engine(kv, &p.name, to)?;
+        }
+        return attempt(kv, |txn| {
+            let mut t = fresh(txn, name)?;
+            t.engine = to;
+            catalog::update_table(txn, &t)
+        });
+    }
+    // One move of a table at a time in this process; one recorded but
+    // not under way here was cut short, and its copy is stale.
+    let _moving = Moving::begin(kv, t.id)?;
+    if let Some(stale) = attempt(kv, |txn| catalog::moving_to(txn, t.id))? {
+        clean_prefixes(kv, &catalog::id_prefixes(stale))?;
+        attempt(kv, |txn| catalog::set_moving(txn, t.id, None))?;
+    }
+    if t.engine == to {
+        return Ok(());
+    }
+    // A column copy's directory made before keys its segments by whole
+    // row keys, which hold the table's id: rewritten first.
+    if !t.relative_directory {
+        attempt(kv, |txn| {
+            let t = fresh(txn, name)?;
+            movable(&t)?;
+            crate::column_store::relativize(txn, &t).map(drop)
+        })?;
+    }
+    let mut mirror = None;
+    let mut claimed = Vec::new();
+    let claim = attempt(kv, |txn| {
+        let t = fresh(txn, name)?;
+        movable(&t)?;
+        mirror = None; // a claim run again mirrors anew
+        let id = catalog::claim_id(txn, to)?;
+        claimed.push(id);
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = catalog::id_prefixes(t.id)
+            .into_iter()
+            .zip(catalog::id_prefixes(id))
+            .collect();
+        mirror = Some(kv.mirror(&pairs)?);
+        catalog::set_moving(txn, t.id, Some(id))?;
+        catalog::update_table(txn, &t)?;
+        Ok((t.id, id))
+    });
+    // What the claims that did not commit mirrored into their ids goes.
+    let kept = claim.as_ref().ok().map(|&(_, id)| id);
+    for id in claimed.into_iter().filter(|&id| Some(id) != kept) {
+        let _ = clean_prefixes(kv, &catalog::id_prefixes(id));
+    }
+    let (from_id, new_id) = match claim {
+        Ok(ids) => ids,
+        Err(e) => {
+            drop(mirror);
+            return Err(e);
+        }
+    };
+    let moved = (|| {
+        for (from, into) in catalog::id_prefixes(from_id)
+            .into_iter()
+            .zip(catalog::id_prefixes(new_id))
+        {
+            copy_prefix(kv, &from, &into)?;
+        }
+        attempt(kv, |txn| {
+            catalog::validate_table(txn, name)?;
+            let mut t = fresh(txn, name)?;
+            if t.id != from_id || catalog::moving_to(txn, from_id)? != Some(new_id) {
+                return Err(Error::object_in_use(format!(
+                    "table \"{name}\" was dropped or replaced while its engine changed"
+                )));
+            }
+            movable(&t)?;
+            t.id = new_id;
+            t.engine = to;
+            catalog::set_moving(txn, from_id, None)?;
+            catalog::update_table(txn, &t)
+        })
+    })();
+    drop(mirror);
+    match moved {
+        Ok(()) => clean_prefixes(kv, &catalog::id_prefixes(from_id)),
+        Err(e) => {
+            // The copy goes; the table stays where it was.
+            let _ = clean_prefixes(kv, &catalog::id_prefixes(new_id)).and_then(|()| {
+                attempt(kv, |txn| {
+                    if catalog::moving_to(txn, from_id)? == Some(new_id) {
+                        catalog::set_moving(txn, from_id, None)?;
+                    }
+                    Ok(())
+                })
+            });
+            Err(e)
+        }
+    }
+}
+
+/// The tables whose engine this process is changing: (the store's
+/// instance, its branch, the table's id).
+static MOVES: std::sync::Mutex<Vec<(u64, String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// A table's move under way in this process, while it lives.
+struct Moving((u64, String, u32));
+
+impl Moving {
+    fn begin(kv: &Arc<dyn Kv>, id: u32) -> Result<Self> {
+        let key = (kv.instance(), kv.branch_name(), id);
+        let mut moves = MOVES.lock().unwrap_or_else(|e| e.into_inner());
+        if moves.contains(&key) {
+            return Err(Error::object_in_use(
+                "the table's engine is being changed by another statement".to_string(),
+            ));
+        }
+        moves.push(key.clone());
+        Ok(Moving(key))
+    }
+}
+
+impl Drop for Moving {
+    fn drop(&mut self) {
+        MOVES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k| k != &self.0);
+    }
+}
+
+/// Refuses a move of `t` its keys cannot make as they are.
+fn movable(t: &Table) -> Result<()> {
+    if t.storage == crate::sealed::SEALED {
+        // Each sealed row is bound to its key (the associated data).
+        return Err(Error::feature(format!(
+            "table \"{}\" is sealed: its rows are bound to their keys; SET STORAGE row first",
+            t.name
+        )));
+    }
+    if t.copy != CopyState::Ready {
+        return Err(Error::object_in_use(format!(
+            "table \"{}\" is changing its storage: ALTER TABLE … SET STORAGE again finishes it",
+            t.name
+        )));
+    }
+    if let Some(cv) = &t.converting {
+        return Err(Error::object_in_use(format!(
+            "the type of column \"{}\" of \"{}\" is being changed; its engine can change when that is done",
+            t.columns[cv.column].name, t.name
+        )));
+    }
+    Ok(())
+}
+
+/// Copies every key under `from` to the same under `into`, a part a
+/// transaction.
+fn copy_prefix(kv: &Arc<dyn Kv>, from: &[u8], into: &[u8]) -> Result<()> {
+    parts(kv, from, |txn, k, v| {
+        txn.put(&[into, &k[from.len()..]].concat(), v)
+    })
+}
+
+/// Deletes every key under `prefixes`, a part a transaction.
+fn clean_prefixes(kv: &Arc<dyn Kv>, prefixes: &[Vec<u8>]) -> Result<()> {
+    for p in prefixes {
+        parts(kv, p, |txn, k, _| txn.delete(k))?;
+    }
+    Ok(())
+}
+
+/// Runs `f` on every entry under `prefix`, a part a transaction, each
+/// part read from where the last one ended (not from the prefix again,
+/// past what the parts before deleted), its size adapting
+/// ([`PART_FIRST`]).
+fn parts(
+    kv: &Arc<dyn Kv>,
+    prefix: &[u8],
+    mut f: impl FnMut(&mut dyn KvTxn, &[u8], &[u8]) -> nucleus_kv::Result<()>,
+) -> Result<()> {
+    let end = prefix_end(prefix).expect("a table's prefix below the last");
+    let mut at = prefix.to_vec();
+    let mut size = PART_FIRST;
+    loop {
+        let mut tries = 0;
+        let (full, next) = attempt(kv, |txn| {
+            tries += 1;
+            if tries > 1 {
+                size = (size / 2).max(PART_LEAST);
+            }
+            let mut taken = Vec::new();
+            let mut bytes = 0;
+            for e in txn.scan(
+                std::ops::Bound::Included(&at),
+                std::ops::Bound::Excluded(&end),
+            )? {
+                let (k, v) = e?;
+                bytes += k.len() + v.len();
+                taken.push((k, v));
+                if taken.len() == size || bytes >= PART_BYTES {
+                    break;
+                }
+            }
+            for (k, v) in &taken {
+                f(txn, k, v)?;
+            }
+            let full = taken.len() == size || bytes >= PART_BYTES;
+            // Past the last key taken: it and a zero byte.
+            let next = taken.last().map(|(k, _)| [k.as_slice(), &[0]].concat());
+            Ok((full, next))
+        })?;
+        match next {
+            Some(k) if full => at = k,
+            _ => return Ok(()),
+        }
+        if tries == 1 {
+            size = (size * 2).min(PART_MOST);
+        }
+    }
 }

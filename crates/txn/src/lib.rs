@@ -28,8 +28,8 @@ mod recent;
 mod writes;
 
 pub use engine::{
-    BACKGROUND_CHUNK, Chunk, Engine, EngineOptions, Isolation, Scan, Timestamp, Transaction,
-    TxnOptions, UserRange,
+    BACKGROUND_CHUNK, Chunk, Engine, EngineOptions, Isolation, Mirror, Scan, Timestamp,
+    Transaction, TxnOptions, UserRange,
 };
 pub use error::{Error, Result};
 pub use nucleus_storage::{BranchInfo, EngineKind, MAIN_NAME};

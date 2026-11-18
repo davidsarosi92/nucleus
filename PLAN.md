@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ✅ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a ✅; L3b–L5 next |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅; L4–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ✅ E1 (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
@@ -3625,7 +3625,7 @@ chosen and their order, the methods and their error bounds, the
 benchmarks — and the steps it leads to are planned as this milestone's
 own, agreed before they are built.
 
-### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; L0–L2 ✅, L3a ✅)
+### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; L0–L2 ✅, L3a–L3b ✅)
 
 **First a study, then the plan.**  Today every table lives in the one
 copy-on-write B+tree (D2, D10); an LSM tree was left for later, "as a
@@ -4003,6 +4003,55 @@ recovery time after a crash mid-compaction.
     gives the right rows in the other engine; documented, not guarded.
     DROP TABLE and DELETE stay key-by-key tombstones until L4's compaction by
     the oldest snapshot can drop a range whole.
+  - **L3b — a table's engine changed online** ✅ (2026-11-18): `ALTER
+    TABLE … SET (engine = …)`.  *Built* (`convert::set_engine`, DOCS
+    §4.6): a route is the store's and never taken back (L3a), so a table
+    changes engine by moving its keys to a new id of the other engine's
+    range — every key under its id (`catalog::id_prefixes`: data, hidden
+    row id, statistics, embedding jobs).  The claim records the move and
+    writes the table's record again (writes that read it validated fail
+    and run again), and the transaction layer mirrors every write under
+    the old prefixes onto the new ones (`txn::Engine::mirror`: the
+    mirrored write joins the same write set, so it spills, logs and
+    commits with it, unchecked for conflicts there); a copy then writes
+    the old keys under the new prefixes a part a transaction, checked as
+    any write — a part that read a key before a mirrored write of it
+    committed runs again, a mirrored write after it wins — and a switch
+    writes the record with the new id at a commit; the old keys go after.
+    *Prior art*: MySQL's `ALTER TABLE … ENGINE=` and PostgreSQL's `SET
+    ACCESS METHOD` rewrite the table under a lock that stops writes (and
+    PostgreSQL's reads); online schema change tools (gh-ost, pt-osc)
+    copy into a shadow table while replaying the writes — triggers or the
+    binlog — and swap at the end; this is their shape with the replay in
+    the transaction layer, the same transaction as the write, so nothing
+    is applied late or out of order.  *Found*: a column copy's directory
+    keyed segments by whole row keys (the table id inside), which no
+    prefix move can carry: it now keys them after the table's prefix
+    (table record version 23 — `relative_directory`; an older table's is
+    rewritten in one transaction before it moves).  *Not taken*: changing
+    a route's engine in place (every branch shares the route, not the
+    table), translating values in the mirror.  *Refused*: sealed tables
+    (a row is sealed with its key as associated data), a table mid
+    storage or type conversion.  *Tested* (`crates/sql/tests/engines.rs`,
+    `crates/txn/tests/mirror.rs`): rows with unique, secondary and
+    foreign keys, a hidden row id, `column` and `row, column` tables, text
+    and HNSW indexes moved to the LSM tree and back with the same answers
+    and the consistency check clean; four writers inserting, updating and
+    deleting through both moves of a row, a column and a `row, column`
+    table, every write kept (removing the mirror fails it); a move cut
+    short cleaned by the next and by `DROP TABLE`; an old directory
+    rewritten (skipping the rewrite fails it); partitions.  *Measured*
+    (release, `nucleus sql` on a local directory): a million rows with
+    a secondary index (two million keys) move to the LSM tree in 2.4 s
+    and back in 2.5 s, against 2.1 s to load them; a million-row column
+    table in 0.7 s.  *Learned*: the first build took 76 s — each part of
+    the clean read from the prefix again, over every tombstone the parts
+    before left (quadratic); a part now goes on past the last key
+    taken, and its size adapts (1024 keys at first, doubled after a part
+    that commits at once up to 65 536, halved on each retry down to 64:
+    few keys where writers are busy, a commit's sync seldom where they
+    are not).  `SET STORAGE column`'s drop of a row copy had the same
+    flaw: a million rows 16.9 → 1.3 s.
 - **L4 — scheduling and ingestion**: compaction against foreground work
   with an I/O budget; bulk loads as ingested runs.
 - **L5 — the verdict**: the benchmarks above; where the LSM is

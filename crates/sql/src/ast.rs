@@ -165,6 +165,14 @@ pub enum Statement {
         /// The storage its old partitions take, and after how long.
         policy: Option<(Vec<String>, Expr)>,
     },
+    /// `ALTER TABLE t SET (option = value, …)`: `engine` — the table's
+    /// keys copied into another engine, online (PLAN.md §M14.28 L3b).
+    SetTableOptions {
+        /// Table.
+        table: String,
+        /// The options, as written.
+        options: Vec<(String, String)>,
+    },
     /// `ALTER TABLE t SET STORAGE row | column | row, column [(columns)]`:
     /// how its rows are stored, converted online.
     SetStorage {

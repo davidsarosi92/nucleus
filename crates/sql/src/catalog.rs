@@ -38,6 +38,9 @@ const CATALOG: &[u8] = &[0x00, 0x01];
 const SEQUENCE: &[u8] = &[0x00, 0x02];
 const ROWID: &[u8] = &[0x00, 0x03];
 const STATS: &[u8] = &[0x00, 0x04];
+/// A table being moved to another engine: the id its keys are copied
+/// under ([`moving_to`]).
+const MOVING: &[u8] = &[0x00, 0x1C];
 const ORDERINGS: &[u8] = &[0x00, 0x05];
 const ORDERING_VERSION: u8 = 1;
 const OPERATORS: &[u8] = &[0x00, 0x06];
@@ -90,7 +93,7 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// column's type being changed online ([`Conversion`]); version 21 a
 /// memory store's analyzer; version 22 the engine holding its keys
 /// ([`TableEngine`]); older versions still read.
-const TABLE_VERSION: u8 = 22;
+const TABLE_VERSION: u8 = 23;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -433,6 +436,13 @@ pub struct Table {
     pub converting: Option<Conversion>,
     /// The engine holding its keys, `WITH (engine = …)`.
     pub engine: TableEngine,
+    /// Its column copy's directory keys each segment by the suffix of its
+    /// last row key after the table's prefix, and holds its first so —
+    /// keys that hold no table id, so they move with the table to
+    /// another id (PLAN.md §M14.28 L3b).  A table made before (record
+    /// version 23) holds whole row keys until a move rewrites them
+    /// ([`crate::column_store::relativize`]).
+    pub relative_directory: bool,
 }
 
 /// The engine holding a table's keys — its rows and its indexes (PLAN.md
@@ -660,9 +670,7 @@ impl Table {
 
     /// The prefix of every key of the table.
     pub fn data_prefix(&self) -> Vec<u8> {
-        let mut k = vec![DATA];
-        k.extend_from_slice(&self.id.to_be_bytes());
-        k
+        data_prefix_of(self.id)
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -861,6 +869,7 @@ impl Table {
             TableEngine::BTree => 0,
             TableEngine::Lsm => 1,
         });
+        w.u8(u8::from(self.relative_directory));
         w.0
     }
 
@@ -1108,6 +1117,7 @@ impl Table {
         } else {
             TableEngine::BTree
         };
+        let relative_directory = version >= 23 && r.u8()? != 0;
         Ok(Self {
             id,
             name,
@@ -1135,6 +1145,7 @@ impl Table {
             subject,
             converting,
             engine,
+            relative_directory,
         })
     }
 }
@@ -1393,12 +1404,21 @@ pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
         )));
     }
     crate::sealed::check_table(&*txn, &table)?;
+    table.id = claim_id(txn, table.engine)?;
+    txn.put(&table_key(&table.name), &table.encode())?;
+    Ok(table)
+}
+
+/// A new table id whose key range is `engine`'s: the next of the
+/// sequence, an id routed to another engine passed over (see
+/// [`create_table`]).
+pub fn claim_id(txn: &mut dyn KvTxn, engine: TableEngine) -> Result<u32> {
     for _ in 0..PASSED_OVER {
-        table.id = u32::try_from(next_sequence(txn, "table_id")?)
+        let id = u32::try_from(next_sequence(txn, "table_id")?)
             .map_err(|_| Error::out_of_range("too many tables"))?;
-        let start = table.data_prefix();
+        let start = data_prefix_of(id);
         let end = prefix_end(&start).expect("a table's prefix below the last");
-        let fits = match (table.engine, txn.engine_of(&start, &end)?.as_deref()) {
+        let fits = match (engine, txn.engine_of(&start, &end)?.as_deref()) {
             (TableEngine::BTree, None) | (TableEngine::Lsm, Some("lsm")) => true,
             (TableEngine::Lsm, None) => txn
                 .add_engine(&start, &end, "lsm")
@@ -1406,14 +1426,52 @@ pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
             _ => false,
         };
         if fits {
-            txn.put(&table_key(&table.name), &table.encode())?;
-            return Ok(table);
+            return Ok(id);
         }
     }
     Err(Error::program_limit(format!(
         "no table id of the {} engine found in {PASSED_OVER}",
-        table.engine.name()
+        engine.name()
     )))
+}
+
+/// The prefix of every data key of table `id` (rows, indexes, column
+/// copy, values out of line): [`Table::data_prefix`].
+pub fn data_prefix_of(id: u32) -> Vec<u8> {
+    let mut k = vec![DATA];
+    k.extend_from_slice(&id.to_be_bytes());
+    k
+}
+
+/// The prefixes of every key under table `id`: its data, its next
+/// hidden row id, its statistics (and sample), its embedding jobs and
+/// next model's vectors — what moves with it to another id (PLAN.md
+/// §M14.28 L3b).
+pub fn id_prefixes(id: u32) -> Vec<Vec<u8>> {
+    let mut out = vec![data_prefix_of(id), id_key(ROWID, id), id_key(STATS, id)];
+    out.extend(crate::embedding::id_prefixes(id));
+    out
+}
+
+/// The id table `id`'s keys are being copied under, by a move to
+/// another engine (`ALTER TABLE … SET (engine = …)`), if one is under
+/// way or was cut short.
+pub fn moving_to(txn: &dyn KvTxn, id: u32) -> Result<Option<u32>> {
+    Ok(match txn.get(&id_key(MOVING, id))? {
+        Some(v) => Some(u32::from_be_bytes(v.as_slice().try_into().map_err(
+            |_| Error::internal("a moving table's record does not decode"),
+        )?)),
+        None => None,
+    })
+}
+
+/// Records (or clears) the id table `id`'s keys are being copied under.
+pub fn set_moving(txn: &mut dyn KvTxn, id: u32, to: Option<u32>) -> Result<()> {
+    match to {
+        Some(to) => txn.put(&id_key(MOVING, id), &to.to_be_bytes())?,
+        None => txn.delete(&id_key(MOVING, id))?,
+    }
+    Ok(())
 }
 
 /// How many table ids [`create_table`] passes over, at most, before it
@@ -1471,6 +1529,13 @@ pub fn drop_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
     txn.delete(&id_key(ROWID, table.id))?;
     txn.delete(&id_key(STATS, table.id))?;
     crate::embedding::forget_table(txn, table.id)?;
+    // A move to another engine cut short: its copy goes too.
+    if let Some(to) = moving_to(&*txn, table.id)? {
+        for p in id_prefixes(to) {
+            delete_range(txn, &p, prefix_end(&p).as_deref())?;
+        }
+        set_moving(txn, table.id, None)?;
+    }
     delete_stats_sample(txn, table)
 }
 
@@ -2025,6 +2090,7 @@ mod tests {
                 stale: vec![2, 4],
             }),
             engine: TableEngine::Lsm,
+            relative_directory: true,
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

@@ -73,6 +73,13 @@ pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>>
             (t.id, ids.collect())
         })
         .collect();
+    // A table being moved to another engine, or a move cut short: its
+    // keys' copy under the new id (PLAN.md §M14.28 L3b), stale after a
+    // crash — the next move removes it.
+    let mut copies = BTreeSet::new();
+    for t in &tables {
+        copies.extend(catalog::moving_to(txn, t.id)?);
+    }
     let data = [0x01u8];
     let end = prefix_end(&data).expect("data prefix");
     let mut seen = BTreeSet::new();
@@ -86,7 +93,10 @@ pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>>
             problems.push(format!("malformed data key {k:?}"));
             continue;
         };
-        if !known.get(&table).is_some_and(|ix| ix.contains(&index)) && seen.insert((table, index)) {
+        if !known.get(&table).is_some_and(|ix| ix.contains(&index))
+            && !copies.contains(&table)
+            && seen.insert((table, index))
+        {
             problems.push(format!(
                 "keys of table id {table} index id {index}, which the catalog does not have"
             ));

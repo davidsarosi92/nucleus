@@ -127,6 +127,14 @@ impl Entry {
     }
 }
 
+/// The prefixes of a table's keys here: its jobs and its next model's
+/// vectors.
+pub(crate) fn id_prefixes(table_id: u32) -> [Vec<u8>; 2] {
+    let mut shadow = SHADOW.to_vec();
+    shadow.extend_from_slice(&table_id.to_be_bytes());
+    [table_prefix(table_id), shadow]
+}
+
 fn table_prefix(table_id: u32) -> Vec<u8> {
     let mut k = QUEUE.to_vec();
     k.extend_from_slice(&table_id.to_be_bytes());

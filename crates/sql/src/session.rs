@@ -950,6 +950,38 @@ impl Session {
                 }
                 Ok(Output::Command("ROLLBACK".into()))
             }
+            Statement::SetTableOptions { table, options } => {
+                // Copied in transactions of its own, while others use
+                // the table.
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "ALTER TABLE … SET (…) cannot run inside a transaction block",
+                    ));
+                }
+                let mut engine = None;
+                for (key, value) in options {
+                    match key.to_ascii_lowercase().as_str() {
+                        "engine" => engine = Some(catalog::TableEngine::named(value)?),
+                        other => {
+                            return Err(Error::invalid_parameter(format!(
+                                "unrecognized parameter \"{other}\" (ALTER TABLE … SET takes engine)"
+                            )));
+                        }
+                    }
+                }
+                {
+                    let txn = self.kv.begin(TxnOptions::read_only())?;
+                    crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                    catalog::table(&*txn, table)?;
+                }
+                if let Some(engine) = engine {
+                    let now = crate::datetime::from_system(self.kv.wall_clock());
+                    crate::datetime::with_now(now, &self.kv, || {
+                        crate::convert::set_engine(&self.kv, table, engine)
+                    })?;
+                }
+                Ok(Output::Command("ALTER TABLE".into()))
+            }
             Statement::SetStorage {
                 table,
                 kinds,
@@ -2038,6 +2070,11 @@ pub(crate) fn execute_statement(
         Statement::SetStorage { .. } | Statement::SetStoragePolicy { .. } => {
             return Err(Error::active_txn(
                 "ALTER TABLE … SET STORAGE runs as a statement of its own",
+            ));
+        }
+        Statement::SetTableOptions { .. } => {
+            return Err(Error::active_txn(
+                "ALTER TABLE … SET (…) runs as a statement of its own",
             ));
         }
         Statement::AlterColumnType {
@@ -3866,6 +3903,7 @@ pub(crate) fn create_table(
         converting: None,
         memory: None,
         engine: opts.engine,
+        relative_directory: true,
     };
     if let Some((kind, names)) = partition_by {
         table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);

@@ -680,13 +680,19 @@ pub fn stats(
 
 /// Index `id`'s table and its position there, as `txn` sees the catalog.
 fn find(txn: &dyn KvTxn, id: &Id) -> Result<Option<(Table, usize)>> {
-    Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
+    let found = crate::catalog::tables(txn)?.into_iter().find_map(|t| {
         let i = t.indexes.iter().position(|ix| {
             ix.id == id.index
                 && matches!(ix.method.as_deref(), Some(NAME | sparse::NAME | json::NAME))
         })?;
         (t.id == id.table).then_some((t, i))
-    }))
+    });
+    // Read validated: a transaction writing the index fails if the table
+    // moved meanwhile (its keys under another id, PLAN.md §M14.28 L3b).
+    if let Some((t, _)) = &found {
+        crate::catalog::validate_table(txn, &t.name)?;
+    }
+    Ok(found)
 }
 
 /// Seals each index whose delta holds [`SEAL`] rows (every index written,

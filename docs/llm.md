@@ -330,7 +330,9 @@ rows, queries reading a few columns) `CREATE TABLE … WITH (storage =
 column)` stores them as compressed column segments; same SQL.  `ALTER TABLE
 t SET STORAGE row, column` keeps both (fast key lookups and fast scans),
 `SET STORAGE column (a, b)` a column copy of some columns; conversions run
-online.  Large tables split by a key: `CREATE TABLE ev (at timestamp, …,
+online.  Tables written far more than read (logs, events, random keys) can
+live in an LSM tree: `CREATE TABLE … WITH (engine = lsm)` (default
+`btree`), or `ALTER TABLE t SET (engine = lsm)` online.  Large tables split by a key: `CREATE TABLE ev (at timestamp, …,
 PRIMARY KEY (at, id)) PARTITION BY RANGE (at)` then `CREATE TABLE ev_2026
 PARTITION OF ev FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')` (also
 `LIST`, `HASH … WITH (MODULUS m, REMAINDER r)`, `DEFAULT`); queries skip

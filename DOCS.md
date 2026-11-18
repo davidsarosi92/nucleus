@@ -818,6 +818,58 @@ DROP TABLE, DELETE and a vacuum delete key by key — tombstones in the LSM
 tree, merged away by compaction; range tombstones there wait for L4's
 compaction by the oldest snapshot.
 
+**A table's engine changed online** (§M14.28 L3b).  `ALTER TABLE t SET
+(engine = lsm | btree)` (`convert::set_engine`; outside a transaction
+block, `25001`; an unknown option `22023`) moves the table's keys to a
+new table id whose range is the other engine's (`catalog::claim_id`, as
+`CREATE TABLE` takes one), while other sessions read and write it — as
+MySQL's `ALTER TABLE … ENGINE=` copies a table, but without stopping its
+writers.  Everything under the old id moves: `catalog::id_prefixes` —
+the data prefix, the hidden row id's counter (`00 03`), the statistics
+and their sample (`00 04`), the embedding jobs and next model's vectors
+(`00 17`, `00 18`).  Four steps, each its own transactions:
+
+1. *The claim* takes the new id, records it (`00 1C <old id>` → the new
+   id, `catalog::moving_to`) and writes the table's record again — a
+   write that read the record validated before (every DML statement's
+   writer does, and the vector and text indexes' upkeep) fails and runs
+   again — and, before it commits, has the transaction layer mirror the
+   old prefixes onto the new ones (`Kv::mirror`, `txn::Engine::mirror`):
+   from then on a transaction's write of a key under an old prefix, in
+   any transaction, holds the same write under the new one, in the same
+   write set (so it spills, logs and commits with it).  A mirrored write
+   is not checked for conflicts at its destination, and no fresh range
+   (D16) is taken within a mirrored prefix.
+2. *The copy* reads the old keys a part a transaction and writes them
+   under the new prefixes — each part from where the last one ended,
+   1024 keys at first, doubled after a part that commits at once (up to
+   65 536, or 16 MiB), halved on each retry (down to 64).  Its writes are checked
+   as any are: a part that read a key before a mirrored write of it
+   committed fails and runs again; a mirrored write committed after the
+   part wins, being newer — so the copy ends equal to the source.
+3. *The switch* reads the record validated and writes it with the new id
+   and engine, clearing the move's record; writes begun before fail and
+   run again on the new keys.  The mirror ends after it.
+4. *The clean* deletes the old keys, a part a transaction; snapshots
+   older than the switch read them as any deleted keys until the vacuum
+   takes them.
+
+Values hold no table id (index entries hold primary keys, a row's
+chunks and a vector or text index's entries are keyed by them), but a
+column copy's directory once keyed segments by whole row keys: it now
+keys them by the keys' suffixes after the table's prefix
+(`relative_directory`, table record version 23; new tables), and a move
+first rewrites an older table's directory (`column_store::relativize`,
+in one transaction — a directory has an entry per segment).  Refused: a
+`sealed` table (each row is sealed with its key as associated data,
+§8.40), a table whose storage or a column's type is being changed.  A
+partitioned table moves each partition, then takes the engine for its
+next ones.  One move of a table at a time per process; the mirror is
+the process's, so a move cut short (a crash) leaves the table where it
+was and its copy stale — the next move, or `DROP TABLE`, removes the
+copy first, and the consistency check (`check::check`) knows a moving
+table's copy.
+
 ### 4.7 Tests
 
 - `pager.rs` — round trips (simulated and real), the immutability rule,
@@ -1919,6 +1971,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 18 <table id> <column u16> <pk>` | a moving embedding column's next model's vector, until the swap (§8.24) |
 | `00 19 <seq>` | an erasure record (§8.29); `00 1A` the last number |
 | `00 1B <version u64>` | a migration applied: its name, checksum, when and by whom (§8.34) |
+| `00 1C <table id>` | a table being moved to another engine: the id its keys are copied under (§4.6) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -3637,7 +3690,9 @@ the encoding straight into vectors (§8.5).
 `column` (`column_store`, `segment`) keeps rows as column segments: up to
 32 768 rows with consecutive keys (fewer when wide), one KV value per
 column and one for the row keys, segments covering disjoint key ranges in
-key order, listed in a directory keyed by each one's last key (index
+key order, listed in a directory keyed by each one's last key — after
+the table's prefix, so a table moved to another id keeps it (§4.6; whole
+in a table made before record version 23) — (index
 `u32::MAX - 3`; with its first key, rows, and each column's least and
 greatest values and `NULL`s).  Columns are encoded by what they hold:
 integers, dates, times and timestamps by frame of reference and bit
@@ -7929,6 +7984,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-18 — §M14.28 L3b, a table's engine changed online:**
+  `ALTER TABLE … SET (engine = …)` — the keys copied under a new id
+  while the transaction layer mirrors writes there, then switched at a
+  commit; a column copy's directory keyed relative to its table (table
+  record version 23).  A million rows and their index move in 2.4 s;
+  `SET STORAGE column`'s drop of a row copy reads on from its last key
+  (a million rows 16.9 → 1.3 s).
 - **2026-11-18 — §M14.33 done:** the suite, TPC-H and ClickBench run
   again against the native, tuned PostgreSQL (`docs/benchmarks.md`):
   row tables' geometric means 0.65× (TPC-H) and 0.57× (ClickBench),

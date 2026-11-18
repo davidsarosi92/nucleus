@@ -993,6 +993,7 @@ pub fn authorize_ddl(
         | Statement::AlterColumnType { table, .. }
         | Statement::SetColumnModel { table, .. }
         | Statement::SetStorage { table, .. }
+        | Statement::SetTableOptions { table, .. }
         | Statement::SetStoragePolicy { table, .. }
         | Statement::SetExpiry { table, .. }
         | Statement::SetSubject { table, .. }
