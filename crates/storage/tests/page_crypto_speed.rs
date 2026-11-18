@@ -112,6 +112,7 @@ fn store_load_and_scan_encrypted() {
             wal_segment_size: 64 << 20,
             page_key: key,
             previous_page_key: None,
+            compaction_bytes_per_sec: 0,
         };
         let t = Instant::now();
         {

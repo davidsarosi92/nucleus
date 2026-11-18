@@ -191,23 +191,58 @@ fn run(kind: Option<EngineKind>) {
     }
     store.checkpoint().unwrap();
     let before = p.0.counts.get();
-    // The steady state: 1M rows under random keys, 100 a commit.
+    // The steady state: 1M rows under random keys, 100 a commit; a
+    // checkpoint every CHECKPOINT bytes of rows, by a thread of its own
+    // (as the transaction layer's checkpointer runs one), each commit's
+    // time taken — what a checkpoint holds writers up for shows in the
+    // slowest.
     let t = Instant::now();
-    let mut since = 0u64;
-    for _ in 0..MORE / 100 {
-        let mut ops: Vec<_> = (0..100).map(|_| row(&rng)).collect();
-        ops.sort_by(|a, b| a.0.cmp(&b.0));
-        ops.dedup_by(|a, b| a.0 == b.0);
-        meta += 1;
-        store.commit(&Batch { meta, ops }).unwrap();
-        since += 100 * (9 + VALUE as u64);
-        if since >= CHECKPOINT {
-            store.checkpoint().unwrap();
-            since = 0;
+    let since = AtomicU64::new(0);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let mut waits = Vec::with_capacity((MORE / 100) as usize);
+    std::thread::scope(|sc| {
+        // The engines' background work (an LSM tree's compaction) on a
+        // thread of its own, as the transaction layer's compactor runs it.
+        sc.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                if store
+                    .compact(&mut || !done.load(Ordering::Acquire))
+                    .unwrap()
+                    == 0
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
+        sc.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                if since.load(Ordering::Acquire) >= CHECKPOINT {
+                    since.store(0, Ordering::Release);
+                    store.checkpoint().unwrap();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
+        for _ in 0..MORE / 100 {
+            let mut ops: Vec<_> = (0..100).map(|_| row(&rng)).collect();
+            ops.sort_by(|a, b| a.0.cmp(&b.0));
+            ops.dedup_by(|a, b| a.0 == b.0);
+            meta += 1;
+            let c = Instant::now();
+            store.commit(&Batch { meta, ops }).unwrap();
+            waits.push(c.elapsed().as_secs_f64() * 1e3);
+            since.fetch_add(100 * (9 + VALUE as u64), Ordering::AcqRel);
         }
-    }
+        done.store(true, Ordering::Release);
+    });
+    store.checkpoint().unwrap();
+    store.compact(&mut || true).unwrap();
     store.checkpoint().unwrap();
     let secs = t.elapsed().as_secs_f64();
+    waits.sort_by(f64::total_cmp);
+    let p99 = waits[waits.len() * 99 / 100];
+    let max = waits[waits.len() - 1];
     let after = p.0.counts.get();
     // Point lookups of rows the table had, after the writes.
     let t = Instant::now();
@@ -221,7 +256,7 @@ fn run(kind: Option<EngineKind>) {
     println!(
         "{name}: {MORE} rows, 100 a commit, into {ROWS}: {secs:.1} s; written {:.1} MiB \
          (WAL {:.1}, data file {:.1}, engines {:.1}) = {:.1} bytes a byte of rows; \
-         a lookup {get_us:.1} µs",
+         a lookup {get_us:.1} µs; a commit p99 {p99:.2} ms, the slowest {max:.1} ms",
         total / 1048576.0,
         w as f64 / 1048576.0,
         d as f64 / 1048576.0,
@@ -236,6 +271,8 @@ fn run(kind: Option<EngineKind>) {
     metric(&format!("{name}: write amplification"), total / rows, "x");
     metric(&format!("{name}: 1M random rows, 100 a commit"), secs, "s");
     metric(&format!("{name}: a point lookup after"), get_us, "µs");
+    metric(&format!("{name}: a commit, p99"), p99, "ms");
+    metric(&format!("{name}: the slowest commit"), max, "ms");
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
 }

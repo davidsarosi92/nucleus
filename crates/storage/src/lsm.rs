@@ -5,10 +5,12 @@
 //! tombstones, and range tombstones for `DROP` / `TRUNCATE` / a covering
 //! write); the store's WAL is its log, so it has none of its own.  At a
 //! checkpoint the memtable is set apart under the branch's write lock
-//! ([`Engine::prepare`], a pointer swap) and written as an immutable,
-//! sorted **run** while readers go on ([`Engine::save`]); then the runs
-//! are compacted, and a **manifest** naming the live runs is written in
-//! the file the checkpoint's LSN names, before the checkpoint commits.
+//! ([`Engine::prepare`], a pointer swap, with the runs as they are:
+//! [`Engine::saver`]) and written as an immutable, sorted **run** with no
+//! lock held — reads and writes go on (§M14.28 L4a) — and a **manifest**
+//! naming the runs is written in the file the checkpoint's LSN names,
+//! before the checkpoint commits.  The run joins the levels at the next
+//! change.
 //! A run is never changed: branches share them by name (a branch forks
 //! its parent's runs), and the store removes a run's file once no
 //! branch's manifest names it.
@@ -35,13 +37,20 @@
 //! the last level is one run, which the runs arriving from the level
 //! above merge into while it is at most `FANIN` times their size (a new
 //! level forms above it when it is larger).  A merge into the last level
-//! drops tombstones (nothing older is left for them to hide).
+//! drops tombstones (nothing older is left for them to hide).  A merge is
+//! a background **job** ([`Engine::job`], run by `Store::compact` on a
+//! thread of its own, within an I/O budget): planned from the levels as
+//! they are, written with no lock held, and installed under the write
+//! lock ([`Engine::install`]) — its inputs are still the oldest runs of
+//! their tier then (flushes since went first; one job at a time).  Its
+//! run is durable with the next manifest; until then a crash opens the
+//! last one, whose runs [`Engine::files`] keeps.
 //!
-//! What L2 leaves to L4 (PLAN.md §M14.28): flushing the memtable by size
-//! between checkpoints (it is flushed at each checkpoint now, so its
-//! memory is bounded by the checkpoint interval), compaction on workers
-//! with an I/O budget instead of inside the checkpoint, a block cache,
-//! and Monkey's allocation of Bloom bits by level.
+//! What L4a leaves (PLAN.md §M14.28 L4b–L4e): flushing the memtable by
+//! size between checkpoints (it is flushed at each checkpoint, so its
+//! memory is bounded by the checkpoint interval), bulk loads as runs, a
+//! block cache, Monkey's allocation of Bloom bits by level, compaction
+//! that drops versions vacuum would, runs sealed under the page key.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -51,7 +60,7 @@ use std::sync::{Arc, Mutex};
 use nucleus_platform::{File, FileSystem, OpenMode};
 
 use crate::crc32c::crc32c;
-use crate::engines::{Engine, Entries, Ops};
+use crate::engines::{Done, Engine, Entries, Job, JobRoom, Ops, Saver};
 use crate::{Error, PageId, Result, lz};
 
 /// Runs a tiered level holds before they merge into one run of the next.
@@ -551,6 +560,12 @@ impl<'f> RunWriter<'f> {
         Ok(())
     }
 
+    /// Its file removed: the run not made.
+    fn abandon(self) -> Result<()> {
+        drop(self.file);
+        Ok(self.fs.remove_file(&self.tmp)?)
+    }
+
     /// The run, durable under its name (its directory entry made durable
     /// by the manifest's write after it); `None` when it holds nothing.
     fn finish(mut self, ranges: Ranges) -> Result<Option<Arc<Run>>> {
@@ -904,14 +919,19 @@ impl Levels {
 }
 
 /// Merges `runs` (newest first) into one run named `name`; tombstones
-/// dropped unless `keep`.
+/// dropped unless `keep`.  `None` when it holds nothing, or when `wrote`
+/// (told the bytes written as they go) says to stop: then its file is
+/// removed.
 fn merge_runs(
     fs: &dyn FileSystem,
     dir: &Path,
     name: &str,
     runs: &[Arc<Run>],
     keep: bool,
+    wrote: &dyn Fn(u64) -> bool,
 ) -> Result<Option<Arc<Run>>> {
+    /// Bytes between two calls of `wrote`.
+    const STEP: u64 = 1 << 20;
     let srcs = runs
         .iter()
         .map(|r| Src::Run(RunScan::new(r, Bound::Unbounded, Bound::Unbounded, false)))
@@ -919,8 +939,16 @@ fn merge_runs(
     let ranges = runs.iter().map(|r| &r.ranges).collect();
     let mut m = Merged::new(srcs, ranges, false, keep);
     let mut w = RunWriter::new(fs, dir, name)?;
+    let mut told = 0;
     while let Some((k, v)) = m.next_entry()? {
         w.add(&k, &v)?;
+        if w.at >= told + STEP {
+            if !wrote(w.at - told) {
+                w.abandon()?;
+                return Ok(None);
+            }
+            told = w.at;
+        }
     }
     let mut ranges = Ranges::default();
     if keep {
@@ -928,7 +956,10 @@ fn merge_runs(
             ranges.union(&r.ranges);
         }
     }
-    w.finish(ranges)
+    let at = w.at;
+    let run = w.finish(ranges)?;
+    wrote(at - told);
+    Ok(run)
 }
 
 // ------------------------------------------------------------ the engine
@@ -939,8 +970,40 @@ pub struct LsmEngine {
     /// The memtable a checkpoint set apart, until its run is taken in.
     sealed: Option<Arc<Memtable>>,
     levels: Levels,
-    /// What the last save wrote, taken in at the next change.
-    saved: Mutex<Option<Levels>>,
+    /// What its saves and its last manifest leave, shared with its savers.
+    side: Arc<Mutex<Side>>,
+}
+
+/// What an engine's savers leave it.
+#[derive(Default)]
+struct Side {
+    /// The run the last save wrote of the memtable set apart (`None`
+    /// within when it held nothing), taken in at the next change.
+    saved: Option<Option<Arc<Run>>>,
+    /// The runs its last manifest names (written or loaded): kept while a
+    /// crash would open it, whatever compaction has made of them since.
+    manifest: Vec<String>,
+}
+
+/// Where a compaction's run goes.
+enum Place {
+    /// First in this tier.
+    Tier(usize),
+    /// The last level (the old one among the inputs).
+    Bottom,
+    /// A new tier after the last one, above the last level.
+    NewTier,
+}
+
+/// A compaction's result ([`Engine::install`]).
+struct Compacted {
+    /// The tier merged: its oldest runs, these.
+    tier: usize,
+    inputs: Vec<String>,
+    /// The last level's run, when merged too.
+    bottom: Option<String>,
+    run: Option<Arc<Run>>,
+    place: Place,
 }
 
 impl Default for LsmEngine {
@@ -956,7 +1019,7 @@ impl LsmEngine {
             mem: Memtable::default(),
             sealed: None,
             levels: Levels::default(),
-            saved: Mutex::new(None),
+            side: Arc::default(),
         }
     }
 
@@ -965,20 +1028,40 @@ impl LsmEngine {
         let bytes = crate::engines::read_file(fs, path)?;
         let mut e = Self::new();
         e.levels = Levels::decode(fs, dir, &bytes)?;
+        e.side.lock().unwrap_or_else(|e| e.into_inner()).manifest = e.levels.names();
         Ok(e)
     }
 
-    /// The last save taken in (a change follows).
+    fn side(&self) -> std::sync::MutexGuard<'_, Side> {
+        self.side.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The last save's run taken in (a change follows).
     fn settle(&mut self) {
-        if let Some(l) = self
-            .saved
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            self.levels = l;
+        let saved = self.side().saved.take();
+        if let Some(run) = saved {
+            Self::put_first(&mut self.levels, run);
             self.sealed = None;
         }
+    }
+
+    /// `run` (a flush's) first in the first tier.
+    fn put_first(levels: &mut Levels, run: Option<Arc<Run>>) {
+        if let Some(r) = run {
+            if levels.tiers.is_empty() {
+                levels.tiers.push(Vec::new());
+            }
+            levels.tiers[0].insert(0, r);
+        }
+    }
+
+    /// The runs now, with a save's not yet taken in.
+    fn current(&self) -> Levels {
+        let mut l = self.levels.clone();
+        if let Some(run) = self.side().saved.clone() {
+            Self::put_first(&mut l, run);
+        }
+        l
     }
 
     /// Newest first: the memtable, the one set apart, the runs.
@@ -988,58 +1071,28 @@ impl LsmEngine {
 
     /// The runs, per level: (tiers, bottom).
     pub fn shape(&self) -> (Vec<usize>, bool) {
-        let s = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        let l = s.as_ref().unwrap_or(&self.levels);
+        let l = self.current();
         (l.tiers.iter().map(Vec::len).collect(), l.bottom.is_some())
     }
 
-    /// Compacts `levels` (lazy leveling), writing runs `{name}-{n}`, ….
-    fn compact(
-        fs: &dyn FileSystem,
-        dir: &Path,
-        name: &str,
-        n: &mut usize,
-        levels: &mut Levels,
-    ) -> Result<()> {
-        let mut i = 0;
-        while i < levels.tiers.len() {
-            if levels.tiers[i].len() < FANIN {
-                i += 1;
-                continue;
-            }
-            let runs = std::mem::take(&mut levels.tiers[i]);
-            let last = i + 1 == levels.tiers.len();
-            let mut next = || {
-                *n += 1;
-                format!("{name}-{}", *n - 1)
-            };
-            if !last {
-                if let Some(r) = merge_runs(fs, dir, &next(), &runs, true)? {
-                    levels.tiers[i + 1].insert(0, r);
-                }
-            } else {
-                let size: u64 = runs.iter().map(|r| r.size).sum();
-                match levels.bottom.take() {
-                    None => levels.bottom = merge_runs(fs, dir, &next(), &runs, false)?,
-                    Some(b) if b.size <= FANIN as u64 * size => {
-                        let mut all = runs;
-                        all.push(b);
-                        levels.bottom = merge_runs(fs, dir, &next(), &all, false)?;
-                    }
-                    Some(b) => {
-                        levels.bottom = Some(b);
-                        if let Some(r) = merge_runs(fs, dir, &next(), &runs, true)? {
-                            levels.tiers.push(vec![r]);
-                        }
-                    }
-                }
-            }
-            i += 1;
+    /// The next merge lazy leveling asks of `levels`: the first tier
+    /// holding [`FANIN`] runs or more, merged whole — into the next tier,
+    /// or at the last into the last level (when that is at most `FANIN`
+    /// times their size; above it otherwise).
+    fn plan(levels: &Levels) -> Option<(usize, Vec<Arc<Run>>, Option<Arc<Run>>, Place)> {
+        let i = levels.tiers.iter().position(|t| t.len() >= FANIN)?;
+        let runs = levels.tiers[i].clone();
+        if i + 1 < levels.tiers.len() {
+            return Some((i, runs, None, Place::Tier(i + 1)));
         }
-        while levels.tiers.last().is_some_and(Vec::is_empty) {
-            levels.tiers.pop();
-        }
-        Ok(())
+        let size: u64 = runs.iter().map(|r| r.size).sum();
+        Some(match &levels.bottom {
+            None => (i, runs, None, Place::Bottom),
+            Some(b) if b.size <= FANIN as u64 * size => {
+                (i, runs, Some(Arc::clone(b)), Place::Bottom)
+            }
+            Some(_) => (i, runs, None, Place::NewTier),
+        })
     }
 }
 
@@ -1093,25 +1146,17 @@ impl Engine for LsmEngine {
     }
 
     fn is_empty(&self) -> bool {
-        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        self.mems().all(Memtable::is_empty)
-            && self.levels.is_empty()
-            && saved.as_ref().is_none_or(Levels::is_empty)
+        self.mems().all(Memtable::is_empty) && self.current().is_empty()
     }
 
     fn fork(&self) -> Box<dyn Engine> {
-        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let mut e = LsmEngine {
+        let saved = self.side().saved.is_some();
+        Box::new(LsmEngine {
             mem: self.mem.clone(),
-            sealed: self.sealed.clone(),
-            levels: self.levels.clone(),
-            saved: Mutex::new(None),
-        };
-        if let Some(l) = saved {
-            e.levels = l;
-            e.sealed = None;
-        }
-        Box::new(e)
+            sealed: if saved { None } else { self.sealed.clone() },
+            levels: self.current(),
+            side: Arc::default(),
+        })
     }
 
     fn prepare(&mut self) -> Result<()> {
@@ -1133,41 +1178,109 @@ impl Engine for LsmEngine {
         Ok(())
     }
 
-    fn save(&self, fs: &dyn FileSystem, dir: &Path, path: &Path, name: &str) -> Result<()> {
+    fn saver(&self) -> Saver {
         let mut levels = self.levels.clone();
-        let base = format!("run-{name}");
-        let mut n = 0;
-        if let Some(m) = self.sealed.as_deref().filter(|m| !m.is_empty()) {
-            // Tombstones kept while older runs may hold what they hide.
-            let keep = !levels.is_empty();
-            let mut w = RunWriter::new(fs, dir, &format!("{base}-{n}"))?;
-            n += 1;
-            for (k, v) in &m.points {
-                if v.is_some() || keep {
-                    w.add(k, v)?;
+        let sealed = self.sealed.clone();
+        let side = Arc::clone(&self.side);
+        Box::new(move |fs, dir, path, name| {
+            let mut run = None;
+            if let Some(m) = sealed.as_deref().filter(|m| !m.is_empty()) {
+                // Tombstones kept while older runs may hold what they hide.
+                let keep = !levels.is_empty();
+                let mut w = RunWriter::new(fs, dir, &format!("run-{name}-0"))?;
+                for (k, v) in &m.points {
+                    if v.is_some() || keep {
+                        w.add(k, v)?;
+                    }
                 }
+                let ranges = if keep {
+                    m.ranges.clone()
+                } else {
+                    Ranges::default()
+                };
+                run = w.finish(ranges)?;
+                Self::put_first(&mut levels, run.clone());
             }
-            let ranges = if keep {
-                m.ranges.clone()
-            } else {
-                Ranges::default()
-            };
-            if let Some(r) = w.finish(ranges)? {
-                if levels.tiers.is_empty() {
-                    levels.tiers.push(Vec::new());
-                }
-                levels.tiers[0].insert(0, r);
-            }
-        }
-        Self::compact(fs, dir, &base, &mut n, &mut levels)?;
-        crate::engines::write_file(fs, path, &levels.encode())?;
-        *self.saved.lock().unwrap_or_else(|e| e.into_inner()) = Some(levels);
-        Ok(())
+            crate::engines::write_file(fs, path, &levels.encode())?;
+            let mut s = side.lock().unwrap_or_else(|e| e.into_inner());
+            s.manifest = levels.names();
+            s.saved = Some(run);
+            Ok(())
+        })
     }
 
     fn files(&self) -> Vec<String> {
-        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        saved.as_ref().unwrap_or(&self.levels).names()
+        let mut names = self.current().names();
+        names.extend(self.side().manifest.iter().cloned());
+        names
+    }
+
+    fn job(&self) -> Option<Job> {
+        let (tier, runs, bottom, place) = Self::plan(&self.current())?;
+        Some(Box::new(move |room: &dyn JobRoom| {
+            let inputs = runs.iter().map(|r| r.name.clone()).collect();
+            let keep = !matches!(place, Place::Bottom);
+            let mut all = runs;
+            all.extend(bottom.iter().cloned());
+            let name = room.name()?;
+            let wrote = |n| room.wrote(n);
+            let run = merge_runs(room.fs(), room.dir(), &name, &all, keep, &wrote)?;
+            if run.is_none() && !room.wrote(0) {
+                return Ok(None); // stopped
+            }
+            let done: Done = Box::new(Compacted {
+                tier,
+                inputs,
+                bottom: bottom.map(|b| b.name.clone()),
+                run,
+                place,
+            });
+            Ok(Some(done))
+        }))
+    }
+
+    fn install(&mut self, done: Done) -> Result<()> {
+        let Ok(c) = done.downcast::<Compacted>() else {
+            return Ok(());
+        };
+        self.settle();
+        let l = &mut self.levels;
+        // The inputs, as planned: the oldest runs of their tier (flushes
+        // since went first), and the last level's run.
+        let Some(t) = l.tiers.get(c.tier) else {
+            return Ok(());
+        };
+        let n = c.inputs.len();
+        let bottom = l.bottom.as_ref().map(|b| &b.name);
+        let fits = t.len() >= n
+            && t[t.len() - n..].iter().map(|r| &r.name).eq(c.inputs.iter())
+            && match (&c.place, &c.bottom) {
+                (_, Some(b)) => bottom == Some(b),
+                (Place::Bottom, None) => bottom.is_none(),
+                _ => true,
+            };
+        if !fits {
+            return Ok(());
+        }
+        let keep = l.tiers[c.tier].len() - n;
+        l.tiers[c.tier].truncate(keep);
+        match c.place {
+            Place::Tier(i) => {
+                if let Some(r) = c.run {
+                    l.tiers[i].insert(0, r);
+                }
+            }
+            Place::Bottom => l.bottom = c.run,
+            Place::NewTier => {
+                if let Some(r) = c.run {
+                    l.tiers.push(vec![r]);
+                }
+            }
+        }
+        while l.tiers.last().is_some_and(Vec::is_empty) {
+            l.tiers.pop();
+        }
+        Ok(())
     }
 }
 
@@ -1248,6 +1361,29 @@ mod tests {
         }
     }
 
+    /// Jobs' room in a test: names counted up, no budget.
+    struct TestRoom<'a> {
+        fs: &'a dyn FileSystem,
+        dir: &'a Path,
+        n: std::cell::Cell<u64>,
+    }
+
+    impl JobRoom for TestRoom<'_> {
+        fn fs(&self) -> &dyn FileSystem {
+            self.fs
+        }
+        fn dir(&self) -> &Path {
+            self.dir
+        }
+        fn name(&self) -> Result<String> {
+            self.n.set(self.n.get() + 1);
+            Ok(format!("run-c{}", self.n.get()))
+        }
+        fn wrote(&self, _bytes: u64) -> bool {
+            true
+        }
+    }
+
     /// Random puts, deletes and range deletes against a model, with
     /// checkpoints (set apart, saved, taken in — and sometimes a save
     /// skipped, as a failed checkpoint leaves it), reloads from the
@@ -1265,6 +1401,11 @@ mod tests {
             let mut e = LsmEngine::new();
             let mut model = Model::new();
             let mut lsn = 0;
+            let room = TestRoom {
+                fs,
+                dir,
+                n: Default::default(),
+            };
             for step in 0..400 {
                 match rng.below(10) {
                     0..=5 => {
@@ -1309,10 +1450,30 @@ mod tests {
                             &rng,
                             &format!("seed {seed} step {step} set apart"),
                         );
+                        // Sometimes a compaction planned before the
+                        // save and taken in after it.
+                        let early = (rng.below(3) == 0).then(|| e.job()).flatten();
                         if rng.below(8) != 0 {
                             let path = dir.join(format!("m-{lsn}"));
-                            e.save(fs, dir, &path, &format!("0-1-{lsn}")).unwrap();
+                            e.saver()(fs, dir, &path, &format!("0-1-{lsn}")).unwrap();
                             check(&e, &model, &rng, &format!("seed {seed} step {step} saved"));
+                            if let Some(j) = early
+                                && let Some(d) = j(&room).unwrap()
+                            {
+                                e.install(d).unwrap();
+                            }
+                            while rng.below(4) != 0 {
+                                let Some(j) = e.job() else { break };
+                                if let Some(d) = j(&room).unwrap() {
+                                    e.install(d).unwrap();
+                                }
+                                check(
+                                    &e,
+                                    &model,
+                                    &rng,
+                                    &format!("seed {seed} step {step} compacted"),
+                                );
+                            }
                             let (tiers, bottom) = e.shape();
                             if bottom && tiers.len() >= 2 {
                                 deep += 1;

@@ -30,6 +30,7 @@ fn opts(key: PageCipher, previous: Option<PageCipher>) -> StoreOptions {
         wal_segment_size: 1 << 14,
         page_key: Some(key),
         previous_page_key: previous,
+        compaction_bytes_per_sec: 0,
     }
 }
 

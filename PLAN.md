@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ✅ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅; L4–L5 next |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0–L2 ✅, L3a–L3b ✅, L4a ✅; L4b–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ✅ E1 (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
@@ -4053,7 +4053,54 @@ recovery time after a crash mid-compaction.
     are not).  `SET STORAGE column`'s drop of a row copy had the same
     flaw: a million rows 16.9 → 1.3 s.
 - **L4 — scheduling and ingestion**: compaction against foreground work
-  with an I/O budget; bulk loads as ingested runs.
+  with an I/O budget; bulk loads as ingested runs.  In steps:
+  - **L4a — the work off the writers ✅**: *Found* first (a commit's
+    time measured under steady writes, `lsm_wamp.rs` now takes each
+    commit's): the slowest LSM commit 1379 ms — the engines' saves ran
+    in `freeze_all`, under every writer's lock, the run written and the
+    whole compaction cascade with it.  *Built*: `Engine::saver` takes
+    the state as of the checkpoint under the locks (the memtable set
+    apart and the levels: shared pointers) and `Checkpoint::finish`
+    saves it without them; the run joins the levels at the engine's next
+    change (an edit on the levels as they are then, not a copy of them).
+    Compaction left the checkpoint: `Engine::job` plans the next merge
+    of lazy leveling from the levels, the job writes with no lock held,
+    and `Engine::install` takes it in under the write lock only if its
+    inputs are still the oldest runs of their tier (flushes since went
+    first) — LevelDB's version edits applied to the version current at
+    install, not the one planned from.  `Store::compact` runs the jobs
+    of a branch, one at a time in the store, within
+    `StoreOptions::compaction_bytes_per_sec` (RocksDB's rate limiter:
+    the job told the bytes as it goes, sleeping on the platform clock
+    when ahead; 0, the default, no limit), stopping when asked; the
+    transaction layer runs it on a `nucleus-compact` thread woken after
+    each checkpoint (without threads to spare, after the checkpoint
+    where it falls due, so the simulation stays deterministic).  A
+    job's run is in flight until installed (`Shared::in_flight`, held
+    while stale files are removed, so a checkpoint meanwhile does not
+    remove it), and durable with the next manifest; `Engine::files`
+    names the runs of the last manifest too, so a compaction installed
+    between a checkpoint's save and its commit does not let it remove
+    what the committed manifest names.  *Tested*: the model test plans
+    compactions before saves and installs them after; the crash test at
+    every I/O point compacts after each checkpoint.  *Measured*
+    (`lsm_wamp.rs`, as above, the checkpoints and the compactions each
+    on a thread of their own): the LSM tree's slowest commit 1379 →
+    65 ms (the B+tree's 91), p99 0.96 → 0.65 ms, the million rows 6.9
+    → 5.4 s, 5.8 bytes written a byte of rows, a lookup 3.3 µs.
+    *Left*: flushing the memtable by size between checkpoints — it is
+    bounded by `checkpoint_wal_bytes` meanwhile, so not needed yet.
+  - **L4b — bulk loads as runs**: `COPY` into an empty LSM table and an
+    engine change's copy written as sorted runs, not through the
+    memtable (RocksDB's `IngestExternalFile`).
+  - **L4c — reads**: a block cache for runs' blocks and Monkey's Bloom
+    bits by level (Dayan et al. 2017).
+  - **L4d — MVCC-aware compaction**: a compaction filter dropping the
+    versions vacuum would and a table's `DROP` / `DELETE` of all as a
+    range, not key-by-key tombstones.
+  - **L4e — sealed runs**: an encrypted database's runs and manifests
+    sealed under the page key, so `engine = lsm` is no longer refused
+    there.
 - **L5 — the verdict**: the benchmarks above; where the LSM is
   recommended, recorded here with the numbers.
 

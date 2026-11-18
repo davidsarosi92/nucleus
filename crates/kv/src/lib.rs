@@ -1131,6 +1131,7 @@ fn store_options(opts: &Options) -> StoreOptions {
         wal_segment_size: opts.wal_segment_bytes,
         page_key: opts.encryption_key.clone(),
         previous_page_key: opts.previous_encryption_key.clone(),
+        compaction_bytes_per_sec: 0,
     }
 }
 

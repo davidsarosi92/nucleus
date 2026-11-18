@@ -25,6 +25,7 @@ fn opts() -> StoreOptions {
         wal_segment_size: 2048,
         page_key: None,
         previous_page_key: None,
+        compaction_bytes_per_sec: 0,
     }
 }
 
@@ -86,6 +87,7 @@ fn a_routed_range_reads_as_one_map_in(kind: EngineKind) {
         apply(&mut model, &b);
         if i % 5 == 0 {
             store.checkpoint().unwrap();
+            store.compact(&mut || true).unwrap();
         }
     }
     assert_eq!(contents(&store), model);
@@ -242,6 +244,7 @@ fn workload(p: &Arc<SimPlatform>, seed: u64, kind: EngineKind) -> (Vec<Model>, u
             if i % 3 == 0 {
                 store.checkpoint()?;
                 acked = i as usize;
+                store.compact(&mut || true)?;
             }
         }
         Ok(())

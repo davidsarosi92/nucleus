@@ -39,7 +39,7 @@
 //! A write or checkpoint that fails part-way **poisons** the store: memory
 //! and disk may disagree, so every later call fails until it is reopened.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -92,6 +92,10 @@ pub struct StoreOptions {
     /// header names it; a store still under it is given `page_key` at
     /// once ([`Pager::open_keys`]).
     pub previous_page_key: Option<crate::PageCipher>,
+    /// The bytes a second the engines' background work ([`Store::compact`]:
+    /// an LSM tree's compaction) writes at most, so it leaves the disk to
+    /// the writers (PLAN.md §M14.28 L4a); 0: no limit.
+    pub compaction_bytes_per_sec: u64,
 }
 
 impl Default for StoreOptions {
@@ -101,6 +105,7 @@ impl Default for StoreOptions {
             wal_segment_size: 16 << 20,
             page_key: None,
             previous_page_key: None,
+            compaction_bytes_per_sec: 0,
         }
     }
 }
@@ -393,6 +398,11 @@ struct Shared {
     branches: Mutex<BTreeMap<u32, Arc<Branch>>>,
     /// One checkpoint (or branch made or dropped) at a time.
     checkpointing: Mutex<()>,
+    /// One [`Store::compact`] at a time.
+    compacting: Mutex<()>,
+    /// The engines' files a background job writes and has not installed
+    /// yet: not removed as stale.  Held while stale files are removed.
+    in_flight: Mutex<HashSet<String>>,
     poisoned: AtomicBool,
     /// A [`Store::scrub`] runs: checkpoints overwrite the WAL segments
     /// they drop; the bytes they zeroed.
@@ -805,6 +815,8 @@ impl Store {
                 system: Mutex::new(system),
                 branches: Mutex::new(branches),
                 checkpointing: Mutex::new(()),
+                compacting: Mutex::new(()),
+                in_flight: Mutex::new(HashSet::new()),
                 poisoned: AtomicBool::new(false),
                 scrubbing: AtomicBool::new(false),
                 wal_zeroed: AtomicU64::new(0),
@@ -819,8 +831,7 @@ impl Store {
             .iter()
             .map(|b| (b.info.id, b.checkpoint_lsn.load(Ordering::Acquire)))
             .collect();
-        let live = live_engine_files(branches.iter());
-        remove_stale_engine_files(fs, dir, &keep, &live)?;
+        remove_stale_engine_files(&store.shared, &keep, branches.iter())?;
         if replayed > 0 || main_root == 0 {
             store.checkpoint()?; // so the next open starts from here
         }
@@ -1453,6 +1464,75 @@ impl Store {
         Ok(true)
     }
 
+    /// The engines' background work on this branch, while `go_on` says
+    /// so (PLAN.md §M14.28 L4a: an LSM tree's compaction, off the
+    /// checkpoint): each job planned under its branch's read lock, run
+    /// without the store's locks — writes, reads and checkpoints going on
+    /// — within [`StoreOptions::compaction_bytes_per_sec`], and installed
+    /// under the branch's write lock (a pointer swap).  What it makes is
+    /// durable with the next checkpoint's manifests; until then a crash
+    /// opens the last ones, whose runs are kept.  The jobs done; one call
+    /// at a time in the store.
+    pub fn compact(&self, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {
+        let sh = &*self.shared;
+        sh.check()?;
+        let _one = sh.compacting.lock().unwrap_or_else(|e| e.into_inner());
+        let go_on = std::cell::RefCell::new(go_on);
+        let mut done = 0;
+        {
+            let b = &self.b;
+            loop {
+                if b.dropped.load(Ordering::Acquire) || !(go_on.borrow_mut())() {
+                    break;
+                }
+                let job = {
+                    let t = b.tree.read().unwrap_or_else(|e| e.into_inner());
+                    t.routes
+                        .iter()
+                        .zip(&t.engines)
+                        .find_map(|(r, e)| e.job().map(|j| (r.id, j)))
+                };
+                let Some((route, job)) = job else { break };
+                let room = Room {
+                    sh,
+                    edir: engines::engines_dir(&sh.dir),
+                    branch: b,
+                    route,
+                    names: Default::default(),
+                    go_on: &go_on,
+                    since: sh.platform.clock().now(),
+                    bytes: Default::default(),
+                };
+                let result = job(&room);
+                {
+                    let mut in_flight = sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+                    let installed = match result {
+                        Ok(Some(d)) => {
+                            let mut t = b.tree.write().unwrap_or_else(|e| e.into_inner());
+                            let at = t.routes.iter().position(|r| r.id == route);
+                            match at {
+                                Some(i) if !b.dropped.load(Ordering::Acquire) => {
+                                    t.engines[i].install(d).map(|()| true)
+                                }
+                                _ => Ok(false),
+                            }
+                        }
+                        Ok(None) => Ok(false),
+                        Err(e) => Err(e),
+                    };
+                    for n in room.names.take() {
+                        in_flight.remove(&n);
+                    }
+                    if !installed? {
+                        return Ok(done);
+                    }
+                }
+                done += 1;
+            }
+        }
+        Ok(done)
+    }
+
     fn begin_running<'a>(
         &'a self,
         running: MutexGuard<'a, ()>,
@@ -1470,7 +1550,7 @@ impl Store {
             .collect();
         let frozen = self.freeze_all(states, op);
         drop(guards);
-        let (lsns, frozen, made, dropped) = match frozen {
+        let (lsns, frozen, made, dropped, saves) = match frozen {
             Ok(f) => f,
             Err(e @ Error::Branch(_)) => return Err(e), // refused before any change
             Err(e) => {
@@ -1484,6 +1564,7 @@ impl Store {
                 lsns,
                 frozen,
                 dropped,
+                saves,
                 _running: running,
             },
             made,
@@ -1504,6 +1585,7 @@ impl Store {
         Frozen,
         Option<Arc<Branch>>,
         Vec<Arc<Branch>>,
+        Vec<Save>,
     )> {
         let sh = &*self.shared;
         let pager = sh.pool.pager();
@@ -1587,17 +1669,18 @@ impl Store {
                 t.insert(&key, &rec)?;
             }
         }
-        // Each branch's engines saved as of its LSN, durably, before the
-        // checkpoint that names that LSN commits (§M14.28 L1).
+        // Each branch's engines as of its LSN, to save — durably, before
+        // the checkpoint that names that LSN commits (§M14.28 L1), and
+        // without the writers held (L4a): in `Checkpoint::finish`.
+        let mut saves = Vec::new();
         for (b, _, lsn, _) in &states {
             let tables = b.tree.read().unwrap_or_else(|e| e.into_inner());
             for (route, engine) in tables.routes.iter().zip(&tables.engines) {
-                engine.save(
-                    sh.platform.fs(),
-                    &engines::engines_dir(&sh.dir),
-                    &engines::engine_file(&sh.dir, b.info.id, route.id, *lsn),
-                    &format!("{}-{}-{}", b.info.id, route.id, lsn),
-                )?;
+                saves.push(Save {
+                    saver: engine.saver(),
+                    path: engines::engine_file(&sh.dir, b.info.id, route.id, *lsn),
+                    name: format!("{}-{}-{}", b.info.id, route.id, lsn),
+                });
             }
         }
         let main = states
@@ -1620,7 +1703,7 @@ impl Store {
             }
         }
         let lsns = states.into_iter().map(|(b, _, lsn, _)| (b, lsn)).collect();
-        Ok((lsns, frozen, made, dropped))
+        Ok((lsns, frozen, made, dropped, saves))
     }
 
     /// Makes branch `name` of `parent` as frozen now (its root the
@@ -1835,12 +1918,85 @@ pub struct Checkpoint<'a> {
     frozen: Frozen,
     /// Branches dropped in it: their logs go once it is durable.
     dropped: Vec<Arc<Branch>>,
+    /// The engines' states to save before it commits.
+    saves: Vec<Save>,
     _running: MutexGuard<'a, ()>,
 }
 
+/// What a background job of [`Store::compact`] works with.
+struct Room<'a, 'g> {
+    sh: &'a Shared,
+    edir: PathBuf,
+    branch: &'a Arc<Branch>,
+    route: u32,
+    /// The files it named: in flight until it is installed.
+    names: std::cell::RefCell<Vec<String>>,
+    go_on: &'a std::cell::RefCell<&'g mut dyn FnMut() -> bool>,
+    /// When it began, and the bytes it wrote since: its pace.
+    since: std::time::Duration,
+    bytes: std::cell::Cell<u64>,
+}
+
+impl engines::JobRoom for Room<'_, '_> {
+    fn fs(&self) -> &dyn FileSystem {
+        self.sh.platform.fs()
+    }
+
+    fn dir(&self) -> &Path {
+        &self.edir
+    }
+
+    /// `run-<branch>-<route>-<WAL end>-c<n>`: the first such name no file
+    /// and no other job has.
+    fn name(&self) -> Result<String> {
+        let fs = self.sh.platform.fs();
+        let mut in_flight = self.sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        let end = self.branch.wal.end();
+        for n in 0.. {
+            let name = format!("run-{}-{}-{end}-c{n}", self.branch.info.id, self.route);
+            if in_flight.contains(&name)
+                || fs.exists(&self.edir.join(&name))?
+                || fs.exists(&self.edir.join(format!("{name}.tmp")))?
+            {
+                continue;
+            }
+            in_flight.insert(name.clone());
+            self.names.borrow_mut().push(name.clone());
+            return Ok(name);
+        }
+        unreachable!("names run out")
+    }
+
+    fn wrote(&self, bytes: u64) -> bool {
+        let total = self.bytes.get() + bytes;
+        self.bytes.set(total);
+        let budget = self.sh.opts.compaction_bytes_per_sec;
+        if budget > 0 && bytes > 0 {
+            let clock = self.sh.platform.clock();
+            let due = self.since + std::time::Duration::from_secs_f64(total as f64 / budget as f64);
+            let now = clock.now();
+            if due > now {
+                clock.sleep(due - now);
+            }
+        }
+        !self.sh.poisoned.load(Ordering::Acquire)
+            && !self.branch.dropped.load(Ordering::Acquire)
+            && (self.go_on.borrow_mut())()
+    }
+}
+
+/// An engine's state to save in a checkpoint ([`Engine::saver`]).
+struct Save {
+    saver: engines::Saver,
+    /// The file the checkpoint's LSN names.
+    path: PathBuf,
+    /// Unique to the branch, route and checkpoint.
+    name: String,
+}
+
 impl Checkpoint<'_> {
-    /// The rest of the checkpoint, writes going on: each WAL durable up
-    /// to its frozen LSN, the frozen pages written back, the pager's
+    /// The rest of the checkpoint, writes going on: the engines' states
+    /// saved, each WAL durable up to its frozen LSN, the frozen pages written back, the pager's
     /// header committed, each WAL before its LSN dropped, dropped
     /// branches' logs deleted.  A failure poisons the store.
     pub fn finish(self) -> Result<()> {
@@ -1849,9 +2005,16 @@ impl Checkpoint<'_> {
             lsns,
             frozen,
             dropped,
+            saves,
             _running,
         } = self;
         let result = (|| {
+            // The engines' states (an LSM tree's memtable written as a
+            // run), writes going on (§M14.28 L4a).
+            let edir = engines::engines_dir(&s.dir);
+            for Save { saver, path, name } in saves {
+                saver(s.platform.fs(), &edir, &path, &name)?;
+            }
             // Nothing in the checkpoint may be less durable than the WALs.
             for (b, lsn) in &lsns {
                 b.wal.sync_to(*lsn)?;
@@ -1871,8 +2034,7 @@ impl Checkpoint<'_> {
                 remove_wal_files(s.platform.fs(), &branch_wal(&s.dir, b.info.id))?;
             }
             let keep: Vec<(u32, u64)> = lsns.iter().map(|(b, lsn)| (b.info.id, *lsn)).collect();
-            let live = live_engine_files(lsns.iter().map(|(b, _)| b));
-            remove_stale_engine_files(s.platform.fs(), &s.dir, &keep, &live)?;
+            remove_stale_engine_files(s, &keep, lsns.iter().map(|(b, _)| b))?;
             crate::metrics::CHECKPOINTS.inc();
             Ok(())
         })();
@@ -1907,36 +2069,34 @@ fn settle(tree: &mut Tables, d: &mut Deferred) -> Result<()> {
     tree.apply_sorted(&ops, None)
 }
 
-/// The shared files (an LSM tree's runs) the engines of `branches` name.
-fn live_engine_files<'a>(
+/// Removes the engines' files not of a branch's checkpoint in `keep`
+/// (`(branch, lsn)`): of checkpoints that did not commit, before the
+/// last, or of branches gone; and the runs (`run-…`) no engine of
+/// `branches` names any more — merged into others, or of those
+/// checkpoints — and no background job is writing.
+fn remove_stale_engine_files<'a>(
+    sh: &Shared,
+    keep: &[(u32, u64)],
     branches: impl Iterator<Item = &'a Arc<Branch>>,
-) -> std::collections::HashSet<String> {
-    let mut live = std::collections::HashSet::new();
+) -> Result<()> {
+    let fs = sh.platform.fs();
+    let edir = engines::engines_dir(&sh.dir);
+    // Held throughout: a job's run is named in flight until its engine
+    // names it.
+    let in_flight = sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+    let mut live = HashSet::new();
     for b in branches {
         let tables = b.tree.read().unwrap_or_else(|e| e.into_inner());
         live.extend(tables.engine_files());
     }
-    live
-}
-
-/// Removes the engines' files not of a branch's checkpoint in `keep`
-/// (`(branch, lsn)`): of checkpoints that did not commit, before the
-/// last, or of branches gone; and the runs (`run-…`) no engine in `live`
-/// names any more — merged into others, or of those checkpoints.
-fn remove_stale_engine_files(
-    fs: &dyn FileSystem,
-    dir: &Path,
-    keep: &[(u32, u64)],
-    live: &std::collections::HashSet<String>,
-) -> Result<()> {
-    let edir = engines::engines_dir(dir);
     if !fs.exists(&edir)? {
         return Ok(());
     }
     for name in fs.list_dir(&edir)? {
         let Some(n) = name.to_str() else { continue };
         if n.starts_with("run-") {
-            if !live.contains(n) {
+            let run = n.strip_suffix(".tmp").unwrap_or(n);
+            if !live.contains(n) && !in_flight.contains(run) {
                 fs.remove_file(&edir.join(&name))?;
             }
             continue;

@@ -218,9 +218,16 @@ struct Inner {
 /// The thread that checkpoints when the WAL since the last checkpoint
 /// passes [`EngineOptions::checkpoint_wal_bytes`] — off the writers' path:
 /// a checkpoint's slow half runs while they write (`Store::checkpoint_begin`).
+///
+/// Beside it, the compactor: the engines' background work
+/// (`Store::compact`, an LSM tree's compaction), woken after each
+/// checkpoint, on a thread of its own — off the writers' path and off the
+/// checkpoints' (PLAN.md §M14.28 L4a).
 struct Checkpointer {
     signal: Arc<Signal>,
     thread: Option<std::thread::JoinHandle<()>>,
+    compactor: Arc<Signal>,
+    compactor_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// What wakes the checkpointer: (a checkpoint is due, stop).
@@ -232,38 +239,68 @@ struct Signal {
 
 impl Checkpointer {
     fn start(store: Arc<Store>, limit: u64) -> std::io::Result<Self> {
+        let compactor = Arc::new(Signal::default());
+        let c = Arc::clone(&compactor);
+        let st = Arc::clone(&store);
+        let compactor_thread = std::thread::Builder::new()
+            .name("nucleus-compact".into())
+            .spawn(move || {
+                while c.wait() {
+                    let mut go_on = || !lock(&c.state).1;
+                    // A failure leaves the runs as they were (the store
+                    // poisoned or not): the next checkpoint tries again.
+                    let _ = st.compact(&mut go_on);
+                }
+            })?;
         let signal = Arc::new(Signal::default());
         let s = Arc::clone(&signal);
+        let cs = Arc::clone(&compactor);
         let thread = std::thread::Builder::new()
             .name("nucleus-checkpoint".into())
             .spawn(move || {
-                loop {
-                    {
-                        let mut st = lock(&s.state);
-                        while !st.0 && !st.1 {
-                            st = s.wake.wait(st).unwrap_or_else(|e| e.into_inner());
-                        }
-                        if st.1 {
-                            return;
-                        }
-                        st.0 = false;
-                    }
+                while s.wait() {
                     // A failure poisons the store: every later write and
                     // read reports it.
-                    if store.checkpoint_past(limit).is_err() {
-                        return;
+                    match store.checkpoint_past(limit) {
+                        Err(_) => return,
+                        Ok(true) => cs.raise(),
+                        Ok(false) => {}
                     }
                 }
             })?;
         Ok(Self {
             signal,
             thread: Some(thread),
+            compactor,
+            compactor_thread: Some(compactor_thread),
         })
     }
 
     fn wake(&self) {
-        lock(&self.signal.state).0 = true;
-        self.signal.wake.notify_one();
+        self.signal.raise();
+    }
+}
+
+impl Signal {
+    /// Something due.
+    fn raise(&self) {
+        lock(&self.state).0 = true;
+        self.wake.notify_one();
+    }
+
+    /// Waits until something is due (true) or stop (false).
+    fn wait(&self) -> bool {
+        let mut st = lock(&self.state);
+        while !st.0 && !st.1 {
+            st = self.wake.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        st.0 = false;
+        !st.1
+    }
+
+    fn stop(&self) {
+        lock(&self.state).1 = true;
+        self.wake.notify_one();
     }
 }
 
@@ -271,9 +308,12 @@ impl Drop for Checkpointer {
     /// Stops the thread, after the checkpoint it may be running: the store
     /// (and its directory's lock) goes with the engine, not after it.
     fn drop(&mut self) {
-        lock(&self.signal.state).1 = true;
-        self.signal.wake.notify_one();
-        if let Some(t) = self.thread.take() {
+        self.signal.stop();
+        self.compactor.stop();
+        for t in [self.thread.take(), self.compactor_thread.take()]
+            .into_iter()
+            .flatten()
+        {
             let _ = t.join();
         }
     }
@@ -371,8 +411,16 @@ impl Inner {
         }
         match &self.checkpointer {
             Some(c) if over <= limit.saturating_mul(2) => c.wake(),
-            _ => {
-                self.store.checkpoint_past(limit)?;
+            Some(c) => {
+                if self.store.checkpoint_past(limit)? {
+                    c.compactor.raise();
+                }
+            }
+            None => {
+                // No thread to spare: the background work here too.
+                if self.store.checkpoint_past(limit)? {
+                    self.store.compact(&mut || true)?;
+                }
             }
         }
         Ok(())

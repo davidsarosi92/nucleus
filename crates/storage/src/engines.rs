@@ -53,22 +53,58 @@ pub trait Engine: Send + Sync {
     fn is_empty(&self) -> bool;
     /// A copy, for a branch made from this one's.
     fn fork(&self) -> Box<dyn Engine>;
-    /// Sets apart what the coming [`save`](Self::save) will write, under
+    /// Sets apart what the coming [`saver`](Self::saver) will save, under
     /// the branch's write lock (cheap: readers wait for it).
     fn prepare(&mut self) -> Result<()> {
         Ok(())
     }
-    /// Saves its state as of the checkpoint, durably: `path` the file the
-    /// checkpoint's LSN names, `dir` the directory of files it may share
-    /// with other branches' engines (an LSM tree's runs), `name` unique
-    /// to this branch, route and checkpoint, for the files it writes
-    /// there.  Readers go on meanwhile.
-    fn save(&self, fs: &dyn FileSystem, dir: &Path, path: &Path, name: &str) -> Result<()>;
-    /// The files in `dir` its last save (or load) named: the store
-    /// removes the others no branch's engine names.
+    /// Its state as of the checkpoint, to save: taken under the branch's
+    /// write lock (cheap — what [`prepare`](Self::prepare) set apart and
+    /// shared pointers), run without it, writes going on meanwhile
+    /// (§M14.28 L4a).
+    fn saver(&self) -> Saver;
+    /// The files in `dir` it needs: those its state names, and those its
+    /// last saved (or loaded) file names.  The store removes the others no
+    /// branch's engine names.
     fn files(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Work due in the background — an LSM tree's compaction — planned
+    /// under the branch's read lock; `None` when nothing is due.
+    fn job(&self) -> Option<Job> {
+        None
+    }
+    /// A job's result taken in, under the branch's write lock.
+    fn install(&mut self, _done: Done) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Saves an engine's state as of a checkpoint, durably: `path` the file
+/// the checkpoint's LSN names, `dir` the directory of files it may share
+/// with other branches' engines (an LSM tree's runs), `name` unique to
+/// the branch, route and checkpoint, for the files it writes there.
+pub type Saver = Box<dyn FnOnce(&dyn FileSystem, &Path, &Path, &str) -> Result<()> + Send>;
+
+/// A job's result, for [`Engine::install`]; `None` when it stopped early.
+pub type Done = Box<dyn std::any::Any + Send>;
+
+/// Work an engine does off the locks ([`Engine::job`]).
+pub type Job = Box<dyn FnOnce(&dyn JobRoom) -> Result<Option<Done>> + Send>;
+
+/// What a [`Job`] works with.
+pub trait JobRoom {
+    /// The file system.
+    fn fs(&self) -> &dyn FileSystem;
+    /// The directory of the engines' shared files.
+    fn dir(&self) -> &Path;
+    /// A name for a new file in [`dir`](Self::dir), not in use, the file
+    /// kept from removal until the job's result is installed.
+    fn name(&self) -> Result<String>;
+    /// `bytes` more written: waits as the I/O budget asks
+    /// ([`crate::StoreOptions::compaction_bytes_per_sec`]); false when the
+    /// job is to stop.
+    fn wrote(&self, bytes: u64) -> bool;
 }
 
 /// A scan's entries, the key first and the value only when asked.
@@ -410,14 +446,16 @@ impl Engine for MapEngine {
         Box::new(self.clone())
     }
 
-    fn save(&self, fs: &dyn FileSystem, _dir: &Path, path: &Path, _name: &str) -> Result<()> {
+    fn saver(&self) -> Saver {
+        // The whole map encoded now: this engine is the boundary's proof,
+        // not for tables of any size.
         let mut out = MAP_MAGIC.to_vec();
         out.extend_from_slice(&(self.map.len() as u32).to_le_bytes());
         for (k, v) in &self.map {
             put_bytes(&mut out, k);
             put_bytes(&mut out, v);
         }
-        write_file(fs, path, &out)
+        Box::new(move |fs, _dir, path, _name| write_file(fs, path, &out))
     }
 }
 
@@ -1076,7 +1114,7 @@ mod tests {
         ])
         .unwrap();
         let path = Path::new("/e/m");
-        m.save(fs, Path::new("/e"), path, "x").unwrap();
+        m.saver()(fs, Path::new("/e"), path, "x").unwrap();
         let back = MapEngine::load(fs, path).unwrap();
         assert_eq!(back.map, m.map);
         let f = fs.open(path, OpenMode::ReadWrite).unwrap();

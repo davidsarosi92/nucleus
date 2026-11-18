@@ -760,7 +760,10 @@ another route, one the B+tree holds entries in on any branch, and an
 encrypted database (the map engine's file is in the clear); it holds
 every writer and tree while it writes the routes, then checkpoints.  The
 `Engine` trait: `get`, `scan(start, end, reverse)`, `apply(ops)`,
-`remove_range`, `is_empty`, `fork`, `save`.  `EngineKind::Map` is the
+`remove_range`, `is_empty`, `fork`, `prepare` and `saver` (the state as
+of a checkpoint, taken under the writers' locks and saved in
+`Checkpoint::finish` without them), `files`, and `job` / `install` for
+background work (§M14.28 L4a).  `EngineKind::Map` is the
 trivial engine that proves the boundary — a sorted map saved whole at
 each checkpoint, not for tables of any size; the LSM tree (L2) is the
 engine the boundary is for.  With no route, every call goes straight to
@@ -769,13 +772,15 @@ the B+tree.
 **The LSM tree** (`lsm`, §M14.28 L2; `EngineKind::Lsm`).  Writes go to a
 memtable (puts, point tombstones, range tombstones for a removed range);
 the store's WAL is its log.  A checkpoint sets the memtable apart under
-the branch's write lock (`Engine::prepare`, a swap) and writes it as an
-immutable sorted run while readers go on (`Engine::save`, under the read
-lock: writers wait for it until L4), compacts, and writes a manifest
-naming the live runs in `engines/<branch>-<route>-<lsn>` before the
-checkpoint commits; runs are `engines/run-<branch>-<route>-<lsn>-<n>`,
-shared between branches by name (a branch forks its parent's), removed
-once no branch's engine names them (`Engine::files`).  Reads merge the
+the branch's write lock (`Engine::prepare`, a swap; `Engine::saver`
+takes it and the runs as they are) and writes it as an immutable sorted
+run with no lock held — reads and writes go on (L4a) — and a manifest
+naming the runs in `engines/<branch>-<route>-<lsn>` before the
+checkpoint commits; the run joins the levels at the engine's next
+change.  Runs are `engines/run-<branch>-<route>-<lsn>-0` (a flush) and
+`…-<wal end>-c<n>` (a compaction), shared between branches by name (a
+branch forks its parent's), removed once no branch's engine names them
+(`Engine::files`: the runs of its levels and of its last manifest).  Reads merge the
 memtable(s) and the runs newest first: the first source holding a key
 decides, a range tombstone hides the key in every older source, and a
 source's own points are newer than its own range tombstones.  A run's
@@ -789,9 +794,23 @@ key), the range tombstones, a CRC-32C, a 32-byte footer with the magic
 upper levels (four runs merge into one run of the next), one run at the
 last level, which the runs arriving from above merge into while it is at
 most four times their size (a level forms above it when larger); a merge
-into the last level drops tombstones.  Left to L4: flushing by size
-between checkpoints, compaction on workers off the lock, a block cache,
-Bloom bits by level.
+into the last level drops tombstones.  **Compaction is background work**
+(L4a): `Engine::job` plans the next merge from the levels as they are
+(under the branch's read lock), the job writes its run with no lock held
+— within `StoreOptions::compaction_bytes_per_sec` (0, the default: no
+limit), told the bytes as it goes and stopping when asked — and
+`Engine::install` takes it in under the write lock: the inputs are
+still the oldest runs of their tier (flushes since went first; one job
+at a time, `Store::compact`), or nothing is changed.  A job's file is
+in flight (`Shared::in_flight`, held while stale files are removed)
+until installed, so a checkpoint meanwhile does not take it for stale.
+Its run is durable with the next checkpoint's manifest; a crash before
+opens the last manifest, whose runs are kept.  The transaction layer
+runs `Store::compact` on a thread of its own (`nucleus-compact`), woken
+after each checkpoint; without threads to spare, after the checkpoint
+where it falls due.  Left to L4b–L4e: bulk loads as runs, flushing by
+size between checkpoints, a block cache, Bloom bits by level, compaction
+that drops versions vacuum would, sealed runs.
 
 **Tables of the LSM engine** (§M14.28 L3).  `CREATE TABLE … WITH (engine
 = lsm)` (or `btree`, the default; the session setting
@@ -8052,6 +8071,12 @@ checks `psql` with and without TLS.
   section of `docs/benchmarks.md` from `bench/all.sh`'s results files;
   method 2 — a difference within 10 % not claimed, rounds started when
   the machine's other work is under 2.5 cores; a second run reproduces.
+- **2026-11-18 — §M14.28 L4a, the LSM tree's work off the writers:** a
+  checkpoint's engine saves run in `Checkpoint::finish`, not under every
+  writer's lock (`Engine::saver`); compaction is a background job
+  (`Engine::job` / `install`, `Store::compact`, the `nucleus-compact`
+  thread) within `StoreOptions::compaction_bytes_per_sec`.  The slowest
+  commit under steady random writes 1379 → 65 ms.
 - **2026-11-17 — §M14.28 L2–L3a, the LSM engine:** memtables, runs with
   Bloom filters, range tombstones, lazy leveling; `CREATE TABLE … WITH
   (engine = lsm)` and `default_table_engine`.
