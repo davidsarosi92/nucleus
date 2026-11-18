@@ -8207,7 +8207,7 @@ checks `psql` with and without TLS.
   ns a tool call (`jsonschema` 0.61: 148).
 - **2026-11-18 — a lookup's rows fetched a group at a time (issue #1):**
   a secondary index's entries fetch their rows by primary key up to
-  eight together (`KvTxn::get_many` → `Transaction::get_many` →
+  eight together (the first alone: an existence check wants one) (`KvTxn::get_many` → `Transaction::get_many` →
   `BTree::seek_group`: the descents a level at a time, each level's
   pages read for the whole group before any is searched, their cache
   misses overlapped); TPC-H Q20 on one worker 218 → 180 ms, on ten 58.0

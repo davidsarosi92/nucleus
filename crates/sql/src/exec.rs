@@ -1196,13 +1196,14 @@ pub fn scan_some<'a>(
     }))
 }
 
-/// The rows a secondary index's first entries fetch together; each group
-/// after holds twice the last, up to [`nucleus_kv::GET_MANY`] — a lookup
-/// that wants one row (an existence check) fetches few past it.
-const INDEX_GROUP_FIRST: usize = 4;
+/// The rows a secondary index's first entries fetch together: one — a
+/// lookup that wants one row (an existence check: TPC-H Q22's `NOT
+/// EXISTS`, 1.43× slower with four) fetches none past it —, then
+/// [`nucleus_kv::GET_MANY`] a group.
+const INDEX_GROUP_FIRST: usize = 1;
 
 /// [`scan_some`] through a secondary index: its entries read a group at a
-/// time, the group's rows fetched by their primary keys together
+/// time (the first of one), the group's rows fetched by their primary keys together
 /// ([`crate::storage::TableStorage::get_many`]: their descents' cache misses overlap — a
 /// `lineitem` lookup's ~7 rows, TPC-H Q20), handed on in the entries'
 /// order.
@@ -1238,18 +1239,27 @@ impl IndexRows<'_> {
             k.extend_from_slice(&pk);
             self.keys.push(k);
         }
-        self.group = (self.group * 2).min(nucleus_kv::GET_MANY);
+        self.group = nucleus_kv::GET_MANY;
         if self.keys.is_empty() {
             return Ok(());
         }
-        self.storage.get_many(
-            self.ctx.txn,
-            self.table,
-            &self.keys,
-            self.wanted,
-            &mut self.labels,
-            &mut self.rows,
-        )?;
+        if let [k] = self.keys.as_slice() {
+            // One: a plain fetch, no group's set-up.
+            let row =
+                self.storage
+                    .get(self.ctx.txn, self.table, k, self.wanted, &mut self.labels)?;
+            self.rows.clear();
+            self.rows.push(row);
+        } else {
+            self.storage.get_many(
+                self.ctx.txn,
+                self.table,
+                &self.keys,
+                self.wanted,
+                &mut self.labels,
+                &mut self.rows,
+            )?;
+        }
         for (k, row) in self.keys.drain(..).zip(self.rows.drain(..)) {
             match row {
                 Some(row) => self.ready.push_back((k, row)),

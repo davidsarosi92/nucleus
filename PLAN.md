@@ -11571,7 +11571,16 @@ simple parameterization, MySQL's former query cache — what not to do).
      group (no faster than 8), the leaves' cells read for the group
      before their values are copied (even).  Q20, the binaries run alone
      in turn: one worker 218 → 180 ms, ten 58.0 → 53.9 (PostgreSQL's
-     59.7: 0.90×).
+     59.7: 0.90×).  The whole TPC-H then (A/B, both orders): Q22 1.43×
+     — its `NOT EXISTS` fetched four rows where one answers it —, so an
+     index's first group is one row, fetched by a plain `get`, then
+     eight a group: Q22 even (0.98×), Q20 0.88×, Q19 0.83×, Q17 ~0.9×.
+     Found by the same run, open: the node format above slows row
+     scans — Q6 1.13×, Q5 1.11×, Q21 1.07×, Q11 1.06×, Q12 1.05× (A/B
+     of the two binaries, both orders); on one worker Q6 716 → 815 ms,
+     the added time in decoding rows (`vector::decode_into`), not in the
+     B+tree's own code.  Not yet understood: the user decides whether
+     the format stays.
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:
