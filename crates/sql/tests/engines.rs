@@ -316,6 +316,7 @@ fn a_table_changes_its_engine_and_back() {
 /// table, whether it committed before the copy reached its key, after,
 /// or across the switch.
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn writes_while_a_table_moves_are_kept() {
     for (seed, storage) in [(10, "row"), (13, "column"), (14, "row, column")] {
         writes_while_moving(seed, storage);
