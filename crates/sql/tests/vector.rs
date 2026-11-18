@@ -654,6 +654,51 @@ fn parallel_aggregates_agree() {
     );
 }
 
+/// A table function lateral to each row — `JSON_TABLE`'s rows,
+/// `json_path_query`, `generate_series`, `unnest` — runs on the workers
+/// with the scan below it, a left row at a time: the same rows, in the
+/// same order, as on one thread.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn parallel_lateral_functions_agree() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(9)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE d (id INT PRIMARY KEY, doc JSON, n INT); \
+         INSERT INTO d SELECT i, json_build_object('a', json_build_array(i % 7, i % 5, \
+           CASE WHEN i % 11 = 0 THEN 'x' ELSE (i % 3)::text END), 'k', i), i % 6 \
+           FROM generate_series(1, 40000) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT count(*), sum(t.v) FROM d, JSON_TABLE(d.doc, '$.a[*]' COLUMNS (v int PATH '$' \
+           NULL ON ERROR)) t",
+        "SELECT d.id, t.o, t.v FROM d, JSON_TABLE(d.doc, '$.a[*]' COLUMNS (o FOR ORDINALITY, \
+           v text PATH '$')) t WHERE d.id % 997 = 1",
+        "SELECT count(*) FROM d, LATERAL json_path_query(d.doc, '$.a[*] ? (@ > 2)') p",
+        "SELECT sum(g) FROM d, LATERAL generate_series(1, d.n) g",
+        "SELECT d.id, u FROM d, LATERAL unnest(ARRAY[d.n, d.id]) u WHERE d.id < 30",
+        "SELECT sum(t.v) FROM d, JSON_TABLE(d.doc, '$.a[*]' COLUMNS (v int PATH '$')) t",
+    ];
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    for q in queries {
+        assert_eq!(outcome(&mut many, q), outcome(&mut one, q), "{q}");
+    }
+    assert!(
+        nucleus_sql::vector::parallel_runs() - before >= 4,
+        "the lateral calls ran in parallel"
+    );
+}
+
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_groups_in_key_order_past_work_mem_agree() {

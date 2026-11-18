@@ -1502,6 +1502,10 @@ impl Accumulator for Acc {
 struct GenerateSeries;
 
 impl TableFunction for GenerateSeries {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "generate_series"
     }
@@ -1553,6 +1557,10 @@ impl TableFunction for GenerateSeries {
 struct Unnest;
 
 impl TableFunction for Unnest {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "unnest"
     }

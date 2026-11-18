@@ -246,6 +246,10 @@ struct Query {
 }
 
 impl TableFunction for Query {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         self.name
     }

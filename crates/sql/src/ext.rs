@@ -659,6 +659,14 @@ pub trait TableFunction: Send + Sync {
     ) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
         Ok(Box::new(self.rows(cx, args)?.into_iter().map(Ok)))
     }
+
+    /// Whether its rows may be made on any thread, a call on each — a
+    /// function of its arguments alone (`generate_series`,
+    /// `json_path_query`): then a lateral call of it, a left row at a
+    /// time, runs on every CPU with the scan below it.  By default not.
+    fn parallel_safe(&self) -> bool {
+        false
+    }
 }
 
 /// A registered table function, as a plan holds it.  Equal when names are.

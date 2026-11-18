@@ -2864,7 +2864,11 @@ and hash joins' probes) the join is that pipeline's step
 (`vector::Lookup`, as a probe is): each left row of a batch looked up as
 above, the rows given made a batch again — so the steps above it, and an
 aggregate over it, run on the workers with the scan, morsel by morsel
-(same conditions; `exec::lookups_parallel_safe`).  A lookup's own scan,
+(same conditions; `exec::lookups_parallel_safe`).  A lateral table
+function (`JSON_TABLE`'s rows, `json_path_query`, `generate_series`,
+`unnest`, …) is such a lookup when it says it is a function of its
+arguments alone (`TableFunction::parallel_safe`, false unless a function
+says so): each left row's call runs on a worker.  A lookup's own scan,
 by its one key value, runs a row at a time (`vector::rows` declines a
 scan by an enclosing row's key: a pipeline made for each lookup cost
 more than its few rows).
@@ -8154,6 +8158,9 @@ checks `psql` with and without TLS.
 - **2026-11-18 — §M14.28 L5, versions dropped by commits from the LSM
   memtable:** `Engine::apply_filtered`; YCSB A on an LSM table 5 726 →
   10 530 operations a second, a read's p99 531 → 25 µs.
+- **2026-11-18 — §M14.15, lateral table functions on the workers:**
+  `TableFunction::parallel_safe`; `JSON_TABLE` over 50,000 performances
+  (1.79 million rows) 0.824 → 0.298 s (PostgreSQL 18's 0.321).
 - **2026-11-18 — short range scans:** `Access::serves` (a filter the
   key range applies keeps a `LIMIT`ed scan on one thread) and KV chunks
   growing from 64 entries (`nucleus_kv::FIRST_CHUNK`); YCSB E's scans on

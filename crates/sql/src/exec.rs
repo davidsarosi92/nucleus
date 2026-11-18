@@ -2242,6 +2242,11 @@ pub(crate) fn lookups_parallel_safe(right: &Plan, on: Option<&Expr>, ctx: &Ctx) 
         p.for_each_expr(&mut |e| ok &= safe(e));
         ok && match p {
             Plan::Scan { .. } => true,
+            // A lateral function of the left row (`JSON_TABLE`'s rows).
+            Plan::Function { func, .. } => match func {
+                crate::plan::TableFunc::Call(f) => f.parallel_safe(),
+                crate::plan::TableFunc::Scalar => true,
+            },
             Plan::Project { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Sort { input, .. }

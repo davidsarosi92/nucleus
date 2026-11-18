@@ -723,6 +723,10 @@ impl Accumulator for ObjectAggState {
 struct TableRows;
 
 impl TableFunction for TableRows {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "__json_table_rows"
     }

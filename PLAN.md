@@ -9121,9 +9121,30 @@ put it but `text`, which it can neither query nor index.
   features (2.4–2.5×).  What is left is the lateral
   nested loop's per-row cost spread over allocations, row building and
   expression calls: `json_path_query` laterally, with no column at all,
-  takes 0.42 s.  *Next:* a cheaper lateral loop (the right side's plan
-  built once and re-bound per row) or a `JSON_TABLE` operator of its
-  own.
+  takes 0.42 s.  *Done (2026-11-18):* the lateral loop runs on the
+  workers.  A lateral table function was never a parallel lookup
+  (`exec::lookups_parallel_safe` refused every `Plan::Function`), so the
+  whole loop ran on one thread while the scan beside it had ten.  Now a
+  table function says whether it is a function of its arguments alone
+  (`TableFunction::parallel_safe`, false by default — an extension's
+  function stays on the thread unless it says so); `JSON_TABLE`'s rows,
+  `json_path_query`, `jsonb_array_elements`/`each`/`object_keys`,
+  `generate_series` and `unnest` do, and the left rows' blocks are looked
+  up on the workers as an index lookup's are.  *Prior art:* PostgreSQL
+  marks each function `PARALLEL SAFE | RESTRICTED | UNSAFE`
+  (`proparallel`) and runs a parallel-safe function scan beside a
+  partial scan under `Gather`; HyPer / Umbra make the dependent join a
+  step of the morsel pipeline.  Taken: the safety a function declares
+  (a default of unsafe), the step in the pipeline already there (§8.5
+  "lookup").  Not taken: a `JSON_TABLE` operator of its own — the
+  per-row cost left is in the lateral loop's allocations, and with ten
+  workers it is under PostgreSQL's.  *Measured* (`bash bench/all.sh
+  json-pg`, five runs' medians; seconds, nucleus / PostgreSQL 18):
+  performances 0.824 → 0.298 / 0.321, features 0.323 → 0.106 / 0.123,
+  tweets 0.098 → 0.069 / 0.266; laterally `json_path_query` with no column 0.354 → 0.069 s
+  (in the process).  Checked: `vector.rs`
+  `parallel_lateral_functions_agree` (1 and 4 workers give the same
+  answers; the parallel path taken).
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)
@@ -9221,8 +9242,8 @@ put it but `text`, which it can neither query nor index.
   The `CHECK`'s cost on single-row `INSERT`s: +6.0 µs a row → +1.3–1.6
   (two A/B runs of `bench/json/schema.py` against the binary before;
   the load without a check unchanged, 1.78–1.82 s).  *Next:* close the
-  remaining gap to `jsonschema`; `JSON_TABLE`'s row loop (2.6×
-  PostgreSQL's time where a document gives many rows).
+  remaining gap to `jsonschema`.  (`JSON_TABLE`'s row loop: done
+  2026-11-18, J3c — under PostgreSQL's time.)
 
 ### §M14.16 — Migrations and code generation ✅
 

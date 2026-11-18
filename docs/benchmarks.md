@@ -1583,29 +1583,29 @@ value in PostgreSQL (nucleus's is in the table above):
 
 | json-pg | nucleus | postgresql |
 |---|---:|---:|
-| parse (tweets), s | 0.365 [0.362–0.366] ±4% | 1.30 [1.30–1.30] ±1% |
-| output (tweets), s | 0.136 [0.135–0.138] ±4% | 0.981 [0.980–0.983] ±1% |
-| field (tweets), s | 0.067 [0.066–0.067] ±9% | 0.249 [0.248–0.250] ±3% |
-| path (tweets), s | 0.062 [0.062–0.063] ±12% ⚠ | 0.247 [0.247–0.248] ±1% |
-| value (tweets), s | 0.063 [0.063–0.064] ±4% | 0.251 [0.250–0.252] ±2% |
-| table (tweets), s | 0.098 [0.097–0.099] ±5% | 0.262 [0.261–0.263] ±2% |
-| parse (performances), s | 0.089 [0.088–0.089] ±5% | 0.708 [0.706–0.709] ±1% |
-| output (performances), s | 0.047 [0.046–0.047] ±4% | 0.492 [0.490–0.493] ±2% |
-| field (performances), s | 0.009 [0.009–0.009] ±11% ⚠ | 0.035 [0.035–0.035] ±2% |
-| path (performances), s | 0.016 [0.016–0.017] ±15% ⚠ | 0.050 [0.050–0.050] ±2% |
-| value (performances), s | 0.008 [0.008–0.008] ±21% ⚠ | 0.036 [0.036–0.036] ±4% |
-| table (performances), s | 0.824 [0.822–0.827] ±1% | 0.316 [0.316–0.318] ±2% |
-| parse (features), s | 0.025 [0.025–0.025] ±2% | 0.063 [0.063–0.063] ±5% |
-| output (features), s | 0.028 [0.028–0.029] ±4% | 0.039 [0.039–0.039] ±3% |
-| field (features), s | 0.004 [0.004–0.004] ±2% | 0.010 [0.010–0.010] ±9% |
-| path (features), s | 0.004 [0.004–0.004] ±2% | 0.011 [0.010–0.011] ±3% |
-| value (features), s | 0.004 [0.004–0.004] ±2% | 0.010 [0.010–0.010] ±2% |
-| table (features), s | 0.323 [0.322–0.324] ±1% | 0.121 [0.121–0.122] ±3% |
+| parse (tweets), s | 0.384 [0.382–0.386] ±5% | 1.32 [1.31–1.32] ±1% |
+| output (tweets), s | 0.134 [0.133–0.136] ±15% ⚠ | 0.996 [0.995–0.998] ±1% |
+| field (tweets), s | 0.067 [0.066–0.068] ±8% | 0.254 [0.253–0.254] ±1% |
+| path (tweets), s | 0.063 [0.062–0.064] ±11% ⚠ | 0.251 [0.250–0.252] ±2% |
+| value (tweets), s | 0.063 [0.063–0.064] ±4% | 0.253 [0.253–0.254] ±1% |
+| table (tweets), s | 0.069 [0.068–0.070] ±4% | 0.266 [0.266–0.267] ±2% |
+| parse (performances), s | 0.089 [0.088–0.089] ±3% | 0.717 [0.716–0.718] ±1% |
+| output (performances), s | 0.047 [0.046–0.047] ±5% | 0.497 [0.496–0.497] ±1% |
+| field (performances), s | 0.009 [0.009–0.009] ±10% | 0.036 [0.036–0.036] ±3% |
+| path (performances), s | 0.017 [0.017–0.017] ±4% | 0.051 [0.051–0.051] ±2% |
+| value (performances), s | 0.009 [0.008–0.009] ±10% ⚠ | 0.037 [0.036–0.037] ±2% |
+| table (performances), s | 0.298 [0.297–0.298] ±1% | 0.321 [0.320–0.322] ±1% |
+| parse (features), s | 0.025 [0.025–0.025] ±2% | 0.064 [0.064–0.064] ±1% |
+| output (features), s | 0.029 [0.029–0.029] ±2% | 0.040 [0.040–0.040] ±2% |
+| field (features), s | 0.004 [0.004–0.004] ±3% | 0.011 [0.010–0.011] ±2% |
+| path (features), s | 0.004 [0.004–0.004] ±11% ⚠ | 0.011 [0.011–0.011] ±4% |
+| value (features), s | 0.004 [0.004–0.004] ±26% ⚠ | 0.011 [0.010–0.011] ±1% |
+| table (features), s | 0.106 [0.105–0.106] ±2% | 0.123 [0.123–0.124] ±2% |
 | size (canada.json), KB | — | 2,599 [2,599–2,599] ±0% |
 | size (citm_catalog.json), KB | — | 739 [739–739] ±0% |
 | size (twitter.json), KB | — | 497 [497–497] ±0% |
 
-Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus 7ff7b48e3+changes — 2026-11-17T07:19:58+00:00
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus 8e8a1a467+changes — 2026-11-18T09:36:18+00:00
 
 Parse: `count(*) … WHERE doc::json IS NOT NULL` over a text column;
 output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
@@ -1619,9 +1619,8 @@ output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
 `'$.geometry.coordinates.size()'` (features); a table: `count(*),
 sum(<a column>)` over `j, JSON_TABLE(j.doc, <rows> COLUMNS (…))` (a
 tweet's hashtags' lengths, a performance's seat areas' ids, a feature's
-points west of 70°W).  `JSON_TABLE` is 2.6× PostgreSQL's time where a
-document gives many rows (performances, features): each row of it goes
-through the general row loop (PLAN.md §M14.15, open).
+points west of 70°W).  `JSON_TABLE`'s rows are made on the workers, each
+document's call beside the others' (PLAN.md §M14.15 J3c).
 
 Indexes on JSON (`bash bench/all.sh json-index`; J4,
 `bench/json/index.py`): 200,000 made-up events (`{"id", "user": {"name",

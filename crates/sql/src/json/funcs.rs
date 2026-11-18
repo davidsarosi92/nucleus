@@ -536,6 +536,10 @@ struct Each {
 }
 
 impl TableFunction for Each {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         self.name
     }
@@ -587,6 +591,10 @@ struct Elements {
 }
 
 impl TableFunction for Elements {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         self.name
     }
@@ -633,6 +641,10 @@ struct Keys {
 }
 
 impl TableFunction for Keys {
+    /// A function of its arguments alone.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         self.name
     }
