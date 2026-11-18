@@ -1143,7 +1143,6 @@ impl Engine {
         let others = self.inner.others(None);
         let mut ops = Vec::new();
         let mut covered = Vec::new();
-        let mut last_user: Option<Vec<u8>> = None;
         let mut kept_one = false;
         let mut next = None;
         let tree = self.inner.store.read()?;
@@ -1151,53 +1150,79 @@ impl Engine {
         // This key's removed versions' range recorded.
         let mut covering = false;
         let to = to.map_or(Bound::Unbounded, Bound::Excluded);
-        for entry in versions(&tree, Bound::Included(from), to)?
-            .into_iter()
-            .flatten()
-        {
-            let (k, v) = entry?;
-            let (user, ts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
-            if last_user.as_deref() != Some(&user[..]) {
-                if ops.len() >= chunk.max(1) {
-                    next = Some(first_version(&user));
-                    break;
+        // Keys compared escaped, values read only where needed — an
+        // intent's, a tombstone told by its one byte — into buffers kept
+        // for the whole chunk: a sweep reads every entry of the store
+        // (PLAN.md §M14.33 R4: 3.8 s of a 9.6 s vacuum after TPC-H's load
+        // went to an allocation or three per entry and their decoding).
+        let (mut k, mut v, mut prev) = (Vec::new(), Vec::new(), Vec::new());
+        let undecodable = || Error::Corrupt("undecodable version key");
+        // `escaped` ‖ 00 00 ‖ the timestamp: a version's store key.
+        let version_key = |escaped: &[u8], ts: u64| {
+            let mut key = Vec::with_capacity(escaped.len() + mvcc::OVERHEAD);
+            key.extend_from_slice(escaped);
+            key.extend_from_slice(&[0, 0]);
+            key.extend_from_slice(&(u64::MAX - ts).to_be_bytes());
+            key
+        };
+        'ranges: for mut range in versions(&tree, Bound::Included(from), to)? {
+            while range.next_key_into(&mut k)? {
+                let n = k.len();
+                if n < mvcc::OVERHEAD || k[n - 10] != 0 || k[n - 9] != 0 {
+                    return Err(undecodable());
                 }
-                last_user = Some(user.clone());
-                kept_one = false;
-                pinned = false;
-                covering = false;
-            }
-            if let Some(id) = intent_of(ts) {
-                // A key with an intent keeps its versions this sweep.
-                pinned = true;
-                let Some(committed) = committed else {
+                let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
+                let escaped = &k[..n - mvcc::OVERHEAD];
+                if !(prev.len() == n && prev.starts_with(escaped)) {
+                    if ops.len() >= chunk.max(1) {
+                        next = Some(version_key(escaped, u64::MAX));
+                        break 'ranges;
+                    }
+                    prev.clear();
+                    prev.extend_from_slice(&k);
+                    kept_one = false;
+                    pinned = false;
+                    covering = false;
+                }
+                if let Some(id) = intent_of(ts) {
+                    // A key with an intent keeps its versions this sweep.
+                    pinned = true;
+                    let Some(committed) = committed else {
+                        continue;
+                    };
+                    if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
+                        range.value_into(&mut v)?;
+                        ops.push((version_key(escaped, cts), Some(v.clone())));
+                        ops.push((k.clone(), None));
+                        *removed += 1;
+                    } else if !others.contains(&id)
+                        && !read(&self.inner.unresolved).contains_key(&id)
+                    {
+                        ops.push((k.clone(), None)); // aborted
+                        *removed += 1;
+                    }
                     continue;
-                };
-                if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
-                    ops.push((encode_key(&user, cts), Some(v)));
-                    ops.push((k, None));
-                    *removed += 1;
-                } else if !others.contains(&id) && !read(&self.inner.unresolved).contains_key(&id) {
-                    ops.push((k, None)); // aborted
+                }
+                if ts > wm || pinned {
+                    continue; // still needed by someone
+                }
+                let tombstone = !kept_one
+                    && range.small_value_into(&mut v, 1)?
+                    && decode_value(&v)
+                        .ok_or(Error::Corrupt("bad version value"))?
+                        .is_none();
+                if kept_one || tombstone {
+                    if !covering {
+                        covering = true;
+                        let mut end = escaped.to_vec();
+                        end.extend_from_slice(&[0, 1]); // after_versions
+                        covered.push((k.clone(), end));
+                    }
+                    ops.push((k.clone(), None));
                     *removed += 1;
                 }
-                continue;
+                kept_one = true;
             }
-            if ts > wm || pinned {
-                continue; // still needed by someone
-            }
-            let tombstone = decode_value(&v)
-                .ok_or(Error::Corrupt("bad version value"))?
-                .is_none();
-            if kept_one || tombstone {
-                if !covering {
-                    covering = true;
-                    covered.push((k.clone(), after_versions(&user)));
-                }
-                ops.push((k, None));
-                *removed += 1;
-            }
-            kept_one = true;
         }
         Ok((ops, covered, next))
     }

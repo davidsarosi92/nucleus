@@ -11029,6 +11029,40 @@ simple parameterization, MySQL's former query cache — what not to do).
      for a filter tested first (late materialization: its rows' other
      columns are decoded after the test, from the copy) — decoding every
      column in the page instead lost Q14 and Q15 10 %, and Q6 is even.
+  Then the load — R4's first whole run had TPC-H's row load at 47.5 s,
+  2.09× PostgreSQL's 22.7 (the target is 2×), where R3's run before the
+  vacuum after the load had 24.4: the `VACUUM` R3 added took ~20 s.
+  Profiled: it swept the whole store (3.2 GB: tables and indexes),
+  3.8 s; rewrote the load's intents as versions through the log, 3.5 s;
+  and its pages went to the file at the next checkpoint — inline in the
+  next statement's commit, the log past twice its limit — 7.5 s, 6.8 of
+  them `pwrite`s: a page (8 KiB) a call, in the cache's order, ~28 µs
+  each.
+  8. *A checkpoint's pages in the file's order.*  `flush_frozen` takes
+     the frozen dirty pages' ids, sorts them, and writes each run of
+     neighbours — up to 128 pages, 1 MiB — with one call
+     (`Pager::write_run`; PostgreSQL's checkpointer sorts its buffers
+     since 9.6).  A frozen page does not change (writers copy it), so
+     its copy is taken under its shard's lock and its dirty flag cleared
+     only once the run is written: an eviction meanwhile writes the same
+     contents again instead of dropping a page the file does not have
+     yet (checked by `checkpoints_while_writing_on_real_files`: a
+     16-page cache, writers evicting through every checkpoint).  The
+     checkpoint after the vacuum 7.5 → 1.6 s.
+  9. *A sweep that copies nothing.*  The sweep allocated a key, a value
+     and a user key per entry and decoded every key.  Now it compares
+     the keys escaped (as R4 step 2's scans), builds the few keys it
+     writes from the escaped bytes, and reads a value only for an
+     intent it rewrites or to tell a tombstone (one byte,
+     `small_value_into`), into buffers kept for the chunk: 3.8 → 1.2 s.
+     A vacuum after the load 9.6 → 6.7 s, one with nothing to do (and
+     the checkpoint after the first) 12.5 → 3.0 s.
+  TPC-H's load, measured alone twice: rows 47.5 → 29.0 s, columns 27.5
+  → 22.7 s.  What is left of it: `COPY`'s text parsing (`lineitem`'s
+  8.7 s), the indexes (10.5 s, `lineitem`'s two 5.4 and 3.6), and the
+  load's intents rewritten through the log (3.5 s: D16's final versions
+  are for a table made in the loading transaction, not an empty one
+  made before).
   Left for later, as issues (no real gain within R4): a row scan's cost
   per row — Q6 1.7×, Q14 1.24× (#2: the late path's copy, a column's
   offset within the row, the leaf walk's version checks) — and a

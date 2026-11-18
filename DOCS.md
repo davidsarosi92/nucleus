@@ -443,12 +443,15 @@ it asks `Pager::keeps` and leaves a page another branch still reads
 cached, then `Pager::release`s it.  A write-back stamps the birth into
 the cached page too, so the header in memory says what the file does.
 `flush_frozen` writes back the dirty pages of the commit in flight while
-writers go on — and readers: a page at a time under its shard's read
-lock (PostgreSQL's checkpointer writes a buffer under a share lock the
-same way), so hits go on and a load or an eviction waits for one page's
-write, not the shard's (holding the shard's write lock through it, a
-checkpoint after a large build held searches up for seconds); one flush
-at a time.  Eviction is the clock algorithm
+writers go on — and readers: in the file's order, each run of
+neighbouring pages (up to 1 MiB) with one write (`Pager::write_run`;
+PostgreSQL's checkpointer sorts its buffers so), each page copied under
+its shard's read lock, so hits go on and a load or an eviction waits for
+one page's copy, not the shard's write (holding the shard's write lock
+through it, a checkpoint after a large build held searches up for
+seconds).  A frozen page does not change, so its dirty flag is cleared
+once its run is written: an eviction meanwhile writes the same contents
+again rather than dropping a page the file lacks.  One flush at a time.  Eviction is the clock algorithm
 over unpinned frames; dirty victims are written back first.  `flush`
 writes every dirty frame, `sync` = flush + pager commit.  The frames are
 split into up to 16 shards (at least 256 frames each; a page always in the
@@ -1094,7 +1097,10 @@ older versions a commit dropped there too.  Without it a tombstone the
 sweep removed — the commit having dropped the value under it, and so
 the sweep finding the tombstone alone — let replay's value under it
 back: a deleted row back after a crash (the embedding queue's crash test
-found it, its range vacuumed after each round, §8.24).
+found it, its range vacuumed after each round, §8.24).  A sweep reads
+every entry, so it copies none: keys compared escaped, the few it writes
+built from the escaped bytes, a value read only for an intent it
+rewrites or to tell a tombstone (its one byte).
 Snapshots register under the same lock the watermark is read under, so GC
 never removes a version a snapshot can see.  `begin_with(at)` reads an older
 snapshot within the history window (read-only), else `SnapshotTooOld`.
@@ -7923,6 +7929,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-18 — §M14.33 R4, the load's vacuum:** a checkpoint writes
+  its pages sorted, a run of neighbours (up to 1 MiB) a call, not a page
+  a call in the cache's order; a vacuum's sweep copies no entry (keys
+  compared escaped, a value read only for an intent or a tombstone's
+  byte).  TPC-H SF 1's row load with its `VACUUM ANALYZE` 47.5 → 29.0 s,
+  its column load 27.5 → 22.7 s.
 - **2026-11-17 — §M14.33 R4, rows decoded in their pages:**
   `Scan::visit` / `KvChunks::visit` hand a row table's batch each live
   entry where it lies, its columns decoded there, not copied first (a

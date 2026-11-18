@@ -109,6 +109,10 @@ impl std::hash::Hasher for PageHasher {
 const SHARD_FRAMES: usize = 256;
 const MAX_SHARDS: usize = 16;
 
+/// Pages a checkpoint writes at once at most ([`BufferPool::flush_frozen`]):
+/// 1 MiB.
+const RUN_PAGES: usize = 128;
+
 /// Pages read at once ahead of a scan ([`BufferPool::read_ahead`]): 128 KiB.
 pub const READ_AHEAD: usize = 16;
 
@@ -545,11 +549,84 @@ impl BufferPool {
     /// Writes the dirty pages of the commit in flight ([`Pager::freeze`])
     /// to the pager — while writers go on, copying them as they change
     /// them.  Pages stay cached.
+    ///
+    /// In the file's order, a run of neighbouring pages at a time
+    /// ([`Pager::write_run`]; PostgreSQL's checkpointer sorts its buffers
+    /// so): a page at a time in the cache's order was a random write each,
+    /// ~28 µs, and a load's checkpoints write gigabytes (PLAN.md §M14.33
+    /// R4).  A frozen page does not change — a writer copies it — so a
+    /// copy taken under its shard's lock is what the file needs, and its
+    /// dirty flag is cleared only once the copy is written: an eviction
+    /// meanwhile writes the same contents again rather than dropping a
+    /// page not yet in the file.
     pub fn flush_frozen(&self) -> Result<()> {
         let _one = self.flushing.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ids = Vec::new();
         for shard in &*self.shards {
-            self.flush_shard(shard, |id| self.pager.is_frozen(id))?;
+            let inner = shard.read().unwrap_or_else(|e| e.into_inner());
+            for (i, id) in inner.ids.iter().enumerate() {
+                if let Some(id) = *id
+                    && self.frame(inner.start + i).dirty.load(Ordering::Acquire)
+                {
+                    ids.push(id);
+                }
+            }
         }
+        self.pager.retain_frozen(&mut ids);
+        ids.sort_unstable();
+        let mut run: Vec<Page> = Vec::with_capacity(RUN_PAGES);
+        let mut first = PageId(0);
+        for id in ids {
+            if !run.is_empty() && (id.0 != first.0 + run.len() as u64 || run.len() == RUN_PAGES) {
+                self.write_frozen_run(first, &mut run)?;
+            }
+            // Its copy, unless it left the cache or was written meanwhile
+            // (an eviction's, an `uncache`'s).
+            let copy = {
+                let inner = self.shard(id).read().unwrap_or_else(|e| e.into_inner());
+                inner.table.get(&id).and_then(|&frame| {
+                    let f = self.frame(frame);
+                    f.dirty
+                        .load(Ordering::Acquire)
+                        .then(|| f.page.read().unwrap_or_else(|e| e.into_inner()).clone())
+                })
+            };
+            let Some(copy) = copy else {
+                self.write_frozen_run(first, &mut run)?;
+                continue;
+            };
+            if run.is_empty() {
+                first = id;
+            }
+            run.push(copy);
+        }
+        self.write_frozen_run(first, &mut run)
+    }
+
+    /// Writes `run` — the frozen pages from `first` on — then marks the
+    /// cached pages clean, with the birth the pager stamped (§M14.13: it
+    /// is fixed when a page is allocated, so it is the cached page's too).
+    /// Empties `run`.
+    fn write_frozen_run(&self, first: PageId, run: &mut Vec<Page>) -> Result<()> {
+        if run.is_empty() {
+            return Ok(());
+        }
+        self.pager.write_run(first, run)?;
+        for (i, page) in run.iter().enumerate() {
+            let id = PageId(first.0 + i as u64);
+            let inner = self.shard(id).read().unwrap_or_else(|e| e.into_inner());
+            if let Some(&frame) = inner.table.get(&id) {
+                let f = self.frame(frame);
+                f.page
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .set_lsn(page.lsn());
+                f.dirty.store(false, Ordering::Release);
+            }
+        }
+        self.writebacks
+            .fetch_add(run.len() as u64, Ordering::Relaxed);
+        run.clear();
         Ok(())
     }
 

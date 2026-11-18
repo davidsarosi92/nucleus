@@ -967,6 +967,67 @@ impl Pager {
         self.write_at(id, page)
     }
 
+    /// [`write_page`](Self::write_page) for the pages `first`, `first + 1`,
+    /// … — a run of neighbours — with one write to the file: a
+    /// checkpoint's pages in the file's order (PostgreSQL's checkpointer
+    /// sorts its buffers so since 9.6), not a system call per page.
+    pub fn write_run(&self, first: PageId, pages: &mut [Page]) -> Result<()> {
+        let Some(last) = (pages.len() as u64).checked_sub(1).map(|n| first.0 + n) else {
+            return Ok(());
+        };
+        {
+            let s = self.begin()?;
+            for (i, page) in pages.iter_mut().enumerate() {
+                let id = PageId(first.0 + i as u64);
+                Self::check_data_page(&s, id)?;
+                if !Self::may_write(&s, id.0) {
+                    return Err(Error::Immutable(id));
+                }
+                if let Some(b) = Self::birth_in(&s, id.0) {
+                    page.set_lsn(b);
+                }
+                if page.page_type() < PageType::FIRST_USER {
+                    return Err(Error::InvalidPage(id));
+                }
+            }
+        }
+        if last >= self.lock().known_len {
+            let mut s = self.lock();
+            if last >= s.known_len {
+                s.known_len = extend(self.file.as_ref(), s.known_len, last + 1)?;
+            }
+        }
+        let cipher = self.keys();
+        RUN_BUFFER.with_borrow_mut(|buf| {
+            buf.resize(pages.len() * PAGE_SIZE, 0);
+            for (i, (page, out)) in pages
+                .iter_mut()
+                .zip(buf.as_chunks_mut::<PAGE_SIZE>().0)
+                .enumerate()
+            {
+                let id = PageId(first.0 + i as u64);
+                page.seal(id);
+                match cipher.as_deref() {
+                    None => out.copy_from_slice(page.bytes()),
+                    Some(c) => c
+                        .seal(id, page, out)
+                        .map_err(|reason| Error::Corrupt { page: id, reason })?,
+                }
+            }
+            Ok(self.file.write_all_at(buf, first.offset())?)
+        })
+    }
+
+    /// Keeps of `ids` those [`is_frozen`](Self::is_frozen), under one look
+    /// at the state.
+    pub fn retain_frozen(&self, ids: &mut Vec<PageId>) {
+        let s = self.lock();
+        match s.frozen.as_ref() {
+            Some(f) => ids.retain(|id| f.pages.contains(&id.0)),
+            None => ids.clear(),
+        }
+    }
+
     /// The commit that will make page `id` durable, if it is not yet:
     /// the one in flight for a frozen page, the next for one allocated
     /// since.
@@ -1489,6 +1550,9 @@ thread_local! {
     /// A thread's buffer for an encrypted page on its way to the file
     /// (the page itself stays in the clear, in the buffer pool).
     static WRITE_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A thread's buffer for a run of pages on its way to the file
+    /// ([`Pager::write_run`]).
+    static RUN_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn write_raw(
