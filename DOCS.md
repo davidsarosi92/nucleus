@@ -2483,7 +2483,11 @@ none; MySQL's `DESCRIBE t` describes a table).
 
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
-expressions read; a scan then decodes only the columns needed — the rest
+expressions read (an uncorrelated subquery's none of the row: it runs
+once — only its operand's; a correlated one's the columns of the row it
+reads — TPC-H Q16's `ps_suppkey NOT IN (SELECT …)` had every column of
+`partsupp` decoded, its comments too: one worker 162.9 → 143.3 ms); a
+scan then decodes only the columns needed — the rest
 read as NULL, skipped in the encoding without being built (an out-of-line
 value not even fetched), and a row's encoding not read at all past the
 last column wanted (`count(*)` reads none of it).  A row table's scan
@@ -3055,7 +3059,12 @@ order of its rows (`Aggregate::order_free`: not `array_agg` or
 pipeline (a scan through filters and projections — over a join's rows,
 a row at a time, the two groupings would only hash each row twice:
 TPC-H Q16 127 → 192 ms); the result is the set's, `NULL`s and errors
-included.  `NOT IN` stays a subquery (its NULL
+included.  Over hash joins the pipeline probes — known only when it
+runs, its tables built — the executor groups twice itself when every
+call is `DISTINCT` over the same arguments and order-free
+(`vector::distinct_aggregate`: the distinct rows by the vectorized,
+parallel grouping, then a batch at a time by the group; TPC-H Q16 on
+ten workers 100.7 → 80.2 ms).  `NOT IN` stays a subquery (its NULL
 semantics are not an anti join's); so do correlated scalar subqueries.
 `EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
 too (§8.13).
@@ -8128,6 +8137,14 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-19 — distinct aggregates over joins grouped twice; columns
+  pruned past an uncorrelated subquery (the sweep before F1's whole
+  run):** `count(DISTINCT x)` over a pipeline's hash joins runs as two
+  vectorized, parallel groupings (`vector::distinct_aggregate`) instead
+  of a set a group a row at a time; a filter with an uncorrelated
+  subquery no longer makes its scan decode every column.  TPC-H Q16 on
+  row tables: ten workers 100.7 → 77.5 ms, one 170.7 → 143.3.
 
 - **2026-11-19 — a buffer frame made with the page read into it (issue
   #2):** a frame used the first time was made with an empty page,

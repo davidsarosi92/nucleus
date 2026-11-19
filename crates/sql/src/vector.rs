@@ -3759,7 +3759,7 @@ pub fn aggregate<'a>(
     outer: Option<&'a Env<'a>>,
 ) -> Result<Option<Rows<'a>>> {
     if aggs.iter().any(|a| a.distinct || !a.order.is_empty()) {
-        return Ok(None);
+        return distinct_aggregate(input, top, group, aggs, ctx, outer);
     }
     let tables = prepare(input, ctx, outer)?;
     if let Some(rows) = parallel_aggregate(input, top, group, aggs, ctx, outer)? {
@@ -3787,6 +3787,73 @@ pub fn aggregate<'a>(
         }),
     ))))
 }
+
+/// `GROUP BY group` with `aggs` that are all `DISTINCT` over the same
+/// arguments (`count(DISTINCT x)`), in two groupings: the input grouped by
+/// `group` and the arguments — the distinct values, vectorized and on the
+/// workers as any grouping — then those rows by `group` with the
+/// aggregates over each value once.  The groups come in the order a
+/// single pass sees them: the first rows grouped give each group's first
+/// value first.  (DuckDB and ClickHouse rewrite a lone distinct aggregate
+/// the same way.)  `None` for other aggregates (each its own set, a row
+/// at a time) or when the input is not a pipeline.
+fn distinct_aggregate<'a>(
+    input: &'a Plan,
+    top: &'a Plan,
+    group: &'a [Expr],
+    aggs: &'a [Agg],
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Option<Rows<'a>>> {
+    let Some(first) = aggs.first() else {
+        return Ok(None);
+    };
+    let alike =
+        |a: &Agg| a.distinct && a.order.is_empty() && !a.args.is_empty() && a.args == first.args;
+    if !aggs.iter().all(|a| alike(a) && a.func.order_free()) {
+        return Ok(None);
+    }
+    let n = group.len();
+    let width = first.args.len();
+    let keys: Vec<Expr> = group.iter().chain(&first.args).cloned().collect();
+    let Some(rows) = aggregate(input, top, &keys, &[], ctx, outer)? else {
+        return Ok(None);
+    };
+    let rows = rows.collect::<Result<Vec<Row>>>()?;
+    let by: Vec<Expr> = (0..n).map(Expr::Column).collect();
+    let once: Vec<Agg> = aggs
+        .iter()
+        .map(|a| Agg {
+            func: a.func.clone(),
+            args: (n..n + width).map(Expr::Column).collect(),
+            distinct: false,
+            order: Vec::new(),
+        })
+        .collect();
+    let mut g = Grouping::new(&by, &once);
+    let mut rows = rows.into_iter().peekable();
+    while rows.peek().is_some() {
+        let chunk: Vec<Row> = rows.by_ref().take(DISTINCT_CHUNK).collect();
+        let b = batch_of_rows(chunk.clone()).expect("rows");
+        let keys = b.cols[..n].to_vec();
+        let args: Vec<Vec<Rc<Vector>>> = once.iter().map(|_| b.cols[n..].to_vec()).collect();
+        g.add(&b.sel, &keys, &args, &|i| chunk[i].clone())?;
+    }
+    let mut done = finish(&mut g)?;
+    if let Some(p) = g.parts.take() {
+        for run in p.seal()? {
+            let rows = crate::exec::aggregate(Box::new(run.iter()), &by, &once, ctx, outer, 1)?;
+            for r in rows {
+                done.push(r?);
+            }
+        }
+    }
+    Ok(Some(Box::new(done.into_iter().map(Ok))))
+}
+
+/// The distinct rows a batch at a time into a distinct aggregate's
+/// second grouping.
+const DISTINCT_CHUNK: usize = 1024;
 
 // ---------------------------------------------------------------- parallel
 

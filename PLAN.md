@@ -11856,6 +11856,32 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
 - the other suites' comparisons (vectors, text, JSON, embeddings,
   memory stores) where nucleus is behind the system it is measured
   against.
+  *S1, TPC-H Q16* (row tables 1.14×, cold 1.30×).  `EXPLAIN ANALYZE` on
+  one worker: the aggregate's `count(DISTINCT ps_suppkey)` a set a group
+  a row at a time (`exec::aggregate`: each row's values built, text
+  through `from_utf8_lossy`, hashed by SipHash), the projection under it
+  a row at a time too — ~95 of 181 ms; and `partsupp` decoded whole, its
+  comments too (~8 ms a run in `memmove`).  The optimizer's two groupings
+  for `DISTINCT` (§M14.20 W6) wait for a pipeline it can see — a scan
+  through filters and projections; a join's probe of a built table is
+  one only when it runs.  Two changes, each measured alone (each binary
+  alone in turn, three loads, medians of 20):
+  - the executor groups twice itself when every call is `DISTINCT` over
+    the same arguments and order-free, the input a pipeline when it runs
+    (`vector::distinct_aggregate`: the input by group and arguments, the
+    vectorized, parallel grouping; those rows a batch at a time by the
+    group, each aggregate fed a value once; DuckDB and ClickHouse plan a
+    lone distinct aggregate so): ten workers 100.7 → 80.2 ms, one 170.7
+    → 164.7;
+  - the column pruning past an uncorrelated subquery: a filter with one
+    made its scan decode every column (the rule for a correlated one,
+    which reads the row it runs for, now narrowed to the columns it
+    reads, `narrow::outer_refs`): one worker 162.9 → 143.3, ten 81.1 →
+    77.5.
+  The whole TPC-H alone in turn: geometric mean 0.950×, Q16 0.74×, Q22
+  0.87× (its filter's uncorrelated `avg` subquery), none above past
+  noise.  Tests: distinct aggregates by batches against a row at a time
+  — `NULL`s, no rows, no groups, the groups' order without an `ORDER BY`.
 
 ## §F2 — NoSQL layer
 

@@ -22,7 +22,10 @@
 //! - the input is a pipeline (a scan through filters and projections):
 //!   the first grouping then runs vectorized and on the workers — over a
 //!   join's rows, a row at a time, it would only hash each row twice
-//!   (TPC-H Q16, 127 → 192 ms).
+//!   (TPC-H Q16, 127 → 192 ms).  Over a join whose build side is a table
+//!   the pipeline probes, that is known only when it runs: there the
+//!   executor groups twice itself when every call is `DISTINCT` over the
+//!   same arguments (`vector::distinct_aggregate`).
 //!
 //! The result is the same: the first grouping's groups are those of
 //! `g, x` in the order first seen, and so the second's, and errors come

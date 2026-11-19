@@ -3,10 +3,10 @@
 //! adding what its expressions read; a scan decodes only its needed
 //! columns, the rest reading as NULL (the row keeps its width, so no
 //! position changes).  A subquery's plan is walked too, from all of its own
-//! output.  Conservative: an expression with a subquery needs
-//! every column (a correlated subquery reads the row it runs for), and so
-//! does anything that compares whole rows (`DISTINCT`, set operations) or
-//! is shared (CTEs, recursion).
+//! output; an expression with a correlated subquery needs the columns of
+//! the row the subquery reads.  Conservative: anything that compares
+//! whole rows (`DISTINCT`, set operations) or is shared (CTEs, recursion)
+//! needs every column.
 
 use std::collections::HashMap;
 
@@ -21,14 +21,22 @@ pub fn needed(plan: &Plan) -> HashMap<usize, Vec<bool>> {
     out
 }
 
-/// Marks in `into` (positions shifted by `offset`) the columns `e` reads;
-/// every one when it has a subquery.
+/// Marks in `into` (positions shifted by `offset`) the columns `e` reads:
+/// its own (an `IN (subquery)`'s operand among them) and those of the row
+/// a correlated subquery in it reads ([`crate::narrow::outer_refs`]); an
+/// uncorrelated one runs once and reads no row of this plan (TPC-H Q16's
+/// `ps_suppkey NOT IN (SELECT …)` read every column of `partsupp`, its
+/// comments too).
 fn read(e: &Expr, into: &mut [bool], offset: isize) {
-    if e.has_subquery() {
-        into.iter_mut().for_each(|n| *n = true);
-        return;
-    }
-    for c in e.columns() {
+    let mut outer = Vec::new();
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x
+            && s.correlated
+        {
+            crate::narrow::outer_refs(&s.plan, 1, &mut outer);
+        }
+    });
+    for c in e.columns().into_iter().chain(outer) {
         let at = c as isize + offset;
         if at >= 0 && (at as usize) < into.len() {
             into[at as usize] = true;

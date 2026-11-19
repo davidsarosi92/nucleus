@@ -2587,3 +2587,31 @@ fn columns_passed_over_read_as_a_row_reads_them() {
     .to_vec();
     assert_eq!(agree(&db, &queries), 0);
 }
+
+/// Distinct aggregates over the same arguments, grouped twice by batches
+/// (the distinct values first, then each group's): the rows a row at a
+/// time gives, in its order — NULLs among the values and the keys, no
+/// rows, no groups; others (different arguments, `ORDER BY` inside)
+/// a row at a time as before.
+#[test]
+fn distinct_aggregates_answer_as_rows_do() {
+    let db = database();
+    let queries: Vec<String> = [
+        "SELECT a, count(DISTINCT b % 7) FROM t GROUP BY a",
+        "SELECT m, s, count(DISTINCT a), sum(DISTINCT a), min(DISTINCT a) FROM t GROUP BY m, s",
+        "SELECT count(DISTINCT a), sum(DISTINCT a) FROM t",
+        "SELECT count(DISTINCT a) FROM t WHERE id < 0",
+        "SELECT a, count(DISTINCT a) FROM t WHERE id < 0 GROUP BY a",
+        "SELECT ok, count(DISTINCT s) FROM t GROUP BY ok",
+        "SELECT d, count(DISTINCT n) FROM t WHERE id % 3 = 0 GROUP BY d",
+        "SELECT a, count(DISTINCT b % 5 + CASE WHEN ok THEN 10 ELSE 0 END) FROM t GROUP BY a",
+        "SELECT m, count(DISTINCT a), count(DISTINCT s) FROM t GROUP BY m",
+        "SELECT m, count(DISTINCT a), count(*) FROM t GROUP BY m",
+        "SELECT m, string_agg(DISTINCT s, ',' ORDER BY s) FROM t GROUP BY m",
+        "SELECT a, avg(DISTINCT f) FROM t GROUP BY a",
+        "SELECT a, count(DISTINCT b), max(DISTINCT b) FROM t WHERE id > 5 GROUP BY a",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(agree(&db, &queries), 0);
+}
