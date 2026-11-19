@@ -11839,6 +11839,24 @@ the row geometric means 0.65× and 0.57×; reads by key even — 1.02×
 with the intervals overlapping, which the method reports as no
 difference (`≈`), and under 1× in the two runs before.
 
+*The sweep before F1's whole run* (begun 2026-11-19, the user: every
+place nucleus lags PostgreSQL looked at — profiled, sped up, measured by
+the method; where no real gain comes, an issue on GitHub and on).  The
+list, from `docs/benchmarks.md` and the whole TPC-H by the method after
+issue #2 (row tables warm 0.57×, cold 0.55×):
+- TPC-H row tables: Q16 1.14× (cold 1.30×), Q10 1.14×, Q12 1.18× (one
+  worker's cost a row, issue #2's remainder), Q22 cold 1.25×; the load
+  1.40×;
+- TPC-H column tables: Q20 2.78×, Q19 2.22×, Q8 1.60×, Q16 1.18×;
+- ClickBench: the row table's Q30 cold 1.17× and load 1.11×; the column
+  table's Q23 1.70×;
+- `bench/run.py`: the B+tree's `DELETE` of a tenth 1.41×; the LSM table's
+  delete 2.27×, count after writes 1.88×, filtered count cold 1.70×, sum
+  cold 1.29×;
+- the other suites' comparisons (vectors, text, JSON, embeddings,
+  memory stores) where nucleus is behind the system it is measured
+  against.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
