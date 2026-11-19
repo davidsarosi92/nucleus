@@ -11738,6 +11738,14 @@ simple parameterization, MySQL's former query cache — what not to do).
      Q7 (1.08×, 1.08×, 1.05× there, from one run each) measured again:
      Q3 154.0 → 150.2 ms on ten workers, Q13 90.5 → 90.0, Q7 142.3 →
      141.4, even on one.
+     By the method (SF 1, row tables, PostgreSQL 18.7): Q6 104 ms
+     [99.4–107] against 92.8 [92.0–93.8], 1.13× (1.22× after step 6);
+     Q12 1.13× (1.27×); Q14 0.61×, Q1 0.39×; answers the same.
+     Tried next, not taken: the leaf walk copying only the rest of each key
+     (`Cursor::leaf_entries`; the page's prefix left in the two key
+     buffers past the first two entries) — `memmove` from there ~6 % of
+     Q6's samples, but Q6 one worker 482 → 490 ms, Q1 even: the prefix is
+     short and the copy's call stays.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
