@@ -2202,7 +2202,9 @@ array_length array_upper array_lower cardinality array_append
 array_to_string pg_typeof current_user current_database current_schema
 current_setting snapshot_commit` (the last: the commit the statement's
 transaction reads, §8.28; and the catalog functions of §8.11); aggregates `count
-sum avg min max string_agg array_agg bool_and bool_or every` (with
+sum avg min max string_agg array_agg bool_and bool_or every any_value` (the
+last SQL:2023's: a value of the group's that is not `NULL`, the first
+seen; with
 `DISTINCT`, `count(*)`, `ORDER BY` inside the call); window calls `f(…)
 OVER name | ([name] [PARTITION BY …] [ORDER BY …] [ROWS | RANGE | GROUPS
 {start | BETWEEN start AND end} [EXCLUDE CURRENT ROW | GROUP | TIES | NO
@@ -8137,6 +8139,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-19 — a projection moves the columns it passes on; `any_value`
+  (the sweep before F1's whole run):** the row executor's projection
+  moves a column it passes on as it is out of its input row at its last
+  use instead of cloning it (no text copied a projection: TPC-H Q10 on
+  ten workers 139.5 → 128.1 ms); the aggregate `any_value(x)`
+  (SQL:2023, PostgreSQL 16).
 
 - **2026-11-19 — distinct aggregates over joins grouped twice; columns
   pruned past an uncorrelated subquery (the sweep before F1's whole

@@ -11883,6 +11883,35 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   noise.  Tests: distinct aggregates by batches against a row at a time
   — `NULL`s, no rows, no groups, the groups' order without an `ORDER BY`.
 
+  *S2, TPC-H Q10* (row tables 1.14×).  `EXPLAIN ANALYZE` against
+  PostgreSQL's on one worker (599 vs 369 ms): its 57 185 lookups into
+  `lineitem` ~4.5 µs each against 2.2; its grouping by seven keys, two
+  long texts, where PostgreSQL groups by `c_custkey, n_name` (its
+  `remove_useless_groupby_columns`: the other customer columns are the
+  primary key's).  The profile on ten workers: `exec::lookup_one` 58 %
+  of the query's threads; the grouping itself (`Grouping::add`) 4 %.
+  - Taken: the row executor's projection moves a column it passes on out
+    of its input row at its last use instead of cloning it (worked out
+    on the first row: a lookup join builds its right side once a left
+    row, and a set built with each cost Q7 3–4 % until it was).  Q10 on
+    ten workers 139.5 → 128.1 ms, one 539 → 520; Q7 −3 %.
+  - Tried, not taken: PostgreSQL's rule — the keys a scan's primary key
+    determines carried as `any_value` instead of grouped by (a pass after
+    eager aggregation, each key traced to its scan through projections,
+    filters and joins).  Measured alone: Q10 one worker −1 to −3 %
+    (noise), ten none.  The vectorized grouping hashes the text keys from
+    the batch's vectors and builds a key only for a new group, so seven
+    keys cost little more than two; what cost was the rows' text copied
+    by each projection above it.  The aggregate `any_value` (SQL:2023,
+    PostgreSQL 16) it needed stays.
+  - Left: the lookups.  Each left row builds the right side's plan, an
+    MVCC scan and a descent from the root, and its combined rows clone
+    the customer's texts.  Directions: a block of left keys sorted and
+    looked up by one cursor going forward (a leaf reached is tried first
+    — a finger search), grouped as `BTree::seek_group` groups point reads
+    (#1); PostgreSQL joins the customers after the lookups, so its rows
+    carry no text through them.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

@@ -228,20 +228,64 @@ fn build_node<'a>(
             // Calls that read no row, once — on the first row, so a
             // projection of none calls nothing.
             let once = std::cell::OnceCell::new();
+            // A column passed on as it is moved out of the row at its
+            // last use, cloned before it (a text not copied a projection);
+            // worked out on the first row, as the calls above (a lookup
+            // join builds its right side a left row).
+            let plan: std::cell::OnceCell<(Vec<Option<(usize, bool)>>, bool)> =
+                std::cell::OnceCell::new();
             Box::new(rows.map(move |r| {
-                let row = r?;
-                let folded: &Vec<Option<Expr>> = once.get_or_init(|| {
+                let mut row = r?;
+                let (taken, computed) = plan.get_or_init(|| {
+                    let taken: Vec<Option<(usize, bool)>> = exprs
+                        .iter()
+                        .enumerate()
+                        .map(|(k, x)| match x {
+                            Expr::Column(i) => Some((
+                                *i,
+                                !exprs[k + 1..]
+                                    .iter()
+                                    .any(|y| matches!(y, Expr::Column(j) if j == i)),
+                            )),
+                            _ => None,
+                        })
+                        .collect();
+                    let computed = taken.iter().any(Option::is_none);
+                    (taken, computed)
+                });
+                let mut out: Vec<Value> = if *computed {
+                    let folded: &Vec<Option<Expr>> = once.get_or_init(|| {
+                        exprs
+                            .iter()
+                            .map(|x| row_free_evaluated(x, ctx, outer))
+                            .collect()
+                    });
+                    let e = env(&row, ctx, outer);
                     exprs
                         .iter()
-                        .map(|x| row_free_evaluated(x, ctx, outer))
-                        .collect()
-                });
-                let e = env(&row, ctx, outer);
-                exprs
-                    .iter()
-                    .zip(folded)
-                    .map(|(x, f)| f.as_ref().unwrap_or(x).eval(&e))
-                    .collect()
+                        .zip(folded)
+                        .zip(taken)
+                        .map(|((x, f), t)| match t {
+                            Some(_) => Ok(Value::Null),
+                            None => f.as_ref().unwrap_or(x).eval(&e),
+                        })
+                        .collect::<Result<_>>()?
+                } else {
+                    vec![Value::Null; exprs.len()]
+                };
+                for (slot, t) in out.iter_mut().zip(taken) {
+                    if let Some((i, last)) = *t {
+                        let v = row
+                            .get_mut(i)
+                            .ok_or_else(|| Error::internal("column out of range"))?;
+                        *slot = if last {
+                            std::mem::replace(v, Value::Null)
+                        } else {
+                            v.clone()
+                        };
+                    }
+                }
+                Ok(out)
             }))
         }
         Plan::Join {

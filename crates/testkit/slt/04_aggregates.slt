@@ -79,3 +79,56 @@ query IT
 SELECT count(*), region FROM sales GROUP BY region ORDER BY count(*), region LIMIT 1
 ----
 1 east
+
+# any_value: one of the group's values that are not NULL.
+query TT rowsort
+SELECT region, any_value(region) FROM sales GROUP BY region
+----
+east east
+north north
+south south
+
+query T
+SELECT any_value(product) IS NOT NULL FROM sales WHERE id = 5 OR id = 1 GROUP BY region ORDER BY 1
+----
+f
+t
+
+# Grouped by a primary key and the columns it determines: through joins,
+# an outer join's padded rows, a table joined to itself, HAVING and
+# ORDER BY.
+statement ok
+CREATE TABLE regions (name TEXT PRIMARY KEY, manager TEXT, budget INT)
+
+statement ok
+INSERT INTO regions VALUES ('north', 'ann', 100), ('south', NULL, 50), ('west', 'eve', 10)
+
+query TTIII
+SELECT r.name, r.manager, r.budget, count(s.id), sum(s.amount) FROM regions r LEFT JOIN sales s ON s.region = r.name GROUP BY r.name, r.manager, r.budget ORDER BY r.name
+----
+north ann 100 2 15
+south NULL 50 2 10
+west eve 10 0 NULL
+
+query ITTI
+SELECT s.id, s.product, r.manager, s.amount FROM sales s LEFT JOIN regions r ON r.name = s.region GROUP BY s.amount, r.manager, s.id, s.product, r.name ORDER BY s.id
+----
+1 apple ann 10
+2 pear ann 5
+3 apple NULL 7
+4 apple NULL 3
+5 NULL NULL NULL
+
+query TIT
+SELECT r.manager, count(*), r.name FROM sales s RIGHT JOIN regions r ON r.name = s.region GROUP BY r.name, r.manager HAVING count(*) > 1 ORDER BY r.manager DESC
+----
+NULL 2 south
+ann 2 north
+
+query ITIT
+SELECT a.id, a.product, b.id, b.product FROM sales a JOIN sales b ON a.amount < b.amount GROUP BY a.id, a.product, b.id, b.product ORDER BY a.id, b.id LIMIT 4
+----
+2 pear 1 apple
+2 pear 3 apple
+3 apple 1 apple
+4 apple 1 apple

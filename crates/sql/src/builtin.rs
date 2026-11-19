@@ -552,6 +552,9 @@ enum AggFunc {
     ArrayAgg,
     BoolAnd,
     BoolOr,
+    /// `any_value(x)` (SQL:2023; PostgreSQL 16 has it): one of the group's values that
+    /// are not `NULL` — the first one seen.
+    AnyValue,
 }
 
 const AGGREGATES: &[(AggFunc, &[&str])] = &[
@@ -564,6 +567,7 @@ const AGGREGATES: &[(AggFunc, &[&str])] = &[
     (AggFunc::ArrayAgg, &["array_agg"]),
     (AggFunc::BoolAnd, &["bool_and", "every"]),
     (AggFunc::BoolOr, &["bool_or"]),
+    (AggFunc::AnyValue, &["any_value"]),
 ];
 
 struct BuiltinAgg(AggFunc);
@@ -593,7 +597,12 @@ impl Aggregate for BuiltinAgg {
     fn infallible(&self) -> bool {
         matches!(
             self.0,
-            AggFunc::Count | AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr
+            AggFunc::Count
+                | AggFunc::Min
+                | AggFunc::Max
+                | AggFunc::BoolAnd
+                | AggFunc::BoolOr
+                | AggFunc::AnyValue
         )
     }
 
@@ -656,6 +665,7 @@ impl Aggregate for BuiltinAgg {
                     Error::feature("arrays of arrays are not supported")
                 })?))
             }
+            AggFunc::AnyValue => keep(at),
             AggFunc::BoolAnd | AggFunc::BoolOr => match at {
                 Some(t) if t != Bool => Err(Error::type_mismatch(format!(
                     "argument of {name} must be type boolean, not type {t}"
@@ -814,7 +824,11 @@ impl Acc {
         self.count += count;
         if !value.is_null() {
             match self.func {
-                AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr => {
+                AggFunc::Min
+                | AggFunc::Max
+                | AggFunc::BoolAnd
+                | AggFunc::BoolOr
+                | AggFunc::AnyValue => {
                     let n = self.count;
                     self.add(&[value])?;
                     self.count = n;
@@ -968,10 +982,15 @@ fn int_of_partial(b: &[u8]) -> Result<i128> {
     ))
 }
 
-/// Folds a value (not `NULL`) into a `min`, `max`, `bool_and` or
-/// `bool_or`'s value so far (`NULL`: none).
+/// Folds a value (not `NULL`) into a `min`, `max`, `bool_and`,
+/// `bool_or` or `any_value`'s value so far (`NULL`: none).
 fn fold(func: AggFunc, cur: &mut Value, v: Value) -> Result<()> {
     match func {
+        AggFunc::AnyValue => {
+            if cur.is_null() {
+                *cur = v;
+            }
+        }
         AggFunc::Min | AggFunc::Max => {
             let replace = cur.is_null() || {
                 let o = v.sql_cmp(cur)?.expect("not null");
@@ -1001,7 +1020,7 @@ impl Grouped {
     fn new(func: AggFunc) -> Self {
         use AggFunc::*;
         let states = match func {
-            Min | Max | BoolAnd | BoolOr => States::Values(Vec::new()),
+            Min | Max | BoolAnd | BoolOr | AnyValue => States::Values(Vec::new()),
             Sum | Avg => States::Unset,
             _ => States::Accs(Vec::new()),
         };
@@ -1107,6 +1126,17 @@ impl GroupAccumulator for Grouped {
                 .map(|(&r, &g)| (r as usize, g as usize))
         };
         if let States::Values(vals) = &mut self.states {
+            if func == AnyValue {
+                // A group's first value kept: the others not even built.
+                if let Some(a) = args.first() {
+                    for (r, g) in pairs() {
+                        if vals[g].is_null() {
+                            vals[g] = a.value(r);
+                        }
+                    }
+                }
+                return Ok(());
+            }
             let min = func == Min;
             match args.first() {
                 Some(Vector::Int(v, _)) if matches!(func, Min | Max) => {
@@ -1447,9 +1477,11 @@ impl Accumulator for Acc {
                 };
                 self.count += 1;
             }
-            AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr => {
-                fold(self.func, &mut self.value, v)?
-            }
+            AggFunc::Min
+            | AggFunc::Max
+            | AggFunc::BoolAnd
+            | AggFunc::BoolOr
+            | AggFunc::AnyValue => fold(self.func, &mut self.value, v)?,
             AggFunc::StringAgg => {
                 let text = v.render();
                 self.text = Some(match self.text.take() {
