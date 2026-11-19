@@ -172,6 +172,8 @@ pub struct Derived {
     h: u128,
     enc: [u128; 15],
     nonce: [u8; NONCE_LEN],
+    /// Made by the instructions (read only where there are any).
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     hw: bool,
 }
 
@@ -204,6 +206,7 @@ impl Derived {
             h,
             enc,
             nonce: *nonce,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             hw: false,
         }
     }

@@ -11621,6 +11621,12 @@ simple parameterization, MySQL's former query cache — what not to do).
      198.7 → 199.4), point lookups slower (the probe 740 → 1020 ns, eight
      at a time 590 → 880; Q20 one worker 180 → 189 ms) — the leaves'
      heads are most of step 2's gain.
+  *Issue #1 closed* (2026-11-19): Q20 by the method (`bench/tpch.py`,
+  SF 1, row tables, 85d69f5) 56.2 ms [54.5–58.2] against PostgreSQL
+  18's 65.2 [59.7–69.6] — 0.86×, the intervals apart; cold 133 against
+  213 (0.62×); 86.5 ms when the issue was opened.  A worker's own
+  efficiency (one worker ~2.7× PostgreSQL's single process) goes on in
+  the row and point-read step.
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:
