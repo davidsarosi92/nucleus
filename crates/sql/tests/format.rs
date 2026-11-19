@@ -283,7 +283,11 @@ fn rows_of_version_2_read_beside_version_3() {
         .collect();
     let mut rewritten = 0;
     for (k, v) in rows {
-        assert_eq!(v[0], 3, "rows are written in version 3");
+        assert_eq!(
+            v[0],
+            encoding::ROW_VERSION,
+            "rows are written in the current version"
+        );
         // (Even rows' long values, out of line, are not rewritten.)
         let row = encoding::decode_row_with(&v, 40, &mut |_, _| Ok(Value::Null)).unwrap();
         let Value::Int(id) = row[0] else { panic!() };

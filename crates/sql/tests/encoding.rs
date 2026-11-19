@@ -16,6 +16,15 @@ fn numeric() -> impl Strategy<Value = Value> {
     })
 }
 
+/// Decimals whose mantissas fit 32 or 64 bits (a row's tags 26 and 27).
+fn small_numeric() -> impl Strategy<Value = Value> {
+    let m = prop_oneof![
+        any::<i32>().prop_map(i128::from),
+        any::<i64>().prop_map(i128::from)
+    ];
+    (m, 0u32..19).prop_map(|(m, scale)| Value::Numeric(Decimal::new(m, scale).unwrap()))
+}
+
 fn interval() -> impl Strategy<Value = Value> {
     (-10_000i32..10_000, -100_000i32..100_000, any::<i32>()).prop_map(|(months, days, us)| {
         Value::Interval(Interval {
@@ -38,6 +47,7 @@ fn value() -> impl Strategy<Value = Value> {
         any::<f64>().prop_map(Value::Float),
         "[\\x00-\\x7f\u{e9}\u{1F600}]{0,12}".prop_map(Value::Text),
         numeric(),
+        small_numeric(),
         DAYS.prop_map(Value::Date),
         MICROS.prop_map(Value::Timestamp),
         MICROS.prop_map(Value::TimestampTz),

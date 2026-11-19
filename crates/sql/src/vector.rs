@@ -2474,6 +2474,27 @@ fn decode_into(
                 });
                 nulls.push(false);
             }
+            (col @ Builder::Dec(..), Some(tag @ (26 | 27))) => {
+                r.u8().map_err(bad)?;
+                let scale = r.u8().map_err(bad)?;
+                let m = if tag == 26 {
+                    i64::from(r.u32().map_err(bad)? as i32)
+                } else {
+                    r.u64().map_err(bad)? as i64
+                };
+                if let Builder::Dec(s, d, nulls) = col
+                    && u32::from(scale) <= crate::decimal::MAX_DIGITS
+                    && s.is_none_or(|s| s == u32::from(scale))
+                {
+                    *s = Some(u32::from(scale));
+                    d.push(m);
+                    nulls.push(false);
+                    continue;
+                }
+                let d =
+                    crate::decimal::Decimal::new(i128::from(m), u32::from(scale)).map_err(bad)?;
+                col.push_decimal(d);
+            }
             (col @ Builder::Dec(..), Some(5)) => {
                 r.u8().map_err(bad)?;
                 let lo = r.u64().map_err(bad)?;

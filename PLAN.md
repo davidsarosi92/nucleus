@@ -11664,6 +11664,23 @@ simple parameterization, MySQL's former query cache — what not to do).
   23 %, the filter 15 %.  What is left is issue #2's other directions
   (a fixed-width column's offset cached, PostgreSQL's `attcacheoff`;
   less per-entry work in the leaf walk); the issue stays open for them.
+  5. *Decimals in 6 or 10 bytes* (2026-11-19, row encoding version 4).
+     Profiled again (Q6, one worker, 85d69f5): decoding ~45 %, the
+     filter ~21 %, the leaf walk ~18 %, the leaf's touch ~10 % (the
+     lines' misses, gathered there).  A decimal was tag 5 — a 128-bit
+     mantissa and a scale, 18 bytes — so `lineitem`'s four decimals
+     took 72 of a row's ~160 bytes.  PostgreSQL's `numeric` stores
+     base-10000 digits (~5–8 bytes for these), DuckDB a decimal in the
+     fewest of 2, 4, 8 or 16 bytes its declared precision needs; ours
+     is typed by value, as its integers are (tags 12, 13, 2): tag 26 is
+     the scale and a mantissa that fits 32 bits (6 bytes), tag 27 one
+     that fits 64 (10), tag 5 the rest.  Older rows still read (tag 5),
+     rewritten when next written.  Q6 one worker 699 → 643 ms, ten
+     126.6 → 111.8; Q1 1185 → 1045 and 198.8 → 175.7.  The whole TPC-H,
+     each binary's server alone in turn (two loads each, the medians of
+     nine): geometric mean 0.969×, Q9 0.87×, Q6 0.91×, Q17 0.92×, Q5
+     and Q18 0.93×, none slower past the runs' spread (Q10 1.03×:
+     135.7–143.7 before); the load 34.6 → 29.4 s.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),

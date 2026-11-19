@@ -364,9 +364,10 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
     Ok((values, at))
 }
 
-/// Version 3 added the column offsets and tags 22 to 25, version 2 tags
-/// 12 to 21; versions 1 and 2 still read.
-pub const ROW_VERSION: u8 = 3;
+/// Version 4 added tags 26 and 27 (a decimal's scale and its mantissa in
+/// 4 or 8 bytes), version 3 the column offsets and tags 22 to 25, version
+/// 2 tags 12 to 21; versions 1 to 3 still read.
+pub const ROW_VERSION: u8 = 4;
 
 /// A row's offsets mark every this many columns.
 pub const STRIDE: usize = 16;
@@ -453,6 +454,21 @@ impl RowWriter {
 /// (tags 22 to 25).
 pub fn encode_row_value(out: &mut Vec<u8>, v: &Value) {
     let (tag, b) = match v {
+        Value::Numeric(d) => {
+            // Its mantissa in 4 or 8 bytes where it fits (tags 26, 27): 6
+            // or 10 bytes where tag 5's i128 took 18.
+            let (m, scale) = (d.mantissa(), d.scale() as u8);
+            if let Ok(x) = i32::try_from(m) {
+                out.extend_from_slice(&[26, scale]);
+                out.extend_from_slice(&x.to_le_bytes());
+            } else if let Ok(x) = i64::try_from(m) {
+                out.extend_from_slice(&[27, scale]);
+                out.extend_from_slice(&x.to_le_bytes());
+            } else {
+                encode_value(out, v);
+            }
+            return;
+        }
         Value::Text(s) => (22, s.as_bytes()),
         Value::Char(s) => (23, s.as_bytes()),
         Value::Bytea(b) => (24, &b[..]),
@@ -611,6 +627,15 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         13 => Value::Int(i64::from(r.u32().map_err(bad)? as i32)),
         3 => Value::Float(f64::from_bits(r.u64().map_err(bad)?)),
         4 => Value::Text(r.str().map_err(bad)?),
+        tag @ (26 | 27) => {
+            let scale = r.u8().map_err(bad)?;
+            let m = if tag == 26 {
+                i64::from(r.u32().map_err(bad)? as i32)
+            } else {
+                r.u64().map_err(bad)? as i64
+            };
+            Value::Numeric(Decimal::new(i128::from(m), u32::from(scale)).map_err(bad)?)
+        }
         5 => {
             let lo = r.u64().map_err(bad)?;
             let hi = r.u64().map_err(bad)?;
@@ -804,6 +829,8 @@ pub(crate) fn skip_value(r: &mut Reader) -> Result<()> {
         Some(2 | 3 | 7 | 8 | 17) => fixed(r, 9),
         Some(9) => fixed(r, 17),
         Some(5) => fixed(r, 18),
+        Some(26) => fixed(r, 6),
+        Some(27) => fixed(r, 10),
         Some(4 | 18 | 15 | 21) => {
             r.u8().map_err(bad)?;
             let n = r.u32().map_err(bad)? as usize;
@@ -1081,6 +1108,44 @@ mod tests {
         assert!(decode_row(b"\x02", 1).is_err());
     }
 
+    /// Decimals take 6 bytes where the mantissa fits an `i32`, 10 where
+    /// an `i64`, 18 (tag 5) past it — read back the same, whole or passed
+    /// over to a column after them; and a row of version 3's decimals
+    /// (tag 5 each) still reads.
+    #[test]
+    fn decimals_take_the_bytes_their_mantissas_need() {
+        let d = |m: i128, scale: u32| Value::Numeric(Decimal::new(m, scale).unwrap());
+        let cases = [
+            (d(0, 0), 6),
+            (d(150, 2), 6),
+            (d(-1, 30), 6),
+            (d(i128::from(i32::MAX), 0), 6),
+            (d(i128::from(i32::MIN), 4), 6),
+            (d(i128::from(i32::MAX) + 1, 2), 10),
+            (d(i128::from(i32::MIN) - 1, 0), 10),
+            (d(i128::from(i64::MAX), 3), 10),
+            (d(i128::from(i64::MIN), 0), 10),
+            (d(i128::from(i64::MAX) + 1, 0), 18),
+            (d(-(10i128.pow(37)), 5), 18),
+        ];
+        for (v, len) in &cases {
+            let mut out = Vec::new();
+            encode_row_value(&mut out, v);
+            assert_eq!(out.len(), *len, "{v:?}");
+            let row = encode_row(&[v.clone(), Value::Int(7)]);
+            assert_eq!(decode_row(&row, 2).unwrap(), vec![v.clone(), Value::Int(7)]);
+            let last = decode_some(&row, 2, Some(&[false, true]), &mut |_, _| unreachable!());
+            assert_eq!(last.unwrap()[1], Value::Int(7));
+        }
+        let mut old = vec![3];
+        old.extend_from_slice(&(cases.len() as u16).to_le_bytes());
+        for (v, _) in &cases {
+            encode_value(&mut old, v); // tag 5
+        }
+        let values: Vec<Value> = cases.iter().map(|(v, _)| v.clone()).collect();
+        assert_eq!(decode_row(&old, cases.len()).unwrap(), values);
+    }
+
     /// A row as version 2 wrote it: no offsets, text with `u32` lengths.
     fn version_2(row: &[Value]) -> Vec<u8> {
         let mut out = vec![2];
@@ -1147,7 +1212,7 @@ mod tests {
         // Short text costs two bytes of header, not five.
         assert_eq!(
             encode_row(&[Value::Text("ab".into())]),
-            [3, 1, 0, 22, 2, b'a', b'b']
+            [ROW_VERSION, 1, 0, 22, 2, b'a', b'b']
         );
         // A mark pointing outside the row is an error, not a wrong value.
         let mut bad = encode_row(&rows[11]);

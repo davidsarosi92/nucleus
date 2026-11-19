@@ -1972,7 +1972,7 @@ encoding).  Key encoding version 2 (the format record, §8.2): version 1
 wrote a `NULL` array element as `01 00`, before the others — the law kit
 caught the disagreement — and the first write to a version-1 database
 rewrites the keys of every table with an array in a key
-(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `03`, column count, the
+(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `04`, column count, the
 offsets of columns 16, 32, … (`u16` from the row's start; `FFFF` for one
 past 64 KiB, reached by reading on from the mark before it), tagged values
 (missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
@@ -1982,12 +1982,15 @@ a real is tag `14`, a bytea `15`; a registered type's value is tag `11`,
 its id, its encoding version and its canonical bytes; tag `16` (a
 `u32` length) is a value stored out of line; text, `char(n)`, bytea and
 an enum shorter than 256 bytes are tags `22`–`25` with a `u8` length
-rather than a `u32` (`encoding::RowWriter`, `encode_row_value`; the wire
-keeps `encode_value`'s).  A scan reading a few of a row's columns jumps
+rather than a `u32`; a decimal is tag `26` (its scale, then its mantissa
+in 4 bytes) or `27` (in 8) where the mantissa fits, else `05` (16 bytes
+and the scale) — 6 or 10 bytes for most where `05` took 18 (issue #2:
+TPC-H `lineitem`'s four decimals 72 → 24 bytes a row) (`encoding::RowWriter`,
+`encode_row_value`; the wire keeps `encode_value`'s).  A scan reading a few of a row's columns jumps
 to the mark before each and skips the values between (`RowHeader::seek`,
-for the row-at-a-time and the batch decoders alike).  Version `02` (no
-offsets, no tags `22`–`25`) still reads; a row is written in `03` when
-next written (§M14.20 W7, D18).
+for the row-at-a-time and the batch decoders alike).  Versions `02` (no
+offsets, no tags `22`–`25`) and `03` (no tags `26`, `27`) still read; a
+row is written in `04` when next written (§M14.20 W7, D18).
 
 **Large values out of line** (`large`).  A value whose encoding is longer
 than 2 000 bytes (`large::THRESHOLD`) — a file in a `bytea`, a document
@@ -8117,6 +8120,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-19 — decimals stored in 6 or 10 bytes (issue #2, row
+  encoding version 4):** a decimal whose mantissa fits 32 or 64 bits is
+  stored as its scale and those bytes (tags 26, 27) instead of a 128-bit
+  mantissa (18 bytes); older rows still read, rewritten when next
+  written.  TPC-H Q6 on row tables, ten workers, 126.6 → 111.8 ms; Q1
+  198.8 → 175.7.
 
 - **2026-11-19 — a scan's leaves read whole first (issue #1):** a B+tree
   cursor moving on to a leaf in a scan reads a byte of each of its cache
