@@ -1228,6 +1228,20 @@ fn dec_kernel(
         if any_over && sel.iter().any(|i| live(i) && raised_over(i)) {
             return Ok(None);
         }
+        // A narrow column against a constant that fits it: compared as
+        // 64-bit integers, by the integers' kernel.
+        let narrow = match (&a, &b) {
+            (DecRows::Narrow(d), DecRows::One(m)) => Some((*d, *m, op)),
+            (DecRows::One(m), DecRows::Narrow(d)) => Some((*d, *m, flipped(op))),
+            _ => None,
+        };
+        if let Some((d, m, op)) = narrow
+            && let Ok(m) = i64::try_from(m)
+        {
+            let mut out = vec![false; len];
+            kernels::cmp_i64(cmp_of(op), &d[..len], Rhs::Const(m), &mut out);
+            return Ok(Some(Vector::Bool(out, nulls)));
+        }
         let want = |o: std::cmp::Ordering| match op {
             Eq => o.is_eq(),
             NotEq => o.is_ne(),

@@ -11707,6 +11707,37 @@ simple parameterization, MySQL's former query cache — what not to do).
      1.10× and 1.09× there, measured again (three loads each, medians of
      20): Q2 18.22 → 18.38 ms on ten workers, 44.61 → 44.60 on one; Q4
      71.0 → 70.9 and 323.4 → 315.6.
+  7. *A row's values passed over by their tags' lengths; decimals
+     compared with a constant on 64 bits; the row reader inlined.*
+     Profiled again (Q6, one worker, 09b7907): `decode_into` and
+     `RowHeader::seek` ~40 % — Q6 reads columns 4–6 and 10 of `lineitem`'s
+     16, so each row passes over seven values, each through
+     `skip_value`'s `match` and a `Result`-returning `take`; the reader's
+     `u8` / `u32` called, not inlined (another codegen unit); the decimal
+     comparisons (`l_discount BETWEEN`, `l_quantity < 24`) widening each
+     64-bit mantissa to 128 bits and choosing the operator a row at a time.
+     Three changes, each measured alone (each binary's server alone in
+     turn, three loads, medians of 20):
+     - the reader's small reads `#[inline]`, the truncated record's error
+       built out of line (`#[cold]`): Q6 one worker 573 → 553 ms, ten
+       101.6 → 98.2; Q1 −1.5 %;
+     - a 64-bit decimal column against a constant that fits 64 bits by the
+       integers' comparison kernel (`kernels::cmp_i64`): 551 → 533, 98.1
+       → 94.9;
+     - a table of each tag's length where its values have one
+       (`encoding::FIXED`, which `skip_value` reads too), a short text
+       passed by its length byte, the row's end checked once after the
+       values passed over (as PostgreSQL's `heap_deform_tuple` adds
+       `attlen` for a fixed-length attribute and reads `varsize` only for
+       the rest; SQLite's record header holds each column's serial type,
+       its size by table): 529 → 485, 95.6 → 89.5.  Q1, reading its
+       columns side by side, even.
+     Together Q6 573 → 485 ms on one worker, 101.6 → 89.5 on ten
+     (PostgreSQL's 93.7).  The whole TPC-H alone in turn: geometric mean
+     0.980×, Q20 0.86×, Q6 0.91×, Q9 and Q5 0.92× and 0.93×; Q3, Q13 and
+     Q7 (1.08×, 1.08×, 1.05× there, from one run each) measured again:
+     Q3 154.0 → 150.2 ms on ten workers, Q13 90.5 → 90.0, Q7 142.3 →
+     141.4, even on one.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),

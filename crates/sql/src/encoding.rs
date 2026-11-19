@@ -809,35 +809,75 @@ impl<'a> RowHeader<'a> {
             }
             m -= 1;
         }
+        // Past the values between: a fixed length or a short text's by
+        // the bytes, the rest by `skip_value`; the end checked once.
+        let b = r.rest();
+        let mut p = 0;
         while *at < c {
-            skip_value(r)?;
+            let Some(&tag) = b.get(p) else {
+                return Err(Error::internal("malformed row encoding"));
+            };
+            let n = usize::from(FIXED[usize::from(tag)]);
+            if n != 0 {
+                p += n;
+            } else if (22..=25).contains(&tag)
+                && let Some(&len) = b.get(p + 1)
+            {
+                p += 2 + usize::from(len);
+            } else {
+                let mut v = Reader::new(&b[p..]);
+                skip_value(&mut v)?;
+                p = b.len() - v.remaining();
+            }
             *at += 1;
         }
+        if p > b.len() {
+            return Err(Error::internal("malformed row encoding"));
+        }
+        *r = Reader::new(&b[p..]);
         Ok(())
     }
 }
+
+/// The row encoding's length of a value of each tag, tag included, where
+/// every value of the tag has one length; 0 where not.
+const FIXED: [u8; 256] = {
+    let mut t = [0u8; 256];
+    t[0] = 1;
+    t[1] = 2;
+    t[12] = 3;
+    t[13] = 5;
+    t[14] = 5;
+    t[6] = 5;
+    t[2] = 9;
+    t[3] = 9;
+    t[7] = 9;
+    t[8] = 9;
+    t[17] = 9;
+    t[9] = 17;
+    t[5] = 18;
+    t[26] = 6;
+    t[27] = 10;
+    // A value stored out of line: its tag and length.
+    t[OUT_OF_LINE as usize] = 5;
+    t
+};
 
 /// Moves past one value's row encoding without building it.
 pub(crate) fn skip_value(r: &mut Reader) -> Result<()> {
     let bad = |_| Error::internal("malformed row encoding");
     let fixed = |r: &mut Reader, n: usize| r.take(n).map(|_| ()).map_err(bad);
+    if let Some(t) = r.peek()
+        && FIXED[usize::from(t)] != 0
+    {
+        return fixed(r, usize::from(FIXED[usize::from(t)]));
+    }
     match r.peek() {
-        Some(0) => fixed(r, 1),
-        Some(1) => fixed(r, 2),
-        Some(12) => fixed(r, 3),
-        Some(13 | 14 | 6) => fixed(r, 5),
-        Some(2 | 3 | 7 | 8 | 17) => fixed(r, 9),
-        Some(9) => fixed(r, 17),
-        Some(5) => fixed(r, 18),
-        Some(26) => fixed(r, 6),
-        Some(27) => fixed(r, 10),
         Some(4 | 18 | 15 | 21) => {
             r.u8().map_err(bad)?;
             let n = r.u32().map_err(bad)? as usize;
             fixed(r, n)
         }
-        // A value stored out of line: its tag and length.
-        Some(OUT_OF_LINE) => fixed(r, 5),
         Some(22..=25) => {
             r.u8().map_err(bad)?;
             let n = usize::from(r.u8().map_err(bad)?);
@@ -903,6 +943,13 @@ impl Writer {
     }
 }
 
+/// A record ended early: built out of the readers' line.
+#[cold]
+#[inline(never)]
+fn truncated() -> Error {
+    Error::internal("truncated record")
+}
+
 /// Reads what [`Writer`] wrote.
 pub struct Reader<'a> {
     b: &'a [u8],
@@ -910,37 +957,44 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// A reader over `b`.
+    #[inline]
     pub fn new(b: &'a [u8]) -> Self {
         Self { b }
     }
 
     /// The next byte, not consumed.
+    #[inline]
     pub fn peek(&self) -> Option<u8> {
         self.b.first().copied()
     }
 
     /// The next `n` bytes.
+    #[inline]
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.b.len() < n {
-            return Err(Error::internal("truncated record"));
+            return Err(truncated());
         }
         let (h, t) = self.b.split_at(n);
         self.b = t;
         Ok(h)
     }
     /// A `u8`.
+    #[inline]
     pub fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
     /// A `u16`.
+    #[inline]
     pub fn u16(&mut self) -> Result<u16> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
     /// A `u32`.
+    #[inline]
     pub fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
     /// A `u64`.
+    #[inline]
     pub fn u64(&mut self) -> Result<u64> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
@@ -969,6 +1023,11 @@ impl<'a> Reader<'a> {
     /// How many bytes are left.
     pub fn remaining(&self) -> usize {
         self.b.len()
+    }
+    /// The bytes not read yet.
+    #[inline]
+    pub fn rest(&self) -> &'a [u8] {
+        self.b
     }
 }
 

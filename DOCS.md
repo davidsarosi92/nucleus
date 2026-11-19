@@ -1988,7 +1988,10 @@ and the scale) — 6 or 10 bytes for most where `05` took 18 (issue #2:
 TPC-H `lineitem`'s four decimals 72 → 24 bytes a row) (`encoding::RowWriter`,
 `encode_row_value`; the wire keeps `encode_value`'s).  A scan reading a few of a row's columns jumps
 to the mark before each and skips the values between (`RowHeader::seek`,
-for the row-at-a-time and the batch decoders alike).  Versions `02` (no
+for the row-at-a-time and the batch decoders alike: a value of a tag of
+one length, or a short text, passed over by the length its tag gives —
+a table, `encoding::FIXED` — the row's end checked once; issue #2: TPC-H
+Q6, seven values passed over a row, −8 %).  Versions `02` (no
 offsets, no tags `22`–`25`) and `03` (no tags `26`, `27`) still read; a
 row is written in `04` when next written (§M14.20 W7, D18).
 
@@ -2530,7 +2533,8 @@ as a row widens it), decimal `+`, `-`, `*` and comparisons on the
 mantissas (an integer a decimal of scale 0; `+`, `-` and comparisons at
 the larger scale, `*` at the sum — `Decimal`'s rules, a result past 38
 digits failing on a row in play; a comparison whose raising would
-overflow compared value by value), text and `char(n)` comparisons (a `char(n)` side
+overflow compared value by value; a 64-bit column against a constant
+that fits 64 bits by the integers' comparison kernel), text and `char(n)` comparisons (a `char(n)` side
 without its trailing blanks, as a row compares it) and `LIKE` whose only
 wildcard is `%` (at the ends: a prefix, suffix or substring; within too:
 its parts found in order, each after the last — `'%special%requests%'`;
@@ -8124,6 +8128,21 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-19 — a row's values passed over by their tags' lengths,
+  decimal comparisons with a constant on 64 bits (issue #2):** a scan
+  skipping the columns it does not read passes a fixed-length value or
+  a short text by the length its tag gives (a table), the row's end
+  checked once; a decimal column held as 64-bit mantissas compared with
+  a constant that fits them goes through the integers' comparison
+  kernel; the row decoder's small reads are inlined.  TPC-H Q6 on row
+  tables: one worker 573 → 485 ms, ten 101.6 → 89.5.
+
+- **2026-11-19 — a filter's conjunction narrowed a term at a time
+  (issue #2):** each term of a filter's `AND` is evaluated over the rows
+  no term before it held FALSE for, a row a term held `NULL` for dropped
+  at the end, instead of the three-valued `AND` built over all the rows.
+  TPC-H Q6 on row tables, ten workers, 112.0 → 100.4 ms.
 
 - **2026-11-19 — decimals stored in 6 or 10 bytes (issue #2, row
   encoding version 4):** a decimal whose mantissa fits 32 or 64 bits is

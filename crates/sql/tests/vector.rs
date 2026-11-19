@@ -2544,3 +2544,46 @@ fn conjunctions_narrow_as_a_rows_and_does() {
     .to_vec();
     assert_eq!(agree(&db, &queries), 2);
 }
+
+/// A narrow decimal column against a constant — on either side, of
+/// either scale, and past 64 bits — compares as a row compares it.
+#[test]
+fn narrow_decimals_compare_with_constants_as_rows_do() {
+    let db = database();
+    let mut queries = Vec::new();
+    for op in ["=", "<>", "<", "<=", ">", ">="] {
+        for c in [
+            "10",
+            "10.5",
+            "16.67",
+            "-3",
+            "123456789012345678901234567890",
+        ] {
+            queries.push(format!(
+                "SELECT count(*) FROM t WHERE n {op} {c} AND id % 2 = 0"
+            ));
+            queries.push(format!(
+                "SELECT id FROM t WHERE {c} {op} n ORDER BY id LIMIT 7"
+            ));
+        }
+    }
+    assert_eq!(agree(&db, &queries), 0);
+}
+
+/// Rows read by columns far apart — values passed over by the bytes of
+/// their tags, `NULL`s, short and long texts among them — read as a row
+/// reads them.
+#[test]
+fn columns_passed_over_read_as_a_row_reads_them() {
+    let db = database();
+    let queries: Vec<String> = [
+        "SELECT id, big IS NULL FROM t WHERE id % 97 = 1 ORDER BY id",
+        "SELECT sum(b), count(m) FROM t WHERE d > DATE '2026-03-01'",
+        "SELECT id, m FROM t WHERE a IS NULL ORDER BY id",
+        "SELECT count(*) FROM t WHERE m = 'ok' AND length(big) > 10",
+        "SELECT r, d FROM t WHERE s LIKE 'name 3%' ORDER BY id LIMIT 20",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(agree(&db, &queries), 0);
+}
