@@ -42,6 +42,17 @@ struct Frame {
     referenced: AtomicBool,
 }
 
+impl Frame {
+    fn new(page: Page) -> Self {
+        Frame {
+            page: RwLock::new(page),
+            pins: AtomicU32::new(0),
+            dirty: AtomicBool::new(false),
+            referenced: AtomicBool::new(false),
+        }
+    }
+}
+
 /// A shard's lock, and the hits found in it — counted on the line the
 /// lock already writes, not on one every thread's hits write.
 #[repr(align(128))]
@@ -241,12 +252,19 @@ impl BufferPool {
 
     /// Frame `i`, made on first use.
     fn frame(&self, i: usize) -> &Frame {
-        self.frames[i].get_or_init(|| Frame {
-            page: RwLock::new(Page::new(PageType::UNUSED)),
-            pins: AtomicU32::new(0),
-            dirty: AtomicBool::new(false),
-            referenced: AtomicBool::new(false),
-        })
+        self.frames[i].get_or_init(|| Frame::new(Page::new(PageType::UNUSED)))
+    }
+
+    /// Puts `page` in frame `i` — the frame made with it on first use, so
+    /// no empty page is allocated (and zeroed) only to be replaced: after
+    /// a start every frame a cold scan fills is a first use.
+    fn put(&self, i: usize, page: Page) -> &Frame {
+        let mut page = Some(page);
+        let f = self.frames[i].get_or_init(|| Frame::new(page.take().expect("not taken yet")));
+        if let Some(page) = page {
+            *f.page.write().unwrap_or_else(|e| e.into_inner()) = page;
+        }
+        f
     }
 
     /// Number of frames.
@@ -386,9 +404,9 @@ impl BufferPool {
             let Ok(frame) = self.victim(&mut inner) else {
                 return;
             };
-            let f = self.frame(frame);
-            *f.page.write().unwrap_or_else(|e| e.into_inner()) = page;
-            f.referenced.store(false, Ordering::Relaxed);
+            self.put(frame, page)
+                .referenced
+                .store(false, Ordering::Relaxed);
             self.install(&mut inner, frame, id, false);
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
@@ -402,11 +420,7 @@ impl BufferPool {
         page: Page,
     ) -> Result<PageRef<'_>> {
         let frame = self.victim(&mut inner)?;
-        *self
-            .frame(frame)
-            .page
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = page;
+        self.put(frame, page);
         self.install(&mut inner, frame, id, false);
         Ok(self.pin(frame, id))
     }
@@ -424,11 +438,7 @@ impl BufferPool {
                 return Err(e);
             }
         };
-        *self
-            .frame(frame)
-            .page
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Page::new(ty);
+        self.put(frame, Page::new(ty));
         self.install(&mut inner, frame, id, true);
         Ok(self.pin(frame, id))
     }

@@ -1504,7 +1504,7 @@ distributed implementation will provide (§F3).
 
 `Database` is the local implementation: `Database::open(dir, Options)` on
 the real file system, `open_on(platform, dir, Options)` on any platform;
-`checkpoint`, `vacuum`, `latest`, `pages` (the data file's pages and the free ones among them), `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used; LSM tables' block cache takes a quarter of it again, filled only as they are read),
+`checkpoint`, `vacuum`, `latest`, `pages` (the data file's pages and the free ones among them), `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used — made with the page read into it, so a cold scan after a start allocates no empty page only to replace it (issue #2: TPC-H Q6 cold 226.6 → 187.3 ms); LSM tables' block cache takes a quarter of it again, filled only as they are read),
 `checkpoint_wal_bytes` (1 GiB — 64 MiB on 32-bit targets), `wal_segment_bytes` (16 MiB), `history`
 (0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
 before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
@@ -8128,6 +8128,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-19 — a buffer frame made with the page read into it (issue
+  #2):** a frame used the first time was made with an empty page,
+  allocated and zeroed, which the page read then replaced (and freed);
+  after a start every frame a cold scan fills is a first use.  Now the
+  frame is made with the page read.  TPC-H Q6 cold (the server just
+  started) 226.6 → 187.3 ms.
 
 - **2026-11-19 — a row's values passed over by their tags' lengths,
   decimal comparisons with a constant on 64 bits (issue #2):** a scan
