@@ -11746,6 +11746,23 @@ simple parameterization, MySQL's former query cache — what not to do).
      buffers past the first two entries) — `memmove` from there ~6 % of
      Q6's samples, but Q6 one worker 482 → 490 ms, Q1 even: the prefix is
      short and the copy's call stays.
+     Why the method's warm Q6 (104 ms) was above the one-server
+     comparisons' (89.5, the same binary), measured: not the workers (the
+     default is the CPUs', 10), nor the statement timeout the method sets
+     (88.7 / 87.7, 89.4 / 89.8 alternately), nor the layout a restart
+     leaves (steady 96.5 before any restart, 97.6 and 93.5 after, in one
+     run).  The method's warm run is the second after a restart, ~5 %
+     above the runs after it (run 2 92–114 ms, runs 3–10 ~93 over nine
+     rounds), and it alternates with PostgreSQL's server; the
+     one-server tool's first ~20 runs after the load are ~96 (the load's
+     writes still going back to the file), then 87–90.  Found on the way:
+     a stopped server leaves its WAL unapplied — 1.85 GB after the TPC-H
+     load — and the next start applies it, each changed page written to a
+     new place (shadow paging): the file 2.78 → 4.25 GB, 184 136 pages
+     (1.4 GB) of it free, the pages in use the same (2.76 GB).  Whether
+     that scatters a table's leaves, so a cold scan's read-ahead (runs of
+     consecutive page ids only) reads a page at a time — Q6 cold 1.29× —
+     is not measured yet.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
