@@ -686,7 +686,10 @@ const RAW: u16 = 0x8000;
 /// a scan through it evicts in steps rather than all at once.
 #[derive(Default)]
 struct Cache {
-    entries: HashMap<(u64, u16), (Decoded, usize, AtomicU64)>,
+    /// (Hashed by the seeded multiplicative hash: a fetched row looks up
+    /// each of its columns — SipHash was ~9 % of TPC-H Q19's on column
+    /// tables.)
+    entries: HashMap<(u64, u16), (Decoded, usize, AtomicU64), crate::fasthash::FastBuild>,
 }
 
 /// The cache's shards: a column's by its key, so threads reading different

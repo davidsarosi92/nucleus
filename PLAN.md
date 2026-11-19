@@ -11942,6 +11942,25 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     (`put_unlogged`) and the runs sorted on one thread; a bottom-up build
     of the fresh range's leaves is PostgreSQL's `_bt_load`.
 
+  *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
+  1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in
+  `lineitem` by its index — 102 ms on one worker against row tables' 35:
+  a fetched row's segment found, its place by a binary search of the
+  segment's keys (`Keys::search` 15 % of the query), each column read
+  through the decoded-column cache, which hashed by SipHash (~9 %).
+  - Taken: the cache hashed by the seeded multiplicative hash — Q19 −4 %
+    (one worker 103.5 → 99.5 ms, ten 32.8 → 31.6, both orders); the
+    whole TPC-H on column tables alone in turn 1.016× (a loaded machine:
+    the third run of four slower in most queries).
+  - Tried, not taken: a column lookup costed 3.0 row lookups instead of
+    1.2, so the optimizer hashes a scan of `lineitem` — 43 ms on ten
+    workers, 240 on one: the key filter is the pipeline's first step, but
+    the column source has decoded every wanted column of each batch
+    first, two texts among them.
+  - Left, issue #5: late materialization for column scans (the key
+    filter's column first, the others for the rows left) and fetches
+    grouped by segment.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
