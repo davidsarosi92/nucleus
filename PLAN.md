@@ -11779,6 +11779,33 @@ simple parameterization, MySQL's former query cache — what not to do).
      the read buffer into its own allocation (`malloc` ~18 % of a cold
      run's busy samples, `pread` ~16 %) — reading into the frame's own
      page instead needs the pager to read into pages it is given.
+     The whole TPC-H by the method after it (SF 1, row tables, PostgreSQL
+     18.7, a noisy machine — the quiet gate waited often): warm geometric
+     mean 0.57×, cold 0.55×, answers 22 of 22 the same; past 1× with the
+     intervals apart: Q10 1.14×, Q12 1.18×, Q16 1.14× warm, Q16 1.30× and
+     Q22 1.25× cold; Q6 ≈ 1.12× warm and ≈ 1.20× cold (intervals
+     overlapping).
+     Tried next, not taken:
+     - *leaves packed fuller* (a throwaway build, the target by an
+       environment variable): `lineitem`'s leaves are 86.5 % full (41
+       entries, 172 bytes an entry with its slot and cell head) at the 7/8
+       target (`pack_cells`, as PostgreSQL's `nbtsort` packs an index; its
+       heap packs to 100 %, InnoDB's clustered index to 15/16).  The data
+       file's pages in use 2,763 → 2,579 MiB at 15/16, 2,417 at full; Q1,
+       Q6, Q12 warm even (Q6 86.7/93.8 → 87.0/87.9 ms), Q6 cold even (204.4
+       /212.2 → 204.6/202.0): a scan's time is its rows', not its pages'.
+       The space alone does not pay for an update's split in a full leaf;
+     - *a filter's leading terms tested first* (those reading only what its
+       first term reads — Q6's two on `l_shipdate`, keeping a seventh —
+       the other columns read for the rows they keep, ClickHouse's
+       `PREWHERE`): each kept row's bytes read twice cost more than three
+       columns' decoding spared, once passing over values costs little:
+       Q6 one worker 502 → 525 ms, Q12 733 → 893, Q14 499 → 529.
+     A cold run's left (the profile above): `pread` copying from the OS's
+     cache, a frame's first touch of new memory, the copy and CRC of each
+     page — PostgreSQL's cold run reads the same way into new shared
+     memory (its checksums on by default since 18); lock waits ~200
+     samples of ~9,400 busy.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
