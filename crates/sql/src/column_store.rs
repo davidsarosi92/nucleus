@@ -850,6 +850,52 @@ fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> 
     Ok(v)
 }
 
+/// Whether column `col` of `seg` is in the cache decoded.
+fn decoded(seg: &Segment, col: usize) -> bool {
+    matches!(cache_get(&(seg.id, col as u16)), Some(Decoded::Column(_)))
+}
+
+/// [`value_of`] for each of `rows`: the column looked up in the cache, and
+/// its header (a dictionary's entries) read, once for all.
+fn values_of(
+    txn: &dyn KvTxn,
+    t: &Table,
+    seg: &Segment,
+    col: usize,
+    rows: &[usize],
+) -> Result<Vec<Value>> {
+    let mut values = if !seg.cols.contains(&(col as u16)) {
+        vec![Value::Null; rows.len()]
+    } else if let Some(Decoded::Column(v)) = cache_get(&(seg.id, col as u16)) {
+        rows.iter().map(|&i| v.value(i)).collect()
+    } else {
+        let key = (seg.id, col as u16 | RAW);
+        let raw = match cache_get(&key) {
+            Some(Decoded::Raw(b)) => b,
+            _ => {
+                let b = Arc::new(
+                    txn.get(&chunk_key(t, seg.id, col as u16))?
+                        .ok_or_else(|| bad("a column is missing"))?,
+                );
+                cache_insert(key, Decoded::Raw(Arc::clone(&b)));
+                b
+            }
+        };
+        match crate::segment::values_at(&raw, rows)? {
+            Some(values) => values,
+            None => {
+                let v = stored_column(txn, t, seg, col)?;
+                rows.iter().map(|&i| v.value(i)).collect()
+            }
+        }
+    };
+    let mut labels = Labels::default();
+    for v in &mut values {
+        labels.fill(txn, t.columns[col].ty, v)?;
+    }
+    Ok(values)
+}
+
 /// [`value_of`] as stored (an enum's value without its label).
 fn stored_value(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> Result<Value> {
     if !seg.cols.contains(&(col as u16)) {
@@ -1518,6 +1564,8 @@ struct Merged<'a> {
     /// The segment being read: it, its keys, its deleted rows, where.
     cur: Option<(Rc<Segment>, Arc<Keys>, BTreeSet<u32>, usize, usize)>,
     prefix: Vec<u8>,
+    /// A column not read, shared by every batch.
+    null: Rc<Vector>,
 }
 
 impl<'a> Merged<'a> {
@@ -1549,6 +1597,7 @@ impl<'a> Merged<'a> {
             delta,
             cur: None,
             prefix: t.index_prefix(0),
+            null: Rc::new(Vector::Const(Value::Null)),
         };
         m.start_at(&start)?;
         Ok(m)
@@ -1678,6 +1727,42 @@ impl<'a> Merged<'a> {
     }
 }
 
+impl Merged<'_> {
+    fn wants(&self, c: usize) -> bool {
+        self.wanted
+            .is_none_or(|w| w.get(c).copied().unwrap_or(false))
+    }
+
+    /// Column `c` of a segment's rows `range`, as a batch gives it.
+    fn segment_column(
+        &self,
+        seg: &Segment,
+        c: usize,
+        range: &std::ops::Range<usize>,
+    ) -> Result<Rc<Vector>> {
+        if !self.wants(c) {
+            return Ok(Rc::clone(&self.null));
+        }
+        let len = range.len();
+        let v = column_of(self.txn, self.t, seg, c)?;
+        Ok(Rc::new(match &*v {
+            Vector::Const(x) => Vector::Const(x.clone()),
+            // A dictionary's codes for a filter that asked for them; its
+            // text for anything else.
+            Vector::Dict(..) if !self.dicts.contains(&c) => v
+                .slice(range.clone())
+                .undict(&Sel::All(len))
+                .expect("a dictionary"),
+            v => v.slice(range.clone()),
+        }))
+    }
+}
+
+/// A tested batch's rows kept, at most this share of its rows, have their
+/// other columns read a value at a time from the segment's stored
+/// columns; more, the columns decoded whole and the rows gathered.
+const SPARSE: usize = 16;
+
 impl BatchSource for Merged<'_> {
     fn next_batch(&mut self, max: usize) -> Result<Option<Batch>> {
         match self.next_run(max)? {
@@ -1687,35 +1772,144 @@ impl BatchSource for Merged<'_> {
             )),
             Some(Run::Segment { seg, range, live }) => {
                 let len = range.len();
-                let mut cols = Vec::with_capacity(self.t.columns.len());
-                for c in 0..self.t.columns.len() {
-                    if self
-                        .wanted
-                        .is_some_and(|w| !w.get(c).copied().unwrap_or(false))
-                    {
-                        cols.push(Rc::new(Vector::Const(Value::Null)));
-                    } else {
-                        let v = column_of(self.txn, self.t, &seg, c)?;
-                        cols.push(Rc::new(match &*v {
-                            Vector::Const(x) => Vector::Const(x.clone()),
-                            // A dictionary's codes for a filter that asked
-                            // for them; its text for anything else.
-                            Vector::Dict(..) if !self.dicts.contains(&c) => v
-                                .slice(range.clone())
-                                .undict(&Sel::All(len))
-                                .expect("a dictionary"),
-                            v => v.slice(range.clone()),
-                        }));
-                    }
-                }
-                let sel = if live.len() == len {
-                    Sel::All(len)
-                } else {
-                    Sel::Rows(live.iter().map(|&i| i - range.start as u32).collect())
-                };
-                Ok(Some(Batch { len, cols, sel }))
+                let cols = (0..self.t.columns.len())
+                    .map(|c| self.segment_column(&seg, c, &range))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Batch {
+                    len,
+                    cols,
+                    sel: live_sel(&live, &range),
+                }))
             }
         }
+    }
+
+    /// A segment's rows tested on the columns `first` alone, the other
+    /// columns read for the rows kept only (late materialization, as a row
+    /// table's scan does: PLAN.md §M14.33 R3) — ClickBench's `SELECT * …
+    /// WHERE URL LIKE '%google%'` decoded every column of every segment
+    /// for 95 rows of a million.  Not where nothing else is read.
+    fn next_batch_tested(
+        &mut self,
+        max: usize,
+        first: &[bool],
+        test: &mut dyn FnMut(&Batch) -> Result<Sel>,
+    ) -> Result<Option<(Batch, usize, bool)>> {
+        let first_of = |c: usize| first.get(c).copied().unwrap_or(false);
+        let width = self.t.columns.len();
+        // Only when what it spares costs, as a row table's scan decides: a
+        // column of variable length, or a few (a decimal counting as two);
+        // a number or two gathered cost more than they spare (ClickBench
+        // Q40's one `bigint` after its filter's five: +6 %).
+        let (rest, costly) = (0..width).filter(|&c| self.wants(c) && !first_of(c)).fold(
+            (0, false),
+            |(n, costly), c| {
+                use crate::types::DataType as T;
+                match self.t.columns[c].ty {
+                    T::Bool
+                    | T::SmallInt
+                    | T::Integer
+                    | T::BigInt
+                    | T::Real
+                    | T::Float
+                    | T::Date
+                    | T::Time
+                    | T::Timestamp
+                    | T::TimestampTz => (n + 1, costly),
+                    T::Numeric => (n + 2, costly),
+                    _ => (n + 1, true),
+                }
+            },
+        );
+        if rest == 0 || (!costly && rest < crate::vector::LATE_COLUMNS) {
+            return Ok(self.next_batch(max)?.map(|b| {
+                let n = b.len;
+                (b, n, false)
+            }));
+        }
+        let (seg, range, live) = match self.next_run(max)? {
+            None => return Ok(None),
+            Some(Run::Delta(rows)) => {
+                let b = crate::vector::batch_of_rows(rows.into_iter().map(|(_, r)| r).collect());
+                return Ok(b.map(|b| {
+                    let n = b.len;
+                    (b, n, false)
+                }));
+            }
+            Some(Run::Segment { seg, range, live }) => (seg, range, live),
+        };
+        let len = range.len();
+        let null = || Rc::clone(&self.null);
+        let probe = Batch {
+            len,
+            cols: (0..width)
+                .map(|c| {
+                    if first_of(c) {
+                        self.segment_column(&seg, c, &range)
+                    } else {
+                        Ok(null())
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?,
+            sel: live_sel(&live, &range),
+        };
+        // Failed: the rows whole, untested — the steps test them again.
+        let kept = match test(&probe) {
+            Ok(kept) => kept,
+            Err(_) => {
+                let cols = (0..width)
+                    .map(|c| match first_of(c) {
+                        true => Ok(Rc::clone(&probe.cols[c])),
+                        false => self.segment_column(&seg, c, &range),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let b = Batch {
+                    len,
+                    cols,
+                    sel: probe.sel,
+                };
+                return Ok(Some((b, len, false)));
+            }
+        };
+        let k = kept.len();
+        let rows: Vec<usize> = kept.iter().map(|i| range.start + i).collect();
+        let at = Sel::Rows(rows.iter().map(|&i| i as u32).collect());
+        let mut cols = Vec::with_capacity(width);
+        for c in 0..width {
+            cols.push(if first_of(c) {
+                // (A dictionary's codes the test read: their text.)
+                let v = probe.cols[c].gather(&kept);
+                Rc::new(v.undict(&Sel::All(k)).unwrap_or(v))
+            } else if !self.wants(c) || k == 0 {
+                null()
+            } else if k * SPARSE <= len && !decoded(&seg, c) {
+                // A few rows of a column not decoded: read where they lie.
+                Rc::new(Vector::typed(values_of(self.txn, self.t, &seg, c, &rows)?))
+            } else {
+                // The column decoded (or found so in the cache), the rows
+                // kept taken from it — not the run's first.
+                let v = column_of(self.txn, self.t, &seg, c)?.gather(&at);
+                Rc::new(v.undict(&Sel::All(k)).unwrap_or(v))
+            });
+        }
+        Ok(Some((
+            Batch {
+                len: k,
+                cols,
+                sel: Sel::All(k),
+            },
+            len,
+            true,
+        )))
+    }
+}
+
+/// The selection of a segment run's live rows (positions in the run).
+fn live_sel(live: &[u32], range: &std::ops::Range<usize>) -> Sel {
+    if live.len() == range.len() {
+        Sel::All(range.len())
+    } else {
+        Sel::Rows(live.iter().map(|&i| i - range.start as u32).collect())
     }
 }
 

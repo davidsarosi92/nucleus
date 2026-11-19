@@ -46,6 +46,14 @@ const QUERIES: &[&str] = &[
     "SELECT id FROM TT WHERE x = 5 ORDER BY id",
     "SELECT count(*) FROM TT WHERE f IS NULL",
     "SELECT * FROM TT WHERE id > 1000000",
+    // Tested on the filter's columns first, the others read for the rows
+    // kept: a few (a value at a time), many (whole columns gathered), by a
+    // dictionary's codes, past NULLs, failing on some row.
+    "SELECT * FROM TT WHERE s LIKE '%7!' ORDER BY id",
+    "SELECT * FROM TT WHERE s = 'name 7' AND x > 500 ORDER BY id",
+    "SELECT * FROM TT WHERE x = 5 OR f IS NULL ORDER BY id",
+    "SELECT id, s, d, ok FROM TT WHERE x < 300 ORDER BY id",
+    "SELECT id, s FROM TT WHERE 10 / (x - 5) > 1 ORDER BY id",
 ];
 
 fn compare(s: &mut Session) {

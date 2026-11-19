@@ -11961,6 +11961,40 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     filter's column first, the others for the rows left) and fetches
     grouped by segment.
 
+  *S6, ClickBench Q23 on column tables* (1.61×: `SELECT * … WHERE URL
+  LIKE '%google%' ORDER BY EventTime LIMIT 10`, 110 against
+  PostgreSQL's 68.6 ms).  The profile: the column source decoded and
+  decompressed all 105 columns of every segment for 95 rows of a million
+  (`segment::unpack`, `lz::decompress`, `Vector::undict`; the `LIKE`
+  kernel 3 %), PostgreSQL's parallel scan reading each row's columns
+  only past its filter.
+  - Taken: late materialization for column scans, as a row table's
+    (R3): a segment run's filter columns decoded and tested — a
+    dictionary's codes where the filter tests them on its entries, as
+    the steps do — then the other columns for the rows kept: at most a
+    sixteenth kept and the column not decoded in the cache, each value
+    read where it lies (`segment::values_at`, the column's header and a
+    dictionary's entries read once for all); else taken from the decoded
+    column by the rows' places.  Only when it spares a column of
+    variable length or four fixed (a decimal two), as R3 decides: Q40's
+    one `bigint` after five filter columns was +6 % before the rule,
+    −6 % with it.  Q23 ten workers 102 → 6.4 ms, one 570 → 33.  Alone in
+    turn on a quiet machine, both orders: ClickBench (column) geometric
+    mean 0.909, no query slower; TPC-H on column tables 0.968 (Q14 36.8
+    → 18.5 ms, Q15 44.1 → 31.6; Q8 the plan flip below); TPC-H on row
+    tables 0.997.
+  - Found: TPC-H Q8 on column tables plans a hash join of `lineitem` or
+    an index nested loop from `part` by turns, the two costed within the
+    statistics' sampling (each `ANALYZE` seeds its sample afresh): ten
+    workers 77 against 110 ms.  The nested loop's lookups scale worse
+    past one worker — issue #5's lookup cost.
+
+  *S7, the ClickBench load on row tables* (1.17×).  Step by step
+  (`cbload.py`, each alone in turn, twice): `COPY` 5.5–5.8 s against
+  PostgreSQL's 5.4–5.6, `ANALYZE` 0.85 against 0.85, `VACUUM` 1.7
+  against 0.6 — the gap is the vacuum's: issue #4 (each committed
+  intent made a version through the WAL), recorded there.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

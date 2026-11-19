@@ -380,56 +380,78 @@ fn packed_at(b: &[u8], i: usize, bits: u8) -> Result<u64> {
 }
 
 /// Row `i`'s value of a column [`encode`]d, read where it lies — `None`
-/// for a layout that must be decoded whole to reach it (a dictionary, row
-/// encodings back to back).
+/// for a layout that must be decoded whole to reach it (row encodings
+/// back to back).
 pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
+    Ok(values_at(b, &[i])?.map(|mut v| v.pop().expect("one value")))
+}
+
+/// [`value_at`] for each of `rows`, the column's header — a dictionary's
+/// entries, a run list — read once for all.
+pub fn values_at(b: &[u8], rows: &[usize]) -> Result<Option<Vec<Value>>> {
     let mut r = Reader::new(b);
     let kind = r.u8().map_err(|_| bad())?;
     let n = r.u32().map_err(|_| bad())? as usize;
-    if i >= n {
+    if rows.iter().any(|&i| i >= n) {
         return Err(bad());
     }
-    if r.u8().map_err(|_| bad())? != 0 {
-        let bytes = r.take(n.div_ceil(8)).map_err(|_| bad())?;
-        if packed_at(bytes, i, 1)? == 1 {
-            return Ok(Some(Value::Null));
+    let nulls = match r.u8().map_err(|_| bad())? {
+        0 => None,
+        _ => Some(r.take(n.div_ceil(8)).map_err(|_| bad())?),
+    };
+    let each = |f: &dyn Fn(usize) -> Result<Value>| -> Result<Option<Vec<Value>>> {
+        let mut out = Vec::with_capacity(rows.len());
+        for &i in rows {
+            out.push(match nulls {
+                Some(b) if packed_at(b, i, 1)? == 1 => Value::Null,
+                _ => f(i)?,
+            });
         }
-    }
+        Ok(Some(out))
+    };
     let int = |k: u8, x: i64| match time_kind(k) {
         None if k == 0 => Ok(Value::Int(x)),
         Some(t) => Ok(t.value(x)),
         None => Err(bad()),
     };
-    Ok(Some(match kind {
+    match kind {
         INTS => {
             let k = r.u8().map_err(|_| bad())?;
             let lo = r.u64().map_err(|_| bad())? as i64;
             let bits = r.u8().map_err(|_| bad())?;
             let rest = r.take(r.remaining()).map_err(|_| bad())?;
-            int(k, lo.wrapping_add(packed_at(rest, i, bits)? as i64))?
+            each(&|i| int(k, lo.wrapping_add(packed_at(rest, i, bits)? as i64)))
         }
         RUNS => {
+            // Each run's value and the row past it.
             let k = r.u8().map_err(|_| bad())?;
             let runs = r.u32().map_err(|_| bad())? as usize;
+            let mut ends = Vec::with_capacity(runs.min(n));
             let mut at = 0;
-            let mut found = None;
             for _ in 0..runs {
                 let x = r.u64().map_err(|_| bad())? as i64;
                 at += r.u32().map_err(|_| bad())? as usize;
-                if i < at {
-                    found = Some(x);
-                    break;
-                }
+                ends.push((at, x));
             }
-            int(k, found.ok_or_else(bad)?)?
+            each(&|i| {
+                let (_, x) = ends
+                    .get(ends.partition_point(|&(end, _)| end <= i))
+                    .ok_or_else(bad)?;
+                int(k, *x)
+            })
         }
         FLOATS => {
-            r.take(8 * i).map_err(|_| bad())?;
-            Value::Float(f64::from_bits(r.u64().map_err(|_| bad())?))
+            let rest = r.take(r.remaining()).map_err(|_| bad())?;
+            each(&|i| {
+                let x = rest.get(8 * i..8 * i + 8).ok_or_else(bad)?;
+                Ok(Value::Float(f64::from_bits(u64::from_le_bytes(
+                    x.try_into().expect("8"),
+                ))))
+            })
         }
         BOOLS => {
             let bytes = r.take(n.div_ceil(8)).map_err(|_| bad())?;
-            Value::Bool(packed_at(bytes, i, 1)? == 1)
+            each(&|i| Ok(Value::Bool(packed_at(bytes, i, 1)? == 1)))
         }
         TEXT | CHAR_TEXT => {
             let total = r.u32().map_err(|_| bad())? as usize;
@@ -437,13 +459,12 @@ pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
             let o = |k: usize| {
                 u32::from_le_bytes(offsets[4 * k..4 * k + 4].try_into().expect("4")) as usize
             };
-            let (from, to) = (o(i), o(i + 1));
             let bytes = r.take(total).map_err(|_| bad())?;
-            let s = bytes.get(from..to).ok_or_else(bad)?;
-            text_value(kind, s)?
+            each(&|i| text_value(kind, bytes.get(o(i)..o(i + 1)).ok_or_else(bad)?))
         }
         DICT | CHAR_DICT => {
-            // Past the dictionary (lengths to skip by) to the row's code.
+            // The dictionary's entries (lengths to skip by), then the rows'
+            // codes.
             let m = r.u32().map_err(|_| bad())? as usize;
             let mut entries = Vec::with_capacity(m.min(n));
             for _ in 0..m {
@@ -452,24 +473,28 @@ pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
             }
             let bits = r.u8().map_err(|_| bad())?;
             let rest = r.take(r.remaining()).map_err(|_| bad())?;
-            let s = entries
-                .get(packed_at(rest, i, bits)? as usize)
-                .ok_or_else(bad)?;
-            text_value(kind, s)?
+            each(&|i| {
+                let s = entries
+                    .get(packed_at(rest, i, bits)? as usize)
+                    .ok_or_else(bad)?;
+                text_value(kind, s)
+            })
         }
         DECIMALS => {
             let scale = r.u8().map_err(|_| bad())?;
             let lo = r.u64().map_err(|_| bad())? as i64;
             let bits = r.u8().map_err(|_| bad())?;
             let rest = r.take(r.remaining()).map_err(|_| bad())?;
-            let m = lo.wrapping_add(packed_at(rest, i, bits)? as i64);
-            Value::Numeric(crate::decimal::Decimal::new(
-                i128::from(m),
-                u32::from(scale),
-            )?)
+            each(&|i| {
+                let m = lo.wrapping_add(packed_at(rest, i, bits)? as i64);
+                Ok(Value::Numeric(crate::decimal::Decimal::new(
+                    i128::from(m),
+                    u32::from(scale),
+                )?))
+            })
         }
-        _ => return Ok(None),
-    }))
+        _ => Ok(None),
+    }
 }
 
 /// A text kind's value: `text`, or `char(n)` for the `CHAR_` kinds.
@@ -897,6 +922,17 @@ mod tests {
             }
         }
         assert!(value_at(&b, values.len()).is_err());
+        // Several at once, in any order, repeated.
+        let first = (!values.is_empty()).then_some([0, 0]);
+        let rows: Vec<usize> = (0..values.len())
+            .rev()
+            .step_by(3)
+            .chain(first.into_iter().flatten())
+            .collect();
+        if let Some(got) = values_at(&b, &rows).unwrap() {
+            let want: Vec<Value> = rows.iter().map(|&i| values[i].clone()).collect();
+            assert_eq!(got, want);
+        }
         b.len()
     }
 

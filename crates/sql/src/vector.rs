@@ -1757,7 +1757,9 @@ impl<'a> DictFilter<'a> {
     ///
     /// With it, whether every conjunct was tested so and held TRUE for
     /// every row left (then only [`rest`](Self::rest) remains to test).
-    fn apply(&self, mut b: Batch, cx: Cx) -> (Batch, bool) {
+    /// `compact` false: never gathered, the rows where they were (a
+    /// column source's test of its rows, late materialization).
+    fn apply(&self, mut b: Batch, cx: Cx, compact: bool) -> (Batch, bool) {
         let mut dropped = false;
         let mut decided = true;
         if !b.sel.is_empty() {
@@ -1790,7 +1792,7 @@ impl<'a> DictFilter<'a> {
                 dropped = true;
             }
         }
-        if dropped && b.sel.len() * 2 <= b.len {
+        if compact && dropped && b.sel.len() * 2 <= b.len {
             let n = b.sel.len();
             let cols = b
                 .cols
@@ -2237,7 +2239,7 @@ fn builders(kinds: &[Kind], take: impl Fn(usize) -> bool, cap: usize) -> (Vec<Bu
 
 /// Columns of fixed width a scan reads besides its filter's for late
 /// materialization to pay ([`RowBatches::next_batch_tested`]).
-const LATE_COLUMNS: usize = 4;
+pub(crate) const LATE_COLUMNS: usize = 4;
 
 impl crate::storage::BatchSource for RowBatches<'_> {
     fn next_batch_tested(
@@ -3049,8 +3051,18 @@ impl<'a> Pipeline<'a> {
             let next = match (&mut self.late, self.steps.first()) {
                 (Some(late), Some((Step::Filter(p), _))) if late.on() => {
                     let cx = self.cx;
+                    // The filter on dictionaries first, as the steps run it.
+                    let dict = self.dict.as_ref().filter(|d| d.step == 0);
                     let got = source.next_batch_tested(self.batch, &late.first, &mut |b| {
-                        filter(p, b.clone(), cx).map(|f| f.sel)
+                        let Some(d) = dict else {
+                            return filter(p, b.clone(), cx).map(|f| f.sel);
+                        };
+                        let (b, all) = d.apply(b.clone(), cx, false);
+                        match (all, &d.rest) {
+                            (true, None) => Ok(b.sel),
+                            (true, Some(rest)) => filter(rest, b, cx).map(|f| f.sel),
+                            (false, _) => filter(p, b, cx).map(|f| f.sel),
+                        }
                     })?;
                     if let Some((b, read, true)) = &got {
                         late.tested += *read as u64;
@@ -3109,7 +3121,7 @@ impl<'a> Pipeline<'a> {
             if let Some(d) = &self.dict
                 && d.step == i
             {
-                let (tested, all) = d.apply(b, self.cx);
+                let (tested, all) = d.apply(b, self.cx, true);
                 b = tested;
                 decided = all.then_some(&d.rest);
             }

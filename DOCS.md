@@ -2500,16 +2500,22 @@ url LIKE '%x%'` builds its hundred columns for the few rows that match.
 It runs when the other columns cost — one of variable length, or four
 or more, a decimal counting as two — and stops once more than half of a scan's first two batches
 pass; a filter that fails has its rows decoded whole, to fail or be
-decided a row at a time as before.  Otherwise a row table's batch decodes
+decided a row at a time as before.  A column table's scan does the same
+by segment run: the filter's columns decoded (a dictionary's codes
+where the filter tests them on its entries), the rows tested, and the
+other columns read for the rows kept — a value at a time from the
+segment's stored column when at most a sixteenth are kept, else whole
+and gathered (ClickBench Q23 on column tables, ten workers, 109 → ~10–20
+ms).  Otherwise a row table's batch decodes
 each row where the store keeps it (`KvChunks::visit`: the leaf held, the
 value in its cell, not copied into a chunk first — a row over 256
 bytes copied alone first, `WIDE_ROW`, as a wide row's column found by
 walking its encoding misses the cache); a row with a value
 stored out of line is taken back and read by chunk (its value fetched
 from the store, which a visit does not read), as is a scan merging side
-areas or the transaction's own writes.  An expression with a subquery needs every
-column (a correlated subquery reads its row), as do `DISTINCT`, set
-operations, CTEs and recursion.  Subqueries' own plans decode only
+areas or the transaction's own writes.  An expression with a correlated
+subquery needs the columns of the row it reads; `DISTINCT`, set
+operations, CTEs and recursion need every column.  Subqueries' own plans decode only
 their columns too (a correlated index lookup into a column table, say,
 decodes the two columns it reads, not the segment's every one).  In a
 query, a correlated subquery's result is kept by the values it reads of
@@ -8139,6 +8145,16 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — late materialization for column scans (the sweep before
+  F1's whole run):** a column table's scan whose first step is a filter
+  decodes the filter's columns of a segment run (a dictionary's codes
+  where the filter tests its entries), tests them, and reads the other
+  columns for the rows kept only — a few a value at a time
+  (`segment::values_at`), more from the decoded column by their places
+  — when what it spares is a column of variable length or four fixed.
+  ClickBench Q23 on column tables, ten workers, 108 → 7 ms; TPC-H Q14
+  and Q15 on column tables 43 → 23 and 46 → 33 ms.
 
 - **2026-11-19 — user keys escaped a byte at a time (the sweep before
   F1's whole run):** `mvcc::escape_onto` writes a key's bytes, each zero
