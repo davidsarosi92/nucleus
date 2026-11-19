@@ -2521,3 +2521,26 @@ fn index_entries_fetch_their_rows_a_group_at_a_time() {
     s.execute("ROLLBACK").unwrap();
     check(&mut s);
 }
+
+/// A filter's conjunctions — terms of NULL truth among them, a later term
+/// that fails — agree row at a time and by batches: the batch narrows its
+/// rows a term at a time, a term evaluated where none before it was FALSE
+/// (as a row's `AND` evaluates it), so its error is raised where a row's is.
+#[test]
+fn conjunctions_narrow_as_a_rows_and_does() {
+    let db = database();
+    let queries: Vec<String> = [
+        "SELECT id FROM t WHERE a > 0 AND ok AND f < 3 ORDER BY id",
+        "SELECT id FROM t WHERE ok AND a < 5 AND n > 10 AND d < DATE '2026-06-01' ORDER BY id",
+        "SELECT count(*) FROM t WHERE a IS NULL AND b > 100 AND s LIKE 'name 1%'",
+        "SELECT id FROM t WHERE (a > 0 AND f > 1) AND (ok OR a < -5) ORDER BY id",
+        // FALSE everywhere: the division is never reached.
+        "SELECT id FROM t WHERE id < 0 AND 10 / (b - b) > 1",
+        // NULL where `a` is: the division is reached there, and fails.
+        "SELECT id FROM t WHERE a > 100 AND 10 / (b - b) > 1",
+        "SELECT id FROM t WHERE id > 0 AND f > 100 AND 10 / (b - b) > 1",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(agree(&db, &queries), 2);
+}

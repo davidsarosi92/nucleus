@@ -2538,7 +2538,11 @@ substrings searched for by their first and last bytes, 32 places at a
 time), `IN` lists of constants over text, `char(n)` and integers (in a
 hash set past eight; other lists value by value, over the operand and the
 items only), comparisons of dates, times and timestamps of one kind,
-`AND` / `OR` / `NOT`, `IS NULL`; an uncorrelated scalar, `EXISTS` or
+`AND` / `OR` / `NOT` (a filter's `AND` narrows the rows a term at a
+time: each term over the rows no term before it held FALSE for — where
+a row's `AND` evaluates it, so a term's error is raised where a row's
+is — and a row a term held `NULL` for dropped at the end; issue #2:
+TPC-H Q6 −8.6 %), `IS NULL`; an uncorrelated scalar, `EXISTS` or
 `ARRAY` subquery once (its rows are cached for the statement), an
 uncorrelated `IN (subquery)` as the list of its rows; function calls
 through the function's batch kernel when it has one

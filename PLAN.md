@@ -11680,7 +11680,33 @@ simple parameterization, MySQL's former query cache — what not to do).
      each binary's server alone in turn (two loads each, the medians of
      nine): geometric mean 0.969×, Q9 0.87×, Q6 0.91×, Q17 0.92×, Q5
      and Q18 0.93×, none slower past the runs' spread (Q10 1.03×:
-     135.7–143.7 before); the load 34.6 → 29.4 s.
+     135.7–143.7 before); the load 34.6 → 29.4 s.  Tried next, not
+     taken: a scan keeping the shape of the rows it decoded — each
+     column's offset, tag and short length, a row whose tags before the
+     column read are those taking its offsets from it with loads
+     independent of one another (PostgreSQL's `attcacheoff`, checked,
+     as a value's width here is its value's) — Q6 one worker 633 → 757
+     ms, Q1 ten 179 → 199: `lineitem`'s rows are not of one shape (a
+     `partkey` below 32,768 takes 2 bytes, ~16 % of them), and checking
+     ten tags costs more than passing seven values whose branches the
+     CPU predicts.
+  6. *A filter's conjunction narrowed a term at a time.*  A filter's
+     `AND` was evaluated as an expression: each `AND` of the chain built
+     its three-valued truth over the rows (two truth arrays, a value and
+     a `NULL` array a row) before the filter took the TRUE ones.  Now each
+     term is evaluated over the rows no term before it held FALSE for —
+     the rows a row's `AND` evaluates it for, so a term's error is raised
+     where a row's is (a test: a division by zero past a `NULL` term
+     fails both ways) — and a row a term held `NULL` for is dropped at the
+     end; with no `NULL`s, a term's booleans narrow the selection
+     directly.  PostgreSQL's `ExecQual` stops at a qual's first FALSE or
+     `NULL` the same way; DuckDB and Velox filter a conjunction a term at
+     a time on a selection vector.  Q6 one worker 633 → 573 ms, ten 112.0
+     → 100.4 (PostgreSQL's 93.7: 1.07×); the whole TPC-H alone in turn:
+     geometric mean 0.990×, Q12 0.93×, Q14 and Q15 0.95×; Q2 and Q4,
+     1.10× and 1.09× there, measured again (three loads each, medians of
+     20): Q2 18.22 → 18.38 ms on ten workers, 44.61 → 44.60 on one; Q4
+     71.0 → 70.9 and 323.4 → 315.6.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),

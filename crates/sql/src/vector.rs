@@ -1522,9 +1522,85 @@ pub(crate) fn count_true(p: &Expr, cols: Vec<Vector>, n: usize, ctx: &Ctx) -> Re
     Ok(filter(p, b, Cx { ctx, outer: None })?.sel.len())
 }
 
-/// The rows of `b` for which `p` holds.
+/// The rows of `b` for which `p` holds.  A conjunction narrows the rows
+/// a conjunct at a time, without the three-valued `AND` built over them
+/// all: each conjunct is evaluated over the rows none before it held
+/// FALSE for — what a row's `AND` evaluates, so no conjunct's error is
+/// skipped where a row's would raise it — and a row any held `NULL` for
+/// is dropped at the end.
 fn filter(p: &Expr, b: Batch, cx: Cx) -> Result<Batch> {
+    let mut conjuncts = Vec::new();
+    and_terms(p, &mut conjuncts);
+    if conjuncts.len() == 1 {
+        return filter_one(p, b, cx);
+    }
+    let mut b = b;
+    // The rows some conjunct held NULL for.
+    let mut null: Option<Vec<bool>> = None;
+    for c in conjuncts {
+        let v = eval(c, &b, &b.sel, cx)?;
+        let sel = match &*v {
+            Vector::Bool(d, None) => match &b.sel {
+                Sel::All(len) => {
+                    let mut rows = Vec::new();
+                    kernels::select(&d[..*len], &mut rows);
+                    Sel::Rows(rows)
+                }
+                sel => sel.keep(|i| d[i]),
+            },
+            Vector::Bool(d, Some(n)) => {
+                let null = null.get_or_insert_with(|| vec![false; b.len]);
+                b.sel.keep(|i| {
+                    null[i] |= n[i];
+                    d[i] || n[i]
+                })
+            }
+            v => {
+                let t = truths(v, b.len, &b.sel)?;
+                let null = null.get_or_insert_with(|| vec![false; b.len]);
+                b.sel.keep(|i| {
+                    null[i] |= t[i] == 2;
+                    t[i] != 0
+                })
+            }
+        };
+        b = Batch { sel, ..b };
+        if b.sel.is_empty() {
+            return Ok(b);
+        }
+    }
+    if let Some(null) = null {
+        let sel = b.sel.keep(|i| !null[i]);
+        b = Batch { sel, ..b };
+    }
+    Ok(b)
+}
+
+/// The terms of `p`'s `AND`s, left to right.
+fn and_terms<'e>(p: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match p {
+        Expr::Binary(BinaryOp::And, l, r) => {
+            and_terms(l, out);
+            and_terms(r, out);
+        }
+        p => out.push(p),
+    }
+}
+
+/// [`filter`] of a predicate that is not an `AND`.
+fn filter_one(p: &Expr, b: Batch, cx: Cx) -> Result<Batch> {
     let v = eval(p, &b, &b.sel, cx)?;
+    if let (Vector::Bool(d, n), Sel::Rows(rows)) = (&*v, &b.sel) {
+        let rows = rows
+            .iter()
+            .copied()
+            .filter(|&i| d[i as usize] && !n.as_ref().is_some_and(|n| n[i as usize]))
+            .collect();
+        return Ok(Batch {
+            sel: Sel::Rows(rows),
+            ..b
+        });
+    }
     if let (Vector::Bool(d, n), Sel::All(len)) = (&*v, &b.sel) {
         let mut rows = Vec::new();
         match n {
