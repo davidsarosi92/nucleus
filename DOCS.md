@@ -476,7 +476,11 @@ with it, the window growing with the leaves it has moved through since
 its last seek (1, 2, 4 … 16, as Linux's read-ahead ramps up), so an index
 lookup's entries across a leaf's end read one page and a scan soon reads
 16 at a time (§M14.20 W5: with the pager's lock gone, `pread` 23 % →
-10 % of TPC-H Q1's time on row tables).  Errors: `PoolExhausted` (every
+10 % of TPC-H Q1's time on row tables).  A leaf a scan moves on to (not
+the first after a seek) is read whole before its entries, a byte of
+each 64 (`View::touch`): its lines' misses overlapped, not left to the
+hardware prefetcher, whose cover of a leaf read entry by entry turned
+on the page's layout (issue #1: TPC-H Q6 on one worker 806 → ~711 ms).  Errors: `PoolExhausted` (every
 frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
 
 ### 4.4 B+tree (`btree::BTree`, `node`)
@@ -8113,6 +8117,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-19 — a scan's leaves read whole first (issue #1):** a B+tree
+  cursor moving on to a leaf in a scan reads a byte of each of its cache
+  lines before its entries (`View::touch`), the misses overlapped.
+  Format version 4's key prefix beside the header had slowed row scans
+  (Q6 1.13×): the hardware prefetcher covered a leaf read entry by entry
+  less well with it there.  TPC-H Q6 on one worker 806 → ~711 ms.
 
 - **2026-11-18 — §M14.28 L3b, a table's engine changed online:**
   `ALTER TABLE … SET (engine = …)` — the keys copied under a new id

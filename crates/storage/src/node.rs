@@ -657,6 +657,23 @@ impl<'a> View<'a> {
         })
     }
 
+    /// Reads a byte of each of its cache lines, the loads independent of
+    /// one another: the node's misses overlapped, all in flight at once,
+    /// before its entries are read one after another.  What a scan entering
+    /// a leaf does (issue #1): the hardware prefetcher's cover of a leaf
+    /// read entry by entry — its cells from the page's end down, each read
+    /// up — depends on the page's layout; TPC-H Q6 one worker 806 ms with
+    /// format version 4's key prefix beside the header, 708 at the page's
+    /// end, 705 either way with the leaf read whole first (pB+-trees
+    /// prefetch a node's lines together: Chen, Gibbons and Mowry, SIGMOD
+    /// 2001).  A byte every 64 (a 128-byte step: 720 ms).
+    pub fn touch(&self) {
+        let x = (0..self.p.len())
+            .step_by(64)
+            .fold(0u8, |x, i| x ^ self.p[i]);
+        std::hint::black_box(x);
+    }
+
     /// Whether it is a leaf.
     pub fn is_leaf(&self) -> bool {
         self.leaf

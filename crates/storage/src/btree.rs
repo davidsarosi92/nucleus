@@ -1734,7 +1734,21 @@ impl<'t> Cursor<'t> {
                     self.child(id, i + 1)?
                 };
                 self.path.push((id, i + 1, n));
-                self.descend(child, |_| Ok(0), |_| Ok(0))?;
+                // A leaf a scan moves on to is read whole first
+                // ([`View::touch`]) — not the first after a seek: an index
+                // lookup's few entries across a leaf's end read a line or
+                // two of it.
+                let whole = window > 1;
+                self.descend(
+                    child,
+                    |_| Ok(0),
+                    |v| {
+                        if whole {
+                            v.touch();
+                        }
+                        Ok(0)
+                    },
+                )?;
                 return Ok(true);
             }
             parent = false;

@@ -11575,12 +11575,52 @@ simple parameterization, MySQL's former query cache — what not to do).
      — its `NOT EXISTS` fetched four rows where one answers it —, so an
      index's first group is one row, fetched by a plain `get`, then
      eight a group: Q22 even (0.98×), Q20 0.88×, Q19 0.83×, Q17 ~0.9×.
-     Found by the same run, open: the node format above slows row
-     scans — Q6 1.13×, Q5 1.11×, Q21 1.07×, Q11 1.06×, Q12 1.05× (A/B
-     of the two binaries, both orders); on one worker Q6 716 → 815 ms,
-     the added time in decoding rows (`vector::decode_into`), not in the
-     B+tree's own code.  Not yet understood: the user decides whether
-     the format stays.
+     Found by the same run: the node format above slows row scans — Q6
+     1.13×, Q5 1.11×, Q21 1.07×, Q11 1.06×, Q12 1.05× (A/B of the two
+     binaries, both orders); on one worker Q6 716 → 815 ms, the added
+     time in decoding rows (`vector::decode_into`), not in the B+tree's
+     own code.  Investigated (the user's call), step 4.
+  4. *A scan's leaves read whole first* (2026-11-19).  Each hypothesis
+     measured alone (Q6, one worker, the medians of 12 runs; layouts
+     switched by an environment variable in one binary):
+     `decode_into`'s machine code is byte for byte the same in both
+     binaries, at the same address — not codegen; cells ending where
+     they did before version 4 (the prefix in front, the cells `plen`,
+     8 or 64 bytes short of the page's end), 795–806 ms — not the rows'
+     alignment; the slots past the prefix aligned to 16 or 64 bytes,
+     ~810 — not the slots' alignment; only the prefix back at the page's
+     end, ~708 (with the slots where they are, too).  What it is: a
+     row's decode waits for its cell's lines, read entry by entry from
+     the page's end down, and the hardware prefetcher's cover of them
+     turns on the page's layout (~700 ns a leaf more with the prefix in
+     front: 5–7 more misses waited for one after another).  Reading the
+     leaf whole first, a byte of each 64 with independent loads, its
+     misses overlapped (`View::touch`; pB+-trees prefetch a node's lines
+     together: Chen, Gibbons and Mowry, SIGMOD 2001): 806 → ~705–711 ms
+     with the prefix in front, from the top down or the bottom up; with
+     the prefix at the end no further gain (708).  Kept: a cursor
+     moving on to a leaf in a scan touches it (not the first after a
+     seek — an index lookup's few entries across a leaf's end read a
+     line or two); the prefix stays beside the header, for point reads.
+     A 128-byte step: 720 ms (the lines the core fetches are 64 bytes
+     here).  The whole TPC-H against 99f0700 (before steps 1–4; A/B,
+     both orders, ten workers): Q20 0.74×, Q19 0.77×, Q17 0.80×, Q8
+     0.92×; Q5 1.00×, Q21 1.02×; Q1 1.04×, Q6 1.04×, Q12 1.05×, Q14
+     1.04×, Q2 1.07×.  Those last, run alone in turn instead (each
+     binary's server the only one loaded, both orders, ten workers): Q1
+     195.7 → 196.1 ms, Q6 124.2 → 126.9, Q12 178.8 → 181.6 (within the
+     runs' spread) — the two servers loaded side by side, not the
+     binaries; Q2 (three loads each, medians of 20) 42.8 → 42.5 ms on
+     one worker, 16.2 → 16.8 on ten (1.03×, open: its plan uses no
+     grouped fetch; its scan of `part` and its lookups run on the
+     workers).  Tried, not
+     taken: leaves without key heads (two-byte slots, heads in internal
+     nodes only), as the heads' four bytes an entry make the SF1 store's
+     data file 5.044 → 5.204 GB (+3.2 %).  One binary, switched: a scan
+     no faster (Q6 one worker 687 → 684 ms, ten 124.8 → 123.3; Q1 ten
+     198.7 → 199.4), point lookups slower (the probe 740 → 1020 ns, eight
+     at a time 590 → 880; Q20 one worker 180 → 189 ms) — the leaves'
+     heads are most of step 2's gain.
   *Issue #2, a row scan's cost* (2026-11-18, Q6 profiled on one worker:
   921 ms, ~150 ns a row of `lineitem`).  Each step measured alone, A/B
   with the binaries alternated in both orders:
