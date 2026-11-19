@@ -8140,6 +8140,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-19 — user keys escaped a byte at a time (the sweep before
+  F1's whole run):** `mvcc::escape_onto` writes a key's bytes, each zero
+  followed by `FF`, into room for the worst case instead of copying the
+  runs between zeros a call each (a six-integer index key 117 → 54 ns);
+  the TPC-H SF 1 load 31–33 → 29 s.  Left: the vacuum after a bulk load
+  (issue #4).
+
 - **2026-11-19 — a projection moves the columns it passes on; `any_value`
   (the sweep before F1's whole run):** the row executor's projection
   moves a column it passes on as it is out of its input row at its last

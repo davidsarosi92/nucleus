@@ -11912,6 +11912,36 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     (#1); PostgreSQL joins the customers after the lookups, so its rows
     carry no text through them.
 
+  *S3, TPC-H Q12* (row tables 1.18×): not a plan's — `lineitem`'s scan
+  and filter, 622 ms against PostgreSQL's 630 on one worker
+  (`EXPLAIN ANALYZE`); on ten, 4.7× one (W6 176 ms, W10 151: the cores
+  past six are efficiency cores), where PostgreSQL's five workers and
+  leader take 140.  What is left is issue #2's per-row cost
+  (`decode_into` 44 % of one worker's samples, the text `IN` 10 %).
+
+  *S4, the TPC-H load* (1.25×).  Step by step (`loadsteps.py`): `COPY`
+  faster than PostgreSQL's (`lineitem` 8.4 against 14.9 s), the index
+  builds 4–5× slower (`lineitem (l_partkey, l_suppkey)` 5.7 against
+  1.3 s), `VACUUM ANALYZE` 10.4 against 1.1.
+  - Taken: a user key escaped a byte at a time into room for the worst
+    case (`mvcc::escape_onto`): the runs between zeros were copied one
+    call each, and an index key of big-endian integers is mostly zeros
+    (a six-integer key 117 → 54 ns, `rustc -O` alone).  The load 33.3 /
+    31.0 → 28.9 / 29.0 s (each binary alone in turn): `COPY lineitem`
+    8.4 → 7.3, the index builds −15 %.  The whole TPC-H alone in turn:
+    no query past noise (a loaded machine; Q2 and Q16, the two outside,
+    again in both orders: even).
+  - Left, issue #4: the vacuum after the load makes each of ~8.7 M
+    committed intents a version — the row's value put again and the
+    intent deleted, through the WAL (`write_covering` ~5 s of ~6.8).  An
+    intent and its version differ in the key's last eight bytes and keep
+    their place among the keys, so a logged *retime* of a range in place
+    would spare the values; it touches the WAL's batch format and the
+    leaves (separators where a key's versions span two leaves).  The
+    index builds' rest: the sorted entries written a `put` at a time
+    (`put_unlogged`) and the runs sorted on one thread; a bottom-up build
+    of the fresh range's leaves is PostgreSQL's `_bt_load`.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

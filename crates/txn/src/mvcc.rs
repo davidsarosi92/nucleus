@@ -44,22 +44,30 @@ pub fn escape(user: &[u8]) -> Vec<u8> {
 
 /// [`escape`], appended to `out` (room for [`OVERHEAD`] more reserved).
 pub fn escape_onto(user: &[u8], out: &mut Vec<u8>) {
-    // A run between zeros at a time: user keys are a few such runs (the
-    // big-endian ids of tables and indexes, then values).
-    out.reserve(user.len() + user.len() / 4 + OVERHEAD);
-    let mut runs = user.split(|&b| b == 0);
-    if let Some(first) = runs.next() {
-        out.extend_from_slice(first);
+    // A byte at a time into room for the worst case, cut to what was
+    // written: user keys are big-endian integers, many of their bytes
+    // zeros — copying the runs between zeros made a call of a few bytes
+    // each (117 → 54 ns a six-integer index key).
+    out.reserve(2 * user.len() + OVERHEAD);
+    let start = out.len();
+    out.resize(start + 2 * user.len(), 0);
+    let buf = &mut out[start..];
+    let mut p = 0;
+    for &b in user {
+        buf[p] = b;
+        p += 1;
+        if b == 0 {
+            buf[p] = 0xFF;
+            p += 1;
+        }
     }
-    for run in runs {
-        out.extend_from_slice(&[0, 0xFF]);
-        out.extend_from_slice(run);
-    }
+    out.truncate(start + p);
 }
 
 /// The store key of `user`'s version at `ts`.
 pub fn encode_key(user: &[u8], ts: u64) -> Vec<u8> {
-    let mut out = escape(user);
+    let mut out = Vec::with_capacity(2 * user.len() + OVERHEAD);
+    escape_onto(user, &mut out);
     out.extend_from_slice(&[0, 0]);
     out.extend_from_slice(&(u64::MAX - ts).to_be_bytes());
     out
