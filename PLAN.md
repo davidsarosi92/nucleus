@@ -11806,6 +11806,17 @@ simple parameterization, MySQL's former query cache — what not to do).
      page — PostgreSQL's cold run reads the same way into new shared
      memory (its checksums on by default since 18); lock waits ~200
      samples of ~9,400 busy.
+  *Issue #2 closed* (2026-11-19, the user's choice): Q6 by the method
+  1.45× → ≈ 1.12× warm and 1.63× → ≈ 1.20× cold (the intervals
+  overlapping; 1.7× when the issue was opened); on ten workers in a
+  steady state even (89.1 ms against 90.4, medians of 15 on one machine,
+  PostgreSQL's own cluster at 1–9 parallel workers: it levels from six,
+  89.7).  Left, recorded for later: a worker's own cost a row — Q6 one
+  worker 488 ms against 404 (1.21×), Q12 734 against 662 (1.11×); its
+  directions: fewer indirect calls a row (the leaf walk → the version
+  check → the decoder, each through `dyn`), a leaf's mark that all its
+  versions are visible and single (PostgreSQL's visibility map; a format
+  change).  The rest of the lags go to the sweep before F1's whole run.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
