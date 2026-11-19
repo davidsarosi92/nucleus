@@ -11762,7 +11762,23 @@ simple parameterization, MySQL's former query cache — what not to do).
      (1.4 GB) of it free, the pages in use the same (2.76 GB).  Whether
      that scatters a table's leaves, so a cold scan's read-ahead (runs of
      consecutive page ids only) reads a page at a time — Q6 cold 1.29× —
-     is not measured yet.
+     measured with a throwaway probe counting a scan's leaf moves: 98.3 %
+     to the next page id before the WAL is applied, 98.6 % after — the
+     pages are rewritten in their order; not the cause.
+  8. *A buffer frame made with the page read into it.*  The cold runs
+     profiled (eight, each after a restart, `sample` attached): of the
+     samples not waiting, ~30 % in `malloc` and `memset` — a frame used
+     the first time was made with an empty page (allocated, zeroed) that
+     the page read (`Page::from_bytes`, allocated again) replaced, the
+     empty one freed; after a start every frame a cold scan fills is a
+     first use.  Now the frame is made with the page read
+     (`BufferPool::put`).  Q6 cold (the server just started; ten rounds,
+     medians, each binary alone in turn) 226.6 → 187.3 ms, the run after
+     it 107.8 → 102.0; the whole TPC-H warm alone in turn: geometric mean
+     0.984×, none past noise.  Left: the page read is still copied from
+     the read buffer into its own allocation (`malloc` ~18 % of a cold
+     run's busy samples, `pread` ~16 %) — reading into the frame's own
+     page instead needs the pager to read into pages it is given.
   *R4's end* (2026-11-18, `b721982`, `bash bench/all.sh suite tpch
   clickbench`, the results in `docs/benchmarks.md`): TPC-H's row tables
   0.65× PostgreSQL's time in the geometric mean (1.27× before R3),
