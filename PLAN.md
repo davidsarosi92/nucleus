@@ -12114,6 +12114,26 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     purpose.  Neal's large superaccumulator and error-free products are
     the ways to try — issue #8.
 
+  *S15, loading vectors* (SIFT-1M's 900,000 rows 15.9 s, pgvector 1.80:
+  8.8×).  Profiled: the server turned each `vector` the driver sent
+  into its text and parsed it back (`native::from_wire` → `Type::output`
+  → `Type::input`, the type having no binary `wire_input`): three
+  quarters of the load.  The Python driver encoded a vector at a time
+  (2.2 s of it, measured alone).
+  - Taken: `wire_input` for `vector` (little-endian `f32`s, checked as
+    the text's input checks them) and `sparsevec` (measured, then
+    `Sparse::checked`); test `native::tests::vector_parameters_read_as_
+    their_text` — every edge (`-0`, subnormals, the largest, NaN,
+    infinities, none, 16001 components; positions out of order,
+    repeated, past the dimensions, zeros, no dimensions, too many) the
+    same value or error code as the text, malformed bytes refused.
+  - Taken: the Python driver's `_vector_block` — a float32 2-D array or
+    a list of 1-D arrays as one block a batch (0.41 s against 2.17);
+    `test_load_vectors` (a 2-D array, a list, a list with a NULL and
+    another dimension; a NaN refused).
+  - 15.9 → 1.46 s, one build and the other in turn (pgvector 1.80, its
+    binary `COPY` file written before its timing).
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

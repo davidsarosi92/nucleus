@@ -1758,7 +1758,9 @@ capability a type can have.  Its canonical bytes are its components as
 little-endian `f32`s (`-0` stored as `0`, so equal vectors are equal
 bytes); text `'[1,2.5,-3]'`, each component printed in the shorter of its
 shortest decimal and exponent forms (`1e-7`); NaN, infinities, an empty
-vector and more than 16000 components refused.  `vector(n)` checks the
+vector and more than 16000 components refused — a driver's parameter or
+loaded value checked from its bytes as the text is (`Type::wire_input`;
+a `sparsevec`'s too), not formatted and parsed again.  `vector(n)` checks the
 dimensions on every write and cast (`22000`, "expected 3 dimensions, not
 2"; `nc_catalog.columns` shows `vector(3)`).  Casts to and from `real[]`
 (and from any numeric array; a NULL element is `23502`) and `text`.
@@ -8161,6 +8163,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — vectors loaded from their bytes (the sweep):** a
+  driver's `vector` and `sparsevec` values are checked from their bytes
+  (`Type::wire_input`), not formatted and parsed again; the Python
+  driver's `load` sends a vector column of float32 numpy arrays as one
+  block a batch.  SIFT's 900,000 vectors 15.9 → 1.46 s (pgvector's
+  `COPY` of a prepared binary file 1.80).
 
 - **2026-11-20 — exact sums' window check inlined (the sweep):** an
   addition's check that the chunks hold it is inlined, the growing

@@ -1823,6 +1823,32 @@ def _var_slot(c, v):
     return str(v).encode()
 
 
+def _vector_block(c, values):
+    """A ``vector`` column's batch without a Python object a value: its
+    offsets and its float32s, when every value is a float32 numpy array of
+    one dimension (or the batch the rows of a 2-D one); else None.  (A
+    value at a time, nine tenths of a million SIFT vectors took 2.2 s
+    here.)"""
+    np = _np()
+    if np is None or c.tag != _EXT or c.type != "vector" or len(values) == 0:
+        return None
+    if isinstance(values, np.ndarray) and values.ndim == 2 and values.dtype == np.float32:
+        block = values
+    else:
+        first = values[0]
+        if not isinstance(first, np.ndarray) or not _is_vector(first):
+            return None
+        shape = first.shape
+        if any(not isinstance(v, np.ndarray) or v.shape != shape or v.dtype != np.float32 for v in values):
+            return None
+        block = np.stack(values)
+    n, d = block.shape
+    if n * d * 4 >= 1 << 32:
+        return None
+    offs = (np.arange(n + 1, dtype="<u4") * np.uint32(4 * d)).tobytes()
+    return offs, block.astype("<f4", copy=False).tobytes()
+
+
 def _encode_batch(columns, cols, start, end):
     """A ``B`` batch of rows ``start``..``end`` of ``cols`` (DOCS.md §10)."""
     n = end - start
@@ -1855,6 +1881,10 @@ def _encode_batch(columns, cols, start, end):
         pad()
         if _width(c):
             out += _fixed_values(c, values, mask if nulls else None)
+        elif (block := None if nulls else _vector_block(c, values)) is not None:
+            out += block[0]
+            pad()
+            out += block[1]
         else:
             parts, offs, at = [], [0], 0
             for i, v in enumerate(values):

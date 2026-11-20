@@ -1211,7 +1211,10 @@ pub trait Type: std::any::Any + Send + Sync {
     }
 
     /// A value from the form [`Type::wire_output`] gives, when that is not
-    /// the canonical bytes (`None`, the default).
+    /// the canonical bytes — or from the canonical bytes, checked as the
+    /// text form's input checks them, where going through the text costs
+    /// (a vector's: formatted and parsed again, three quarters of a
+    /// load's time).  `None` (the default): through the text form.
     fn wire_input(&self, bytes: &[u8]) -> Option<Result<Value>> {
         let _ = bytes;
         None

@@ -329,6 +329,16 @@ impl Type for VectorType {
     fn output(&self, v: &Value) -> String {
         components(v).map_or_else(|_| "?".into(), |c| format(&c))
     }
+    // A driver's little-endian `f32`s, checked as the text's input is (a
+    // component's shortest text reads back as it).
+    fn wire_input(&self, b: &[u8]) -> Option<Result<Value>> {
+        let (cs, rest) = b.as_chunks::<4>();
+        if !rest.is_empty() {
+            return Some(Err(Error::data_exception("malformed vector")));
+        }
+        let cs: Vec<f32> = cs.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        Some(checked(&cs))
+    }
     fn equality(&self) -> Option<&dyn Equality> {
         Some(&CanonicalBytes)
     }

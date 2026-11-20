@@ -338,6 +338,14 @@ impl Type for SparseType {
     fn output(&self, v: &Value) -> String {
         Sparse::of(v).map_or_else(|_| "?".into(), |s| format(&s))
     }
+    // A driver's bytes measured, then checked as the text's input is.
+    fn wire_input(&self, b: &[u8]) -> Option<Result<Value>> {
+        let given = Value::ext(sparse_type(), b.to_vec());
+        Some(Sparse::of(&given).and_then(|s| {
+            let pairs = s.at.iter().map(|&a| u64::from(a)).zip(s.values).collect();
+            Ok(Sparse::checked(u64::from(s.dims), pairs)?.value())
+        }))
+    }
     fn equality(&self) -> Option<&dyn Equality> {
         Some(&CanonicalBytes)
     }

@@ -616,6 +616,35 @@ class Conformance(unittest.TestCase):
                 self.assertEqual(c.load(t2, pa.table({"id": pa.array([7, None], pa.int32()), "v": [1.5, 2.5]})), 2)
                 self.assertEqual(c.execute(f"SELECT count(*), count(id) FROM {t2} WHERE v > 1").rows, [(5, 4)])
 
+    @unittest.skipUnless(_has("numpy"), "numpy is not installed")
+    def test_load_vectors(self):
+        # Vectors as a 2-D array, a list of arrays (both a block a batch),
+        # and lists with a NULL, another dimension or plain floats (a value
+        # at a time): what is read back is what was loaded.
+        import numpy as np
+        with connect() as c:
+            t = table()
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, v vector)")
+            rng = np.random.default_rng(3)
+            block = rng.standard_normal((70_000, 8)).astype(np.float32)
+            block[5, 2] = -0.0
+            self.assertEqual(c.load(t, {"id": np.arange(70_000, dtype=np.int32), "v": block}), 70_000)
+            listed = [rng.standard_normal(8).astype(np.float32) for _ in range(100)]
+            ids = np.arange(100_000, 100_100, dtype=np.int32)
+            self.assertEqual(c.load(t, {"id": ids, "v": listed}), 100)
+            mixed = [np.ones(3, dtype=np.float32), None, np.array([1.5, 2.5], dtype=np.float32)]
+            self.assertEqual(c.load(t, {"id": [200_000, 200_001, 200_002], "v": mixed}), 3)
+            back = c.numpy(f"SELECT id, v FROM {t} WHERE id < 70000 ORDER BY id")
+            got = np.stack([np.asarray(x, dtype=np.float32) for x in back["v"]])
+            self.assertTrue(np.array_equal(got, block))
+            self.assertEqual(c.execute(f"SELECT v FROM {t} WHERE id = 100007").rows[0][0].tolist(),
+                             listed[7].tolist())
+            self.assertEqual(c.execute(f"SELECT id FROM {t} WHERE id >= 200000 AND v IS NULL").rows,
+                             [(200_001,)])
+            self.assertEqual(c.execute(f"SELECT vector_dims(v) FROM {t} WHERE id = 200002").rows, [(2,)])
+            with self.assertRaises(nucleus.DataError):
+                c.load(t, {"id": [300_000], "v": [np.array([np.nan], dtype=np.float32)]})
+
     @server_only
     def test_authentication(self):
         with self.assertRaises(nucleus.OperationalError) as e:

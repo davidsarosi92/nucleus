@@ -1461,7 +1461,74 @@ fn run<R: Read, W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::split_tag;
+    use super::{from_wire, split_tag};
+    use nucleus_sql::ext::TypeRef;
+    use nucleus_wire::WireValue;
+
+    /// A vector's or a sparse vector's parameter, read from its bytes, is
+    /// what the text form read: the same value, or an error of the same
+    /// code — `-0`, subnormals, the largest, `NaN`, infinities, none;
+    /// positions out of order, repeated, past the dimensions, zeros.
+    #[test]
+    fn vector_parameters_read_as_their_text() {
+        let f = |cs: &[f32]| cs.iter().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>();
+        let s = |dims: u32, at: &[u32], vs: &[f32]| {
+            let mut b = dims.to_le_bytes().to_vec();
+            b.extend((at.len() as u32).to_le_bytes());
+            at.iter().for_each(|a| b.extend(a.to_le_bytes()));
+            vs.iter().for_each(|v| b.extend(v.to_le_bytes()));
+            b
+        };
+        let _types = nucleus_sql::ext::Registry::builtin();
+        let cases = [
+            ("vector", f(&[1.0, 2.5, -3.0])),
+            (
+                "vector",
+                f(&[-0.0, 0.0, 1e-45, -1.2e-38, 3.4028235e38, 0.1]),
+            ),
+            ("vector", f(&[1.0, f32::NAN])),
+            ("vector", f(&[f32::INFINITY])),
+            ("vector", f(&[f32::NEG_INFINITY, 1.0])),
+            ("vector", f(&[])),
+            ("vector", f(&vec![0.25; 16001])),
+            ("sparsevec", s(10, &[3, 1], &[0.5, 2.0])),
+            ("sparsevec", s(10, &[1, 1], &[0.5, 2.0])),
+            ("sparsevec", s(10, &[10], &[0.5])),
+            ("sparsevec", s(10, &[2, 4], &[0.0, -0.0])),
+            ("sparsevec", s(10, &[2], &[f32::NAN])),
+            ("sparsevec", s(10, &[2], &[f32::INFINITY])),
+            ("sparsevec", s(0, &[], &[])),
+            ("sparsevec", s(1_000_001, &[], &[])),
+            ("sparsevec", s(5, &[], &[])),
+        ];
+        for (name, bytes) in cases {
+            let t = TypeRef::named(name).unwrap();
+            let text = t.imp().input(
+                &t.imp()
+                    .output(&nucleus_sql::Value::ext(t, bytes.clone())),
+            );
+            let wire = from_wire(WireValue::Ext {
+                type_name: name.into(),
+                bytes: bytes.clone(),
+            });
+            match (text, wire) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "{name} {bytes:?}"),
+                (Err(a), Err(b)) => assert_eq!(a.code, b.code, "{name} {bytes:?}"),
+                (a, b) => panic!("{name} {bytes:?}: text {a:?}, bytes {b:?}"),
+            }
+        }
+        // Bytes no value has: refused.
+        for (name, bytes) in [
+            ("vector", vec![0; 5]),
+            ("sparsevec", vec![1, 0, 0, 0, 1, 0, 0, 0]),
+        ] {
+            let wire = from_wire(WireValue::Ext {
+                type_name: name.into(),
+                bytes,
+            });
+            assert!(wire.is_err(), "{name}");
+        }
+    }
 
     #[test]
     fn tags() {

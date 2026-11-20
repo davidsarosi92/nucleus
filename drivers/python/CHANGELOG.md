@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `load` sends a `vector` column of float32 numpy arrays (a 2-D array,
+  or a list of 1-D arrays of one dimension, without NULLs) as one block
+  a batch: 900,000 SIFT vectors encoded in 0.4 s, not 2.2.
 - A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as the
   host — `nucleus.connect("/tmp/nucleus.sock")` — reaches `nucleus server
   --socket`; no TLS there.

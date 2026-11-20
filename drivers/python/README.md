@@ -47,8 +47,9 @@ own layout; a `vector` column a `fixed_size_list<float32>`, and in
 numpy, pyarrow, pandas and polars are optional — needed only by what
 uses them.  Bulk load, the other way: `conn.load("t", df)` — a
 DataFrame, an Arrow table, a dict of columns or rows, sent as columnar
-batches in one `COPY` (numpy numbers, dates and timestamps without a
-Python object per value) — and `conn.copy("COPY t FROM STDIN WITH
+batches in one `COPY` (numpy numbers, dates, timestamps and float32
+vectors — a 2-D array or a list of 1-D ones — without a Python object
+per value) — and `conn.copy("COPY t FROM STDIN WITH
 (FORMAT csv)", open("t.csv", "rb"))` for text or CSV.  Many
 statements in one round trip: `conn.pipeline([(sql, params), …])` (each
 one's `Result`, or its `Error` in its place); one statement for many
