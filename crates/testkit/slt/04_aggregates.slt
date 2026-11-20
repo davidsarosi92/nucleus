@@ -132,3 +132,33 @@ SELECT a.id, a.product, b.id, b.product FROM sales a JOIN sales b ON a.amount < 
 2 pear 3 apple
 3 apple 1 apple
 4 apple 1 apple
+
+# DISTINCT over a primary key of one column read by a scan: the values are
+# distinct already (the call aggregated as without it); over a join, which
+# repeats rows, it still removes the repeats.
+query IIR
+SELECT count(DISTINCT id), sum(DISTINCT id), avg(DISTINCT id) FROM sales WHERE id > 1
+----
+4 14 3.500
+
+query TII
+SELECT region, count(DISTINCT id), count(*) FROM sales GROUP BY region ORDER BY region
+----
+east 1 1
+north 2 2
+south 2 2
+
+query II
+SELECT count(DISTINCT x.id), count(*) FROM sales x JOIN sales y ON x.product = y.product
+----
+4 10
+
+query I
+SELECT count(DISTINCT k) FROM (SELECT id AS k FROM sales ORDER BY id LIMIT 3) q
+----
+3
+
+query T
+SELECT array_agg(DISTINCT name ORDER BY name) FROM regions
+----
+{north,south,west}

@@ -12065,6 +12065,18 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     transaction's intents, at three snapshots, in batches of 1 to 1024 —
     what a scan gives.
 
+  *S12, `count(DISTINCT id)`* (2.0× PostgreSQL's 401 ms; by 1000 groups
+  `count(DISTINCT id)` grouped twice, 1527 ms).  `id` is the table's
+  primary key: its values are distinct already.  Taken from SQL Server's
+  and Oracle's simplification of `COUNT(DISTINCT key)`:
+  `distinct::needless` drops a call's `DISTINCT` over a primary key of
+  one column read by a scan through filters, sorts, limits and
+  projections (no join: it repeats rows; not a `real`/`double` key, as
+  `0` and `-0`).  806 → 90 ms, by groups 1527 → 107, one build and the
+  other in turn.  Tests: `04_aggregates.slt` — filtered, grouped,
+  `sum`/`avg(DISTINCT id)`, through a subquery's `LIMIT`, and over a
+  join, where the repeats are still removed.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

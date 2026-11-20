@@ -45,9 +45,19 @@ use crate::vector::Vector;
 /// groupings.
 pub(crate) fn two_level(plan: Plan) -> Plan {
     let plan = crate::optimizer::map_children(plan, &two_level);
-    let Plan::Aggregate { input, group, aggs } = plan else {
+    let Plan::Aggregate {
+        input,
+        group,
+        mut aggs,
+    } = plan
+    else {
         return plan;
     };
+    for a in &mut aggs {
+        if a.distinct && needless(&input, &a.args) {
+            a.distinct = false;
+        }
+    }
     if !eligible(&aggs) || !crate::vector::pipelined(&input) {
         return Plan::Aggregate { input, group, aggs };
     }
@@ -91,6 +101,42 @@ pub(crate) fn two_level(plan: Plan) -> Plan {
         input: Box::new(inner),
         group: (0..n).map(Expr::Column).collect(),
         aggs: outer,
+    }
+}
+
+/// Whether a `DISTINCT` call over `args`, reading `input`'s rows, sees
+/// distinct values without it: one column, a table's primary key of one
+/// column as a scan reads it, through filters, sorts, limits and
+/// projections — no join, which could repeat a row (SQL Server simplifies
+/// `COUNT(DISTINCT key)` so; the statistics suite's `count(DISTINCT id)`
+/// on ten million rows, 806 ms grouped twice).  Not a key of `real` or
+/// `double precision`, as a grouping by them would not group `0` and
+/// `-0` apart.
+fn needless(input: &Plan, args: &[Expr]) -> bool {
+    use crate::types::DataType;
+    let [Expr::Column(c)] = args else {
+        return false;
+    };
+    let Some((t, col)) = origin(input, *c) else {
+        return false;
+    };
+    t.primary_key == [col] && !matches!(t.columns[col].ty, DataType::Real | DataType::Float)
+}
+
+/// The table and its column that column `col` of `plan`'s rows is, as a
+/// scan reads it (each of the scan's rows once).
+fn origin(plan: &Plan, col: usize) -> Option<(&crate::catalog::Table, usize)> {
+    match plan {
+        Plan::Scan { table, .. } => (col < table.columns.len()).then_some((table, col)),
+        Plan::Filter { input, .. }
+        | Plan::Secure { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. } => origin(input, col),
+        Plan::Project { input, exprs } => match exprs.get(col)? {
+            Expr::Column(i) => origin(input, *i),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

@@ -3053,6 +3053,14 @@ repeat) or an aggregate that can fail (the right rows no left row
 matches are aggregated too, and their error would come where the join
 gave none).
 
+**`DISTINCT` over a key left out** (`distinct::needless`): a call's
+`DISTINCT` over a column that is its table's primary key of one column,
+read by a scan through filters, sorts, limits and projections (no join,
+which repeats rows), is dropped — the values are distinct already (as
+SQL Server simplifies `COUNT(DISTINCT key)`); not over a `real` or
+`double precision` key.  The statistics suite's `count(DISTINCT id)` on
+ten million rows 806 → 90 ms.
+
 **`DISTINCT` inside aggregates as groupings** (`distinct`, §M14.20 W6):
 `SELECT g, count(DISTINCT x), sum(y) … GROUP BY g` is aggregated twice —
 by `g, x`, the other aggregates giving their partial states
@@ -8147,6 +8155,11 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — `DISTINCT` over a primary key left out (the sweep):**
+  `count(DISTINCT id)` where `id` is a scanned table's primary key of
+  one column aggregates as `count(id)`: 806 → 90 ms on ten million rows
+  (PostgreSQL 401), by 1000 groups 1527 → 107.
 
 - **2026-11-20 — a load's committed intents read a leaf at a time (the
   sweep before F1's whole run):** a row table's scan over intents not
