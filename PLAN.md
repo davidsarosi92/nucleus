@@ -12033,6 +12033,17 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     than the bound still finds nothing again — a policy that keeps part
     of it is for when the bound is too small, not a constant.
 
+  *S10, `bench/run.py`'s `DELETE` of a tenth* (1.41×; the LSM table's
+  lags — delete 2.27×, count after writes 1.88×, cold reads 1.3–1.7× —
+  are §M14.28 L5's next steps, awaiting agreement).  95 against
+  PostgreSQL's 68 ms (`del.py`, five rounds): the matching rows found
+  by the parallel scan ~24 ms, the deletes buffered ~10, the commit ~38
+  — 100 000 delete versions inserted into the B+tree (~380 ns each),
+  where PostgreSQL sets each tuple's `xmax` in place.
+  - Not taken: a delete marked in place beside the version it ends is
+    issue #4's logged in-place rewrite; within the writes' target (≤ 2×).
+    Issue #7.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
