@@ -23,7 +23,7 @@ query T
 EXPLAIN SELECT count(*) FROM t WHERE k = 1
 ----
 Aggregate: count(*)
-  Index Scan using t_k on t (k = 1) filter: (#1 = 1)
+  Index Scan using t_k on t (k = 1)
 
 statement ok
 ANALYZE
@@ -39,14 +39,14 @@ query T
 EXPLAIN SELECT count(*) FROM t WHERE v = 5
 ----
 Aggregate: count(*)
-  Index Scan using t_v on t (v = 5) filter: (#2 = 5) (rows=1)
+  Index Scan using t_v on t (v = 5) (rows=1)
 
 # Ranges are estimated from the histogram.
 query T
 EXPLAIN SELECT count(*) FROM t WHERE v > 990
 ----
 Aggregate: count(*)
-  Index Scan using t_v on t (v > 990) filter: (#2 > 990) (rows=9)
+  Index Scan using t_v on t (v > 990) (rows=9)
 
 query T
 EXPLAIN SELECT count(*) FROM t WHERE v > 10

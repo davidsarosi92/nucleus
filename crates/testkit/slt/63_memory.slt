@@ -93,7 +93,7 @@ query T
 EXPLAIN SELECT id FROM slt_notes WHERE subject = 'u1' AND content @@ 'tea'
 ----
 Project: #0
-  Index Scan using slt_notes_subject on slt_notes (subject = 'u1') filter: ((#1 = 'u1') AND @@(#3, 'tea', 'english'))
+  Index Scan using slt_notes_subject on slt_notes (subject = 'u1') filter: @@(#3, 'tea', 'english')
 
 # A contradiction is the caller's call: the new memory replaces the old,
 # which is closed, not deleted.

@@ -61,8 +61,10 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
             filter,
             ..
         } => {
-            if let Some(f) = filter {
-                read(f, &mut wanted, 0);
+            // (Not the conditions the key range applies exactly: its rows
+            // are not checked for them.)
+            if let Some(f) = access.rest(filter.as_ref()) {
+                read(&f, &mut wanted, 0);
             }
             // The ranked value past the table's columns: the columns its
             // call reads where the index cannot rank (its other operands

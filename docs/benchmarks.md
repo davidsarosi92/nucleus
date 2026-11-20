@@ -1649,9 +1649,11 @@ client over TCP — for a lookup of one row that is mostly the round trip:
 Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus 7ff7b48e3+changes — 2026-11-17T07:36:31+00:00
 
 `jsonb_path_ops` cannot serve `?` (PostgreSQL scans for "rare"); the
-`json` index can.  PostgreSQL builds its indexes three times faster and
-answers point lookups in a third of the time — both open (PLAN.md
-§M14.15).
+`json` index can.  PostgreSQL builds its indexes three times faster
+(open, PLAN.md §M14.15).  Since this run a count over an index's range
+reads no row (§M14.33 S17): score, indexed, 165 µs, measured alone; the
+point lookups' remaining gap is the clients' (nucleus's Python driver
+over TCP against psql), the statement itself 5 µs.
 
 JSON Schema checks (`bash bench/all.sh json-schema`; J5,
 `bench/json/src/bin/schema.rs`): 100,000 made-up tool calls, one in ten

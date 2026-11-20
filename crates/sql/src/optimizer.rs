@@ -1398,9 +1398,8 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
     let eq = |k: &Expr| {
         preds
             .iter()
-            .filter_map(|p| key_bound(p, k))
-            .find(|(op, _)| *op == BinaryOp::Eq)
-            .map(|(_, e)| e)
+            .filter_map(|p| key_bound(p, k).map(|b| (p, b)))
+            .find(|(_, (op, _))| *op == BinaryOp::Eq)
     };
     let columns = |cols: &[usize]| cols.iter().map(|&c| Expr::Column(c)).collect::<Vec<_>>();
     let candidates = std::iter::once((None, columns(&table.primary_key))).chain(
@@ -1427,7 +1426,20 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
         if keys.is_empty() {
             continue; // a hidden row id
         }
-        let prefix: Vec<Expr> = keys.iter().map_while(&eq).collect();
+        // The key part's type, for the conditions applied exactly.
+        let key_ty = |pos: usize| match index {
+            None => table.columns[table.primary_key[pos]].ty,
+            Some(i) => table.indexes[i].key_type(table, pos),
+        };
+        let mut exact = Vec::new();
+        let mut prefix = Vec::new();
+        for (pos, k) in keys.iter().enumerate() {
+            let Some((p, (op, e))) = eq(k) else { break };
+            if index.is_some() && applied_exactly(key_ty(pos), op, &e) {
+                exact.push(p.clone());
+            }
+            prefix.push(e);
+        }
         let (mut lower, mut upper) = (Bound::Unbounded, Bound::Unbounded);
         let mut used: Vec<Expr> = prefix
             .iter()
@@ -1435,7 +1447,10 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
             .map(|(e, k)| bin(BinaryOp::Eq, k, e))
             .collect();
         if let Some(next) = keys.get(prefix.len()) {
-            for (op, e) in preds.iter().filter_map(|p| key_bound(p, next)) {
+            for (p, (op, e)) in preds
+                .iter()
+                .filter_map(|p| key_bound(p, next).map(|b| (p, b)))
+            {
                 let slot = match op {
                     BinaryOp::Gt | BinaryOp::GtEq => &mut lower,
                     BinaryOp::Lt | BinaryOp::LtEq => &mut upper,
@@ -1447,6 +1462,9 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
                     } else {
                         Bound::Included(e.clone())
                     };
+                    if index.is_some() && applied_exactly(key_ty(prefix.len()), op, &e) {
+                        exact.push(p.clone());
+                    }
                     used.push(bin(op, next, &e));
                 }
             }
@@ -1476,6 +1494,7 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
                     prefix,
                     lower,
                     upper,
+                    exact,
                 },
             ));
         }
@@ -1486,6 +1505,31 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
         (Some((_, a)), _) => a,
         (None, _) => Access::Full,
     }
+}
+
+/// Whether a key range applies `key op e` exactly — every row it reads
+/// passes it, none it leaves out would: a key part whose encoding orders
+/// and compares as SQL does — an integer's, a boolean's; a text's for
+/// equality alone (its order is the collation's) — and a value computed
+/// once as the row's check would (nothing volatile).  The value's type
+/// is checked when the range is made ([`crate::exec::key_range`]: one
+/// that would not convert exactly, the conditions are checked after all).
+fn applied_exactly(key: crate::types::DataType, op: BinaryOp, e: &Expr) -> bool {
+    use crate::types::DataType;
+    let mut stable = true;
+    e.walk(&mut |x| {
+        if let Expr::Call(f, _) = x
+            && f.volatility() == crate::ext::Volatility::Volatile
+        {
+            stable = false;
+        }
+    });
+    stable
+        && match key {
+            DataType::Bool | DataType::SmallInt | DataType::Integer | DataType::BigInt => true,
+            DataType::Text => op == BinaryOp::Eq,
+            _ => false,
+        }
 }
 
 fn bin(op: BinaryOp, k: &Expr, e: &Expr) -> Expr {

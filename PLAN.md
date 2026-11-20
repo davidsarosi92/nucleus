@@ -12163,6 +12163,36 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     query vector (62 µs a trivial query with it); pgvector's pgbench
     takes it from a table.
 
+  *S17, counts over an index's range* (json-index, 200,000 documents:
+  `count(*) … WHERE (doc->>'score')::int BETWEEN 10 AND 12`, 600 rows,
+  0.96 ms, PostgreSQL 0.111: 8.6×).  Each entry's row was fetched
+  (45% of the time) and the filter checked on it again (39%) — the very
+  conditions the key range had applied.  PostgreSQL's index-only scan
+  answers from the index (its visibility map all-visible after the
+  load's `VACUUM`).
+  - Taken: `Access::Key::exact` — the filter's conjuncts a secondary
+    index's range applies exactly (`optimizer::applied_exactly`: a key
+    part of an integer or boolean, or a text's for equality; a value
+    computed once, nothing volatile).  They are not checked again
+    (`Access::rest`) and `prune` reads no column for them; where a value
+    would not make them exact at run time (`exec::key_range_exact`: a
+    `NULL`, a conversion that is not exact) all are checked, on whole
+    rows.  A range below a bound only starts past the part's `NULL`
+    keys.  An index scan wanting no column fetches no row
+    (`IndexRows::keys_only`; a sealed table's excepted).  An MVCC
+    entry is visible exactly when its row version is, so the count is
+    the transaction's own — no visibility map needed.  `EXPLAIN` shows
+    the conditions left.  score 762 → 165 µs (nucleus's floor, `SELECT
+    1`, ~53 µs through the Python client over TCP; psql's for
+    PostgreSQL is lower), id 63 → 62, both orders, binaries alone in
+    turn; `user` (the `json` index) also 118 → 77, not isolated.
+  - Not a lag: "id, indexed" 62 µs against 37 is the clients' floors
+    (5 µs of it the statement's).
+  - Test: `69_expression_indexes.slt` — counts over ranges with `NULL`
+    keys and documents, a `NULL` bound, a numeric bound on an integer
+    part, text equality and range, a transaction's own update and
+    delete; 59 of 59 records as PostgreSQL has them.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

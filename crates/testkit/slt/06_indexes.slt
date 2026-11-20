@@ -46,7 +46,7 @@ query T
 EXPLAIN SELECT id FROM items WHERE sku = 'c3'
 ----
 Project: #0
-  Index Scan using items_sku on items (sku = 'c3') filter: (#1 = 'c3')
+  Index Scan using items_sku on items (sku = 'c3')
 
 query T
 EXPLAIN SELECT id FROM items WHERE id = 2

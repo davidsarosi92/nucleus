@@ -99,6 +99,7 @@ fn reads(plan: &Plan, st: &Stats) -> f64 {
                         prefix,
                         lower,
                         upper,
+                        ..
                     },
                 ..
             } => {

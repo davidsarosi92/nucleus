@@ -3486,6 +3486,20 @@ columns only (`0A000`).  `nc_catalog.indexes.columns` and pg-compat's
 `indexdef` show `(expr)`; `pg_index.indkey` holds 0 for it, as
 PostgreSQL's.
 
+**Conditions a key range applies exactly** (§M14.33 S17): of a scan
+through a secondary index, the filter's conjuncts that bound a key part
+of an integer or boolean (or equal a text's) by a value computed once
+are recorded on the path (`Access::Key::exact`).  The rows the range
+reads pass them, so they are not checked again (`Access::rest`, which
+`EXPLAIN` shows as the filter) and no column is read for them; where a
+value at run time is `NULL` or would not convert exactly
+(`exec::key_range_exact`), all are checked on whole rows.  A range
+below a bound only starts past the part's `NULL` keys.  An index scan
+that wants no column — `count(*)` over the range — reads the entries
+alone (`IndexRows::keys_only`; not a sealed table's, whose destroyed
+rows its fetch tells): an entry is visible exactly when its row version
+is, so the count needs no visibility map.
+
 **Encoding versions** (registered types): each stored value carries its
 type's encoding version.  A value in an older one is upgraded as it is
 read (`Type::upgrade(from, bytes)`), and writes use the current one, so
@@ -8168,6 +8182,12 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — counts over an index's range (the sweep):** the
+  filter's conditions a secondary index's key range applies exactly are
+  not checked again, and an index scan wanting no column reads no row.
+  json-index, `(doc->>'score')::int BETWEEN 10 AND 12` (600 rows):
+  762 → 165 µs a count (PostgreSQL's index-only scan 111).
 
 - **2026-11-20 — filtered vector searches (the sweep):** a B-tree range
   searched among is read with its keys left escaped, and the filter's

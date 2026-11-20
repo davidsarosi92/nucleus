@@ -286,6 +286,13 @@ pub enum Access {
         lower: Bound<Expr>,
         /// Upper bound on the next column.
         upper: Bound<Expr>,
+        /// The scan filter's conjuncts this range applies exactly — a
+        /// secondary index's, each a bound by a value free of the row on
+        /// a key part whose encoding orders and equals as SQL does
+        /// ([`Access::rest`]): its rows pass them, unchecked, and need
+        /// not be read for them (an index-only count, PLAN.md §M14.33
+        /// S17).
+        exact: Vec<Expr>,
     },
     /// The rows an index method finds: exactly, for a condition of the
     /// scan's filter it serves (`col @@ q` by a text index, PLAN.md
@@ -382,6 +389,7 @@ impl Access {
             prefix,
             lower,
             upper,
+            ..
         } = self
         else {
             return false;
@@ -429,6 +437,22 @@ impl Access {
             Bound::Unbounded => false,
         };
         is(lower, BinaryOp::GtEq, BinaryOp::Gt) || is(upper, BinaryOp::LtEq, BinaryOp::Lt)
+    }
+
+    /// The scan filter `filter` past the conjuncts this key range applies
+    /// exactly (`exact`): what its rows are still checked for.
+    pub fn rest(&self, filter: Option<&Expr>) -> Option<Expr> {
+        let f = filter?;
+        let Access::Key { exact, .. } = self else {
+            return Some(f.clone());
+        };
+        if exact.is_empty() {
+            return Some(f.clone());
+        }
+        let mut cs = Vec::new();
+        crate::binder::conjuncts(f.clone(), &mut cs);
+        cs.retain(|c| !exact.contains(c));
+        crate::binder::conjunction(cs)
     }
 
     /// Whether its rows carry the ranked function's value past the
@@ -546,6 +570,7 @@ fn key_conds(table: &Table, access: &Access) -> (String, String) {
         prefix,
         lower,
         upper,
+        ..
     } = access
     else {
         return (String::new(), String::new());
@@ -935,8 +960,9 @@ impl Plan {
                         format!("Index Scan using {} on {} {what}", ix.name, table.name)
                     }
                 };
-                if let Some(f) = filter {
-                    let _ = write!(s, " filter: {}", show(f));
+                // (Less the conditions its key range applies exactly.)
+                if let Some(f) = access.rest(filter.as_ref()) {
+                    let _ = write!(s, " filter: {}", show(&f));
                 }
                 if let Some(e) = estimate
                     && note.is_none()

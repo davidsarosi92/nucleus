@@ -150,6 +150,20 @@ fn build_node<'a>(
                 (Some(c), None) => Some(c.clone()),
                 (None, f) => f.clone(),
             };
+            // The conditions a key range applies exactly are not checked
+            // again (`prune` read no columns for them) — unless a value
+            // would not make them exact: then all, on whole rows.
+            let (filter, wanted) = match access {
+                Access::Key { exact, .. } if !exact.is_empty() => {
+                    let e = env(&[], ctx, outer);
+                    if key_range_exact(table, access, &e)?.is_none_or(|(_, x)| x) {
+                        (access.rest(filter.as_ref()), wanted)
+                    } else {
+                        (filter, None)
+                    }
+                }
+                _ => (filter, wanted),
+            };
             let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
             let rows: Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>>> = if keys.is_empty() {
                 Box::new(rows)
@@ -825,16 +839,30 @@ pub(crate) fn key_range(
     access: &Access,
     e: &Env,
 ) -> Result<Option<(Vec<u8>, Option<Vec<u8>>, Option<usize>)>> {
+    Ok(key_range_exact(table, access, e)?.map(|(r, _)| r))
+}
+
+/// [`key_range`], and whether it is exactly its conditions' — every value
+/// a key part's own type, or converted exactly, none `NULL`.  Where it is
+/// not, the conditions it would apply exactly ([`Access::rest`]) are
+/// checked on its rows after all.
+#[allow(clippy::type_complexity)]
+pub(crate) fn key_range_exact(
+    table: &Table,
+    access: &Access,
+    e: &Env,
+) -> Result<Option<((Vec<u8>, Option<Vec<u8>>, Option<usize>), bool)>> {
     let Access::Key {
         index,
         prefix,
         lower,
         upper,
+        ..
     } = access
     else {
         let p = table.index_prefix(0);
         let end = prefix_end(&p);
-        return Ok(Some((p, end, None)));
+        return Ok(Some(((p, end, None), true)));
     };
     let columns: &[usize] = match index {
         None => &table.primary_key,
@@ -863,12 +891,14 @@ pub(crate) fn key_range(
     }
     let base_end = prefix_end(&key);
     if !usable {
-        return Ok(Some((key.clone(), base_end, *index)));
+        return Ok(Some(((key.clone(), base_end, *index), false)));
     }
     let pos = prefix.len();
+    let exact = std::cell::Cell::new(true);
     let bound_key = |b: &Expr| -> Result<Option<Vec<u8>>> {
         let v = b.eval(e)?;
         let Some(v) = coerce(v, pos).filter(|v| !v.is_null()) else {
+            exact.set(false);
             return Ok(None);
         };
         let mut k = key.clone();
@@ -876,6 +906,14 @@ pub(crate) fn key_range(
         Ok(Some(k))
     };
     let start = match lower {
+        // Below a bound only: past the part's `NULL`s (its key `0x00`
+        // sorts first), which pass no comparison — the range is then the
+        // condition's exactly ([`Access::rest`]).
+        Bound::Unbounded if !matches!(upper, Bound::Unbounded) => {
+            let mut k = key.clone();
+            k.push(0x01);
+            k
+        }
         Bound::Unbounded => key.clone(),
         Bound::Included(b) => bound_key(b)?.unwrap_or_else(|| key.clone()),
         Bound::Excluded(b) => {
@@ -890,7 +928,7 @@ pub(crate) fn key_range(
         },
         Bound::Excluded(b) => bound_key(b)?.or(base_end),
     };
-    Ok(Some((start, end, *index)))
+    Ok(Some(((start, end, *index), exact.get())))
 }
 
 /// The access path a scan through an index method reads where the index
@@ -1332,6 +1370,11 @@ pub fn scan_some<'a>(
         // A sealed row whose key is destroyed reads as absent: its
         // entries are passed over.
         sealed: table.storage == crate::sealed::SEALED,
+        // No column wanted (a count of an index's range): the entries
+        // alone, no row fetched — a sealed table's excepted, whose
+        // destroyed rows are told by their fetch.
+        keys_only: table.storage != crate::sealed::SEALED
+            && wanted.is_some_and(|w| !w.contains(&true)),
         keys: Vec::new(),
         rows: Vec::new(),
         ready: std::collections::VecDeque::new(),
@@ -1360,6 +1403,7 @@ struct IndexRows<'a> {
     base: Vec<u8>,
     labels: crate::enums::Labels,
     sealed: bool,
+    keys_only: bool,
     keys: Vec<Vec<u8>>,
     rows: Vec<Option<Row>>,
     ready: std::collections::VecDeque<(Vec<u8>, Row)>,
@@ -1385,6 +1429,13 @@ impl IndexRows<'_> {
         }
         self.group = nucleus_kv::GET_MANY;
         if self.keys.is_empty() {
+            return Ok(());
+        }
+        if self.keys_only {
+            let width = self.table.columns.len();
+            for k in self.keys.drain(..) {
+                self.ready.push_back((k, vec![Value::Null; width]));
+            }
             return Ok(());
         }
         if let [k] = self.keys.as_slice() {

@@ -65,14 +65,14 @@ query T
 EXPLAIN SELECT id FROM users WHERE lower(email) = 'ann@x.org'
 ----
 Project: #0
-  Index Scan using users_lower_idx on users ((lower(email)) = 'ann@x.org') filter: (lower(#1) = 'ann@x.org')
+  Index Scan using users_lower_idx on users ((lower(email)) = 'ann@x.org')
 
 # nucleus-only: the plans.
 query T
 EXPLAIN SELECT id FROM users WHERE (doc->>'age')::int >= 31
 ----
 Project: #0
-  Index Scan using users_age on users (((doc->>'age')::int) >= 31) filter: (->>(json,text)(#3, 'age')::integer >= 31)
+  Index Scan using users_age on users (((doc->>'age')::int) >= 31)
 
 # A unique expression: two rows may not share a name, NULLs aside.
 statement error 23505
@@ -170,7 +170,7 @@ query T
 EXPLAIN SELECT a FROM t WHERE a % 7 = 3 AND upper(b) = 'K3'
 ----
 Project: #0
-  Index Scan using t_ab on t ((a % 7) = 3 AND (upper(b)) = 'K3') filter: (((#0 % 7)::integer = 3) AND (upper(#1) = 'K3')) (rows=3)
+  Index Scan using t_ab on t ((a % 7) = 3 AND (upper(b)) = 'K3') (rows=3)
 
 # A column's type changed: the expression bound again, the index rebuilt.
 statement ok
@@ -204,7 +204,7 @@ query T
 EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50
 ----
 Project: #0
-  Index Scan using users_jv on users ((JSON_VALUE(doc, '$.age' RETURNING int)) = 50) filter: (json_value(#3, $."age", NULL, NULL::integer, 0, NULL, 0, NULL) = 50)
+  Index Scan using users_jv on users ((JSON_VALUE(doc, '$.age' RETURNING int)) = 50)
 
 # nucleus-only: the plans.
 query T
@@ -215,3 +215,96 @@ Project: #0
 
 statement ok
 DROP TABLE users
+
+# The conditions a key range applies exactly are not checked again, and a
+# count of its range reads no row (PLAN.md §M14.33 S17): `NULL` keys left
+# out below a bound, values that do not convert exactly checked on the
+# rows after all, a transaction's own changes counted.
+statement ok
+CREATE TABLE ev (id int PRIMARY KEY, doc jsonb)
+
+statement ok
+INSERT INTO ev VALUES (1, '{"s": 10, "k": "a"}'), (2, '{"s": 11, "k": "b"}'), (3, '{"s": 12, "k": "a"}'), (4, '{"k": "c"}'), (5, NULL), (6, '{"s": 30, "k": "a"}')
+
+statement ok
+CREATE INDEX ev_s ON ev (((doc->>'s')::int))
+
+statement ok
+CREATE INDEX ev_k ON ev ((doc->>'k'))
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int BETWEEN 10 AND 12
+----
+3
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int < 12
+----
+2
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int <= 30
+----
+4
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int < NULL::int
+----
+0
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int < 11.5
+----
+2
+
+query I
+SELECT count(*) FROM ev WHERE doc->>'k' = 'a'
+----
+3
+
+query I
+SELECT count(*) FROM ev WHERE doc->>'k' = 'a' AND id > 1
+----
+2
+
+query I
+SELECT count(*) FROM ev WHERE doc->>'k' > 'a'
+----
+2
+
+statement ok
+BEGIN
+
+statement ok
+UPDATE ev SET doc = '{"s": 11, "k": "z"}' WHERE id = 6
+
+statement ok
+DELETE FROM ev WHERE id = 1
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int BETWEEN 10 AND 12
+----
+3
+
+query I
+SELECT count(*) FROM ev WHERE doc->>'k' = 'a'
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM ev WHERE (doc->>'s')::int BETWEEN 10 AND 12
+----
+3
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT count(*) FROM ev WHERE doc->>'k' = 'a' AND id > 1
+----
+Aggregate: count(*)
+  Index Scan using ev_k on ev ((doc->>'k') = 'a') filter: (#0 > 1)
+
+statement ok
+DROP TABLE ev
