@@ -12193,6 +12193,33 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     part, text equality and range, a transaction's own update and
     delete; 59 of 59 records as PostgreSQL has them.
 
+  *S18, index builds* (json-index: `USING json` over 200,000 documents
+  0.80 s, PostgreSQL's GIN 0.27: 3×; BM25, BEIR: scifact 0.39 s,
+  ParadeDB 0.30, nfcorpus 0.34 against 0.21).  The JSON (and sparse)
+  index built on one thread, its terms written by `format!` (a third of
+  the work); a build's segments were written, read back, merged,
+  deleted and the merged one written; and a text index of fewer than
+  8,192 rows built on one or two workers (batches of 4,096 at least).
+  - Taken: `text::index::build_segments` — the text, sparse and JSON
+    builds' rows read, then made documents and segments a batch at a
+    time on the workers (the text index's way, §M14.21 T5b).  json 801
+    → 314 ms.
+  - Taken: a JSON term's hex digits written by hand (`json::term`):
+    314 → 300 (the create alone 252 → 235).
+  - Taken: `Store::append_merged` — where the index holds no segment
+    yet, the batches' segments merged into one in memory and written
+    once: 300 → 207 (the commit's checkpoint 59 → 7 ms; PostgreSQL 266).
+  - Taken: `BUILD_MIN` 4,096 → 512 (with the merge in memory a small
+    segment costs little): scifact 361 → 107 ms (ParadeDB 297),
+    nfcorpus 323 → 90 (210), arguana 273 → 137 (340).  Each both
+    orders, binaries alone in turn.
+  - Left: the B-tree expression indexes (`((doc->>'id'))` 90 ms,
+    PostgreSQL 41; `(((doc->>'score')::int))` 95, 38): the keys computed
+    on the workers ~16 ms, the entries put one at a time ~23 ms (an
+    encoded key and value allocated each, then the sorted apply), the
+    commit's checkpoint ~25 ms (its ordered sync 14).  A bulk load of
+    sorted entries into leaves is the remedy — issue #9.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

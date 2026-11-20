@@ -4553,15 +4553,17 @@ logarithmic policy).  `upkeep_now` (tests, `VACUUM`), `merge_all`,
 `shape` and `stats` are public for tests.  `CREATE INDEX` reads the
 rows' texts, then analyzes them and makes segments on the statement's
 workers (`parallel_workers`) — a batch each, the rows over the workers,
-4,096 to 100,000 a segment (Lucene's and Tantivy's indexing threads, a
-segment each) — and runs the merges due a round at a time, a round's
+512 to 100,000 a segment (Lucene's and Tantivy's indexing threads, a
+segment each; `build_segments`, the sparse and JSON indexes' builds
+too) — and runs the merges due a round at a time, a round's
 groups at once and each group's terms in runs on its share of the
 workers (`segment::merge`: cut at terms of the part with the most,
 joined in order; the same bytes as one run).  Where the batches'
-segments hold 3 GB or less together they are merged into one at once
-(`merge_all` on the workers; Lucene's `forceMerge(1)` for an index done
-with) — a search looks each term up once a segment, and one merge reads
-each document once — else the merges due run.
+segments hold 3 GB or less together they are merged into one at once,
+in memory, before any is written (`Store::append_merged`, on the
+workers; Lucene's `forceMerge(1)` for an index done with) — a search
+looks each term up once a segment, and one merge reads each document
+once — else the merges due run.
 
 *Segments* (`text/index/segment.rs`): documents (primary key, text
 hash, length), terms sorted, each with its document count and its
@@ -8182,6 +8184,14 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — text, sparse and JSON index builds on the workers (the
+  sweep):** the three builds share `build_segments` — batches of 512 to
+  100,000 rows on the statement's workers, their segments merged into
+  one in memory before any is written.  `USING json` over 200,000
+  documents 801 → 207 ms (PostgreSQL's GIN 266); BM25 `CREATE INDEX`
+  scifact 361 → 107 ms (ParadeDB 297), nfcorpus 323 → 90 (210), arguana
+  273 → 137 (340).
 
 - **2026-11-20 — counts over an index's range (the sweep):** the
   filter's conditions a secondary index's key range applies exactly are

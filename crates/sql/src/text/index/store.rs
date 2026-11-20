@@ -464,6 +464,33 @@ impl Store {
         Ok(txn.put(&self.keys.root(), &root.encode())?)
     }
 
+    /// A build's segments ([`append_segments`](Self::append_segments))
+    /// merged into one in memory first, where the index holds none yet —
+    /// not written, read back, merged and deleted (a third of a JSON
+    /// index's build); else appended and every segment merged.
+    pub(crate) fn append_merged(
+        &self,
+        txn: &mut dyn KvTxn,
+        segments: Vec<(Vec<u8>, u32)>,
+        workers: usize,
+    ) -> Result<()> {
+        if segments.len() <= 1 || !self.root(&*txn)?.segments.is_empty() {
+            self.append_segments(txn, segments)?;
+            return self.merge_all(txn, workers);
+        }
+        let docs = segments.iter().map(|(_, n)| n).sum();
+        let one = {
+            let segs = segments
+                .iter()
+                .map(|(b, _)| Segment::decode(b))
+                .collect::<Result<Vec<_>>>()?;
+            let parts: Vec<(&Segment, Option<&[u64]>)> = segs.iter().map(|s| (s, None)).collect();
+            segment::merge(&parts, workers, self.weighted)?
+        };
+        drop(segments);
+        self.append_segments(txn, vec![(one, docs)])
+    }
+
     /// Seals the delta `txn` sees: its rows a new segment, its tombstones
     /// applied; the delta's keys (0: none were there).
     pub(crate) fn seal(&self, txn: &mut dyn KvTxn) -> Result<usize> {

@@ -51,9 +51,21 @@ const DOC: u64 = 17;
 /// The containment index method.
 pub struct JsonIndex;
 
+/// A term: `tag` and a hash's 16 hex digits (as `format!("{tag}{h:016x}")`
+/// writes it, without the formatter).
+fn term(tag: u8, h: u64) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut b = [0u8; 17];
+    b[0] = tag;
+    for (i, d) in b[1..].iter_mut().enumerate() {
+        *d = HEX[(h >> (60 - 4 * i) & 15) as usize];
+    }
+    String::from_utf8_lossy(&b).into_owned()
+}
+
 /// A key path's term.
 fn key_term(path: &[u8]) -> String {
-    format!("k{:016x}", crate::object_cache::object_id(PATH, path))
+    term(b'k', crate::object_cache::object_id(PATH, path))
 }
 
 /// A leaf's term: its path's hash and its value's bytes (canonical: equal
@@ -63,7 +75,7 @@ fn leaf_term(path: &[u8], value: &[u8]) -> String {
     let mut b = Vec::with_capacity(8 + value.len());
     b.extend_from_slice(&p.to_le_bytes());
     b.extend_from_slice(value);
-    format!("v{:016x}", crate::object_cache::object_id(LEAF, &b))
+    term(b'v', crate::object_cache::object_id(LEAF, &b))
 }
 
 /// The terms of the node `n` (its bytes `raw`) on `path` — each key on it
@@ -275,36 +287,18 @@ impl IndexMethod for JsonIndex {
         Ok(())
     }
 
-    /// The rows' documents read, made segments of [`super::BUILD_BATCH`],
-    /// merged into one where they fit.
+    /// The rows' documents read, then their terms and segments made on
+    /// the statement's workers ([`super::build_segments`]).
     fn build(&self, txn: &mut dyn KvTxn, _: &Registry, t: &Table, i: usize) -> Result<()> {
         let col = t.indexes[i].columns[0];
         let mut wanted = vec![false; t.columns.len()];
         wanted[col] = true;
-        let s = super::store(t, i);
-        let mut docs: Vec<(Vec<u8>, u64, Doc)> = Vec::new();
-        let mut made = Vec::new();
-        for r in crate::index_method::rows(&*txn, t, Some(&wanted))? {
-            let (pk, row) = r?;
-            if let Some((hash, doc)) = indexed(t, i, &row)? {
-                docs.push((pk, hash, doc));
-            }
-            if docs.len() == super::BUILD_BATCH {
-                made.push((super::segment::of_docs(&docs)?, docs.len() as u32));
-                docs.clear();
-            }
-        }
-        if !docs.is_empty() {
-            made.push((super::segment::of_docs(&docs)?, docs.len() as u32));
-        }
-        let bytes: usize = made.iter().map(|(b, _)| b.len()).sum();
-        s.append_segments(txn, made)?;
-        let workers = crate::budget::workers();
-        if bytes <= super::ONE_SEGMENT {
-            s.merge_all(txn, workers)
-        } else {
-            s.merge_due(txn, workers)
-        }
+        let rows = crate::index_method::rows(&*txn, t, Some(&wanted))?
+            .filter(|r| !matches!(r, Ok((_, row)) if row[col].is_null()))
+            .collect::<Result<Vec<_>>>()?;
+        super::build_segments(txn, &super::store(t, i), rows, |(pk, row)| {
+            Ok(indexed(t, i, row)?.map(|(hash, doc)| (pk.clone(), hash, doc)))
+        })
     }
 
     fn check(
@@ -408,6 +402,14 @@ mod tests {
 
     fn doc(text: &str) -> Vec<u8> {
         crate::json::parse::parse(text).expect("json")
+    }
+
+    #[test]
+    fn terms_are_written_as_the_formatter_writes_them() {
+        for h in [0, 1, 0xab, u64::MAX, 0x0123_4567_89ab_cdef, 1 << 63] {
+            assert_eq!(term(b'k', h), format!("k{h:016x}"));
+            assert_eq!(term(b'v', h), format!("v{h:016x}"));
+        }
     }
 
     /// Whether `q`'s leaves are among `d`'s: what the index finds.

@@ -45,7 +45,7 @@ pub const SEAL: u64 = 1024;
 /// Documents a build puts in a segment at most (merges then join them).
 const BUILD_BATCH: usize = 100_000;
 /// …and at least, where its workers share fewer rows (each a segment).
-const BUILD_MIN: usize = 4096;
+const BUILD_MIN: usize = 512;
 /// The share of the matches a ranking's first `n` may be at most for
 /// MaxScore to skip by their threshold; past it, every match is scored.
 const WHOLE: f64 = 64.0;
@@ -94,6 +94,76 @@ fn store(t: &Table, i: usize) -> Store {
 }
 
 /// A text's hash: what a tombstone names the version of a row by.
+/// A build's rows (`items`, read already) made documents (`doc`: a row's
+/// primary key, hash and document; `None`, not indexed) and segments in
+/// batches on the statement's workers (Tantivy's and Lucene's indexing
+/// threads, each its own segments), appended to `s`, then merged into
+/// one where they fit, else the merges due, a round at a time on the
+/// workers too.  The text, sparse and JSON indexes' builds.
+fn build_segments<T: Sync>(
+    txn: &mut dyn KvTxn,
+    s: &Store,
+    items: Vec<T>,
+    doc: impl Fn(&T) -> Result<Option<(Vec<u8>, u64, Doc)>> + Sync,
+) -> Result<()> {
+    let workers = crate::budget::workers();
+    let per = items.len().div_ceil(workers).clamp(BUILD_MIN, BUILD_BATCH);
+    let batches: Vec<&[T]> = items.chunks(per).collect();
+    let make = |batch: &[T]| -> Result<(Vec<u8>, u32)> {
+        let mut docs = Vec::with_capacity(batch.len());
+        for x in batch {
+            if let Some(d) = doc(x)? {
+                docs.push(d);
+            }
+        }
+        segment::of_docs(&docs).map(|b| (b, docs.len() as u32))
+    };
+    let made: Vec<Result<(Vec<u8>, u32)>> = if workers <= 1 || batches.len() <= 1 {
+        batches.iter().map(|b| make(b)).collect()
+    } else {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let out: Vec<Mutex<Option<Result<(Vec<u8>, u32)>>>> =
+            batches.iter().map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|sc| {
+            for _ in 0..workers.min(batches.len()) {
+                sc.spawn(|| {
+                    loop {
+                        let b = next.fetch_add(1, Relaxed);
+                        let Some(batch) = batches.get(b) else { break };
+                        *out[b].lock().unwrap_or_else(|e| e.into_inner()) = Some(make(batch));
+                    }
+                });
+            }
+        });
+        out.into_iter()
+            .map(|m| {
+                m.into_inner()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .expect("made")
+            })
+            .collect()
+    };
+    drop(batches);
+    drop(items);
+    // (A batch with no document indexed makes no segment.)
+    let made = made
+        .into_iter()
+        .filter(|r| !matches!(r, Ok((_, 0))))
+        .collect::<Result<Vec<_>>>()?;
+    let bytes: usize = made.iter().map(|(b, _)| b.len()).sum();
+    // One segment where it fits — a search looks each term up once per
+    // segment (a long query's hundreds of terms), and an index just
+    // built is read before it is written (Lucene's `forceMerge(1)` for
+    // an index done with); one merge of them all reads each document
+    // once, where merges by tiers read it once a tier.
+    if bytes <= ONE_SEGMENT {
+        s.append_merged(txn, made, workers)
+    } else {
+        s.append_segments(txn, made)?;
+        s.merge_due(txn, workers)
+    }
+}
+
 fn text_hash(s: &str) -> u64 {
     crate::object_cache::object_id(13, s.as_bytes())
 }
@@ -250,7 +320,6 @@ impl IndexMethod for TextIndex {
         let mut wanted = vec![false; t.columns.len()];
         wanted[col] = true;
         let a = crate::text::named(analyzer_of(&t.indexes[i]).unwrap_or(crate::text::DEFAULT))?;
-        let s = store(t, i);
         let mut texts: Vec<(Vec<u8>, String)> = Vec::new();
         for r in crate::index_method::rows(&*txn, t, Some(&wanted))? {
             let (pk, mut row) = r?;
@@ -260,55 +329,13 @@ impl IndexMethod for TextIndex {
                 _ => return Err(Error::internal("a text index of a column not text")),
             }
         }
-        let workers = crate::budget::workers();
-        let per = texts.len().div_ceil(workers).clamp(BUILD_MIN, BUILD_BATCH);
-        let batches: Vec<&[(Vec<u8>, String)]> = texts.chunks(per).collect();
-        let make = |batch: &[(Vec<u8>, String)]| {
-            let docs: Vec<(Vec<u8>, u64, Doc)> = batch
-                .iter()
-                .map(|(pk, text)| (pk.clone(), text_hash(text), Doc::analyze(a.as_ref(), text)))
-                .collect();
-            segment::of_docs(&docs).map(|b| (b, docs.len() as u32))
-        };
-        let made: Vec<Result<(Vec<u8>, u32)>> = if workers <= 1 || batches.len() <= 1 {
-            batches.iter().map(|b| make(b)).collect()
-        } else {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let out: Vec<Mutex<Option<Result<(Vec<u8>, u32)>>>> =
-                batches.iter().map(|_| Mutex::new(None)).collect();
-            std::thread::scope(|sc| {
-                for _ in 0..workers.min(batches.len()) {
-                    sc.spawn(|| {
-                        loop {
-                            let b = next.fetch_add(1, Relaxed);
-                            let Some(batch) = batches.get(b) else { break };
-                            *out[b].lock().unwrap_or_else(|e| e.into_inner()) = Some(make(batch));
-                        }
-                    });
-                }
-            });
-            out.into_iter()
-                .map(|m| {
-                    m.into_inner()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .expect("made")
-                })
-                .collect()
-        };
-        drop(texts);
-        let made = made.into_iter().collect::<Result<Vec<_>>>()?;
-        let bytes: usize = made.iter().map(|(b, _)| b.len()).sum();
-        s.append_segments(txn, made)?;
-        // One segment where it fits — a search looks each term up once per
-        // segment (a long query's hundreds of terms), and an index just
-        // built is read before it is written (Lucene's `forceMerge(1)` for
-        // an index done with); one merge of them all reads each document
-        // once, where merges by tiers read it once a tier.
-        if bytes <= ONE_SEGMENT {
-            s.merge_all(txn, workers)
-        } else {
-            s.merge_due(txn, workers)
-        }
+        build_segments(txn, &store(t, i), texts, |(pk, text)| {
+            Ok(Some((
+                pk.clone(),
+                text_hash(text),
+                Doc::analyze(a.as_ref(), text),
+            )))
+        })
     }
 
     fn check(

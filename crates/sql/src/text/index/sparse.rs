@@ -157,36 +157,18 @@ impl IndexMethod for SparseIndex {
         Ok(())
     }
 
-    /// The rows' vectors read, made segments of [`super::BUILD_BATCH`],
-    /// merged into one where they fit.
+    /// The rows' vectors read, then made documents and segments on the
+    /// statement's workers ([`super::build_segments`]).
     fn build(&self, txn: &mut dyn KvTxn, _: &Registry, t: &Table, i: usize) -> Result<()> {
         let col = t.indexes[i].columns[0];
         let mut wanted = vec![false; t.columns.len()];
         wanted[col] = true;
-        let s = super::store(t, i);
-        let mut docs: Vec<(Vec<u8>, u64, Doc)> = Vec::new();
-        let mut made = Vec::new();
-        for r in crate::index_method::rows(&*txn, t, Some(&wanted))? {
-            let (pk, row) = r?;
-            if let Some((hash, doc)) = indexed(t, i, &row)? {
-                docs.push((pk, hash, doc));
-            }
-            if docs.len() == super::BUILD_BATCH {
-                made.push((super::segment::of_docs(&docs)?, docs.len() as u32));
-                docs.clear();
-            }
-        }
-        if !docs.is_empty() {
-            made.push((super::segment::of_docs(&docs)?, docs.len() as u32));
-        }
-        let bytes: usize = made.iter().map(|(b, _)| b.len()).sum();
-        s.append_segments(txn, made)?;
-        let workers = crate::budget::workers();
-        if bytes <= super::ONE_SEGMENT {
-            s.merge_all(txn, workers)
-        } else {
-            s.merge_due(txn, workers)
-        }
+        let rows = crate::index_method::rows(&*txn, t, Some(&wanted))?
+            .filter(|r| !matches!(r, Ok((_, row)) if row[col].is_null()))
+            .collect::<Result<Vec<_>>>()?;
+        super::build_segments(txn, &super::store(t, i), rows, |(pk, row)| {
+            Ok(indexed(t, i, row)?.map(|(hash, doc)| (pk.clone(), hash, doc)))
+        })
     }
 
     fn check(
