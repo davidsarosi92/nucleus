@@ -509,6 +509,14 @@ impl Batch {
     pub fn row(&self, i: usize) -> Row {
         self.cols.iter().map(|c| c.value(i)).collect()
     }
+
+    /// Row `i` with room for `spare` more values (a window's results: the
+    /// row not grown again, a reallocation a row).
+    pub fn row_spare(&self, i: usize, spare: usize) -> Row {
+        let mut row = Vec::with_capacity(self.cols.len() + spare);
+        row.extend(self.cols.iter().map(|c| c.value(i)));
+        row
+    }
 }
 
 /// What expressions are evaluated in besides the batch.
@@ -3235,6 +3243,16 @@ pub fn rows<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Option<Rows<'a>>> {
+    rows_spare(plan, ctx, outer, 0)
+}
+
+/// [`rows`], each row with room for `spare` more values.
+pub fn rows_spare<'a>(
+    plan: &'a Plan,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+    spare: usize,
+) -> Result<Option<Rows<'a>>> {
     if outer.is_some() && looks_up(plan) {
         return Ok(None);
     }
@@ -3248,6 +3266,7 @@ pub fn rows<'a>(
         return Ok(Some(Box::new(ParallelRows {
             work,
             plan,
+            spare,
             next: 0,
             rows: std::collections::VecDeque::new(),
             err: None,
@@ -3260,6 +3279,7 @@ pub fn rows<'a>(
     };
     Ok(Some(Box::new(BatchRows {
         pipe,
+        spare,
         batch: None,
         pos: 0,
         pending: std::collections::VecDeque::new(),
@@ -3372,6 +3392,7 @@ impl Iterator for PipeBatches<'_> {
 /// A pipeline's batches as rows.
 struct BatchRows<'a> {
     pipe: Pipeline<'a>,
+    spare: usize,
     batch: Option<Batch>,
     pos: usize,
     pending: std::collections::VecDeque<Row>,
@@ -3399,7 +3420,7 @@ impl Iterator for BatchRows<'_> {
             {
                 let i = b.sel.nth(self.pos);
                 self.pos += 1;
-                return Some(Ok(b.row(i)));
+                return Some(Ok(b.row_spare(i, self.spare)));
             }
             self.batch = None;
             match self.pipe.next() {
@@ -5181,6 +5202,7 @@ const SERIAL_ROWS: usize = 1 << 16;
 struct ParallelRows<'a> {
     work: Morsels<'a>,
     plan: &'a Plan,
+    spare: usize,
     next: usize,
     rows: std::collections::VecDeque<Row>,
     err: Option<Error>,
@@ -5204,9 +5226,9 @@ impl Iterator for ParallelRows<'_> {
                 return None;
             }
             let end = (self.next + self.work.workers).min(total);
-            let plan = self.plan;
+            let (plan, spare) = (self.plan, self.spare);
             let results = self.work.run(self.next..end, false, &|wctx, range| {
-                morsel_rows(plan, wctx, range)
+                morsel_rows(plan, wctx, range, spare)
             });
             self.next = end;
             for r in results {
@@ -5317,7 +5339,12 @@ fn morsel_batches(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Dense>
 
 /// One morsel's rows, on a worker: the rows, and the error that ended
 /// them (if one did).
-fn morsel_rows(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Row>, Option<Error>)> {
+fn morsel_rows(
+    plan: &Plan,
+    ctx: &Ctx,
+    range: KeyRange,
+    spare: usize,
+) -> Result<(Vec<Row>, Option<Error>)> {
     let Some(mut pipe) = Pipeline::new(plan, plan, ctx, None, true, Some(range))? else {
         return Err(Error::internal("a morsel's pipeline"));
     };
@@ -5325,7 +5352,7 @@ fn morsel_rows(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Row>, Opt
     loop {
         match pipe.next() {
             Ok(None) => return Ok((out, None)),
-            Ok(Some(Out::Batch(b))) => out.extend(b.sel.iter().map(|i| b.row(i))),
+            Ok(Some(Out::Batch(b))) => out.extend(b.sel.iter().map(|i| b.row_spare(i, spare))),
             Ok(Some(Out::Rows(rows, err))) => {
                 out.extend(rows);
                 if err.is_some() {

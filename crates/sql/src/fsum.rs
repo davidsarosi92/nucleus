@@ -224,9 +224,38 @@ impl ExactSum {
         if let Some(s) = self.special {
             return Some(s);
         }
+        if let Some(x) = self.total_small() {
+            return Some(x);
+        }
         let (v, exp) = self.exact()?;
         let x = v.to_f64(exp, false);
         x.is_finite().then_some(x)
+    }
+
+    /// [`total`](Self::total) where the chunks make an `i128` (four or
+    /// fewer, as a sum of values of like magnitude is): the integer cast
+    /// rounds once, to nearest, ties to even, and the power of two it is
+    /// scaled by is exact while the result is a normal double — else
+    /// `None`, the big integer's rounding taken (a running total finished
+    /// at every row, ten million rows: 651 of 4316 samples in that one).
+    #[inline]
+    fn total_small(&self) -> Option<f64> {
+        if self.chunks.len() > 4 {
+            return None;
+        }
+        let mut v: i128 = 0;
+        for (i, &c) in self.chunks.iter().enumerate() {
+            v = v.checked_add(i128::from(c).checked_mul(1i128 << (32 * i))?)?;
+        }
+        if v == 0 {
+            return Some(0.0);
+        }
+        let exp = 32 * self.lo as i32 - 1075;
+        if !(-1022..=1023).contains(&exp) {
+            return None;
+        }
+        let x = v as f64 * f64::from_bits(((exp + 1023) as u64) << 52);
+        (x.is_finite() && x.abs() >= f64::MIN_POSITIVE).then_some(x)
     }
 
     /// The sum divided by `n` (a count of values), correctly rounded —
@@ -421,6 +450,68 @@ mod tests {
             assert_eq!(a.total(), sum(&xs));
             let b = ExactSum::from_bytes(&a.to_bytes()).unwrap();
             assert_eq!(b.total(), sum(&xs));
+        }
+    }
+
+    /// The total of a small state (`total_small`: an `i128`, cast and
+    /// scaled) is the big integer's rounding, over values of every
+    /// magnitude and sign — the subnormals' and the top's edges, ties, a
+    /// running total read after each value.
+    #[test]
+    fn small_totals_round_as_the_big_integer() {
+        let slow = |s: &ExactSum| {
+            let (v, exp) = s.exact().unwrap();
+            let x = v.to_f64(exp, false);
+            x.is_finite().then_some(x)
+        };
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut small, mut all) = (0, 0);
+        for round in 0..4000 {
+            let mut s = ExactSum::new();
+            let base = (next() % 2100) as i32 - 1075;
+            let spread = [0, 1, 8, 30, 60, 120][round % 6];
+            for _ in 0..(1 + next() % 40) {
+                let e = (base + (next() % (spread + 1)) as i32).clamp(-1074, 1023);
+                let m = 1.0 + (next() >> 12) as f64 / (1u64 << 52) as f64;
+                let x = m * 2f64.powi(e);
+                let x = if next() % 3 == 0 { -x } else { x };
+                if !x.is_finite() {
+                    continue;
+                }
+                s.add(x);
+                all += 1;
+                small += usize::from(s.total_small().is_some());
+                assert_eq!(
+                    s.total().map(f64::to_bits),
+                    slow(&s).map(f64::to_bits),
+                    "{s:?}"
+                );
+            }
+        }
+        // The fast way taken for most of them.
+        assert!(small * 2 > all, "{small} of {all}");
+        for xs in [
+            &[1.0, 2f64.powi(-53)][..],
+            &[1.0, 2f64.powi(-53), 2f64.powi(-60)],
+            &[f64::MIN_POSITIVE, -5e-324],
+            &[f64::MIN_POSITIVE, 5e-324],
+            &[5e-324; 3],
+            &[f64::MAX, 1.0],
+            &[1e9 + 0.25; 1000],
+        ] {
+            let mut s = ExactSum::new();
+            xs.iter().for_each(|&x| s.add(x));
+            assert_eq!(
+                s.total().map(f64::to_bits),
+                slow(&s).map(f64::to_bits),
+                "{xs:?}"
+            );
         }
     }
 

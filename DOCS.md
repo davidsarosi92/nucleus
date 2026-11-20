@@ -2294,7 +2294,13 @@ sums stay exact, and `array_agg`'s order is kept); otherwise
 (`string_agg`, an extension's aggregate without partial states) each
 distinct frame's rows added to a fresh state.  Consecutive equal frames
 reuse the last result; frames' groups are taken from an accumulator
-renewed every 1024, so a long partition does not hold a state a row.
+renewed every 1024, so a long partition does not hold a state a row;
+each row's frame is computed where it is wanted, not kept for the
+partition.  A pipeline under the node gives its rows with room for the
+calls' values (`vector::rows_spare`), so a row is not grown again.  An
+exact sum is finished from an `i128` where its chunks make one
+(`ExactSum::total_small`: the cast rounds once, the scaling by a power
+of two exact), which a running total does at every row.
 Errors are PostgreSQL's (42P20 for a window where none is allowed, a
 nested call or a conflicting window; 42803 for a window inside an
 aggregate; 22013, 22014, 22016 for a negative frame offset, `ntile` or
@@ -8155,6 +8161,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — window functions over ten million rows (the sweep):**
+  frames computed where wanted, not kept (560 MB); the input's rows
+  made with room for the calls' values; exact sums finished from an
+  `i128`; an aggregate of one argument fed without a vector a row.
+  Running sum 3302 → 1967 ms (PostgreSQL 2308), `lag` 2559 → 1961
+  (2150), moving average 4896 → 4526 (8581).
 
 - **2026-11-20 — `DISTINCT` over a primary key left out (the sweep):**
   `count(DISTINCT id)` where `id` is a scanned table's primary key of

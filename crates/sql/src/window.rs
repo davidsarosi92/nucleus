@@ -341,12 +341,22 @@ impl Partitions<'_> {
                 fed[i] = false;
             }
         }
-        let frames: Vec<Ranges> = (0..n)
-            .map(|i| frame.ranges(i, shape))
-            .collect::<Result<_>>()?;
+        // Each row's frame, computed where it is wanted (not kept: ten
+        // million rows' would be 560 MB); which way they are evaluated
+        // found first.
+        let range = |i: usize| frame.ranges(i, shape);
+        let (mut whole, mut running) = (true, true);
+        for i in 0..n {
+            let r = range(i)?;
+            whole &= *r == [(0, n)];
+            running &= r.len() <= 1 && r.first().is_none_or(|r| r.0 == 0);
+            if !whole && !running {
+                break;
+            }
+        }
         let row_args = |i: usize| args.iter().map(|a| a[i].clone()).collect::<Vec<_>>();
         // The whole partition: one state.
-        if frames.iter().all(|r| **r == [(0, n)]) {
+        if whole {
             let mut acc = agg.start();
             for i in (0..n).filter(|&i| fed[i]) {
                 acc.add(&row_args(i))?;
@@ -357,13 +367,16 @@ impl Partitions<'_> {
         let Some(mut ga) = combinable else {
             // States that do not combine: each distinct frame from scratch.
             let mut out: Vec<Value> = Vec::with_capacity(n);
+            let mut prev = None;
             for i in 0..n {
-                if i > 0 && frames[i] == frames[i - 1] {
+                let r = range(i)?;
+                if prev == Some(r) {
                     out.push(out[i - 1].clone());
                     continue;
                 }
+                prev = Some(r);
                 let mut acc = agg.start();
-                for &(a, b) in frames[i].iter() {
+                for &(a, b) in r.iter() {
                     for j in (a..b).filter(|&j| fed[j]) {
                         acc.add(&row_args(j))?;
                     }
@@ -375,9 +388,8 @@ impl Partitions<'_> {
         let vectors: Vec<Vector> = args.into_iter().map(Vector::Values).collect();
         let refs: Vec<&Vector> = vectors.iter().collect();
         let mut out: Vec<Value> = Vec::with_capacity(n);
-        let running = frames
-            .iter()
-            .all(|r| r.len() <= 1 && r.first().is_none_or(|r| r.0 == 0));
+        let (mut rows, mut groups): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        let mut prev = None;
         if running {
             // From the partition's start: group 0 grows, and is finished
             // at each frame's end — itself where finishing keeps its state,
@@ -387,17 +399,19 @@ impl Partitions<'_> {
             ga.resize(1);
             let mut fed_to = 0;
             for i in 0..n {
-                let end = frames[i].first().map_or(0, |r| r.1);
-                if i > 0 && frames[i] == frames[i - 1] {
+                let r = range(i)?;
+                let end = r.first().map_or(0, |r| r.1);
+                if prev == Some(r) {
                     out.push(out[i - 1].clone());
                     continue;
                 }
+                prev = Some(r);
                 if end > fed_to {
-                    let rows: Vec<u32> = (fed_to..end)
-                        .filter(|&j| fed[j])
-                        .map(|j| j as u32)
-                        .collect();
-                    ga.update(&rows, &vec![0; rows.len()], &refs)?;
+                    rows.clear();
+                    rows.extend((fed_to..end).filter(|&j| fed[j]).map(|j| j as u32));
+                    groups.clear();
+                    groups.resize(rows.len(), 0);
+                    ga.update(&rows, &groups, &refs)?;
                     fed_to = end;
                 }
                 if keeps {
@@ -422,17 +436,17 @@ impl Partitions<'_> {
         let m = n;
         let mut partials: Vec<Option<Value>> = Vec::new();
         let mut scratch = Scratch::new(agg)?;
-        let mut rows: Vec<u32> = Vec::new();
-        let mut groups: Vec<u32> = Vec::new();
         for i in 0..n {
-            if i > 0 && frames[i] == frames[i - 1] {
+            let r = range(i)?;
+            if prev == Some(r) {
                 out.push(out[i - 1].clone());
                 continue;
             }
+            prev = Some(r);
             let (acc, g) = scratch.group()?;
-            if small(&frames[i]) {
+            if small(&r) {
                 rows.clear();
-                for &(a, b) in frames[i].iter() {
+                for &(a, b) in r.iter() {
                     rows.extend((a..b).filter(|&j| fed[j]).map(|j| j as u32));
                 }
                 groups.clear();
@@ -455,7 +469,7 @@ impl Partitions<'_> {
                     }
                 }
             }
-            for &(a, b) in frames[i].iter() {
+            for &(a, b) in r.iter() {
                 let (mut l, mut r) = (a + m, b + m);
                 let (mut left, mut right) = (Vec::new(), Vec::new());
                 while l < r {

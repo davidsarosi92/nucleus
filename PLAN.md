@@ -12077,6 +12077,29 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   `sum`/`avg(DISTINCT id)`, through a subquery's `LIMIT`, and over a
   join, where the repeats are still removed.
 
+  *S13, window functions* (running sum 1.43×, `lag` 1.19× PostgreSQL's).
+  Over ten million rows already in key order (no sort), `row_number()`
+  alone took 1.8 s: the node is a row at a time.  Profiled, one build
+  and the next in turn, each taken:
+  - The input rows grown by the calls' values: a reallocation a row, a
+    quarter of `row_number()`.  A pipeline under the node now makes its
+    rows with the room (`vector::rows_spare`, `Batch::row_spare`).
+  - Each row's frame kept for the whole partition before evaluating
+    (`Vec<Ranges>`, 560 MB here), and two vectors allocated a row in
+    the running total: frames now computed where wanted, buffers reused.
+  - The running total's exact sum finished at every row through a big
+    integer (15% of the query): `ExactSum::total_small` — four chunks
+    or fewer make an `i128`, whose cast to a double rounds once (to
+    nearest, ties to even) and whose scaling by a power of two is exact
+    while the result is normal; else the big integer's rounding.  Test:
+    4000 random states of every magnitude, spread and sign, each total
+    after each value the big integer's, bit for bit.
+  - The aggregate above (`max` of the results) evaluated its argument
+    into a vector a row: one argument or none now added as it is.
+  Running sum 3302 → 1967 ms (PostgreSQL 2308), `lag` 2559 → 1961
+  (2150), moving average 4896 → 4526 (8581), `row_number` by groups
+  2435 → 2205 (4609).
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

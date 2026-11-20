@@ -368,7 +368,27 @@ fn build_node<'a>(
         }
         Plan::Distinct { input } => Box::new(Distinct::new(build(input, ctx, outer)?, 0)),
         Plan::Window { input, funcs } => {
-            crate::window::run(build(input, ctx, outer)?, input.width(), funcs, ctx, outer)?
+            // Rows with room for the functions' values and the computed
+            // keys (a reallocation a row: a quarter of `row_number()` over
+            // ten million rows).
+            let w = &funcs[0];
+            let spare = funcs.len() + w.partition.len() + w.order.len();
+            let vectorized = match &**input {
+                Plan::Scan { .. }
+                | Plan::Filter { .. }
+                | Plan::Secure { .. }
+                | Plan::Project { .. }
+                    if ctx.profile.is_none() =>
+                {
+                    crate::vector::rows_spare(input, ctx, outer, spare)?
+                }
+                _ => None,
+            };
+            let rows = match vectorized {
+                Some(rows) => rows,
+                None => build(input, ctx, outer)?,
+            };
+            crate::window::run(rows, input.width(), funcs, ctx, outer)?
         }
         Plan::View { view } => Box::new(
             view.rows(&CallContext::new(ctx.txn, ctx.registry))?
@@ -2860,6 +2880,18 @@ fn feed(agg: &Agg, st: &mut AggState, args: Vec<Value>) -> Result<()> {
 /// Adds a row's arguments to an aggregate (or to its `ORDER BY` buffer),
 /// counting the memory a buffer or a `DISTINCT` set grows by.
 fn feed_row(agg: &Agg, st: &mut AggState, e: &Env, bytes: &mut usize) -> Result<()> {
+    // One argument or none, added as it is (no vector a row: a sixth of
+    // `max` over ten million rows' window results).
+    if st.buffer.is_none() && st.seen.is_none() && agg.args.len() <= 1 {
+        let Some(a) = agg.args.first() else {
+            return st.acc.add(&[]);
+        };
+        let v = a.eval(e)?;
+        if !agg.func.keeps_nulls() && v.is_null() {
+            return Ok(());
+        }
+        return st.acc.add(std::slice::from_ref(&v));
+    }
     let args = agg
         .args
         .iter()
