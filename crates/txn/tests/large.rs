@@ -507,6 +507,87 @@ fn visits_read_what_scans_read() {
 }
 
 #[test]
+fn escaped_scans_rank_committed_intents_as_scans_do() {
+    // A row table's scan, keys left escaped, over side areas not yet
+    // vacuumed (each leaf's entries ranked in place,
+    // `Scan::refill_escaped_merged`): a large commit's intents, versions
+    // before and after it, deletes over it, values too long for their
+    // cells, keys with zero bytes, a running large transaction's intents,
+    // at snapshots before, between and after — in batches of any size,
+    // what a scan gives.
+    let p = Arc::new(SimPlatform::new(23));
+    let e = engine_on(&p, opts()).unwrap();
+    let rng = SplitMix64::new(9);
+    let key = |i: usize| {
+        let mut k = format!("w{i:05}").into_bytes();
+        if i.is_multiple_of(4) {
+            k.extend_from_slice(&[0, (i % 3) as u8]);
+        }
+        k
+    };
+    let value = |tag: &str, i: usize| {
+        if i.is_multiple_of(11) {
+            vec![b'L'; 2500 + i]
+        } else {
+            format!("{tag}-{i}").into_bytes()
+        }
+    };
+    let mut seed = e.begin();
+    for i in (0..400).step_by(2) {
+        seed.put(&key(i), &value("seed", i)).unwrap();
+    }
+    seed.commit().unwrap();
+    let before = e.begin();
+    let mut big = e.begin();
+    for i in 0..400 {
+        if i % 9 == 0 {
+            big.delete(&key(i)).unwrap();
+        } else {
+            big.put(&key(i), &value("big", i)).unwrap();
+        }
+    }
+    assert!(e.intent_count().unwrap() > 300);
+    big.commit().unwrap();
+    let between = e.begin();
+    let mut small = e.begin();
+    for _ in 0..60 {
+        let i = rng.below(400) as usize;
+        if rng.below(3) == 0 {
+            small.delete(&key(i)).unwrap();
+        } else {
+            small.put(&key(i), &value("small", i)).unwrap();
+        }
+    }
+    small.commit().unwrap();
+    let after = e.begin();
+    // Intents of a transaction still running: passed over.
+    let mut running = e.begin();
+    for i in 400..700 {
+        running.put(&key(i), &value("running", i)).unwrap();
+    }
+    assert!(e.intent_count().unwrap() > 500);
+    let (lo, hi) = (key(37), key(333));
+    for reader in [&before, &between, &after] {
+        for (start, end) in [
+            (Bound::Unbounded, Bound::Unbounded),
+            (Bound::Included(&lo[..]), Bound::Excluded(&hi[..])),
+            (Bound::Excluded(&lo[..]), Bound::Included(&hi[..])),
+        ] {
+            let want: Vec<_> = reader
+                .scan(start, end)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            for entries in [1, 2, 7, 64, 1024] {
+                let (got, _) = visited(reader, start, end, entries, 0, &rng);
+                assert_eq!(got, want, "{entries}");
+            }
+        }
+    }
+    drop(running);
+}
+
+#[test]
 fn chunked_scans_read_what_scans_read() {
     // Versions, deletions, a spilled transaction's side area, another
     // committed one's not yet resolved, and the reader's own writes: a

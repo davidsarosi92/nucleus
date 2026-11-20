@@ -3633,6 +3633,159 @@ impl Scan<'_> {
         Ok(given)
     }
 
+    /// [`refill_escaped`](Self::refill_escaped) where side areas are merged
+    /// (`sides`, each with its rank, [`sides`](Self::sides)): a user key's
+    /// versions come together, its intents first, and its entry is the
+    /// highest ranked of them — an intent of a side area at the area's
+    /// rank (others' passed over: running, aborted or committed later),
+    /// its first version at or below the snapshot at its timestamp —, its
+    /// value replaced in the batch when a better ranked one follows.  A
+    /// load's spilled rows, committed and not yet vacuumed, so read as the
+    /// store's are, a leaf at a time, their keys left escaped (the merge
+    /// below decoded each: a sum over ten million rows so loaded 203 ms,
+    /// 75 vacuumed).
+    fn refill_escaped_merged(
+        &mut self,
+        tree: &Tables,
+        seek: &[u8],
+        max: usize,
+        bytes: usize,
+        sides: &[(u64, u64)],
+    ) -> Result<()> {
+        let txn = self.txn;
+        let store_end = self.store_end.take();
+        let end = match &store_end {
+            Some(e) => Bound::Excluded(e.as_slice()),
+            None => Bound::Unbounded,
+        };
+        let undecodable = || Error::Corrupt("undecodable version key");
+        let user_of = |k: &[u8]| decode_key(k).map(|(u, _)| u).ok_or_else(undecodable);
+        let rank_of = |id: u64| sides.iter().find(|&&(i, _)| i == id).map(|&(_, r)| r);
+        let [k, v, prev] = &mut self.bufs;
+        let (buf, live) = (&mut self.buffer, &mut self.live);
+        buf.escaped = true;
+        prev.clear();
+        // The rank of the version the previous entry's user key has in the
+        // batch (`None`: none yet), and whether its first version at or
+        // below the snapshot was seen (the older ones after it pass).
+        let mut best: Option<u64> = None;
+        let mut versioned = false;
+        let mut upper: Option<Vec<u8>> = None;
+        let mut passed = 0;
+        let stopped = std::cell::Cell::new(false);
+        let large = std::cell::Cell::new(false);
+        let mut step = |prev: &[u8], k: &[u8], value: Option<&[u8]>| -> Result<bool> {
+            let n = k.len();
+            if n < 10 || k[n - 10] != 0 || k[n - 9] != 0 {
+                return Err(undecodable());
+            }
+            let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
+            let escaped = &k[..n - 10];
+            if !(prev.len() == n && same_from_end(&prev[..n - 10], escaped)) {
+                best = None;
+                versioned = false;
+            }
+            let rank = match intent_of(ts) {
+                Some(id) => rank_of(id),
+                None if ts <= txn.start && !versioned => {
+                    versioned = true;
+                    Some(ts)
+                }
+                None => None,
+            };
+            if best.is_none() && (buf.ents.len() >= max || buf.data.len() >= bytes) {
+                // The batch is full: it ends at this key (its versions
+                // read again from the first next time).
+                upper = Some(user_of(k)?);
+                stopped.set(true);
+                return Ok(false);
+            }
+            let Some(rank) = rank else {
+                if best.is_none() {
+                    // Too new, or another's intent: many end the batch.
+                    passed += 1;
+                    if passed >= PASS_LIMIT {
+                        upper = Some(user_of(k)?);
+                        stopped.set(true);
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            };
+            if best.is_some_and(|b| rank <= b) {
+                return Ok(true);
+            }
+            let Some(stored) = value else {
+                // Its value read on its own: this entry again, as it was.
+                if intent_of(ts).is_none() {
+                    versioned = false;
+                }
+                large.set(true);
+                return Ok(false);
+            };
+            let value = decode_value(stored).ok_or(Error::Corrupt("bad version value"))?;
+            if best.is_none() {
+                let at = buf.data.len();
+                buf.data.extend_from_slice(escaped);
+                buf.ents.push((at, buf.data.len()));
+                live.push(value.is_some());
+            } else {
+                let (_, ke) = *buf.ents.last().expect("its entry");
+                buf.data.truncate(ke);
+                *live.last_mut().expect("its entry") = value.is_some();
+            }
+            buf.data.extend_from_slice(value.unwrap_or_default());
+            best = Some(rank);
+            Ok(true)
+        };
+        let failed: std::cell::Cell<Option<Error>> = std::cell::Cell::new(None);
+        let mut each = |prev: &[u8], k: &[u8], value: Option<&[u8]>| match step(prev, k, value) {
+            Ok(go) => Ok(go),
+            Err(e) => {
+                failed.set(Some(e));
+                stopped.set(true);
+                Ok(false)
+            }
+        };
+        'ranges: for mut range in versions(tree, Bound::Included(seek), end)? {
+            'leaves: loop {
+                let leaf = range.leaf_entries(k, prev, usize::MAX, &mut each)?;
+                if stopped.get() {
+                    break 'ranges;
+                }
+                match leaf {
+                    Some(true) if !large.get() => {}
+                    Some(false) => break,
+                    Some(true) | None => {
+                        let one = leaf.is_some();
+                        large.set(false);
+                        loop {
+                            std::mem::swap(k, prev);
+                            if !range.next_into(k, v)? {
+                                break 'leaves;
+                            }
+                            if !each(prev, k, Some(v))? {
+                                break 'ranges;
+                            }
+                            if one {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        drop(each);
+        if let Some(e) = failed.take() {
+            return Err(e);
+        }
+        self.store_end = store_end;
+        if let Some(u) = upper {
+            self.from = Some(Bound::Included(u));
+        }
+        Ok(())
+    }
+
     /// [`refill`](Self::refill) for [`count_only`](Self::count_only), the
     /// store read alone: an entry a live user key, its key and value
     /// empty.  A version's user key is its store key but the last ten
@@ -3881,6 +4034,11 @@ impl Scan<'_> {
                 self.from = Some(Bound::Included(u));
             }
             return Ok(());
+        }
+        // The keys left escaped, as above: a leaf at a time, the intents
+        // ranked in place.
+        if self.escaped_keys && want.is_none() && !self.validated && self.writes.peek().is_none() {
+            return self.refill_escaped_merged(&tree, &seek, max, bytes, &sides);
         }
         // Intents seen — committed ones at their commit timestamps, the
         // transaction's own above everything — against the versions: per

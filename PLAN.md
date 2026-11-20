@@ -12044,6 +12044,27 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     issue #4's logged in-place rewrite; within the writes' target (≤ 2×).
     Issue #7.
 
+  *S11, the statistics suite* (sum 2.46×, variance 2.14×, corr 2.37×,
+  avg 2.07× PostgreSQL's).  Its table is loaded by one `INSERT … SELECT`
+  of ten million rows and `ANALYZE`d, not vacuumed: the load's intents
+  spilled into the store, committed, unresolved.  Vacuumed, `sum` took
+  75 ms against 203 (PostgreSQL 86): a scan merging a side area left the
+  leaf-at-a-time read (`refill_escaped`, keys left escaped) for the
+  merge, which decodes each version's key (`mvcc::decode_key_onto` the
+  top of the profile).
+  - Taken: `Scan::refill_escaped_merged` — the merge a leaf at a time,
+    keys left escaped: a user key's versions come together, its intents
+    first, and its entry is the highest ranked (an intent of a committed
+    side area at its commit, the first version at or below the snapshot
+    at its timestamp), its value replaced in the batch when a better one
+    follows.  The statistics suite as it loads, one build and the other
+    in turn: sum 209 → 100 ms, avg 202 → 104 (PostgreSQL 102), variance
+    203 → 120, corr 248 → 163, sum by 1000 groups 200 → 122 (172); TPC-H
+    on row tables 0.985×.  Test: escaped scans over a large commit's
+    intents, versions before and after, deletes, long values, a running
+    transaction's intents, at three snapshots, in batches of 1 to 1024 —
+    what a scan gives.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

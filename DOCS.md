@@ -1320,7 +1320,8 @@ budget read, overwrite and delete their spilled writes and commit them
 reopening); rollbacks and drops leave no intent, crashes leave aborted
 ones vacuum removes; conflicts with intents both ways; committed intents
 ranked with newer and older versions for readers at three snapshots,
-through vacuum; an older engine's side area moved into versions on
+through vacuum, and by a row table's scan with its keys left escaped (a
+leaf at a time, batches of 1 to 1024 entries); an older engine's side area moved into versions on
 opening (its uncommitted one dropped, new ids past its ids); serializable
 reads against a large commit's span; a concurrent reader never sees part
 of a large commit, and does not keep the writer from spilling; a crash at
@@ -8146,6 +8147,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — a load's committed intents read a leaf at a time (the
+  sweep before F1's whole run):** a row table's scan over intents not
+  yet vacuumed ranks them in place, a leaf's entries at a time with
+  their keys left escaped (`Scan::refill_escaped_merged`), instead of
+  decoding each version's key.  The statistics suite's ten million rows
+  as loaded: `sum` 209 → 100 ms, `variance` 203 → 120, `corr` 248 → 163.
 
 - **2026-11-20 — the column cache sized by the machine (the sweep before
   F1's whole run):** decoded columns are cached up to an eighth of the
