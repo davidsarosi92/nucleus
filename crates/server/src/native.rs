@@ -1503,10 +1503,9 @@ mod tests {
         ];
         for (name, bytes) in cases {
             let t = TypeRef::named(name).unwrap();
-            let text = t.imp().input(
-                &t.imp()
-                    .output(&nucleus_sql::Value::ext(t, bytes.clone())),
-            );
+            let text = t
+                .imp()
+                .input(&t.imp().output(&nucleus_sql::Value::ext(t, bytes.clone())));
             let wire = from_wire(WireValue::Ext {
                 type_name: name.into(),
                 bytes: bytes.clone(),
