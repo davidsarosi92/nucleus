@@ -12132,7 +12132,36 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     `test_load_vectors` (a 2-D array, a list, a list with a NULL and
     another dimension; a NaN refused).
   - 15.9 → 1.46 s, one build and the other in turn (pgvector 1.80, its
-    binary `COPY` file written before its timing).
+    binary `COPY` file written before its timing); dbpedia's 99,000 ×
+    1536 42.2 → 3.42 s (pgvector 7.30, `halfvec` 5.23).
+  - Not a lag: "binary quantization 3.5×" compared pgvector's `bit`
+    index at `ef` 10 (recall 0.615, 286 µs) with nucleus's `f32` at
+    recall 0.852 (994 µs); at like recall — pgvector `bit` `ef` 40 0.916
+    in 803 µs, nucleus `ef` 40 0.929 in 1001 µs — 1.25×, with the
+    client's 6 KB vector in nucleus's time only.
+
+  *S16, filtered vector searches* (SIFT-1M, `ef_search` 40: the 0.01%
+  filter `a = 7 AND id % 10 = 3` 473 µs, pgvector 215: 2.2×).  The
+  B-tree range of `a = 7` (1,000 rows) was searched among exactly, every
+  row's vector compared (a vector out of cache, ~200 ns each) and the
+  rest of the filter checked on the rows found; PostgreSQL checks
+  `id % 10 = 3` on the bitmap scan's rows and sorts 100.  And the
+  range's entries were read through the merge that decodes each key
+  (the load's intents not vacuumed, S11).
+  - Taken: `exec::early_conditions` — the filter's conjuncts reading
+    only an integer primary key (nothing volatile, no subquery) checked
+    on each entry's key (`early_passes`; an error or an undecodable key
+    keeps the entry, the filter deciding on the row), dropped entries
+    read up to sixteen times the most searched among.  462 → 315 µs.
+  - Taken: the range's entries read with their keys left escaped (only
+    the primary keys wanted): 315 → 266; `a = 7` 298 → 263 (pgvector
+    353), `a < 10` 1410 → 990.  Both orders, binaries alone in turn.
+  - Test: `hnsw_searches_among_a_filters_rows` with `cat = 7 AND id % 3
+    = 1` and `cat < 3 AND id > 2000 AND (id % 2 = 0 OR tag = 't1')` —
+    the exact search's rows, built, written, folded.
+  - Left: 266 against 215 includes nucleus's Python client sending the
+    query vector (62 µs a trivial query with it); pgvector's pgbench
+    takes it from a table.
 
 ## §F2 — NoSQL layer
 

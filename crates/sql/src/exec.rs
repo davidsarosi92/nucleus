@@ -1118,8 +1118,9 @@ fn ranked_rows(
         Ok(true)
     };
     let free = keys.is_empty() && chose.is_none() && filter.is_none() && r.checks.is_empty();
+    let early = early_conditions(table, filter);
     let mut get = |most: usize| match within {
-        Some(w) => among(table, w, most, ctx, outer),
+        Some(w) => among(table, w, most, &early, ctx, outer),
         None => Ok(None),
     };
     let mut ask = crate::index_method::RankAsk {
@@ -1149,6 +1150,7 @@ fn among(
     table: &Table,
     w: &Access,
     most: usize,
+    early: &[Expr],
     ctx: &Ctx,
     outer: Option<&Env>,
 ) -> Result<Option<crate::index_method::Pks>> {
@@ -1185,15 +1187,93 @@ fn among(
     };
     let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
     let mut entries = Entries::new(ctx, Bound::Included(&start), end)?;
+    // Only the values (the primary keys) are read: the keys left escaped,
+    // a leaf at a time even over a load's intents not yet vacuumed.
+    entries.escaped_keys();
+    // Entries the early conditions drop are read too, up to sixteen times
+    // the rows searched among (an entry read is a twentieth of a distance).
+    let width = if early.is_empty() {
+        0
+    } else {
+        table.columns.len()
+    };
+    let mut row = vec![Value::Null; width];
+    let mut read = 0u64;
     while let Some((_, pk)) = entries.next()? {
+        read += 1;
+        if !early.is_empty() && !early_passes(table, pk, early, &mut row, ctx, outer) {
+            if read > 16 * (most as u64 + 1) {
+                crate::budget::charge_scans(read)?;
+                return Ok(None);
+            }
+            continue;
+        }
         pks.push(pk);
         if pks.len() > most {
-            crate::budget::charge_scans(pks.len() as u64)?;
+            crate::budget::charge_scans(read)?;
             return Ok(None);
         }
     }
-    crate::budget::charge_scans(pks.len() as u64)?;
+    crate::budget::charge_scans(read)?;
     Ok(Some(pks))
+}
+
+/// The conjuncts of a ranked scan's `filter` that read only the table's
+/// primary key, of integers: checked on the entries of the B-tree range
+/// searched among ([`among`]), from the primary key each holds, before a
+/// vector is compared — as PostgreSQL filters a bitmap scan's rows before
+/// sorting them (`a = 7 AND id % 10 = 3` over a million rows, 1,000
+/// entries: 100 distances, not 1,000).  Nothing volatile, no subquery;
+/// the filter is checked again on the rows found.
+fn early_conditions(table: &Table, filter: Option<&Expr>) -> Vec<Expr> {
+    let pk = &table.primary_key;
+    let (Some(f), false) = (filter, pk.is_empty()) else {
+        return Vec::new();
+    };
+    if !pk.iter().all(|&c| {
+        matches!(
+            table.columns[c].ty,
+            DataType::SmallInt | DataType::Integer | DataType::BigInt
+        )
+    }) {
+        return Vec::new();
+    }
+    let mut cs = Vec::new();
+    crate::binder::conjuncts(f.clone(), &mut cs);
+    cs.retain(|c| {
+        let mut ok = true;
+        c.walk(&mut |x| match x {
+            Expr::Column(i) => ok &= pk.contains(i),
+            Expr::Subquery(_) => ok = false,
+            Expr::Call(f, _) if f.volatility() == crate::ext::Volatility::Volatile => ok = false,
+            _ => {}
+        });
+        ok && !c.columns().is_empty()
+    });
+    cs
+}
+
+/// Whether the row of primary key `pk` (its values' key encoding, as an
+/// index entry holds it) can pass `early`: its
+/// key's values put in `row`, each condition checked — one false, it
+/// cannot; an error or a key not decoded, it is kept (the filter decides
+/// on the row).
+fn early_passes(
+    table: &Table,
+    pk: &[u8],
+    early: &[Expr],
+    row: &mut [Value],
+    ctx: &Ctx,
+    outer: Option<&Env>,
+) -> bool {
+    let Ok((values, _)) = crate::encoding::decode_key(pk, table.primary_key.len()) else {
+        return true;
+    };
+    for (&c, v) in table.primary_key.iter().zip(values) {
+        row[c] = v;
+    }
+    let e = env(row, ctx, outer);
+    early.iter().all(|c| !matches!(c.holds(&e), Ok(false)))
 }
 
 /// A table's rows through an access path, with each row's primary key.

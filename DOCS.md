@@ -4178,7 +4178,12 @@ key filters, then `within`'s condition (unless the row came from
 `among`), the filter and the checks — `None` where nothing checks; and
 `among` (`exec::among`) a callback the method calls with the most rows
 it takes, which reads the B-tree range's primary keys or asks the other
-method's `rows_where`, `None` past that many.  The method gives at least
+method's `rows_where`, `None` past that many.  The range's entries are
+read with their keys left escaped (only the values, the primary keys,
+are wanted); the filter's conjuncts that read only an integer primary
+key (`exec::early_conditions`: nothing volatile, no subquery) are
+checked on each entry's key first, a false one dropping it before its
+vector is compared — up to sixteen times the most entries read so.  The method gives at least
 `k` rows that pass, in any order — an exact one every row tied with the
 `k`-th passing — or `None` where it cannot tell them; the scan then reads
 `within`'s rows (or every row) with the filter, the sort and the limit
@@ -8163,6 +8168,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — filtered vector searches (the sweep):** a B-tree range
+  searched among is read with its keys left escaped, and the filter's
+  conditions on an integer primary key are checked on its entries
+  before a distance.  SIFT-1M, `ef_search` 40: `a = 7 AND id % 10 = 3`
+  462 → 266 µs a search (pgvector 215), `a = 7` 298 → 263 (353),
+  `a < 10` 1410 → 990.
 
 - **2026-11-20 — vectors loaded from their bytes (the sweep):** a
   driver's `vector` and `sparsevec` values are checked from their bytes

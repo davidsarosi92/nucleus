@@ -755,7 +755,9 @@ fn hnsw_serves_order_by_distance_limit() {
 /// are searched among exactly — the same rows as the exact search, through
 /// writes not yet folded, changed vectors and deletes, before and after
 /// the upkeep; many, through the graph, `ef_search` counting the rows that
-/// pass; fewer than asked for, the range read and sorted.
+/// pass; fewer than asked for, the range read and sorted.  Conditions on
+/// the primary key alone are checked on the range's entries before a
+/// distance (`exec::early_conditions`): the same rows.
 #[test]
 fn hnsw_searches_among_a_filters_rows() {
     let kv = db(17);
@@ -802,6 +804,8 @@ fn hnsw_searches_among_a_filters_rows() {
             "cat < 3",
             "cat = 7 AND tag = 't1'",
             "cat BETWEEN 4 AND 5",
+            "cat = 7 AND id % 3 = 1",
+            "cat < 3 AND id > 2000 AND (id % 2 = 0 OR tag = 't1')",
         ] {
             let sql = format!("SELECT id FROM items WHERE {filter} ORDER BY v <-> '{q}' LIMIT 10");
             let p = plan(s, &sql);
