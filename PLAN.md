@@ -12220,6 +12220,19 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     commit's checkpoint ~25 ms (its ordered sync 14).  A bulk load of
     sorted entries into leaves is the remedy — issue #9.
 
+  *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
+  "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's
+  bitmap heap scan 1.0).  The found rows are read by their primary keys
+  (`entries_at`), ~100 rows apart: a B+tree descent each (55%); the
+  condition checked again on each (25%, the index lossy as
+  `jsonb_path_ops` is); the blocks of found rows grow from 8.
+  - Taken: `entries_at`'s lookups a group at a time (`get_many`, up to
+    the next probe; not validated reads): 2,140 → 1,930 µs, both
+    orders.
+  - Not taken alone: the found rows in one block from the start, 12%
+    (blocks start small for a limit above).
+  - Left: issue #10 — PostgreSQL reaches a tuple by its TID, no descent.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

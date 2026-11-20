@@ -1669,7 +1669,29 @@ pub fn entries_at(
     let mut dense = density.is_some_and(dense_at);
     let (mut probe_due, mut lookups, mut behind, mut can_seek) =
         (density.is_none(), 0usize, false, true);
+    let (mut group, mut found): (Vec<&[u8]>, Vec<Option<Vec<u8>>>) = (Vec::new(), Vec::new());
     while i < keys.len() {
+        // Lookups a group at a time, up to the next probe: their descents'
+        // cache misses overlap ([`nucleus_kv::KvTxn::get_many`]; a JSON
+        // index's 2,000 rows of 200,000, PLAN.md §M14.33 S19).
+        let n = (PROBE_EVERY - lookups % PROBE_EVERY)
+            .min(nucleus_kv::GET_MANY)
+            .min(keys.len() - i);
+        if !dense && !probe_due && !validated && n > 1 {
+            group.clear();
+            group.extend(keys[i..i + n].iter().map(Vec::as_slice));
+            txn.get_many(&group, &mut found)?;
+            for (j, v) in found.drain(..).enumerate() {
+                if let Some(v) = v {
+                    f(i + j, &keys[i + j], &v)?;
+                }
+            }
+            i += n;
+            lookups += n;
+            probe_due = lookups % PROBE_EVERY == 0;
+            behind = true;
+            continue;
+        }
         if !dense && !probe_due {
             let k = keys[i].as_slice();
             let v = if validated {

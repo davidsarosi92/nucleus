@@ -4119,7 +4119,8 @@ recheck) — in key order, a block at a time (8, then twice the
 last up to 256, four times past it, up to 16,384: a limit above stops it
 early), by a merge with the table's scan (`exec::rows_at`,
 `TableStorage::rows_at`; the row storage's `exec::entries_at`, PLAN.md
-§M14.21 T5b): where the keys lie far apart each is looked up, where they
+§M14.21 T5b): where the keys lie far apart they are looked up a group
+of `GET_MANY` at a time (their descents' cache misses overlapped), where they
 lie close the scan reads on through the entries between, passing the
 unwanted by their keys — chosen by the share wanted of the entries
 passed, measured as it goes (a probe of 16 entries where it is not yet
@@ -8184,6 +8185,12 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — found rows looked up a group at a time (the sweep):**
+  where the rows an index method finds lie far apart, `entries_at`
+  looks them up `GET_MANY` at a time, their descents' cache misses
+  overlapped.  json-index containment (2,000 rows of 200,000): 2,140 →
+  1,930 µs (PostgreSQL 1,000, issue #10).
 
 - **2026-11-20 — text, sparse and JSON index builds on the workers (the
   sweep):** the three builds share `build_segments` — batches of 512 to
