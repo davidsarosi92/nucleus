@@ -12294,11 +12294,160 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ⬜
+### §M15 — Document model ⬜ (study written 2026-11-20, steps to be agreed)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
 - Path indexes (`a.b.c`), array indexes.
+
+**The study (2026-11-20).**  What a document model adds to what §M14.15
+built: a place whose rows *are* documents — no schema to declare, an id
+each, written and read whole or by path — reached from every driver as
+documents, not as SQL text.  For an AI application this is the shape of
+most of what it keeps (a conversation, an agent's state, a tool's
+result, a profile), and the shape models write best.
+
+*What exists to build on* (surveyed in the code):
+
+- **The `json` type** (§M14.15 J1): a canonical binary form read in
+  place (`json::form`: an object's keys sorted, offset tables, a key
+  found by binary search, a value reached without reading its
+  siblings); exact numbers; an order-preserving key encoding
+  (`json::key`), so a JSON value can be a primary key; the drivers'
+  native values (Python `dict`, JavaScript objects).
+- **Paths and operators**: `->`, `->>`, `#>`, `@>`, `?`, SQL/JSON paths
+  compiled once a statement, `JSON_VALUE` / `JSON_QUERY` /
+  `JSON_EXISTS` / `JSON_TABLE`; the update functions (`json_set`,
+  `json_insert`, `||`, `-`, `#-`).
+- **Indexes**: expression indexes over any expression (J4a), the
+  containment index `USING json` (J4b: `@>`, `?`, `?|`, `?&`), counts
+  over an index's range read no row (§M14.33 S17).
+- **Rows of any size** (`large`: a value past `THRESHOLD` stored out of
+  line in chunks), so a document is not bounded by a page.
+- **Everything a table has**: transactions across tables, row-level
+  security, time travel (§M14.14), branches (§M14.13), memory stores'
+  subjects and erasure (§M14.24), sealing, backups, CDC to come
+  (§M16.5) — a collection that is a table has all of it at once.
+- **`json_matches_schema`** (J5): a collection's optional schema is a
+  `CHECK`.
+
+*What others do:*
+
+- **MongoDB**: BSON — fields in insertion order, typed scalars (int32,
+  int64, double, decimal128, date, ObjectId, binary, regex), found by a
+  linear walk; `_id` required, unique, any type but an array, an
+  ObjectId (12 bytes: time, random, counter) when the client gives none;
+  WiredTiger stores a document under an internal record id with `_id`
+  as a secondary index.  *Multikey* indexes: an indexed path holding an
+  array gives an entry per element (one array path per compound index);
+  *wildcard* indexes (`$**`) index every path; equality of embedded
+  documents is order-sensitive.
+- **PostgreSQL** has no collections; `jsonb` columns with GIN.
+  **DocumentDB** (Microsoft, open source 2025, the base of FerretDB 2):
+  MongoDB's API as a PostgreSQL extension — a `bson` type, a table per
+  collection `(shard_key, object_id, document)`, RUM / GIN indexes per
+  path — the document model *as tables*.
+- **Oracle 23ai**: JSON collections (`CREATE JSON COLLECTION TABLE`, a
+  table with one `DATA` column and `_id` taken from it), *JSON-relational
+  duality views* (documents read and written over normalized tables),
+  the MongoDB API in front; multi-valued indexes over arrays.
+- **MySQL 8.0.17** multi-valued indexes: `CAST(doc->'$.tags' AS CHAR(10)
+  ARRAY)` — an entry per element, used by `MEMBER OF`, `JSON_CONTAINS`,
+  `JSON_OVERLAPS`.  **CockroachDB**: inverted indexes on JSON (an entry
+  per path and leaf), used for `@>` and equality on paths.
+- **Couchbase** (N1QL / SQL++): documents keyed by id, SQL over them,
+  array indexes (`DISTINCT ARRAY v FOR v IN tags END`).  **Firestore**
+  indexes every field by itself.  **SQLite**'s JSONB is a format, not a
+  model.
+- The common ground: a collection is a keyed set of documents; an id is
+  the key; arrays need an index whose entries are their elements; and
+  where it is built on a relational engine (DocumentDB, Oracle,
+  Couchbase), a collection is a table with the document in a column.
+
+*What nucleus takes, and why — proposed:*
+
+1. **A collection is a table, and a catalog object of its own kind**:
+   `CREATE COLLECTION c` makes a table `(_id json PRIMARY KEY, doc
+   json)` marked a collection in the catalog (`nc_catalog.collections`;
+   `\d c` says so).  Everything a table has, it has (above); SQL reads
+   and writes it as it is (`SELECT doc->>'name' FROM c WHERE doc @>
+   …`).  Its options: a schema (`WITH (schema = '…')`, a `CHECK` by
+   `json_matches_schema`), memory-store subjects, sealing — the table's.
+   Principle 11: one catalog, one transaction across tables and
+   collections, no second store.
+2. **The id is the key** — a document's `_id` field, any JSON value but
+   an array (MongoDB's rule), its key encoding the primary key; the row
+   keeps it beside the document (`_id` a stored generated column of
+   `doc->'_id'`), so a read by id is a primary-key read and the
+   document round-trips whole.  An id not given is made: a UUIDv7 as a
+   string (time-ordered, so inserts append at the key range's end — the
+   B+tree's cheap case; nucleus's `uuidv7()`), not an ObjectId
+   (MongoDB's; the compatibility module makes ObjectIds where its
+   clients expect them).
+3. **The form stays `json`'s** (canonical, keys sorted) — measured
+   first (D1) against BSON's linear walk for the reads that matter (a
+   field of a 1 KB, a 16 KB document; a path three deep; a whole
+   document out).  Key order is not kept: RFC 8259's objects are
+   unordered and canonical bytes give equality, hashing and unique
+   indexes at a byte comparison.  The one difference from MongoDB,
+   recorded: `{b: 1, a: 2}` reads back `{a: 2, b: 1}`, and embedded
+   documents compare equal whatever their order.
+4. **No new scalar types in `json`**: dates, binary and ObjectIds are
+   not JSON; nucleus's own documents keep them as JSON (ISO 8601
+   strings, base64, strings), as models and HTTP APIs do, and SQL casts
+   them where typed (`(doc->>'at')::timestamptz`, an expression index
+   on it).  The MongoDB module (§M16) maps BSON's extended types to
+   Extended JSON's canonical forms (`{"$date": …}`, `{"$oid": …}`) on
+   the way in and back on the way out — its clients see their types;
+   the core is not shaped by them.
+5. **Path indexes are expression indexes** (`CREATE INDEX ON c ((doc #>
+   '{a,b,c}'))`, and `CREATE INDEX ON c (a.b.c)` for a collection — the
+   path's value as JSON, compared and ranged by `json`'s order, so one
+   index serves numbers and strings alike).
+6. **Array indexes: a multi-valued expression index** — a key part an
+   expression giving a set (`ARRAY`, `json_array_elements`, a path with
+   `[*]`), an entry per distinct element (MySQL's and MongoDB's
+   multikey; one such part an index, as MongoDB allows), kept on every
+   write by `dml::IndexKeys` as the expression indexes are.  Chosen for
+   `doc->'tags' @> '"x"'`, `'x' = ANY(…)`, a path's equality or range
+   under `[*]`, `JSON_EXISTS(doc, '$.tags[*] ? (@ == "x")')`; a scan
+   through it reads a row once per match (a row whose array holds two
+   matching elements: `DISTINCT` on the key, as MySQL does).  Beside
+   the containment index, which serves `@>` over every path but not
+   ranges.
+7. **Writes by document**: insert (an id made where none), replace by
+   id, update by operators (set, unset, increment, push, pull — the
+   `json_*` functions applied in place of the row, one rewrite), delete;
+   an upsert is `INSERT … ON CONFLICT (_id)`.  All of them SQL first
+   (§M16 gives them messages on `ncp` and driver APIs).
+8. **The query language is decided at M15's end** (as the plan says),
+   with D1–D4 built: the candidates are SQL/JSON over `doc` (what
+   exists) and a JSON filter document (`{"age": {"$gt": 30}}`, the
+   operators models write fluently), compiled to the same `Expr` —
+   the second a front end, never a second planner.
+
+*Steps (proposed, to be agreed):*
+
+- **D1 — the form measured**: field reads, path reads and whole-document
+  output from `json`'s form against a BSON walk (the `bson` crate,
+  outside the core, in `bench/`) and `jsonb` (PostgreSQL 18), on
+  documents of 1 KB and 16 KB; a change to the form only where it
+  loses, under a new encoding version (principle 6).
+- **D2 — collections**: `CREATE / DROP / ALTER COLLECTION`, the catalog
+  kind and `nc_catalog.collections`, `_id` as the stored key (made
+  where absent), `WITH (schema = …)`; insert, replace, update by
+  operators, delete and upsert in SQL; pg-compat sees a table; slt
+  against PostgreSQL where the SQL is the same.
+- **D3 — path and multi-valued indexes**: `CREATE INDEX ON c (a.b.c)`,
+  the multi-valued expression index and its planner rules; measured
+  against PostgreSQL's GIN and MongoDB's multikey index (in Docker).
+- **D4 — the decision on the query language**, with a prototype of the
+  JSON filter compiled to `Expr`, judged on what developers and models
+  write; recorded here, then §M16.
+
+**Done when:** collections exist in the catalog and SQL, with ids as
+keys, path and array indexes chosen by the planner and measured, the
+form's choice measured, and §M16's query language decided.
 
 ### §M16 — Document queries + document server ⬜
 
