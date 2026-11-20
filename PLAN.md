@@ -291,7 +291,7 @@ are marked ✅.
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
-| **F2 — NoSQL** | M15 | Document model | ⬜ |
+| **F2 — NoSQL** | M15 | Document model | ⬜ study written, D1–D4 agreed (2026-11-20) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
@@ -12294,7 +12294,7 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ⬜ (study written 2026-11-20, steps to be agreed)
+### §M15 — Document model ⬜ (study written and steps agreed 2026-11-20)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
@@ -12364,7 +12364,7 @@ result, a profile), and the shape models write best.
   where it is built on a relational engine (DocumentDB, Oracle,
   Couchbase), a collection is a table with the document in a column.
 
-*What nucleus takes, and why — proposed:*
+*What nucleus takes, and why (agreed 2026-11-20 — a collection a table of its own catalog kind; keys sorted, the form canonical; no new scalar types, Extended JSON in the MongoDB module):*
 
 1. **A collection is a table, and a catalog object of its own kind**:
    `CREATE COLLECTION c` makes a table `(_id json PRIMARY KEY, doc
@@ -12426,7 +12426,7 @@ result, a profile), and the shape models write best.
    operators models write fluently), compiled to the same `Expr` —
    the second a front end, never a second planner.
 
-*Steps (proposed, to be agreed):*
+*Steps (agreed 2026-11-20, in this order; built after F1's whole run):*
 
 - **D1 — the form measured**: field reads, path reads and whole-document
   output from `json`'s form against a BSON walk (the `bson` crate,
