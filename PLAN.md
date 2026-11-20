@@ -11995,6 +11995,21 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   against 0.6 — the gap is the vacuum's: issue #4 (each committed
   intent made a version through the WAL), recorded there.
 
+  *S8, cold TPC-H on row tables* (Q22 1.20–1.25×, Q6 ≈ 1.2× by the
+  method).  Restarted, seven rounds (`cold.py`): Q6 cold 208 against
+  PostgreSQL's 172 ms (warm 97 against 94), Q22 52.8 against 46.8 (warm
+  30.7 against 36.4).  Q6 cold on one worker, profiled over six
+  restarts: the scan's read path ~190 of 545 ms — of each run read,
+  `pread` 57, a page's allocation 51 (mostly fresh memory first
+  touched), its checksum 31 (interleaved, at the hardware's rate), its
+  copy out of the read buffer 27.  PostgreSQL scans a large table
+  through a ring of 32 buffers (`BAS_BULKREAD`) — no fresh memory — and
+  checks no sums by default.
+  - Not taken: the run read into its frames by one vectored read (an FFI
+    call more in `nucleus-platform`, `unsafe` allowed by name) spares
+    the copy, ~5 % of a cold scan; a ring would make warm scans read the
+    file.  Issue #6.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
