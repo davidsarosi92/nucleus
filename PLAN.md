@@ -12008,7 +12008,30 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   - Not taken: the run read into its frames by one vectored read (an FFI
     call more in `nucleus-platform`, `unsafe` allowed by name) spares
     the copy, ~5 % of a cold scan; a ring would make warm scans read the
-    file.  Issue #6.
+    file.  Issue #6.  ClickBench Q31 on row tables cold (≈ 1.09×, its
+    interval ±12 %) is the same read: warm it is 0.86×.
+
+  *S9, TPC-H Q20 on column tables* (1.18×).  Not its plan's: on one
+  worker the same query took 316 ms, 89 with the decoded columns' cache
+  at 1 GiB instead of 256 MiB — `column_store::cached` was half the
+  query's samples, every run reading and decoding `lineitem`'s columns
+  again (its four and the keys ~290 MB: a scan through more than the
+  cache, the column used longest ago gone first, is the next it reads).
+  - Tried, not taken: Caffeine's W-TinyLFU (Einziger, Friedman and
+    Manes, 2017) — a window an eighth of the bound, the main part entered
+    past a column looked up less often by a count-min sketch.  TPC-H on
+    column tables 0.949× (Q20 68.3 → 55.0, Q6 35.8 → 25.5) but Q14 1.29×
+    and ClickBench Q20–Q22 2× (5.7 → 11.4 ms): a scan counts a lookup a
+    batch, so the columns of the queries before stood above the next
+    query's until the sketch's halving, too rare to let them in.
+  - Taken: the cache's bound an eighth of the memory the process may use
+    (half the index objects' budget, a bound, not memory taken; at least
+    256 MiB).  Alone in turn, both orders: TPC-H on column tables 0.713×
+    (Q20 69.7 → 31.1 ms against PostgreSQL's ~60, Q6 36.4 → 16.2, Q8
+    87.3 → 29.7, Q12 50.4 → 26.4, Q3 65.1 → 36.4), none slower;
+    ClickBench on column tables 0.985×, none slower.  A scan through more
+    than the bound still finds nothing again — a policy that keeps part
+    of it is for when the bound is too small, not a constant.
 
 ## §F2 — NoSQL layer
 

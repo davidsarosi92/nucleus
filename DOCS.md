@@ -3844,9 +3844,10 @@ by value; `NULL`s a bitmap (a segment
 lists the table columns it holds: a partial column copy holds some).  A
 segment's id is a hash of its contents, so it never changes and its decoded columns
 are cached by id (in 16 shards by key, a hit locking its shard only to
-read; the size bound, 256 MB, is all shards' together, and past it the
-columns used longest ago in any shard go, an eighth of the bound at a
-time) — its directory entry decoded too, once (a lookup's), and its row
+read; the size bound, all shards' together, is an eighth of the memory
+the process may use — half the index objects' budget, a bound, not
+memory taken — at least 256 MiB; past it the columns used longest ago
+in any shard go, an eighth of the bound at a time) — its directory entry decoded too, once (a lookup's), and its row
 keys with every 32nd key's first 8 bytes as a number beside them (a
 search narrows to 32 keys in that small array first, ClickHouse's marks).
 A read of one row (by its key: an index lookup, a
@@ -8145,6 +8146,14 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-20 — the column cache sized by the machine (the sweep before
+  F1's whole run):** decoded columns are cached up to an eighth of the
+  memory the process may use (at least 256 MiB) instead of a fixed 256
+  MiB, less than a TPC-H SF 1 query's `lineitem` columns: a scan through
+  more than the cache, run again, found none of them.  TPC-H on column
+  tables, ten workers, geometric mean 0.713× (Q20 69.7 → 31.1 ms, Q6 36.4
+  → 16.2, Q8 87.3 → 29.7); ClickBench on column tables 0.985×.
 
 - **2026-11-20 — late materialization for column scans (the sweep before
   F1's whole run):** a column table's scan whose first step is a filter

@@ -724,7 +724,7 @@ fn cache_get(key: &(u64, u16)) -> Option<Decoded> {
 /// bound is free — one shard's lock held at a time.
 fn cache_insert(key: (u64, u16), d: Decoded) {
     let size = decoded_bytes(&d);
-    if CACHE_TOTAL.load(Relaxed) + size > CACHE_BYTES {
+    if CACHE_TOTAL.load(Relaxed) + size > cache_bytes() {
         evict(size);
     }
     cache(&key)
@@ -746,8 +746,9 @@ fn evict(room: usize) {
         );
     }
     by_use.sort_unstable_by_key(|e| e.1);
+    let bound = cache_bytes();
     for (k, _) in by_use {
-        if CACHE_TOTAL.load(Relaxed) + room <= CACHE_BYTES - CACHE_BYTES / 8 {
+        if CACHE_TOTAL.load(Relaxed) + room <= bound - bound / 8 {
             break;
         }
         cache(&k)
@@ -757,8 +758,29 @@ fn evict(room: usize) {
     }
 }
 
-/// The decoded columns' bound, in bytes (all shards' together).
-const CACHE_BYTES: usize = 256 << 20;
+/// The decoded columns' bound, in bytes (all shards' together): an eighth
+/// of the memory the process may use (half the index objects' budget,
+/// [`crate::object_cache::budget`], sized by the machine as DuckDB's
+/// `memory_limit` is) — a bound, not memory taken — at least 256 MiB; 256
+/// MiB where that is unknown or the address space 32-bit.  A fixed 256 MiB
+/// was less than TPC-H SF 1's `lineitem` columns a query reads (Q20: its
+/// four and the keys, ~290 MB), and a scan through more than the cache,
+/// run again, finds none of its columns: the one used longest ago, gone
+/// first, is the next it reads (Q20 on column tables, ten workers, 70
+/// against 33 ms with them all cached).  A scan-resistant policy was
+/// tried instead (PLAN.md §M14.33 S9).
+fn cache_bytes() -> usize {
+    static BYTES: OnceLock<usize> = OnceLock::new();
+    *BYTES.get_or_init(|| {
+        const LEAST: usize = 256 << 20;
+        if cfg!(target_pointer_width = "32") {
+            return LEAST;
+        }
+        nucleus_platform::real::physical_memory()
+            .and_then(|m| usize::try_from(m / 8).ok())
+            .map_or(LEAST, |b| b.max(LEAST))
+    })
+}
 
 /// The bytes the shards hold.
 static CACHE_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
