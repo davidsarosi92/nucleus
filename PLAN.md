@@ -12233,6 +12233,27 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     (blocks start small for a limit above).
   - Left: issue #10 — PostgreSQL reaches a tuple by its TID, no descent.
 
+  *S20, the rest of the list, measured again or weighed — none taken.*
+  - ann-sparse load (100,000 SPLADE-like rows as `INSERT … VALUES`
+    literals; 6.09 s in the last whole run, pgvector's `COPY` 1.40):
+    1.22 s now — the lag is gone (the text input made faster since).
+  - SPLADE on ArguAna (3.95 ms a query, pgvector 1.37): nucleus's
+    sparse index is exact, pgvector's HNSW approximate (`ef_search`
+    40), at the same nDCG@10 by chance of the set; searched exactly
+    both are alike (ann-sparse, 20.8 ms and 20.9) — not a lag of like
+    things, as S15's binary quantization.
+  - `recall` with a request id (1.50 ms, 0.81 without): the read
+    record is a commit (§M14.24 R5's measured choice); an asynchronous
+    read log would lose the last records in a crash — left as designed,
+    not a lag against PostgreSQL.
+  - tsearch-rank's "all" queries (0.17 ms, PostgreSQL 0.11): both
+    under a millisecond, the gap the clients' floors (nucleus's Python
+    client over TCP ~50 µs, psql's `\timing`); the analyzers are
+    1.9–3.6× faster than `to_tsvector` already.
+  - JSON output against serde (2×) and JSON Schema against the
+    `jsonschema` crate (1.7×): not against PostgreSQL — §M14.15's open
+    performance notes.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
