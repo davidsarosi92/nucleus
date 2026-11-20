@@ -8162,6 +8162,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-20 — exact sums' window check inlined (the sweep):** an
+  addition's check that the chunks hold it is inlined, the growing
+  apart: `corr` 181 → 152 ms, skewness and kurtosis 222 → 189 (issue #8
+  for the rest).
+
 - **2026-11-20 — window functions over ten million rows (the sweep):**
   frames computed where wanted, not kept (560 MB); the input's rows
   made with room for the calls' values; exact sums finished from an

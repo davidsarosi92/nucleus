@@ -154,9 +154,21 @@ impl ExactSum {
         }
     }
 
-    /// Grows the window to hold chunks `from .. to`.
-    #[inline]
+    /// Grows the window to hold chunks `from .. to`: a comparison where it
+    /// holds them (every addition but the first few), inlined — the
+    /// growing apart (inlined whole, the five sums of `corr` spent a sixth
+    /// of their time calling it).
+    #[inline(always)]
     fn cover(&mut self, from: usize, to: usize) {
+        if from >= self.lo && to <= self.lo + self.chunks.len() && !self.chunks.is_empty() {
+            return;
+        }
+        self.grow(from, to);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, from: usize, to: usize) {
         if self.chunks.is_empty() {
             self.lo = from;
             self.chunks.resize(to - from, 0);

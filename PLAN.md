@@ -12100,6 +12100,20 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   (2150), moving average 4896 → 4526 (8581), `row_number` by groups
   2435 → 2205 (4609).
 
+  *S14, exact sums* (`corr` 1.7×, `variance` 1.28×, `sum` 1.24×
+  PostgreSQL's).  `corr` keeps five exact sums, three of them of
+  products (`ExactSum::add_product`); `ExactSum::cover`, the check that
+  the chunk window holds an addition's chunks, was not inlined (its
+  growing path with it): a sixth of the profile.
+  - Taken: the check inlined, the growing apart and cold.  `corr` 181 →
+    152 ms, skewness and kurtosis 222 → 189, regression by 1000 groups
+    222 → 201 (both orders, the machine at load 5).
+  - Left: the exact products themselves.  PostgreSQL adds doubles
+    naively and its parallel `corr` differs between runs (−3.08e−06,
+    −3.68e−06); nucleus's is the same bits in any order, kept on
+    purpose.  Neal's large superaccumulator and error-free products are
+    the ways to try — issue #8.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
