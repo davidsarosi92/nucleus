@@ -12369,6 +12369,25 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     turn, both orders: the indexes 8.97 → 7.19 s, `(l_partkey,
     l_suppkey)` 4.63 → 3.56, `(l_suppkey)` 3.00 → 2.51, `orders
     (o_custkey)` 0.79 → 0.60.
+    Sampled after (b)+(c), the `(l_partkey, l_suppkey)` build's session
+    thread: the entries put one at a time 31 % (the tree's apply 15 %;
+    the key's escaping, `mvcc::escape_onto`, 6 %), the commit's checkpoint
+    24 % (the pages written 13 %, their sync 9 %), the runs pushed to
+    scratch and merged back 22 %, the scan's workers 11 %, the sort 3 %.
+    Tried, not taken: `work_mem` 2 GB with the sample sort (one run, no
+    spill) — `(l_partkey, l_suppkey)` −7 %, `(l_suppkey)` +7 %; the
+    unlogged batches 8 MiB instead of 1 (fewer applies, fewer spawned
+    threads) — the same or slower; the escape eight bytes at a time
+    (SWAR zero test) — 44 → 40 ns a key in a test, under 1 % of the build.
+    What is left is the bytes: an entry is ~70 bytes in its leaf
+    (`(l_suppkey)`: 384 MiB, PostgreSQL's deduplicated B-tree a fraction
+    of that) — its slot and cell header 13, the key past the leaf's
+    prefix (the primary key escaped, the version's 10) ~38, and the value,
+    the primary key again, 19, though a non-unique entry's key ends with
+    it.  Next (the performance pass, a format change): a non-unique
+    entry's value left empty (the primary key read from its key's end:
+    its 66 readers), −27 %; then posting lists for repeated values, as
+    PostgreSQL 13's deduplication.
 
   *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
   "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's
