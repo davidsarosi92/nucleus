@@ -2837,7 +2837,7 @@ impl Transaction {
         }
         let ops = std::mem::take(&mut pending.ops);
         pending.bytes = 0;
-        Ok(self.engine.store.write_unlogged(&Batch { meta: 0, ops })?)
+        Ok(self.engine.store.write_unlogged(Batch { meta: 0, ops })?)
     }
 
     /// The starts of the fresh ranges this transaction writes unlogged.

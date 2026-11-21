@@ -1472,8 +1472,8 @@ impl Store {
     /// loses it — what the layer above must be able to find again and
     /// delete (the transaction layer marks such a range in a logged record
     /// first, and its commit checkpoints before the commit record).
-    pub fn write_unlogged(&self, batch: &Batch) -> Result<()> {
-        if let Some((k, _)) = batch.ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
+    pub fn write_unlogged<'a>(&self, batch: impl WriteBatch<'a>) -> Result<()> {
+        if let Some((k, _)) = batch.batch().ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
             return Err(Error::KeyTooLarge(k.len()));
         }
         self.check()?;
@@ -1483,12 +1483,14 @@ impl Store {
         b.writers_waiting.fetch_add(1, Ordering::AcqRel);
         let mut tree = b.tree.write().unwrap_or_else(|e| e.into_inner());
         b.writers_waiting.fetch_sub(1, Ordering::AcqRel);
-        apply(&mut tree, batch, None).inspect_err(|_| self.poison())?;
+        // (The deferred entries first, the tree's lock held: no reader
+        // sees either before it goes.)
         overlay(
             &mut b.deferred.lock().unwrap_or_else(|e| e.into_inner()),
-            batch,
+            batch.batch(),
             Vec::new(),
         );
+        apply_ops(&mut tree, batch.into_ops(), None).inspect_err(|_| self.poison())?;
         drop(tree);
         // A bulk load grown past what an engine holds in memory (an LSM
         // tree's memtable, §M14.28 L4b): written out now, by the loader,
