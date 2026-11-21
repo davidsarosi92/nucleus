@@ -24,8 +24,37 @@ const CARRY_EVERY: u32 = 1 << 30;
 /// 53-bit significand can reach: 0 ..= 65.
 const CHUNKS: usize = 67;
 
+/// Additions after which a sum keeps a bin per exponent ([`Bins`]): a
+/// long sum's — a group of a few rows never grows them.
+const BINNED_AFTER: u32 = 1 << 14;
+
+/// The exponents the bins cover: from a quarter of them below the value
+/// whose addition made them to the rest above.
+const BINS: usize = 256;
+
+/// Additions to the bins between their folds into the chunks: each bin
+/// is an `i64` of significands below 2⁵³, so 2¹⁰ of them cannot overflow
+/// it.
+const FOLD_EVERY: u32 = 1 << 10;
+
+/// Neal's large superaccumulator, in a window of exponents: a bin per
+/// exponent field, the significands of the values with that exponent
+/// added to it as they are — an addition one integer addition (and a
+/// product two: its rounded value and its error, `fma`'s, both exact
+/// doubles), against the small accumulator's three, or five for a 128-bit
+/// product (issue #8: `corr`'s three products a row 5.5 → 2.6 ns each).
+/// Folded into the chunks every [`FOLD_EVERY`] additions and before the
+/// sum is read.
+#[derive(Clone, Debug)]
+struct Bins {
+    sums: [i64; BINS],
+    /// The exponent field of `sums[0]`.
+    base: usize,
+    adds: u32,
+}
+
 /// A sum of doubles kept exactly.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct ExactSum {
     /// The chunks from `lo`: chunk `lo + i` in units of 2^(32(lo+i) − 1075).
     chunks: Vec<i64>,
@@ -34,6 +63,16 @@ pub struct ExactSum {
     adds: u32,
     /// The sum of the infinities and `NaN`s added (`None`: none).
     special: Option<f64>,
+    /// Bins by exponent, past [`BINNED_AFTER`] additions.
+    bins: Option<Box<Bins>>,
+}
+
+/// Equal sums: the same value (as [`ExactSum::to_bytes`] has it, its
+/// canonical form), however it is held.
+impl PartialEq for ExactSum {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_bytes() == other.to_bytes()
+    }
 }
 
 impl ExactSum {
@@ -69,6 +108,16 @@ impl ExactSum {
         let (Some((mx, ex)), Some((my, ey))) = (significand(x), significand(y)) else {
             return; // a zero
         };
+        // Binned, and the product's bits all at or above 2⁻¹⁰⁷⁴: it is
+        // its rounded value plus `fma`'s error, both doubles, exactly.
+        if self.bins.is_some() && ex + ey >= 1076 {
+            let err = x.mul_add(y, -prod);
+            self.put(prod, false);
+            if err != 0.0 {
+                self.put(err, false);
+            }
+            return;
+        }
         let mut p = u128::from(mx) * u128::from(my);
         // Its lowest bit's place, in units of 2⁻¹⁰⁷⁵.
         let mut at = ex + ey - 1075;
@@ -103,16 +152,98 @@ impl ExactSum {
         } else {
             w.iter_mut().zip(&c).for_each(|(w, c)| *w += c);
         }
+        self.counted(i << 5);
+    }
+
+    /// One more addition to the chunks (of a value at exponent field
+    /// about `exp`): carried every [`CARRY_EVERY`], the bins made at
+    /// [`BINNED_AFTER`].
+    #[inline]
+    fn counted(&mut self, exp: usize) {
+        self.adds += 1;
+        if self.adds == BINNED_AFTER && self.bins.is_none() {
+            self.bins = Some(Box::new(Bins {
+                sums: [0; BINS],
+                base: exp.saturating_sub(BINS / 4),
+                adds: 0,
+            }));
+        }
+        if self.adds == CARRY_EVERY {
+            self.carry();
+        }
+    }
+
+    /// The bins' sums added to the chunks, the bins emptied.
+    fn fold(&mut self) {
+        let Some(mut b) = self.bins.take() else {
+            return;
+        };
+        for (i, v) in b.sums.iter_mut().enumerate() {
+            if *v != 0 {
+                self.add_int(*v, b.base + i);
+                *v = 0;
+            }
+        }
+        b.adds = 0;
+        self.bins = Some(b);
+    }
+
+    /// Adds `v · 2^at` (units of 2⁻¹⁰⁷⁵): a bin's sum.
+    fn add_int(&mut self, v: i64, at: usize) {
+        let w = u128::from(v.unsigned_abs()) << (at & 31);
+        let i = at >> 5;
+        let c = [
+            (w as u64 & 0xffff_ffff) as i64,
+            ((w >> 32) as u64 & 0xffff_ffff) as i64,
+            (w >> 64) as i64,
+        ];
+        self.cover(i, i + 3);
+        let at = i - self.lo;
+        let ws = &mut self.chunks[at..at + 3];
+        if v < 0 {
+            ws.iter_mut().zip(&c).for_each(|(w, c)| *w -= c);
+        } else {
+            ws.iter_mut().zip(&c).for_each(|(w, c)| *w += c);
+        }
         self.adds += 1;
         if self.adds == CARRY_EVERY {
             self.carry();
         }
     }
 
+    /// This sum with its bins folded into the chunks (itself where it
+    /// has none): what every read of it reads.
+    fn settled(&self) -> std::borrow::Cow<'_, ExactSum> {
+        if self.bins.is_none() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut s = self.clone();
+        s.fold();
+        s.bins = None;
+        std::borrow::Cow::Owned(s)
+    }
+
     #[inline]
     fn put(&mut self, x: f64, negate: bool) {
         let bits = x.to_bits();
         let exp = ((bits >> 52) & 0x7ff) as usize;
+        if let Some(b) = self.bins.as_deref_mut()
+            && exp != 0x7ff
+        {
+            let i = exp.max(1).wrapping_sub(b.base);
+            if i < BINS {
+                let mut m = (bits & ((1u64 << 52) - 1)) as i64;
+                if exp != 0 {
+                    m |= 1 << 52;
+                }
+                b.sums[i] += if (bits >> 63 != 0) != negate { -m } else { m };
+                b.adds += 1;
+                if b.adds == FOLD_EVERY {
+                    self.fold();
+                }
+                return;
+            }
+        }
         if exp == 0x7ff {
             let x = if negate { -x } else { x };
             self.special = Some(self.special.map_or(x, |s| s + x));
@@ -148,10 +279,7 @@ impl ExactSum {
             w[1] += c[1];
             w[2] += c[2];
         }
-        self.adds += 1;
-        if self.adds == CARRY_EVERY {
-            self.carry();
-        }
+        self.counted(exp);
     }
 
     /// Grows the window to hold chunks `from .. to`: a comparison where it
@@ -208,6 +336,7 @@ impl ExactSum {
 
     /// Adds everything `other` holds.
     pub fn merge(&mut self, other: &ExactSum) {
+        let other = &*other.settled();
         if !other.chunks.is_empty() {
             // A chunk holds up to (adds + 1) · 2³² in magnitude, so the
             // two together are one more addition than both counts.
@@ -233,6 +362,11 @@ impl ExactSum {
     /// The sum, correctly rounded (to nearest, ties to even); `None` when
     /// it overflowed (finite values whose sum is beyond a double).
     pub fn total(&self) -> Option<f64> {
+        let s = self.settled();
+        s.total_settled()
+    }
+
+    fn total_settled(&self) -> Option<f64> {
         if let Some(s) = self.special {
             return Some(s);
         }
@@ -274,6 +408,11 @@ impl ExactSum {
     /// the mean rounded once, not the rounded sum divided; `None` when it
     /// is beyond a double.
     pub fn mean(&self, n: u64) -> Option<f64> {
+        let s = self.settled();
+        s.mean_settled(n)
+    }
+
+    fn mean_settled(&self, n: u64) -> Option<f64> {
         if let Some(s) = self.special {
             return Some(s / n as f64);
         }
@@ -293,6 +432,11 @@ impl ExactSum {
     /// The sum exactly, `v · 2^exp`; `None` when an infinity or `NaN` was
     /// added.
     pub fn exact(&self) -> Option<(BigInt, i64)> {
+        let s = self.settled();
+        s.exact_settled()
+    }
+
+    fn exact_settled(&self) -> Option<(BigInt, i64)> {
         if self.special.is_some() {
             return None;
         }
@@ -307,6 +451,11 @@ impl ExactSum {
     /// sum follows (and it), then the chunks carried — each but the top in
     /// 4 bytes, the top in 8 — without the zero chunks at either end.
     pub fn to_bytes(&self) -> Vec<u8> {
+        let s = self.settled();
+        s.to_bytes_settled()
+    }
+
+    fn to_bytes_settled(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(18 + 4 * self.chunks.len());
         out.push(0);
         match self.special {
@@ -797,5 +946,104 @@ mod tests {
         assert_eq!(p.total(), Some(5e-324 * 2f64.powi(60)));
         p.add_product(-3.0, 1.5);
         assert_eq!(p.total(), Some(5e-324 * 2f64.powi(60) - 4.5));
+    }
+
+    /// Long sums — binned past their first additions — equal to the same
+    /// values summed a hundred at a time (never binned) and merged: values
+    /// and products of every magnitude and sign, subnormals, subtractions,
+    /// products at the edge where `fma`'s error is no longer a double,
+    /// values outside the bins' window, and states through their bytes.
+    #[test]
+    fn binned_sums_equal_unbinned_ones() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..12 {
+            // Exponent fields: all, or a narrow band then far outside it.
+            let (lo, span) = match round % 3 {
+                0 => (1, 2045),
+                1 => (1000, 40),
+                _ => (500, 60),
+            };
+            let mut long = ExactSum::new();
+            let mut parts = Vec::new();
+            let mut part = ExactSum::new();
+            for i in 0..30_000u64 {
+                fn one(next: &mut impl FnMut() -> u64, far: bool, lo: u64, span: u64) -> f64 {
+                    let e = if far {
+                        next() % 2046 + 1
+                    } else {
+                        next() % span + lo
+                    };
+                    let x = f64::from_bits(next() & !(0xfffu64 << 52) | (e << 52));
+                    if next().is_multiple_of(2) { x } else { -x }
+                }
+                let far = i % 97 == 0;
+                match next() % 5 {
+                    0 => {
+                        // Around the fma edge: exponent fields summing to
+                        // ~1076.
+                        let e = next() % 40 + 518;
+                        let x = f64::from_bits(next() & !(0xfffu64 << 52) | (e << 52));
+                        let y = f64::from_bits(
+                            next() & !(0xfffu64 << 52) | ((1076 - e + next() % 3 - 1) << 52),
+                        );
+                        long.add_product(x, y);
+                        part.add_product(x, y);
+                    }
+                    1 => {
+                        let (x, y) = (one(&mut next, far, lo, span), one(&mut next, far, lo, span));
+                        if (x * y).is_finite() {
+                            long.add_product(x, y);
+                            part.add_product(x, y);
+                        }
+                    }
+                    2 => {
+                        let x = one(&mut next, far, lo, span);
+                        long.sub(x);
+                        part.sub(x);
+                    }
+                    3 => {
+                        let x = f64::from_bits(next() % (1 << 52)); // subnormal
+                        long.add(x);
+                        part.add(x);
+                    }
+                    _ => {
+                        let x = one(&mut next, far, lo, span);
+                        long.add(x);
+                        part.add(x);
+                    }
+                }
+                if i % 100 == 99 {
+                    parts.push(std::mem::take(&mut part));
+                }
+            }
+            assert!(long.bins.is_some(), "binned");
+            let mut want = ExactSum::new();
+            for p in &parts {
+                assert!(p.bins.is_none());
+                want.merge(p);
+            }
+            assert!(want.bins.is_none());
+            assert_eq!(long.to_bytes(), want.to_bytes(), "round {round}");
+            assert_eq!(long.total(), want.total());
+            assert_eq!(long.mean(30_000), want.mean(30_000));
+            let back = ExactSum::from_bytes(&long.to_bytes()).unwrap();
+            assert_eq!(back.total(), want.total());
+            // A binned state merged into another, and back out of it.
+            let mut both = long.clone();
+            both.merge(&long);
+            let mut twice = want.clone();
+            twice.merge(&want);
+            assert_eq!(both, twice);
+            // Bytes of a binned state merged into a binned one.
+            let mut more = long.clone();
+            more.merge_bytes(&long.to_bytes()).unwrap();
+            assert_eq!(more, twice);
+        }
     }
 }

@@ -12260,6 +12260,29 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     −3.68e−06); nucleus's is the same bits in any order, kept on
     purpose.  Neal's large superaccumulator and error-free products are
     the ways to try — issue #8.
+  - Issue #8 (2026-11-21).  A test of the three ways, a million
+    products each (`x · id`, `x²`, `id²` of the bench's columns), all
+    bit for bit the 128-bit path's: the 128-bit product 5.5 ns, an
+    `fma` split (p = x·y, e = fma(x, y, −p), both exact doubles) added
+    to the small accumulator 4.4, the split added to Neal's large
+    superaccumulator (a bin per exponent field, a significand one integer
+    addition) 2.25, to a window of 256 such bins 2.65.  Taken: the
+    window (`fsum::Bins`, 2 KiB): a sum grows it past 16,384 additions —
+    past 512, `regression` over 1000 groups went 204 → 334 ms (the
+    groups' bins out of the caches, each worker's states copied out
+    folded) —, its bins folded into the chunks every 1,024 additions to
+    them and before any read; the split only where the product's bits
+    all lie at or above 2⁻¹⁰⁷⁴ (exponent fields summing to 1076 or
+    more), else the 128-bit path.  Both orders: `corr` 160.3 → 140.6 ms
+    (PostgreSQL 104), the rest within the noise.  Tested against the
+    same values summed a hundred at a time, never binned, and merged
+    (`binned_sums_equal_unbinned_ones`: every magnitude and sign,
+    subnormals, subtractions, products at the `fma` edge, values outside
+    the window, states through their bytes).  Left: the scan — `count(*)`
+    of the same table 93 ms, `min(x)` 116, `sum(x)` 113, against
+    PostgreSQL's whole `sum` 86: the table is loaded by one `INSERT …
+    SELECT` and not vacuumed, so every read merges the load's committed
+    intents (S11).
 
   *S15, loading vectors* (SIFT-1M's 900,000 rows 15.9 s, pgvector 1.80:
   8.8×).  Profiled: the server turned each `vector` the driver sent

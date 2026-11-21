@@ -2722,6 +2722,12 @@ as an integer in units of 2⁻¹⁰⁷⁵, in 32-bit chunks held in 64-bit
 words, only the chunks touched kept; an addition or subtraction is three
 integer additions, `add_product` adds x·y exactly — the significands'
 106-bit product from one 128-bit multiplication, added as five chunks;
+a long sum — past 16,384 additions — also keeps Neal's *large*
+accumulator over a window of 256 exponents: a bin per exponent field,
+each value's significand one integer addition into its bin, and a
+product split by `fma` into its rounded value and its error (both exact
+doubles where its bits lie at or above 2⁻¹⁰⁷⁴), the bins folded into
+the chunks every 1,024 additions and before any read;
 the result rounded once to nearest even from the integer;
 a worker's state passed as bytes — the chunks carried, all but the top
 in four bytes, without the zeros at either end — and added from them
