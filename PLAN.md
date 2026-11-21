@@ -4374,6 +4374,27 @@ recovery time after a crash mid-compaction.
     rest is the transaction layer's per-entry work, as for the B+tree.
     Sizing the block cache (one budget with the page cache, or its
     share) is left to the perf pass, with #13.
+  - Issue #12, deletes (2026-11-21).  *Found* (`sample`, ten `DELETE`s
+    of 10 % after `update 25%`): the commit was three fifths of an LSM
+    table's delete against a quarter of the B+tree's — each op's key and
+    value copied into the memtable, and each user key's other versions
+    looked for by a range of the map (two descents, a `Vec` for the end
+    key and one for what it found) though most keys have one.  *Taken*:
+    `Engine::apply_owned` (a commit's ops moved in); where a commit's user
+    keys are one in 32 or more of the memtable's keys, one walk over the
+    memtable beside them (a merge join) — else the look per key, without
+    allocating where it finds under two versions.  *Measured*: ten
+    deletes, both orders, medians 147.7 → 118.5 ms (walk at one in 16:
+    not taken for this table, the memtable of 1.35M keys; one in 64
+    within the noise of 32); the suite (`--engines btree,lsm --no-pg`,
+    three rounds): `delete 10%` 143 → 125 ms (the B+tree 98), `count
+    after writes` 17.2 → 15.9.  *Tried, not taken*: a set of the hashes
+    of user keys with versions in the memtable, to skip the look for a
+    key's first version — slower (142 → 158 ms: a random access into a
+    3.5 MB table per op, more than the map's cached upper levels).
+    *Tested*: `commits_of_many_keys_drop_versions_in_memory` (fails with
+    the walk's drops left out).  *Left*: the memtable's inserts (a
+    `BTreeMap`, ~1.6 ms in 10 a delete), and YCSB E's short scans.
 
   *F1's whole run: LSM rows gone — a benchmark's fault, the store
   hardened* (2026-11-21).  `wamp-lsm`'s first run lost ~20 of ~25

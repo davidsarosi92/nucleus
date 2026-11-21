@@ -334,6 +334,17 @@ struct Memtable {
     ranges: Ranges,
 }
 
+/// The map's keys a commit's user key may be among for its garbage to be
+/// found by one walk over the map rather than a look for each
+/// ([`Memtable::garbage_of_all`]).
+const WALK_EVERY: usize = 32;
+
+fn drop_all(points: &mut BTreeMap<Vec<u8>, Val>, keys: Vec<Vec<u8>>) {
+    for k in keys {
+        points.remove(&k);
+    }
+}
+
 /// A memtable's entries counted as one block when a scan is cut into
 /// parts ([`Engine::split_keys`]): about a block's of small rows.
 const SPLIT_STRIDE: usize = 64;
@@ -370,16 +381,21 @@ impl Memtable {
     }
 
     fn put(&mut self, key: &[u8], v: Val) {
-        if self.last().is_none_or(|l| key > l) {
-            self.tail_bytes += entry_bytes(key, &v);
-            Arc::make_mut(&mut self.tail).push((key.to_vec(), v));
+        self.put_owned(key.to_vec(), v);
+    }
+
+    /// [`put`](Self::put), the key handed over.
+    fn put_owned(&mut self, key: Vec<u8>, v: Val) {
+        if self.last().is_none_or(|l| key.as_slice() > l) {
+            self.tail_bytes += entry_bytes(&key, &v);
+            Arc::make_mut(&mut self.tail).push((key, v));
             return;
         }
-        if self.tail.first().is_some_and(|(f, _)| key >= f.as_slice()) {
+        if self.tail.first().is_some_and(|(f, _)| key >= *f) {
             self.untail();
         }
-        self.sampled(key);
-        self.points.insert(key.to_vec(), v);
+        self.sampled(&key);
+        self.points.insert(key, v);
     }
 
     /// `key`, put in `points`, kept in `sample` if it is one of the keys
@@ -399,7 +415,7 @@ impl Memtable {
     /// may be in runs, so the filter sees them as above a last level; the
     /// tail (a load's keys, written once) is left as it is.
     fn drop_garbage(&mut self, ops: &Ops, filter: &dyn LeafFilter) {
-        let mut gone: Vec<Vec<u8>> = Vec::new();
+        let mut end = Vec::new();
         let mut last: Option<&[u8]> = None;
         for (k, _) in ops {
             let p = prefix(k);
@@ -407,24 +423,55 @@ impl Memtable {
                 continue; // not a version, or its prefix seen
             }
             last = Some(p);
-            let mut end = p.to_vec();
-            *end.last_mut().expect("a prefix ends 00 00") = 1;
-            let live: Vec<(&Vec<u8>, &[u8])> = self
-                .points
-                .range::<[u8], _>((Bound::Included(p), Bound::Excluded(end.as_slice())))
-                .filter_map(|(k, v)| Some((k, v.as_deref()?)))
-                .collect();
+            self.garbage_of(p, &mut end, filter);
+        }
+    }
+
+    /// [`drop_garbage`](Self::drop_garbage) for the user keys `users`
+    /// (each ending at its `ends`, ascending).  Where they are many among
+    /// the map's keys, one walk over the map from the first, beside them
+    /// (a merge join, each key compared once) instead of a look for each
+    /// (two descents of the map: a quarter of a `DELETE`'s time on an LSM
+    /// table, issue #12).
+    fn garbage_of_all(&mut self, users: &[u8], ends: &[usize], filter: &dyn LeafFilter) {
+        let Some(&first_end) = ends.first() else {
+            return;
+        };
+        let starts = std::iter::once(0).chain(ends.iter().copied());
+        let each = starts.zip(ends.iter().copied());
+        if ends.len() * WALK_EVERY < self.points.len() {
+            let mut end = Vec::new();
+            for (a, b) in each {
+                self.garbage_of(&users[a..b], &mut end, filter);
+            }
+            return;
+        }
+        let mut gone: Vec<Vec<u8>> = Vec::new();
+        let mut it = self
+            .points
+            .range::<[u8], _>((Bound::Included(&users[..first_end]), Bound::Unbounded))
+            .peekable();
+        let mut live: Vec<(&Vec<u8>, &[u8])> = Vec::new();
+        let (mut entries, mut drop) = (Vec::new(), Vec::new());
+        for (a, b) in each {
+            let p = &users[a..b];
+            while it.next_if(|(k, _)| k.as_slice() < p).is_some() {}
+            live.clear();
+            while let Some((k, v)) = it.next_if(|(k, _)| k.starts_with(p)) {
+                if let Some(v) = v {
+                    live.push((k, v));
+                }
+            }
             if live.len() < 2 {
                 continue;
             }
-            let entries: Vec<LeafEntry> = live
-                .iter()
-                .map(|&(key, v)| LeafEntry {
-                    key,
-                    inline: Some(v),
-                })
-                .collect();
-            let mut drop = vec![false; entries.len()];
+            entries.clear();
+            entries.extend(live.iter().map(|&(key, v)| LeafEntry {
+                key,
+                inline: Some(v),
+            }));
+            drop.clear();
+            drop.resize(entries.len(), false);
             filter.drops_above(&entries, &mut drop);
             gone.extend(
                 live.iter()
@@ -433,6 +480,44 @@ impl Memtable {
                     .map(|((k, _), _)| (*k).clone()),
             );
         }
+        drop_all(&mut self.points, gone);
+    }
+
+    /// [`drop_garbage`](Self::drop_garbage) for one prefix `p` (`end` a
+    /// buffer reused).  Most prefixes a commit writes have one version
+    /// here: found by looking at two entries, nothing allocated.
+    fn garbage_of(&mut self, p: &[u8], end: &mut Vec<u8>, filter: &dyn LeafFilter) {
+        end.clear();
+        end.extend_from_slice(p);
+        *end.last_mut().expect("a prefix ends 00 00") = 1;
+        let span = (Bound::Included(p), Bound::Excluded(end.as_slice()));
+        let mut live = self
+            .points
+            .range::<[u8], _>(span)
+            .filter(|(_, v)| v.is_some());
+        if live.next().is_none() || live.next().is_none() {
+            return;
+        }
+        let live: Vec<(&Vec<u8>, &[u8])> = self
+            .points
+            .range::<[u8], _>(span)
+            .filter_map(|(k, v)| Some((k, v.as_deref()?)))
+            .collect();
+        let entries: Vec<LeafEntry> = live
+            .iter()
+            .map(|&(key, v)| LeafEntry {
+                key,
+                inline: Some(v),
+            })
+            .collect();
+        let mut drop = vec![false; entries.len()];
+        filter.drops_above(&entries, &mut drop);
+        let gone: Vec<Vec<u8>> = live
+            .iter()
+            .zip(&drop)
+            .filter(|&(_, &d)| d)
+            .map(|((k, _), _)| (*k).clone())
+            .collect();
         for k in gone {
             self.points.remove(&k);
         }
@@ -2034,6 +2119,42 @@ impl Engine for LsmEngine {
     fn apply_filtered(&mut self, ops: &Ops, filter: &dyn LeafFilter) -> Result<()> {
         self.apply(ops)?;
         self.mem.drop_garbage(ops, filter);
+        Ok(())
+    }
+
+    /// The keys and values moved into the memtable; with a filter, each
+    /// user key's versions looked at once its last op is in (the ops are
+    /// sorted, a key's versions together).
+    fn apply_owned(
+        &mut self,
+        ops: Vec<(Vec<u8>, Val)>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
+        self.settle();
+        let Some(filter) = filter else {
+            for (k, v) in ops {
+                self.mem.put_owned(k, v);
+            }
+            return Ok(());
+        };
+        // The user keys written (each once, in order), in one buffer.
+        let (mut users, mut ends) = (Vec::new(), Vec::new());
+        for (k, _) in &ops {
+            let p = prefix(k);
+            let last = match ends.as_slice() {
+                [.., a, b] => &users[*a..*b],
+                [b] => &users[..*b],
+                [] => &[][..],
+            };
+            if p.len() < k.len() && last != p {
+                users.extend_from_slice(p);
+                ends.push(users.len());
+            }
+        }
+        for (k, v) in ops {
+            self.mem.put_owned(k, v);
+        }
+        self.mem.garbage_of_all(&users, &ends, filter);
         Ok(())
     }
 

@@ -58,6 +58,19 @@ pub trait Engine: Send + Sync {
         let _ = filter;
         self.apply(ops)
     }
+    /// [`apply`](Self::apply) or [`apply_filtered`](Self::apply_filtered)
+    /// with `ops` handed over: an engine that keeps them may take their
+    /// keys and values without copying them (a commit's).
+    fn apply_owned(
+        &mut self,
+        ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
+        match filter {
+            Some(f) => self.apply_filtered(&ops, f),
+            None => self.apply(&ops),
+        }
+    }
     /// Removes every entry in `[start, end)`.
     fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()>;
     /// Up to `parts - 1` keys inside `(start, end)` cutting it into parts
@@ -780,11 +793,9 @@ impl Tables {
         if !tree_ops.is_empty() || (filter.is_some() && !ops.is_empty()) {
             to_tree(&mut self.tree, &tree_ops)?;
         }
-        for (e, ops) in self.engines.iter_mut().zip(&engine_ops) {
-            match filter {
-                _ if ops.is_empty() => {}
-                Some(f) => e.apply_filtered(ops, f)?,
-                None => e.apply(ops)?,
+        for (e, ops) in self.engines.iter_mut().zip(engine_ops) {
+            if !ops.is_empty() {
+                e.apply_owned(ops, filter)?;
             }
         }
         Ok(())
@@ -810,11 +821,9 @@ impl Tables {
             }
         }
         self.tree.apply_sorted_owned(tree_ops, filter)?;
-        for (e, ops) in self.engines.iter_mut().zip(&engine_ops) {
-            match filter {
-                _ if ops.is_empty() => {}
-                Some(f) => e.apply_filtered(ops, f)?,
-                None => e.apply(ops)?,
+        for (e, ops) in self.engines.iter_mut().zip(engine_ops) {
+            if !ops.is_empty() {
+                e.apply_owned(ops, filter)?;
             }
         }
         Ok(())

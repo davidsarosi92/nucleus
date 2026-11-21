@@ -181,3 +181,70 @@ fn commits_drop_versions_in_memory() {
     assert_eq!(e.begin().get(b"k3").unwrap(), None);
     assert_eq!(e.begin().get(b"k1").unwrap().as_deref(), Some(&b"v205"[..]));
 }
+
+/// The same where each commit writes many of the memtable's keys — their
+/// garbage found by one walk over the memtable (issue #12), not a look
+/// for each: every key keeps a few versions, a snapshot held keeps what
+/// it reads, deleted keys stay deleted.
+#[test]
+fn commits_of_many_keys_drop_versions_in_memory() {
+    let p: Arc<dyn Platform> = Arc::new(SimPlatform::new(4));
+    let e = Engine::open(p, Path::new("/db"), EngineOptions::default()).unwrap();
+    let t = e.begin();
+    assert!(t.add_engine(b"k", b"l", EngineKind::Lsm).unwrap());
+    t.commit().unwrap();
+    let key = |j: u32| format!("k{j:03}").into_bytes();
+    let mut old = None;
+    for i in 1..=40u32 {
+        let mut t = e.begin();
+        for j in 0..300u32 {
+            if i == 30 && j % 3 == 0 {
+                t.delete(&key(j)).unwrap();
+            } else if i < 30 || j % 3 != 0 {
+                t.put(&key(j), format!("v{i}").as_bytes()).unwrap();
+            }
+        }
+        t.commit().unwrap();
+        if i == 9 {
+            // No snapshot yet: a few versions a key (found by the walk).
+            for j in [0u32, 1, 299] {
+                let n = stored(&e, &key(j));
+                assert!(n <= 2, "{n} versions of k{j:03} after {i} commits");
+            }
+        }
+        if i == 10 {
+            old = Some(e.begin());
+        }
+    }
+    let old = old.unwrap();
+    for j in [0u32, 1, 150, 299] {
+        assert_eq!(old.get(&key(j)).unwrap().as_deref(), Some(&b"v10"[..]));
+    }
+    // Held by the snapshot: v10 and what came after it.  (The memtable
+    // now large beside a commit's keys, each key is looked at alone.)
+    let held = stored(&e, &key(1));
+    assert!(
+        (31..=32).contains(&held),
+        "{held} versions with a snapshot held"
+    );
+    drop(old);
+    let mut t = e.begin();
+    for j in 0..300u32 {
+        if j % 3 != 0 {
+            t.put(&key(j), b"last").unwrap();
+        }
+    }
+    t.commit().unwrap();
+    let r = e.begin();
+    for j in 0..300u32 {
+        let want = (j % 3 != 0).then_some(&b"last"[..]);
+        assert_eq!(r.get(&key(j)).unwrap().as_deref(), want, "k{j:03}");
+        if j % 3 != 0 {
+            assert!(
+                stored(&e, &key(j)) <= 2,
+                "{} versions of k{j:03}",
+                stored(&e, &key(j))
+            );
+        }
+    }
+}

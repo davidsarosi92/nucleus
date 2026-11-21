@@ -894,7 +894,12 @@ shows it, as `drops_above`, the memtable's entries sharing the `escape(user)
 00 00` prefix of each key written — so a key written over and over keeps
 a few versions in memory, as in a B+tree leaf, not one a write until a
 save (a read steps over each one kept: 5000 versions of a key made its
-read 12 → 420 µs).  The memtable's ascending tail is left as it is.
+read 12 → 420 µs).  A commit hands its ops over (`Engine::apply_owned`:
+keys and values moved into the memtable, not copied), and where its user
+keys are many beside the memtable's keys (one in 32 or more) their
+versions are found by one walk over the memtable from the first, a merge
+join, not two descents of the map for each (issue #12).  The memtable's
+ascending tail is left as it is.
 **Scans in parallel** (L5): `Engine::split_keys` cuts a range into parts
 for a parallel scan's morsels — the B+tree's leaf separators where no
 route is, and within one engine's range that engine's: the LSM tree's
