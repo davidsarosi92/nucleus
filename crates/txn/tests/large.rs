@@ -1038,6 +1038,7 @@ impl Platform for Threads {
 /// snapshot sees gone, every key's value as it was — with keys holding
 /// zeros (escaped) and a reader's snapshot holding versions back.
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn a_whole_vacuum_sweeps_its_parts_on_workers() {
     // No checkpoint on the way: the crash below replays every batch.
     let opts = || EngineOptions {
