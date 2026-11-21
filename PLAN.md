@@ -4379,6 +4379,37 @@ recovery time after a crash mid-compaction.
   fails without the check).  The `wamp` step's other fault — a
   recovery not done timed as one — was fixed before the rerun.
 
+  *Issue #14: recovery after random-key writes — page-ordered redo*
+  (2026-11-21).  The restart after `wamp`'s steady state (5 million rows
+  100 a transaction, random keys, among ~10 million) took 989, 60 and
+  923 s in the rerun: no checkpoint fell in the phase (~800 MB of WAL,
+  under the GiB), so recovery replayed all of it, a batch at a time,
+  each row a leaf the 128 MiB cache did not hold — read, rewritten,
+  evicted — and its checkpoint wrote ~35 GiB.  A profile of a scaled
+  copy (`recov`, 2.5 M rows, 1.25 M random writes, a 32 MiB cache —
+  the same ratio) showed CPU, not the disk: `pread`/`pwrite` of a leaf a
+  row, each leaf decoded and encoded again, and — each 100-row batch
+  reaching over 64 leaves — `apply_sorted`'s workers started and stopped
+  for every batch.  Taken, from ARIES's redo by page (and the goal of
+  PostgreSQL's recovery prefetch): recovery gathers the replayed puts
+  and deletes up to `StoreOptions::redo_bytes` and applies them sorted
+  by key, the last of each key's, in one `apply_sorted` pass — a batch
+  removing ranges applied as logged, after what was gathered; the
+  deferred puts are not the tree's and keep their own order.  The
+  budget: 64 MiB by default, an eighth of the machine's memory from the
+  kv layer (nothing else runs during recovery); about twice it at the
+  peak (`phys_footprint` 188 MiB at 64 MiB).  Measured: the scaled copy
+  35.6 → 5.0 s (A/B, both orders; 4 MiB 13.6 s, 256 MiB 3.3 s); `wamp`
+  phases 0, 1, 5 on the server: the restart after the steady state 923
+  → **23.5 s**, its checkpoint 35 GiB → 3.0 GiB written; after the
+  random bulk load 19.7 → 4.9 s.  Tested by
+  `recovery_ends_the_same_whatever_it_gathers` (no budget, 300 bytes, 1
+  MiB: puts, deletes, keys repeated within and across batches, removed
+  ranges, deferred puts — fails when a key's first write is kept
+  instead of its last), and the crash-at-every-point tests now recover
+  through 512-byte passes.  Left for the performance pass: the live
+  write path's small batches start `apply_sorted`'s workers each.
+
 **Done when:** the study is written here — the workloads and their
 measured amplifications, the design behind the KV contract, the
 compaction policy chosen and why, what is left to the B+tree — and the

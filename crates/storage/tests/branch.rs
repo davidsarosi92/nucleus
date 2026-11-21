@@ -46,6 +46,8 @@ fn opts() -> StoreOptions {
         previous_page_key: None,
         compaction_bytes_per_sec: 0,
         lsm_cache_bytes: nucleus_storage::lsm::BLOCK_CACHE_BYTES,
+        // Recovery gathers a few batches at a time: its passes tested.
+        redo_bytes: 512,
     }
 }
 

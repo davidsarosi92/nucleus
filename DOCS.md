@@ -690,10 +690,17 @@ only if the WAL since the last (after any running ends) is past
 checkpoint.  A `Batch` is `meta: u64` (the transaction layer's commit
 timestamp) and ordered puts/deletes; its WAL encoding is versioned.  Keys
 over `MAX_KEY` are refused before logging.  Any failure poisons the store.
-Recovery checkpoints once if it replayed anything; a checkpoint the WAL
-does not line up with (ahead of its end, or its start after it) is
-corruption.  Options: `cache_pages` (default 1024), `wal_segment_size`
-(default 16 MiB).  Meta slots: 0 the main tree's root, 1 its checkpoint
+Recovery gathers the replayed batches' puts and deletes, up to
+`redo_bytes`, and applies them sorted by key — for each key the last
+logged — in one pass over the tree (`apply_sorted`), each leaf read and
+written once a pass rather than once a row; a batch removing ranges is
+applied as logged, after what was gathered (page-ordered redo, issue
+#14).  Recovery checkpoints once if it replayed anything; a checkpoint
+the WAL does not line up with (ahead of its end, or its start after
+it) is corruption.  Options: `cache_pages` (default 1024),
+`wal_segment_size` (default 16 MiB), `redo_bytes` (default 64 MiB; the
+kv layer gives it an eighth of the machine's memory; 0: each batch as
+logged).  Meta slots: 0 the main tree's root, 1 its checkpoint
 LSN, 2 its last `meta`, 3 the branch directory's root.
 
 **Branches** (§M14.13 B1).  A `Store` is one branch of the database in

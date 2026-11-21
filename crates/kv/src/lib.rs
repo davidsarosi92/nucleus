@@ -1194,7 +1194,21 @@ fn store_options(opts: &Options) -> StoreOptions {
         previous_page_key: opts.previous_encryption_key.clone(),
         compaction_bytes_per_sec: 0,
         lsm_cache_bytes: (opts.cache_bytes / 4).max(1 << 20),
+        redo_bytes: redo_bytes(),
     }
+}
+
+/// The memory recovery gathers replayed writes in (`StoreOptions::
+/// redo_bytes`): an eighth of the machine's — nothing else runs while a
+/// database recovers —, at least the store's default.
+fn redo_bytes() -> usize {
+    let least = nucleus_storage::store::REDO_BYTES;
+    if cfg!(target_pointer_width = "32") {
+        return least;
+    }
+    nucleus_platform::real::physical_memory()
+        .and_then(|m| usize::try_from(m / 8).ok())
+        .map_or(least, |b| b.max(least))
 }
 
 /// Whether the database in directory `dir` is encrypted — its data file's

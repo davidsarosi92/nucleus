@@ -99,6 +99,11 @@ pub struct StoreOptions {
     /// The bytes the LSM trees' block cache holds at most (§M14.28 L4c:
     /// one cache for the process, as large as the largest store asks).
     pub lsm_cache_bytes: usize,
+    /// The memory recovery gathers the logged puts and deletes in before
+    /// it applies them, sorted by key — each leaf read and written once a
+    /// pass instead of once a row (issue #14); about twice that at the
+    /// peak, while a pass is applied.  0: each batch as it was logged.
+    pub redo_bytes: usize,
 }
 
 impl Default for StoreOptions {
@@ -110,7 +115,81 @@ impl Default for StoreOptions {
             previous_page_key: None,
             compaction_bytes_per_sec: 0,
             lsm_cache_bytes: crate::lsm::BLOCK_CACHE_BYTES,
+            redo_bytes: REDO_BYTES,
         }
+    }
+}
+
+/// [`StoreOptions::redo_bytes`]' default.
+pub const REDO_BYTES: usize = 64 << 20;
+
+/// Recovery's writes gathered ([`StoreOptions::redo_bytes`]): the puts
+/// and deletes of the batches replayed, in the log's order, applied
+/// sorted by key — for each key the last — when they fill the budget, a
+/// batch that removes ranges comes (it is applied as logged, after
+/// them), or the log ends.  Page-ordered redo, as ARIES's redo by page
+/// and PostgreSQL's recovery prefetch aim at: after random-key writes a
+/// row each touched a leaf the cache did not hold — read, rewritten,
+/// evicted —, so recovery took as long as the writes had (PLAN.md
+/// §M14.28, issue #14).
+struct Redo {
+    ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl Redo {
+    fn new(budget: usize) -> Self {
+        Self {
+            ops: Vec::new(),
+            bytes: 0,
+            budget,
+        }
+    }
+
+    /// `batch` replayed: gathered, or (no budget, or ranges to remove)
+    /// applied after what was gathered.
+    fn replay(
+        &mut self,
+        tree: &mut Tables,
+        batch: Batch,
+        covered: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        if self.budget == 0 || !covered.is_empty() {
+            self.flush(tree)?;
+            apply(tree, &batch, None)?;
+            return remove_covered(tree, covered);
+        }
+        // A key and a value's bytes, and what a gathered entry costs
+        // beside them (its two vectors and the tuple).
+        const ENTRY: usize = 64;
+        for op in batch.ops {
+            self.bytes += op.0.len() + op.1.as_ref().map_or(0, Vec::len) + ENTRY;
+            self.ops.push(op);
+        }
+        if self.bytes >= self.budget {
+            self.flush(tree)?;
+        }
+        Ok(())
+    }
+
+    /// What was gathered, into the tree: sorted by key (stably, so a
+    /// key's writes keep the log's order), the last of each key's kept.
+    fn flush(&mut self, tree: &mut Tables) -> Result<()> {
+        if self.ops.is_empty() {
+            return Ok(());
+        }
+        let mut ops = std::mem::take(&mut self.ops);
+        self.bytes = 0;
+        ops.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut last: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(ops.len());
+        for op in ops {
+            match last.last_mut() {
+                Some(l) if l.0 == op.0 => *l = op,
+                _ => last.push(op),
+            }
+        }
+        tree.apply_sorted(&last, None)
     }
 }
 
@@ -679,16 +758,19 @@ fn open_branch(
     }
     let mut deferred = Deferred::new();
     let header = wal.record_len(0);
+    let mut redo = Redo::new(opts.redo_bytes);
     wal.replay(applied, |lsn, payload| {
         let (batch, covered, put) = Batch::decode_full(payload)?;
-        apply(&mut tree, &batch, None)?;
-        remove_covered(&mut tree, &covered)?;
+        // The deferred puts are not the tree's: the order between them
+        // and the tree's writes does not matter.
         overlay(&mut deferred, &batch, put);
         meta = batch.meta;
+        redo.replay(&mut tree, batch, &covered)?;
         replayed += 1;
         applied = lsn + header + payload.len() as u64;
         Ok(())
     })?;
+    redo.flush(&mut tree)?;
     Ok(Branch {
         info,
         tree: RwLock::new(tree),

@@ -48,6 +48,8 @@ fn opts() -> StoreOptions {
         previous_page_key: None,
         compaction_bytes_per_sec: 0,
         lsm_cache_bytes: nucleus_storage::lsm::BLOCK_CACHE_BYTES,
+        // Recovery gathers a few batches at a time: its passes tested.
+        redo_bytes: 512,
     }
 }
 
@@ -1129,6 +1131,65 @@ fn contents_deferred(store: &Store) -> Model {
         .collect();
     m.extend(store.deferred().iter().map(|(k, v)| (k.clone(), v.clone())));
     m
+}
+
+/// Recovery gathers the replayed writes and applies them sorted by key
+/// (`StoreOptions::redo_bytes`, issue #14): whatever it gathers — no
+/// batch (each as logged), a few, all — it ends where the log does: keys
+/// written again and deleted within and across batches, ranges removed
+/// (their keys deleted, as the engine's covering writes do), puts
+/// deferred.
+#[test]
+fn recovery_ends_the_same_whatever_it_gathers() {
+    for redo in [0, 300, 1 << 20] {
+        let p = sim(5);
+        let o = StoreOptions {
+            redo_bytes: redo,
+            ..opts()
+        };
+        let open = || Store::open(Arc::clone(&p) as Arc<dyn Platform>, Path::new(DIR), &o);
+        let (store, _) = open().unwrap();
+        let rng = SplitMix64::new(5);
+        let mut model = Model::new();
+        for i in 1..=200u64 {
+            let lsn = match rng.below(10) {
+                0 => {
+                    let d = rng.below(4);
+                    let (lo, hi) = (format!("k{d}"), format!("k{}", d + 1));
+                    let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = model
+                        .range(lo.clone().into_bytes()..hi.clone().into_bytes())
+                        .map(|(k, _)| (k.clone(), None))
+                        .collect();
+                    ops.push((format!("z{i}").into_bytes(), Some(vec![i as u8; 9])));
+                    let b = Batch { meta: i, ops };
+                    apply(&mut model, &b);
+                    store
+                        .write_covering(&b, &[(lo.into_bytes(), hi.into_bytes())])
+                        .unwrap()
+                }
+                1 => {
+                    let b = random_batch(&rng, i);
+                    apply(&mut model, &b);
+                    let k = format!("d{:02}", rng.below(20)).into_bytes();
+                    let v = vec![i as u8; rng.below(50) as usize];
+                    model.insert(k.clone(), v.clone());
+                    store.write_deferring(&b, vec![(k, v)], &Keep).unwrap()
+                }
+                _ => {
+                    let b = random_batch(&rng, i);
+                    apply(&mut model, &b);
+                    store.write(&b).unwrap()
+                }
+            };
+            store.wait_durable(lsn).unwrap();
+        }
+        assert_eq!(contents_deferred(&store), model);
+        drop(store);
+        p.sim_fs().crash();
+        let (store, rec) = open().unwrap();
+        assert_eq!((rec.replayed, rec.meta), (200, 200), "redo_bytes {redo}");
+        assert_eq!(contents_deferred(&store), model, "redo_bytes {redo}");
+    }
 }
 
 #[test]
