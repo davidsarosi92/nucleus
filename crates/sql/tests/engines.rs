@@ -389,6 +389,16 @@ fn writes_while_moving(seed: u64, storage: &str) {
             })
         })
         .collect();
+    // The writers under way before the first move (a slow machine — the
+    // iOS simulator's runner — moved the table before they had begun).
+    let began = std::time::Instant::now();
+    while written.load(std::sync::atomic::Ordering::Relaxed) < 50 {
+        assert!(
+            began.elapsed().as_secs() < 120 && writers.iter().all(|w| !w.is_finished()),
+            "the writers did not begin"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     for engine in ["lsm", "btree"] {
         let before = written.load(std::sync::atomic::Ordering::Relaxed);
         s.execute(&format!("ALTER TABLE t SET (engine = {engine})"))
