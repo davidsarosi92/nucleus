@@ -645,7 +645,8 @@ fails with `Error::Locked` ("in use by another process") instead of
 corrupting the database — then creates `dir/data` and `dir/wal/` if
 needed and recovers; returns `Recovery { meta, replayed }`.  The lock
 also tells whether `dir/LOCK` is still the file it locked
-(`Lock::still_here`: the same device and inode on Unix): a checkpoint
+(`Lock::still_here`: the same device and inode on Unix; elsewhere
+always true — Windows will not move a directory with files open in it): a checkpoint
 asks before it writes and removes files by their names, an opening
 before it removes stale ones, and a store whose directory was removed
 or replaced while open — another store made at the path — poisons

@@ -201,7 +201,9 @@ pub trait Lock: Send + Sync {
     /// false once that file, or the directory it is in, was removed,
     /// moved away or replaced.  What lives at the path then is someone
     /// else's — another store made there — and the holder must not touch
-    /// it.  True where that cannot be told.
+    /// it.  True where that cannot be told: off Unix (Windows will not
+    /// move or remove a directory with files open in it; WASI's std has
+    /// no stable file identity).
     fn still_here(&self) -> io::Result<bool> {
         Ok(true)
     }

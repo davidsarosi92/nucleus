@@ -339,6 +339,7 @@ fn works_on_the_real_file_system() {
 }
 
 /// The files under `dir`, each with its length.
+#[cfg(unix)]
 fn files_under(dir: &Path) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
     let mut todo = vec![dir.to_path_buf()];
@@ -362,6 +363,11 @@ fn files_under(dir: &Path) -> BTreeMap<String, u64> {
 /// recovering cost the F1 run's LSM tables their runs, PLAN.md §M14.28):
 /// the first one's checkpoint refuses — poisoned — and leaves every file
 /// of the second one as it was, which opens with its rows.
+///
+/// Unix only: Windows refuses to move a directory with files open in it
+/// (so the case cannot arise there), and WASI's std has no stable way to
+/// tell a file's identity (`still_here` is true there).
+#[cfg(unix)]
 #[test]
 fn a_store_whose_directory_was_replaced_touches_nothing_there() {
     let base = nucleus_platform::temp_dir().join(format!(
