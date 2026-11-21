@@ -1003,7 +1003,17 @@ impl Pager {
         if last >= self.lock().known_len {
             let mut s = self.lock();
             if last >= s.known_len {
-                s.known_len = extend(self.file.as_ref(), s.known_len, last + 1)?;
+                // A long run reaching past the end grows the file by its
+                // own write: zeros written ahead first wrote its pages
+                // twice — a checkpoint's appended pages, a load's or an
+                // index build's whole growth (issue #9: 785 MiB written
+                // for a 384 MiB index).  Pages it skips past the end read
+                // as zeros, as written ones would.
+                s.known_len = if pages.len() >= RUN_GROWS {
+                    s.known_len.max(last + 1)
+                } else {
+                    extend(self.file.as_ref(), s.known_len, last + 1)?
+                };
             }
         }
         let cipher = self.keys();
@@ -1546,6 +1556,10 @@ fn read_run(
     })
 }
 
+/// The fewest pages of a run ([`Pager::write_run`]) that grows the file by
+/// its own write past the end, without zeros ahead: 128 KiB.
+const RUN_GROWS: usize = 16;
+
 /// The fewest pages the file grows by: 1 MiB.
 const EXTEND_MIN: u64 = 128;
 /// The most: 64 MiB.
@@ -1864,6 +1878,50 @@ mod tests {
         assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
         set_version(ENCRYPTED_FORMAT_VERSION + 1);
         assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
+    }
+
+    /// A long run written past the file's end grows it by its own write —
+    /// no zeros ahead, which wrote a checkpoint's appended pages twice
+    /// (issue #9) — the pages it skips read as never written, a page
+    /// written there later reads back, and all of them after a reopen.
+    #[test]
+    fn a_long_run_past_the_end_grows_the_file_by_itself() {
+        let p = SimPlatform::new(1);
+        let fs = p.fs();
+        fs.create_dir_all(Path::new("/db")).unwrap();
+        let path = Path::new("/db/data");
+        let pager = Pager::create(fs, path).unwrap();
+        let ids: Vec<PageId> = (0..48).map(|_| pager.allocate().unwrap()).collect();
+        let page = |i: usize| {
+            let mut page = Page::new(PageType::FIRST_USER);
+            page.payload_mut()[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            page
+        };
+        // The last 32 as one run, 16 past the end skipped.
+        let mut run: Vec<Page> = (16..48).map(page).collect();
+        pager.write_run(ids[16], &mut run).unwrap();
+        let size = fs.open(path, OpenMode::ReadOnly).unwrap().size().unwrap();
+        assert_eq!(
+            size,
+            (ids[47].0 + 1) * PAGE_SIZE as u64,
+            "grown by the run alone"
+        );
+        assert!(
+            pager.read_page(ids[3]).is_err(),
+            "a page skipped was never written"
+        );
+        for (i, &id) in ids.iter().enumerate().take(16) {
+            pager.write_page(id, &mut page(i)).unwrap();
+        }
+        pager.sync().unwrap();
+        drop(pager);
+        let pager = Pager::open(fs, path).unwrap();
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(
+                pager.read_page(id).unwrap().payload()[..8],
+                (i as u64).to_le_bytes()
+            );
+        }
     }
 
     /// An encrypted file's header copies are authenticated (PLAN.md

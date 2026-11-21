@@ -372,7 +372,10 @@ nothing is zeroed first), `write_page`, `is_writable`,
 the pages, by zeros an eighth of its length at a time, 1 to 64 MiB: a
 write into blocks the file has costs a fraction of one that makes APFS
 allocate them; zeros past the header's page count are not the
-database's), `free` (refuses double
+database's — but a run of 16 pages or more written past the end
+(`write_run`, a checkpoint's appended pages) grows the file by its own
+write, since zeros ahead of it wrote its pages twice; pages it skips
+read as never written), `free` (refuses double
 frees); `meta`/`set_meta` (16 `u64` slots committed atomically with the
 pages); `sync`, `close`; `check` (on-disk free list vs. memory, no page in
 two places), `accounting` (free / pending / free-list pages / allocated).
@@ -437,7 +440,9 @@ commit the next freeze makes.
 `write()` marks it dirty — after checking the pager's rule, so a missing
 copy-on-write fails at once.  `create(type)` allocates a page into a frame;
 `free(id)` drops it (must be unpinned; a dirty page of a commit in flight
-is written back first — the frozen state still holds it).
+is written back first — the frozen state still holds it: from the
+commit's freeze until its `flush_frozen` ends, kept for that flush to
+write with its other pages, in the file's order, and else at once).
 `free_in(id, branch)` is a branch's free (§M14.13): with the page's
 `birth(id)` (the pager's for a page not durable yet, else the header's)
 it asks `Pager::keeps` and leaves a page another branch still reads
@@ -1163,9 +1168,13 @@ look).  A bulk insert of new keys in key order looks at the tree once,
 not once a row; the run ends at a spill, where its own intents enter the
 tree.  A checkpoint is due
 when the WAL since the last one exceeds `checkpoint_wal_bytes` (1 GiB, as
-PostgreSQL's `max_wal_size`; 64 MiB on 32-bit targets) — asked in one
-place after every write to the store (a commit's, a spill's; §M14.20
-W4: it was two, both under the commit lock).  Where the platform has
+PostgreSQL's `max_wal_size`; 64 MiB on 32-bit targets), or what the
+branch wrote without the WAL (D16) an eighth of that
+(`Store::unlogged_since_checkpoint`) — asked in one place after every
+write to the store (a commit's, a spill's, an unlogged batch's; §M14.20
+W4: it was two, both under the commit lock).  Writes without the WAL only
+wake the checkpointer, never wait for a checkpoint: the checkpoint their
+commit waits for then finds most of them written (issue #9).  Where the platform has
 threads to spare (`parallelism() > 1`) a checkpointer thread is woken
 and runs it — its slow half while commits go on (§4.6) —; in the
 simulation, or when the WAL passes twice the limit (the thread fell

@@ -169,6 +169,17 @@ pub struct BufferPool {
     /// Held by a flush: two at once could write a page's copies in the
     /// wrong order (the shards' read locks keep only evictions out).
     flushing: Mutex<()>,
+    /// Frozen pages not yet written that were freed while a commit is in
+    /// flight — from its freeze ([`hold_freed_frozen`]) to the end of
+    /// [`flush_frozen`] (whether they are taken, and their contents):
+    /// written with the others, in the file's order, where each was a
+    /// write of its own on the writer's thread (issue #9: a large index
+    /// build's checkpoints, the build's last leaves and their parents
+    /// replaced as it goes on).
+    ///
+    /// [`hold_freed_frozen`]: Self::hold_freed_frozen
+    /// [`flush_frozen`]: Self::flush_frozen
+    orphans: Mutex<(bool, Vec<(PageId, Page)>)>,
 }
 
 impl std::fmt::Debug for BufferPool {
@@ -266,6 +277,7 @@ impl BufferPool {
             evictions: AtomicU64::new(0),
             writebacks: AtomicU64::new(0),
             flushing: Mutex::new(()),
+            orphans: Mutex::new((false, Vec::new())),
         }
     }
 
@@ -529,12 +541,22 @@ impl BufferPool {
                 return Err(Error::Pinned(id));
             }
             // A page of a commit in flight, copied since: the frozen state
-            // still holds it, so its contents go to the file first.
+            // still holds it, so its contents go to the file first — with
+            // the checkpoint's other pages where it is writing them (the
+            // page stays the pager's to write until that commit: freed,
+            // it is pending).
             if f.dirty.load(Ordering::Acquire) && self.pager.is_frozen(id) {
-                let mut page = f.page.write().unwrap_or_else(|e| e.into_inner());
-                self.pager.write_page(id, &mut page)?;
+                let mut orphans = self.orphans.lock().unwrap_or_else(|e| e.into_inner());
+                if orphans.0 {
+                    let page = f.page.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    orphans.1.push((id, page));
+                } else {
+                    drop(orphans);
+                    let mut page = f.page.write().unwrap_or_else(|e| e.into_inner());
+                    self.pager.write_page(id, &mut page)?;
+                    self.writebacks.fetch_add(1, Ordering::Relaxed);
+                }
                 f.dirty.store(false, Ordering::Release);
-                self.writebacks.fetch_add(1, Ordering::Relaxed);
             }
             inner.table.remove(&id);
             *inner.id(frame) = None;
@@ -594,6 +616,13 @@ impl BufferPool {
         Ok(())
     }
 
+    /// From now until [`flush_frozen`](Self::flush_frozen) ends, frozen
+    /// pages freed before they are written are kept for it to write (a
+    /// commit just frozen, its writers still held).
+    pub fn hold_freed_frozen(&self) {
+        self.orphans.lock().unwrap_or_else(|e| e.into_inner()).0 = true;
+    }
+
     /// Writes the dirty pages of the commit in flight ([`Pager::freeze`])
     /// to the pager — while writers go on, copying them as they change
     /// them.  Pages stay cached.
@@ -609,6 +638,41 @@ impl BufferPool {
     /// page not yet in the file.
     pub fn flush_frozen(&self) -> Result<()> {
         let _one = self.flushing.lock().unwrap_or_else(|e| e.into_inner());
+        self.orphans.lock().unwrap_or_else(|e| e.into_inner()).0 = true;
+        let flushed = self.flush_frozen_cached();
+        // The pages freed meanwhile, taken no more (one freed from now on
+        // is written as it goes).
+        let mut orphans = {
+            let mut o = self.orphans.lock().unwrap_or_else(|e| e.into_inner());
+            o.0 = false;
+            std::mem::take(&mut o.1)
+        };
+        flushed?;
+        orphans.sort_unstable_by_key(|(id, _)| *id);
+        let mut run: Vec<Page> = Vec::with_capacity(RUN_PAGES);
+        let mut first = PageId(0);
+        for (id, page) in orphans {
+            if !run.is_empty() && (id.0 != first.0 + run.len() as u64 || run.len() == RUN_PAGES) {
+                self.pager.write_run(first, &mut run)?;
+                self.writebacks
+                    .fetch_add(run.len() as u64, Ordering::Relaxed);
+                run.clear();
+            }
+            if run.is_empty() {
+                first = id;
+            }
+            run.push(page);
+        }
+        if !run.is_empty() {
+            self.pager.write_run(first, &mut run)?;
+            self.writebacks
+                .fetch_add(run.len() as u64, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// [`flush_frozen`](Self::flush_frozen)'s pages still cached.
+    fn flush_frozen_cached(&self) -> Result<()> {
         let mut ids = Vec::new();
         for shard in &*self.shards {
             let inner = shard.read().unwrap_or_else(|e| e.into_inner());

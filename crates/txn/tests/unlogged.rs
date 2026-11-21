@@ -459,7 +459,8 @@ impl Platform for Threads {
 /// Where there are threads, a batch of unlogged writes goes into the store
 /// on one of its own while the next is gathered (issue #9): reads between
 /// see every write before them, a rollback deletes the range with the
-/// batch going in, and a commit is durable whole.
+/// batch going in, checkpoints keep up with the writes, and a commit is
+/// durable whole.
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn unlogged_batches_go_in_behind_the_writes() {
@@ -484,8 +485,15 @@ fn unlogged_batches_go_in_behind_the_writes() {
     // and 16 bytes each) hands it over: the read right after must wait
     // for it.
     let first_batch = (1usize << 20).div_ceil(7 + 60 + 16) - 1;
+    // What was written without the WAL and no checkpoint holds yet: the
+    // checkpointer, woken past an eighth of `checkpoint_wal_bytes` (128
+    // KiB here), keeps it far below the ~5 MB written.
+    let mut peak = 0;
     for i in 0..60_000 {
         t.put(&ikey(i), &value(i)).unwrap();
+        if i % 1000 == 0 {
+            peak = peak.max(e.store().unlogged_since_checkpoint());
+        }
         if i == first_batch {
             assert_eq!(t.get(&ikey(i)).unwrap(), Some(value(i)));
         }
@@ -499,6 +507,7 @@ fn unlogged_batches_go_in_behind_the_writes() {
             );
         }
     }
+    assert!(peak < 2 << 20, "{peak} bytes unlogged, not checkpointed");
     t.commit().unwrap();
     drop(e);
     p.sim_fs().crash();

@@ -889,6 +889,10 @@ struct Branch {
     /// LSN and meta.
     writer: Mutex<(Lsn, u64)>,
     checkpoint_lsn: AtomicU64,
+    /// Bytes written without the WAL ([`Store::write_unlogged`]) since
+    /// the last checkpoint froze the tree: what a checkpoint owes besides
+    /// the WAL's.
+    unlogged: AtomicU64,
     recovery: Recovery,
     /// Dropped ([`Store::drop_branch`]): its pages may be another's now.
     dropped: AtomicBool,
@@ -1111,6 +1115,7 @@ fn open_branch(
         deferred: Mutex::new(deferred),
         writer: Mutex::new((applied, meta)),
         checkpoint_lsn: AtomicU64::new(checkpoint),
+        unlogged: AtomicU64::new(0),
         recovery: Recovery { meta, replayed },
         dropped: AtomicBool::new(false),
         tag: AtomicU64::new(0),
@@ -1727,8 +1732,15 @@ impl Store {
             batch.batch(),
             Vec::new(),
         );
+        let bytes: usize = batch
+            .batch()
+            .ops
+            .iter()
+            .map(|(k, v)| k.len() + v.as_ref().map_or(0, Vec::len))
+            .sum();
         apply_ops(&mut tree, batch.into_ops(), None).inspect_err(|_| self.poison())?;
         drop(tree);
+        b.unlogged.fetch_add(bytes as u64, Ordering::AcqRel);
         // A bulk load grown past what an engine holds in memory (an LSM
         // tree's memtable, §M14.28 L4b): written out now, by the loader,
         // the writer lock still held and the readers going on.  A failure
@@ -2062,13 +2074,14 @@ impl Store {
         Ok(self.begin_running(running, Op::Nothing)?.0)
     }
 
-    /// A checkpoint, if this branch's WAL since the last one (once any
-    /// running has ended) is past `bytes`; whether it ran.  Callers that
-    /// find the WAL long at once do not checkpoint one after another.
-    pub fn checkpoint_past(&self, bytes: u64) -> Result<bool> {
+    /// A checkpoint, if since the last one (once any running has ended)
+    /// this branch's WAL is past `wal` bytes or what it wrote without the
+    /// WAL past `unlogged`; whether it ran.  Callers that find either long
+    /// at once do not checkpoint one after another.
+    pub fn checkpoint_past(&self, wal: u64, unlogged: u64) -> Result<bool> {
         self.shared.check()?;
         let running = self.running();
-        if self.wal_since_checkpoint() <= bytes {
+        if self.wal_since_checkpoint() <= wal && self.unlogged_since_checkpoint() <= unlogged {
             return Ok(false);
         }
         self.begin_running(running, Op::Nothing)?.0.finish()?;
@@ -2179,6 +2192,15 @@ impl Store {
             .map(|(b, w)| (Arc::clone(b), 0, w.0, w.1))
             .collect();
         let frozen = self.freeze_all(states, op);
+        // What was written without the WAL is the frozen tree's now; the
+        // frozen pages freed before they are written, its checkpoint's to
+        // write.
+        if frozen.is_ok() {
+            for b in &list {
+                b.unlogged.store(0, Ordering::Release);
+            }
+            sh.pool.hold_freed_frozen();
+        }
         drop(guards);
         let (lsns, frozen, made, dropped, saves) = match frozen {
             Ok(f) => f,
@@ -2511,6 +2533,15 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// Bytes this branch wrote without the WAL since the last checkpoint
+    /// froze its tree ([`write_unlogged`](Self::write_unlogged)'s keys and
+    /// values) — what the next checkpoint writes for them.  Callers
+    /// checkpoint when it grows too large, so the checkpoint a commit of
+    /// such writes waits for finds most of them written.
+    pub fn unlogged_since_checkpoint(&self) -> u64 {
+        self.b.unlogged.load(Ordering::Acquire)
     }
 
     /// WAL bytes written to this branch since the last checkpoint — how

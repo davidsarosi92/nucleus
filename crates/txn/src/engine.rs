@@ -261,7 +261,7 @@ impl Checkpointer {
                 while s.wait() {
                     // A failure poisons the store: every later write and
                     // read reports it.
-                    match store.checkpoint_past(limit) {
+                    match store.checkpoint_past(limit, unlogged_limit(limit)) {
                         Err(_) => return,
                         Ok(true) => cs.raise(),
                         Ok(false) => {}
@@ -397,28 +397,43 @@ fn roll_back_to(store: &Store, at: u64) -> Result<()> {
     Ok(())
 }
 
+/// What a branch may write without the WAL ([`Store::write_unlogged`])
+/// before a checkpoint is due, beside `wal` bytes of WAL: an eighth of
+/// them (128 MiB on 64-bit targets).  The checkpoint a commit of such
+/// writes waits for (D16) then finds most of them written — by the
+/// checkpointer, while the writes went on (issue #9: a large index
+/// build's commit wrote its whole index then, and the load's pages
+/// before it, ~half the build).
+fn unlogged_limit(wal: u64) -> u64 {
+    wal / 8
+}
+
 impl Inner {
     /// The one checkpoint trigger (§M14.20 W4), after every write to the
     /// store: past `checkpoint_wal_bytes` of WAL since the last checkpoint,
-    /// the checkpointer is woken; without one — or when it falls behind,
-    /// past twice that — the checkpoint runs here (waiting for one
-    /// running).
+    /// or [`unlogged_limit`] of writes without it, the checkpointer is
+    /// woken; without one — or when it falls behind, past twice the WAL's
+    /// limit — the checkpoint runs here (waiting for one running).  Writes
+    /// without the WAL never wait for one: a crash replays none of them,
+    /// and their commit checkpoints.
     fn checkpoint_if_due(&self) -> Result<()> {
         let limit = self.opts.checkpoint_wal_bytes;
         let over = self.store.wal_since_checkpoint();
-        if over <= limit {
+        let unlogged = self.store.unlogged_since_checkpoint() > unlogged_limit(limit);
+        if over <= limit && !unlogged {
             return Ok(());
         }
         match &self.checkpointer {
             Some(c) if over <= limit.saturating_mul(2) => c.wake(),
             Some(c) => {
-                if self.store.checkpoint_past(limit)? {
+                if self.store.checkpoint_past(limit, unlogged_limit(limit))? {
                     c.compactor.raise();
                 }
             }
+            None if over <= limit => {}
             None => {
                 // No thread to spare: the background work here too.
-                if self.store.checkpoint_past(limit)? {
+                if self.store.checkpoint_past(limit, unlogged_limit(limit))? {
                     self.store.compact(&mut || true)?;
                 }
             }
@@ -3009,7 +3024,10 @@ impl Transaction {
         let engine = Arc::clone(&self.engine);
         let h = std::thread::Builder::new()
             .name("nucleus unlogged".into())
-            .spawn(move || Ok(engine.store.write_unlogged(Batch { meta: 0, ops })?))
+            .spawn(move || {
+                engine.store.write_unlogged(Batch { meta: 0, ops })?;
+                engine.checkpoint_if_due()
+            })
             .map_err(|_| Error::Corrupt("no thread for an unlogged batch"))?;
         *lock(&self.applying) = Some(h);
         Ok(())
@@ -3029,7 +3047,8 @@ impl Transaction {
         }
         let ops = std::mem::take(&mut pending.ops);
         pending.bytes = 0;
-        Ok(self.engine.store.write_unlogged(Batch { meta: 0, ops })?)
+        self.engine.store.write_unlogged(Batch { meta: 0, ops })?;
+        self.engine.checkpoint_if_due()
     }
 
     /// The starts of the fresh ranges this transaction writes unlogged.
