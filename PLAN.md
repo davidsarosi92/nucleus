@@ -4368,7 +4368,7 @@ recovery time after a crash mid-compaction.
     1GB`, both orders: 23.7 → 15.0 ms (merge alone 17.1, the lock 15.9,
     single comparison within the noise), default cache 39 → 31.
     *Left*: at the default cache the run's blocks are read again by every
-    scan — a quarter of `cache_bytes` for LSM blocks is the L5 choice
+    scan — a quarter of `cache_bytes` for LSM blocks was the L5 choice
     (the LSM not favoured), and a table of 1M rows needs ~96 MiB (the
     knee: `--cache 256MB` 19.9 ms, `384MB` 14.5); with them cached the
     rest is the transaction layer's per-entry work, as for the B+tree.
@@ -4421,6 +4421,22 @@ recovery time after a crash mid-compaction.
     allocations.  The block cache's share of `cache_bytes` (a quarter,
     the L5 choice) is the question #11 left too: to be decided with the
     memory budget in the perf pass.
+  - Issues #11 and #13, the block cache's memory (2026-11-21, agreed:
+    one budget).  *Taken*: the block cache's budget is `cache_bytes`
+    (`nucleus-kv`), shared with the page cache: it holds what the buffer
+    pools' frames leave of it (`buffer::FRAME_BYTES`: frames are made on
+    first use and kept), at least a quarter — so the worst case is the
+    quarter's before (1.25 × `cache_bytes`), and a store whose tables are
+    LSM gives their blocks what its B+tree does not use.  (RocksDB has
+    one block cache for every column family; PostgreSQL one
+    `shared_buffers`.  A single CLOCK over pages and blocks of every size
+    was not taken: the buffer pool's frames are fixed and never freed,
+    and the two evict differently.)  *Measured*, the data in a run after
+    restarts, default cache, both orders: a warm filtered count 14.6 →
+    8.3 ms (the B+tree ~8), `count after writes` 32.8 → 17.0, `delete
+    10%` 160 → 124; the suite (`--engines btree,lsm --no-pg`): warm
+    reads within 1.0–1.1× of the B+tree's (count(*) 7.0 / 6.8, sum 8.6
+    / 8.2, group by 12.6 / 13.2).
 
   *F1's whole run: LSM rows gone — a benchmark's fault, the store
   hardened* (2026-11-21).  `wamp-lsm`'s first run lost ~20 of ~25

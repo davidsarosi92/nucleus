@@ -875,7 +875,11 @@ between).  **The block cache** (L4c): a block read is decoded once —
 its bytes and each entry's key offset, searched in place — and kept in
 one cache for the process (`lsm::CACHE`: CLOCK in 16 shards, as large
 as the largest store's `StoreOptions::lsm_cache_bytes`, 64 MiB by
-default; `nucleus-kv` gives a quarter of `cache_bytes`).  A look-up
+default; `nucleus-kv` gives it `cache_bytes`, a budget it shares with the
+page cache: it holds what the buffer pools' frames leave of it —
+`buffer::FRAME_BYTES`, the frames made so far — and at least a quarter,
+so a store of LSM tables has the whole of it for their blocks, issues
+#11 and #13).  A look-up
 takes its shard's lock shared — a block's use marked by an atomic flag,
 the key hashed by `mix` — so a parallel scan's workers do not wait on
 each other (issue #11).  A forward scan reads a run's blocks ahead (`Ahead`,
@@ -1554,7 +1558,7 @@ distributed implementation will provide (§F3).
 
 `Database` is the local implementation: `Database::open(dir, Options)` on
 the real file system, `open_on(platform, dir, Options)` on any platform;
-`checkpoint`, `vacuum`, `latest`, `pages` (the data file's pages and the free ones among them), `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used — made with the page read into it, so a cold scan after a start allocates no empty page only to replace it (issue #2: TPC-H Q6 cold 226.6 → 187.3 ms); LSM tables' block cache takes a quarter of it again, filled only as they are read),
+`checkpoint`, `vacuum`, `latest`, `pages` (the data file's pages and the free ones among them), `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used — made with the page read into it, so a cold scan after a start allocates no empty page only to replace it (issue #2: TPC-H Q6 cold 226.6 → 187.3 ms); LSM tables' block cache shares it — it takes what the page cache's frames leave, at least a quarter —, filled only as they are read),
 `checkpoint_wal_bytes` (1 GiB — 64 MiB on 32-bit targets), `wal_segment_bytes` (16 MiB), `history`
 (0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
 before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
