@@ -878,7 +878,12 @@ as the largest store's `StoreOptions::lsm_cache_bytes`, 64 MiB by
 default; `nucleus-kv` gives a quarter of `cache_bytes`).  A look-up
 takes its shard's lock shared — a block's use marked by an atomic flag,
 the key hashed by `mix` — so a parallel scan's workers do not wait on
-each other (issue #11).  Lookups and
+each other (issue #11).  A forward scan reads a run's blocks ahead (`Ahead`,
+issue #13): a part of a parallel scan whose blocks fit in 256 KiB reads
+them in one call, a longer range one block first and then reads doubled
+each time up to 256 KiB, never past the block that holds the range's end
+— each block then checked, decompressed and decoded on the scan's worker
+as it reaches it.  Lookups and
 scans fill it, compactions read through it without filling it; blocks
 are keyed by a run's number in the process, so a run reopened after a
 crash is never served another's.  **Versions dropped by merges** (L4d):

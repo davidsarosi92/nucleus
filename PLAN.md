@@ -4394,7 +4394,33 @@ recovery time after a crash mid-compaction.
     3.5 MB table per op, more than the map's cached upper levels).
     *Tested*: `commits_of_many_keys_drop_versions_in_memory` (fails with
     the walk's drops left out).  *Left*: the memtable's inserts (a
-    `BTreeMap`, ~1.6 ms in 10 a delete), and YCSB E's short scans.
+    `BTreeMap`, ~1.6 ms in 10 a delete).  YCSB E (`ycsb.rs`, 100k
+    operations): the LSM 16,256 ops/s against the B+tree's 16,491 (it was
+    1.4× fewer; scan p50 31.2 / 27.0 µs, p99 64 / 234) — closed.
+  - Issue #13, cold reads (2026-11-21).  *Found*: after a restart the
+    first scan of a run read each ~2 KiB stored block by a `pread` of its
+    own (5,788 of the profile's samples, decompression 1,553).  Also
+    found: what the suite times as an LSM table's warm reads after its
+    first restart is the run read anew by every scan — the table's ~80
+    MB decoded do not fit the default 32 MiB block cache (warm filtered
+    count, data in the run: 17.5 ms at the default, 8.2 with `--cache
+    1GB`; the B+tree ~8) — and after a replay the memtable set apart is
+    read, not the run, until the next write takes the saved run in.
+    *Taken*: read-ahead for forward run scans (`Ahead`: a part's blocks
+    whole when they fit 256 KiB, else one block then doubling to 256
+    KiB, never past the range's end block).  *Measured* (`bench/run.py
+    --engines lsm --no-pg`, three rounds, against the binary before):
+    filtered count cold 35.3 → 27.0 ms (the B+tree 18.4), sum cold 26.7
+    → 18.9 (11.0), group by cold 31.4 → 24.3 (17.6), count(*) cold 9.0 →
+    8.4; the run re-read at the default cache, warm, 17.7 → 14.5; YCSB E
+    within the noise.  *Left*, all of it the compression's price or the
+    cache's size: a cold block's decompression (4,053 samples of a cold
+    filtered count's), `pread`s copying the file from the OS cache
+    (2,979), decoding the entries' offsets (1,435), each block's buffer
+    zeroed before it is filled (1,168: no `unsafe` to skip it) and its
+    allocations.  The block cache's share of `cache_bytes` (a quarter,
+    the L5 choice) is the question #11 left too: to be decided with the
+    memory budget in the perf pass.
 
   *F1's whole run: LSM rows gone — a benchmark's fault, the store
   hardened* (2026-11-21).  `wamp-lsm`'s first run lost ~20 of ~25

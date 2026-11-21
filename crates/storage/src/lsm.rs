@@ -297,15 +297,20 @@ fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
 
 fn read_all(file: &dyn File, at: u64, len: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0; len];
+    read_exact(file, at, &mut buf)?;
+    Ok(buf)
+}
+
+fn read_exact(file: &dyn File, at: u64, buf: &mut [u8]) -> Result<()> {
     let mut done = 0;
-    while done < len {
+    while done < buf.len() {
         let n = file.read_at(&mut buf[done..], at + done as u64)?;
         if n == 0 {
             return Err(corrupt("an LSM run ends early"));
         }
         done += n;
     }
-    Ok(buf)
+    Ok(())
 }
 
 // ------------------------------------------------------------ memtable
@@ -681,7 +686,11 @@ impl Run {
     /// Block `i`, read, checked and decoded.
     fn read_block(&self, i: usize) -> Result<Decoded> {
         let b = &self.index[i];
-        let stored = read_all(&*self.file, b.offset, b.len as usize)?;
+        Self::decode(&read_all(&*self.file, b.offset, b.len as usize)?)
+    }
+
+    /// A block from its stored bytes: checked, decompressed, decoded.
+    fn decode(stored: &[u8]) -> Result<Decoded> {
         if stored.len() < 9 {
             return Err(corrupt("an LSM block too short"));
         }
@@ -703,6 +712,29 @@ impl Run {
             _ => return Err(corrupt("an LSM block's codec is unknown")),
         };
         Decoded::new(data)
+    }
+
+    /// Block `i` from the block cache, else from `ahead`'s bytes when it
+    /// holds them, else read alone (put in the cache when `fill`).
+    fn block_from(
+        &self,
+        i: usize,
+        fill: bool,
+        ahead: &mut Ahead,
+        limit: usize,
+    ) -> Result<Arc<Decoded>> {
+        let key = (self.id, i as u32);
+        if let Some(d) = CACHE.get(key) {
+            return Ok(d);
+        }
+        let d = match ahead.bytes_of(self, i, limit) {
+            Some(stored) => Arc::new(Self::decode(stored)?),
+            None => Arc::new(self.read_block(i)?),
+        };
+        if fill {
+            CACHE.put(key, Arc::clone(&d));
+        }
+        Ok(d)
     }
 
     /// Block `i`, from the block cache (put there when `fill`: lookups and
@@ -1097,6 +1129,75 @@ fn below(end: &Bound<Vec<u8>>, k: &[u8]) -> bool {
     }
 }
 
+/// Bytes a forward scan reads from a run's file at once, at most: its
+/// next blocks, read ahead (issue #13: a cold scan read each ~2 KiB block
+/// by a call of its own, most of its time in `pread`).
+const READ_AHEAD: usize = 256 << 10;
+
+/// A forward scan's blocks read ahead: the stored bytes of blocks
+/// `from..to` — the range's blocks at once where they fit in
+/// [`READ_AHEAD`] (a parallel scan's part), else reads growing from one
+/// block, doubled each time, to it, so a short scan of a long range (a
+/// `LIMIT`'s) reads little more than it uses.
+#[derive(Default)]
+struct Ahead {
+    bytes: Vec<u8>,
+    from: usize,
+    to: usize,
+    /// What the next read takes.
+    next: usize,
+}
+
+impl Ahead {
+    /// Block `i`'s stored bytes, read with the blocks after it (up to
+    /// `last`, the range's) when they are not held — `None` for a scan's
+    /// first block, read alone.
+    fn bytes_of(&mut self, run: &Run, i: usize, limit: usize) -> Option<&[u8]> {
+        if !(self.from..self.to).contains(&i) {
+            if self.next == 0 {
+                // The first read: the range's blocks whole where they fit
+                // (a parallel scan's part), else this block alone.
+                let span = (i < limit).then(|| {
+                    let last = &run.index[limit - 1];
+                    last.offset + u64::from(last.len) - run.index[i].offset
+                });
+                match span {
+                    Some(n) if n as usize <= READ_AHEAD => self.next = n as usize,
+                    _ => {
+                        self.next = run.index[i].len as usize;
+                        return None;
+                    }
+                }
+            } else {
+                self.next = (self.next * 2).min(READ_AHEAD);
+            }
+            let start = run.index[i].offset;
+            let mut to = i;
+            let mut end = start;
+            while to < limit
+                && run.index[to].offset == end
+                && (to == i || end - start + u64::from(run.index[to].len) <= self.next as u64)
+            {
+                end += u64::from(run.index[to].len);
+                to += 1;
+            }
+            if to == i {
+                return None; // past the range's blocks: read alone
+            }
+            self.bytes.resize((end - start) as usize, 0);
+            if read_exact(&*run.file, start, &mut self.bytes).is_err() {
+                self.to = self.from;
+                return None; // read alone, its error reported there
+            }
+            (self.from, self.to) = (i, to);
+        }
+        let first = run.index[self.from].offset;
+        let b = &run.index[i];
+        let at = (b.offset - first) as usize;
+        Some(&self.bytes[at..at + b.len as usize])
+    }
+}
+
 /// A run's entries in `(start, end)`, a block at a time.
 struct RunScan<'a> {
     run: &'a Run,
@@ -1116,6 +1217,10 @@ struct RunScan<'a> {
     /// Whether the block's entries from `at` on all lie within the range
     /// (none checked one by one).
     within: bool,
+    /// Forward: the blocks read ahead, and the block past the last the
+    /// range may reach.
+    ahead: Ahead,
+    limit: usize,
     done: bool,
 }
 
@@ -1144,6 +1249,11 @@ impl<'a> RunScan<'a> {
             at: 0,
             first: true,
             within: false,
+            ahead: Ahead::default(),
+            limit: match end {
+                Bound::Unbounded => run.index.len(),
+                Bound::Included(k) | Bound::Excluded(k) => run.block_of(k).map_or(0, |i| i + 1),
+            },
             done: empty_bounds(start, end),
         }
     }
@@ -1255,7 +1365,12 @@ impl<'a> RunScan<'a> {
                 self.next += 1;
                 self.next - 1
             };
-            let d = self.run.block(i, self.fill)?;
+            let d = if self.rev {
+                self.run.block(i, self.fill)?
+            } else {
+                self.run
+                    .block_from(i, self.fill, &mut self.ahead, self.limit)?
+            };
             // The first block: from where the range starts in it.
             self.at = if self.rev {
                 if self.first {
