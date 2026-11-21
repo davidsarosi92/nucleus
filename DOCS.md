@@ -875,7 +875,10 @@ between).  **The block cache** (L4c): a block read is decoded once —
 its bytes and each entry's key offset, searched in place — and kept in
 one cache for the process (`lsm::CACHE`: CLOCK in 16 shards, as large
 as the largest store's `StoreOptions::lsm_cache_bytes`, 64 MiB by
-default; `nucleus-kv` gives a quarter of `cache_bytes`).  Lookups and
+default; `nucleus-kv` gives a quarter of `cache_bytes`).  A look-up
+takes its shard's lock shared — a block's use marked by an atomic flag,
+the key hashed by `mix` — so a parallel scan's workers do not wait on
+each other (issue #11).  Lookups and
 scans fill it, compactions read through it without filling it; blocks
 are keyed by a run's number in the process, so a run reopened after a
 crash is never served another's.  **Versions dropped by merges** (L4d):
@@ -898,12 +901,16 @@ route is, and within one engine's range that engine's: the LSM tree's
 runs' blocks' first keys and its memtables' sampled keys (a key put in
 the map is kept in a sample when its hash is a multiple of 64; the
 ascending tail every 64th, by index), evenly chosen; across engines one
-part.  A merge reads its sources into buffers it reuses (a source's head
-swapped with the entry given, the key swapped with the caller's), and
-one source is read straight, unmerged — a batch at a time, as a B+tree
-leaf is (`Entries::leaf_entries`, through `Tables`' pieces: a run's
-block, or 256 of a memtable's entries, to the transaction layer's
-callback); a scan leaves out the sources that hold nothing in its range
+part.  A merge compares its sources' next entries where they lie — a
+memtable's by reference, a run's in its decoded block (`Src::ready`,
+`key`, `value`, `bump`) —, each source's key once an entry (the older
+sources holding the same key marked as it goes and passed over), a run's
+block checked against the range's end once when its last key is within
+it; an entry is copied only into the buffers it is given in.  A forward
+scan takes the merged entries 256 at a time, as a B+tree leaf
+(`Entries::leaf_entries`, through `Tables`' pieces, to the transaction
+layer's callback); one source is read straight, unmerged — a run's
+block, or 256 of a memtable's entries, a call (issue #11); a scan leaves out the sources that hold nothing in its range
 (an empty memtable, a run whose keys are all outside it and that has no
 range tombstone).
 

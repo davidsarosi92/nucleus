@@ -832,23 +832,72 @@ impl<'f> RunWriter<'f> {
 
 // ------------------------------------------------------------ scans
 
-/// One source's entries in `(start, end)`, one direction.
+/// One source's entries in `(start, end)`, one direction.  Each is read
+/// where it lies — a memtable's entries by reference, a run's in its
+/// decoded block — its next entry ([`Src::ready`], then [`Src::key`] and
+/// [`Src::value`]) compared and given without being copied.
 enum Src<'a> {
-    Mem(std::iter::Peekable<Box<dyn Iterator<Item = (&'a Vec<u8>, &'a Val)> + 'a>>),
+    Mem(MemScan<'a>),
     Run(RunScan<'a>),
 }
 
+/// A memtable's entries, the next one held.
+struct MemScan<'a> {
+    it: Box<dyn Iterator<Item = (&'a Vec<u8>, &'a Val)> + 'a>,
+    head: Option<(&'a Vec<u8>, &'a Val)>,
+}
+
 impl Src<'_> {
+    /// Whether an entry is next (its block read where it is a run's).
+    #[inline]
+    fn ready(&mut self) -> Result<bool> {
+        match self {
+            Src::Mem(m) => {
+                if m.head.is_none() {
+                    m.head = m.it.next();
+                }
+                Ok(m.head.is_some())
+            }
+            Src::Run(r) => r.ready(),
+        }
+    }
+
+    /// The next entry's key ([`Src::ready`] said there is one).
+    #[inline]
+    fn key(&self) -> &[u8] {
+        match self {
+            Src::Mem(m) => m.head.expect("ready").0,
+            Src::Run(r) => r.key(),
+        }
+    }
+
+    /// The next entry's value (`None`: a tombstone).
+    #[inline]
+    fn value(&self) -> Option<&[u8]> {
+        match self {
+            Src::Mem(m) => m.head.expect("ready").1.as_deref(),
+            Src::Run(r) => r.value(),
+        }
+    }
+
+    /// Past the next entry.
+    #[inline]
+    fn bump(&mut self) {
+        match self {
+            Src::Mem(m) => m.head = None,
+            Src::Run(r) => r.bump(),
+        }
+    }
+
     /// The next entry into `key` and `val` (their buffers reused); false
     /// at the end.
     fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Val) -> Result<bool> {
-        match self {
-            Src::Mem(it) => Ok(it.next().is_some_and(|(k, v)| {
-                set_entry(key, val, k, v.as_deref());
-                true
-            })),
-            Src::Run(r) => r.next_into(key, val),
+        if !self.ready()? {
+            return Ok(false);
         }
+        set_entry(key, val, self.key(), self.value());
+        self.bump();
+        Ok(true)
     }
 
     /// [`Entries::leaf_entries`] forward: a run's block, or up to
@@ -861,9 +910,12 @@ impl Src<'_> {
         each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
     ) -> Result<bool> {
         match self {
-            Src::Mem(it) => {
+            Src::Mem(m) => {
                 for _ in 0..MEM_BATCH {
-                    let Some(&(k, v)) = it.peek() else {
+                    if m.head.is_none() {
+                        m.head = m.it.next();
+                    }
+                    let Some((k, v)) = m.head else {
                         return Ok(false);
                     };
                     if let Some(v) = v
@@ -871,7 +923,7 @@ impl Src<'_> {
                     {
                         return Ok(true);
                     }
-                    it.next();
+                    m.head = None;
                 }
                 Ok(true)
             }
@@ -918,18 +970,19 @@ fn set_entry(key: &mut Vec<u8>, val: &mut Val, k: &[u8], v: Option<&[u8]>) {
 
 fn mem_scan<'a>(m: &'a Memtable, start: Bound<&[u8]>, end: Bound<&[u8]>, rev: bool) -> Src<'a> {
     if empty_bounds(start, end) {
-        let it: Box<dyn Iterator<Item = _>> = Box::new(std::iter::empty());
-        return Src::Mem(it.peekable());
+        return Src::Mem(MemScan {
+            it: Box::new(std::iter::empty()),
+            head: None,
+        });
     }
     let r = m.points.range::<[u8], _>((start, end));
     let t = m.tail[m.tail_span(start, end)].iter().map(|(k, v)| (k, v));
-    if rev {
-        let it: Box<dyn Iterator<Item = _>> = Box::new(t.rev().chain(r.rev()));
-        Src::Mem(it.peekable())
+    let it: Box<dyn Iterator<Item = _>> = if rev {
+        Box::new(t.rev().chain(r.rev()))
     } else {
-        let it: Box<dyn Iterator<Item = _>> = Box::new(r.chain(t));
-        Src::Mem(it.peekable())
-    }
+        Box::new(r.chain(t))
+    };
+    Src::Mem(MemScan { it, head: None })
 }
 
 /// Whether `(start, end)` holds no key (`BTreeMap::range` refuses them).
@@ -975,6 +1028,9 @@ struct RunScan<'a> {
     at: usize,
     /// Whether the block is the first read (where the range starts).
     first: bool,
+    /// Whether the block's entries from `at` on all lie within the range
+    /// (none checked one by one).
+    within: bool,
     done: bool,
 }
 
@@ -1002,32 +1058,27 @@ impl<'a> RunScan<'a> {
             block: None,
             at: 0,
             first: true,
+            within: false,
             done: empty_bounds(start, end),
         }
     }
 
-    fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Val) -> Result<bool> {
+    /// Whether an entry is next: its block read, the range's end checked.
+    #[inline]
+    fn ready(&mut self) -> Result<bool> {
         loop {
             if self.done {
                 return Ok(false);
             }
             if let Some(d) = &self.block {
-                let j = if self.rev {
-                    if self.at == 0 {
-                        self.block = None;
-                        continue;
-                    }
-                    self.at -= 1;
-                    self.at
-                } else {
-                    if self.at >= d.len() {
-                        self.block = None;
-                        continue;
-                    }
-                    self.at += 1;
-                    self.at - 1
-                };
-                let k = d.key(j);
+                if self.rev && self.at == 0 || !self.rev && self.at >= d.len() {
+                    self.block = None;
+                    continue;
+                }
+                if self.within {
+                    return Ok(true);
+                }
+                let k = d.key(self.at - usize::from(self.rev));
                 let inside = if self.rev {
                     above(&self.start, k)
                 } else {
@@ -1035,12 +1086,36 @@ impl<'a> RunScan<'a> {
                 };
                 if !inside {
                     self.done = true;
-                    return Ok(false);
+                    self.block = None;
                 }
-                set_entry(key, val, k, d.value(j));
-                return Ok(true);
+                return Ok(inside);
             }
             self.load()?;
+        }
+    }
+
+    #[inline]
+    fn key(&self) -> &[u8] {
+        self.block
+            .as_ref()
+            .expect("ready")
+            .key(self.at - usize::from(self.rev))
+    }
+
+    #[inline]
+    fn value(&self) -> Option<&[u8]> {
+        self.block
+            .as_ref()
+            .expect("ready")
+            .value(self.at - usize::from(self.rev))
+    }
+
+    #[inline]
+    fn bump(&mut self) {
+        if self.rev {
+            self.at -= 1;
+        } else {
+            self.at += 1;
         }
     }
 
@@ -1117,6 +1192,13 @@ impl<'a> RunScan<'a> {
                 0
             };
             self.first = false;
+            // The block's far end within the range: so is all of it.
+            self.within = d.len() > 0
+                && if self.rev {
+                    above(&self.start, d.key(0))
+                } else {
+                    below(&self.end, d.key(d.len() - 1))
+                };
             self.block = Some(d);
         }
         Ok(())
@@ -1207,19 +1289,23 @@ fn next_run_id() -> u64 {
 /// and decompressed again while it stays.  CLOCK replacement (a block
 /// used since the hand passed it gets a second chance), in shards each
 /// under its own lock, within [`set_block_cache_bytes`].  Compactions
-/// read through it without filling it.
+/// read through it without filling it.  A look-up takes its shard's lock
+/// shared (a block's use marked by an atomic flag) and hashes the key by
+/// [`mix`]: a merged scan's workers each look a block up every few dozen
+/// entries (issue #11: a sixth of a merged scan's time waited on the
+/// shards' locks).
 pub(crate) static CACHE: BlockCache = BlockCache::new();
 
 const SHARDS: usize = 16;
 
 pub(crate) struct BlockCache {
-    shards: [Mutex<Shard>; SHARDS],
+    shards: [std::sync::RwLock<Shard>; SHARDS],
     /// Bytes it may hold, all shards together.
     capacity: std::sync::atomic::AtomicUsize,
 }
 
 struct Shard {
-    map: Option<std::collections::HashMap<(u64, u32), usize>>,
+    map: Option<std::collections::HashMap<(u64, u32), usize, MixHash>>,
     slots: Vec<Slot>,
     hand: usize,
     bytes: usize,
@@ -1228,7 +1314,41 @@ struct Shard {
 struct Slot {
     key: (u64, u32),
     block: Arc<Decoded>,
-    used: bool,
+    used: std::sync::atomic::AtomicBool,
+}
+
+/// The block cache's hasher: a key's words through [`mix`].
+#[derive(Clone, Copy, Default)]
+struct MixHash;
+
+impl std::hash::BuildHasher for MixHash {
+    type Hasher = MixHasher;
+
+    fn build_hasher(&self) -> MixHasher {
+        MixHasher(0)
+    }
+}
+
+struct MixHasher(u64);
+
+impl std::hash::Hasher for MixHasher {
+    fn finish(&self) -> u64 {
+        mix(self.0)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(*b);
+        }
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.0 = self.0.rotate_left(32) ^ u64::from(n);
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = mix(self.0 ^ n);
+    }
 }
 
 /// What the block cache holds at most, unless set: 64 MiB.
@@ -1247,7 +1367,7 @@ impl BlockCache {
     const fn new() -> Self {
         BlockCache {
             shards: [const {
-                Mutex::new(Shard {
+                std::sync::RwLock::new(Shard {
                     map: None,
                     slots: Vec::new(),
                     hand: 0,
@@ -1258,16 +1378,20 @@ impl BlockCache {
         }
     }
 
-    fn shard(&self, key: (u64, u32)) -> std::sync::MutexGuard<'_, Shard> {
-        let h = mix(key.0 ^ (u64::from(key.1) << 32)) as usize % SHARDS;
-        self.shards[h].lock().unwrap_or_else(|e| e.into_inner())
+    fn shard_of(key: (u64, u32)) -> usize {
+        mix(key.0 ^ (u64::from(key.1) << 32)) as usize % SHARDS
     }
 
     fn get(&self, key: (u64, u32)) -> Option<Arc<Decoded>> {
-        let mut s = self.shard(key);
+        let s = self.shards[Self::shard_of(key)]
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let i = *s.map.as_ref()?.get(&key)?;
-        let slot = &mut s.slots[i];
-        slot.used = true;
+        let slot = &s.slots[i];
+        // Marked only when not yet: no write to a line many share.
+        if !slot.used.load(std::sync::atomic::Ordering::Relaxed) {
+            slot.used.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Some(Arc::clone(&slot.block))
     }
 
@@ -1280,7 +1404,9 @@ impl BlockCache {
         if size > cap {
             return;
         }
-        let mut guard = self.shard(key);
+        let mut guard = self.shards[Self::shard_of(key)]
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let s = &mut *guard;
         let map = s.map.get_or_insert_with(Default::default);
         if map.contains_key(&key) {
@@ -1292,8 +1418,8 @@ impl BlockCache {
             if s.hand >= s.slots.len() {
                 s.hand = 0;
             }
-            if s.slots[s.hand].used {
-                s.slots[s.hand].used = false;
+            if *s.slots[s.hand].used.get_mut() {
+                *s.slots[s.hand].used.get_mut() = false;
                 s.hand += 1;
                 continue;
             }
@@ -1309,26 +1435,23 @@ impl BlockCache {
         s.slots.push(Slot {
             key,
             block,
-            used: false,
+            used: false.into(),
         });
     }
 }
 
-/// A source's next entry in a merge (its buffers reused).
-#[derive(Clone, Default)]
-struct Head {
-    key: Vec<u8>,
-    val: Val,
-    /// Whether it holds one (else the source is done).
-    some: bool,
-}
-
-/// Sources merged, newest first: what a reader sees.
+/// Sources merged, newest first: what a reader sees.  Each source's next
+/// entry is compared where it lies (PLAN.md §M14.28, issue #11): an entry
+/// is copied only into the buffers it is given in, and a forward scan
+/// takes the merged entries a batch at a time ([`Entries::leaf_entries`]).
 struct Merged<'a> {
     srcs: Vec<Src<'a>>,
-    heads: Vec<Head>,
+    /// Whether each source has an entry next.
+    live: Vec<bool>,
     /// Each source's range tombstones (they hide older sources' keys).
     ranges: Vec<&'a Ranges>,
+    /// Whether any source has range tombstones.
+    any_ranges: bool,
     rev: bool,
     /// Tombstones and hidden keys passed over (a compaction keeps them).
     keep_tombstones: bool,
@@ -1338,12 +1461,16 @@ struct Merged<'a> {
     cur: Val,
 }
 
+/// Merged entries [`Merged`]'s `leaf_entries` gives a call.
+const MERGE_BATCH: usize = 256;
+
 impl<'a> Merged<'a> {
     fn new(srcs: Vec<Src<'a>>, ranges: Vec<&'a Ranges>, rev: bool, keep_tombstones: bool) -> Self {
         let n = srcs.len();
         Merged {
             srcs,
-            heads: vec![Head::default(); n],
+            live: vec![false; n],
+            any_ranges: ranges.iter().any(|r| !r.is_empty()),
             ranges,
             rev,
             keep_tombstones,
@@ -1353,9 +1480,80 @@ impl<'a> Merged<'a> {
         }
     }
 
+    /// The source whose next entry is the merge's next (a tombstone only
+    /// when kept), the same key in older sources passed over; `None` at
+    /// the end.  That entry stays its source's next.
+    fn next_source(&mut self) -> Result<Option<usize>> {
+        if !self.started {
+            for (l, s) in self.live.iter_mut().zip(&mut self.srcs) {
+                *l = s.ready()?;
+            }
+            self.started = true;
+        }
+        loop {
+            // The least key (greatest, reverse), from the newest source
+            // holding it; the older sources holding the same key marked
+            // (one comparison a source).
+            let mut best: Option<usize> = None;
+            let mut same = 0u64;
+            for i in 0..self.srcs.len() {
+                if !self.live[i] {
+                    continue;
+                }
+                let Some(b) = best else {
+                    best = Some(i);
+                    continue;
+                };
+                let o = self.srcs[i].key().cmp(self.srcs[b].key());
+                match if self.rev { o.reverse() } else { o } {
+                    std::cmp::Ordering::Less => {
+                        best = Some(i);
+                        same = 0;
+                    }
+                    std::cmp::Ordering::Equal if i < 64 => same |= 1 << i,
+                    _ => {}
+                }
+            }
+            let Some(b) = best else {
+                return Ok(None);
+            };
+            // The same key in older sources: passed over (past the 64th
+            // source, found again).
+            while same != 0 {
+                let i = same.trailing_zeros() as usize;
+                same &= same - 1;
+                self.srcs[i].bump();
+                self.live[i] = self.srcs[i].ready()?;
+            }
+            for i in (b + 1).max(64)..self.srcs.len() {
+                if self.live[i] && self.srcs[i].key() == self.srcs[b].key() {
+                    self.srcs[i].bump();
+                    self.live[i] = self.srcs[i].ready()?;
+                }
+            }
+            let hidden = self.any_ranges
+                && self.ranges[..b]
+                    .iter()
+                    .any(|r| r.covers(self.srcs[b].key()));
+            if hidden || self.srcs[b].value().is_none() && !self.keep_tombstones {
+                self.srcs[b].bump();
+                self.live[b] = self.srcs[b].ready()?;
+                continue;
+            }
+            return Ok(Some(b));
+        }
+    }
+
+    /// Source `b` past its next entry.
+    #[inline]
+    fn pass(&mut self, b: usize) -> Result<()> {
+        self.srcs[b].bump();
+        self.live[b] = self.srcs[b].ready()?;
+        Ok(())
+    }
+
     /// The next entry, into `key` and `cur` (a tombstone only when kept);
-    /// false at the end.  The entry's buffers are swapped with the
-    /// source's head's, so no entry is copied but into them.
+    /// false at the end.
     fn advance(&mut self) -> Result<bool> {
         // One source: nothing to merge, its entries straight in.
         if let [src] = self.srcs.as_mut_slice() {
@@ -1366,50 +1564,13 @@ impl<'a> Merged<'a> {
             }
             return Ok(false);
         }
-        if !self.started {
-            for (h, src) in self.heads.iter_mut().zip(&mut self.srcs) {
-                h.some = src.next_into(&mut h.key, &mut h.val)?;
-            }
-            self.started = true;
-        }
-        loop {
-            // The least key (greatest, reverse), from the newest source
-            // holding it.
-            let mut best: Option<usize> = None;
-            for (i, h) in self.heads.iter().enumerate() {
-                if !h.some {
-                    continue;
-                }
-                best = match best {
-                    None => Some(i),
-                    Some(b) => {
-                        let bk = &self.heads[b].key;
-                        let better = if self.rev { h.key > *bk } else { h.key < *bk };
-                        Some(if better { i } else { b })
-                    }
-                };
-            }
-            let Some(b) = best else {
-                return Ok(false);
-            };
-            std::mem::swap(&mut self.key, &mut self.heads[b].key);
-            std::mem::swap(&mut self.cur, &mut self.heads[b].val);
-            let h = &mut self.heads[b];
-            h.some = self.srcs[b].next_into(&mut h.key, &mut h.val)?;
-            // The same key in older sources: passed over.
-            for (h, src) in self.heads.iter_mut().zip(&mut self.srcs).skip(b + 1) {
-                if h.some && h.key == self.key {
-                    h.some = src.next_into(&mut h.key, &mut h.val)?;
-                }
-            }
-            if self.ranges[..b].iter().any(|r| r.covers(&self.key)) {
-                continue;
-            }
-            if self.cur.is_none() && !self.keep_tombstones {
-                continue;
-            }
-            return Ok(true);
-        }
+        let Some(b) = self.next_source()? else {
+            return Ok(false);
+        };
+        let src = &self.srcs[b];
+        set_entry(&mut self.key, &mut self.cur, src.key(), src.value());
+        self.pass(b)?;
+        Ok(true)
     }
 
     /// The next entry, owned (a compaction's).
@@ -1440,8 +1601,9 @@ impl Entries for Merged<'_> {
         Ok(())
     }
 
-    /// One source's, forward, a batch at a time ([`Src::batch`]); several
-    /// sources merged give an entry at a time.
+    /// Forward, a batch at a time: one source's as it gives them
+    /// ([`Src::batch`]), several sources' up to [`MERGE_BATCH`] merged
+    /// entries, each given from where it lies.
     fn leaf_entries(
         &mut self,
         key: &mut Vec<u8>,
@@ -1449,12 +1611,24 @@ impl Entries for Merged<'_> {
         max: usize,
         each: &mut dyn FnMut(&[u8], &[u8], Option<&[u8]>) -> Result<bool>,
     ) -> Result<Option<bool>> {
-        match self.srcs.as_mut_slice() {
-            [src] if !self.rev && !self.keep_tombstones => {
-                Ok(Some(src.batch(key, prev, max, each)?))
-            }
-            _ => Ok(None),
+        if self.rev || self.keep_tombstones {
+            return Ok(None);
         }
+        if let [src] = self.srcs.as_mut_slice() {
+            return Ok(Some(src.batch(key, prev, max, each)?));
+        }
+        for _ in 0..MERGE_BATCH {
+            let Some(b) = self.next_source()? else {
+                return Ok(Some(false));
+            };
+            let src = &self.srcs[b];
+            let v = src.value().expect("tombstones passed over");
+            if !give(key, prev, src.key(), v, max, each)? {
+                return Ok(Some(true));
+            }
+            self.pass(b)?;
+        }
+        Ok(Some(true))
     }
 }
 
@@ -2450,7 +2624,7 @@ mod tests {
             }
         }
         for s in &c.shards {
-            let s = s.lock().unwrap();
+            let s = s.read().unwrap();
             assert!(s.bytes <= 10_000, "a shard holds {}", s.bytes);
             assert_eq!(s.map.as_ref().map_or(0, |m| m.len()), s.slots.len());
             for (i, slot) in s.slots.iter().enumerate() {

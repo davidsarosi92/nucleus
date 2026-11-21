@@ -4348,6 +4348,32 @@ recovery time after a crash mid-compaction.
   files' key derivation, issue #3: done 2026-11-18, L4e.)  Agreed
   2026-11-20: kept as issues #11 (merged scans), #12 (deletes and short
   scans) and #13 (cold reads), F1's whole run first.
+  - Issue #11, merged scans (2026-11-21).  *Found* (`sample`, the
+    suite's state after `update 25%` and `delete 10%`: a run and a
+    memtable of 350,000 entries): a merge copied every entry's key and
+    value into its source's head and again into the caller's buffers,
+    compared each key twice, gave them an entry at a time; its workers
+    waited on the block cache's shard locks (a sixth of the time,
+    SipHash under a `Mutex` for every block); and the run's ~80 MB
+    decoded do not fit the default 32 MiB block cache, so each scan read
+    and decompressed it again (`--cache 1GB`: 40 → 25 ms alone).
+    *Taken*: the sources' next entries compared where they lie (a
+    memtable's by reference, a run's in its block), each source once an
+    entry, a block's end checked once, 256 merged entries a call through
+    `leaf_entries`; the cache's look-ups under a shared lock with an
+    atomic use flag and a `mix` hasher.  *Measured* (`bench/run.py
+    --engines btree,lsm --no-pg`, three rounds): `count after writes`
+    28.7 → 17.2 ms (the B+tree 11.4); a scratch script's state (the
+    memtable flushed to a run by a restart, then the writes), `--cache
+    1GB`, both orders: 23.7 → 15.0 ms (merge alone 17.1, the lock 15.9,
+    single comparison within the noise), default cache 39 → 31.
+    *Left*: at the default cache the run's blocks are read again by every
+    scan — a quarter of `cache_bytes` for LSM blocks is the L5 choice
+    (the LSM not favoured), and a table of 1M rows needs ~96 MiB (the
+    knee: `--cache 256MB` 19.9 ms, `384MB` 14.5); with them cached the
+    rest is the transaction layer's per-entry work, as for the B+tree.
+    Sizing the block cache (one budget with the page cache, or its
+    share) is left to the perf pass, with #13.
 
   *F1's whole run: LSM rows gone — a benchmark's fault, the store
   hardened* (2026-11-21).  `wamp-lsm`'s first run lost ~20 of ~25
