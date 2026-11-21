@@ -7898,7 +7898,13 @@ would use against a server.
   native protocol's server (§M14.31), the row scan's and the joins'
   paths (§M14.33); the code's symbols 6.47 → 7.21 MB, no one part
   above 60 KB of it — nothing to cut without cutting a feature.  iOS
-  keeps its 9 MiB while it fits.
+  keeps its 9 MiB while it fits.  *Grown on purpose to 10 MiB on iOS
+  too* (2026-11-22): 9,443,936 bytes, 6.6 KB past 9 MiB (+1.36 MB since
+  2026-11-14, the same features as Android's growth and the open
+  issues' fixes since: the parallel sweep and the vacuum's in-place
+  rekey, the index builds' pipeline, the column store's directory and
+  grouped fetches, deletes by key) — CI's iOS job failed on it at
+  a8b652c.
 - **Tested** on the iOS simulator (iOS 18) and an Android emulator
   (API 35, arm64 with 16 KB pages; x86_64 in CI): the Swift suite (19
   tests: the conformance cases on a database in memory and in a

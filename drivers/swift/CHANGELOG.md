@@ -8,6 +8,8 @@
   `ColumnKey(master:name:)` — `encrypt`, `decrypt`, `blindIndex`;
   `Connection.presentSubjectKey` and `holdSubjectKey` (protocol version 8,
   the `k` message).
+- The size budget is 10 MiB on arm64 (was 9 MiB): an app's engine,
+  9,443,936 bytes, passed 9 MiB by 6.6 KB (nucleus PLAN.md §M14.23).
 - The size budget is 9 MiB on arm64 (was 8 MiB): the engine's JSON
   (nucleus PLAN.md §M14.15 J1–J3) took an app's engine to 7.71 MiB, and
   Android's to 8.17 MiB.

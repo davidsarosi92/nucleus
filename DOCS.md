@@ -8258,7 +8258,7 @@ the Java driver's sources and Kotlin's `Database`) from them.
 (directory `files/nucleus/<name>` of the app's), `connect(user,
 database)` → the Java driver's `NucleusClient` over the session's
 streams, `close()` (`AutoCloseable`), `Database.engineVersion`.  Each
-build checks the size budget (arm64: 10 MiB on Android, 9 MiB on iOS; what the engine adds to
+build checks the size budget (arm64: 10 MiB on Android and on iOS; what the engine adds to
 an app: on iOS a program using the C API linked as an app is and
 stripped; on Android the `.so`).
 
