@@ -527,6 +527,16 @@ fn claim_for_delta(
     Ok(())
 }
 
+/// Whether this transaction sees any entry under the table's index
+/// `index` (the delta store's rows, the deleted rows' markers).
+fn holds_any(txn: &dyn KvTxn, t: &Table, index: u32) -> Result<bool> {
+    let p = t.index_prefix(index);
+    let end = prefix_end(&p).expect("an index prefix");
+    Ok(txn
+        .first(Bound::Included(&p), Bound::Excluded(&end))?
+        .is_some())
+}
+
 /// The segment whose key range holds `key`, if any.
 fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Arc<Segment>>> {
     let p = t.index_prefix(DIRECTORY);
@@ -2271,6 +2281,89 @@ impl TableStorage for ColumnStorage {
             None => Ok(None),
             Some((seg, i)) => Ok(Some(segment_row(txn, t, &seg, i, wanted)?)),
         }
+    }
+
+    /// The keys together (an index's rows, a lookup's): the delta store's
+    /// rows and the deleted rows' markers read for all of them at once —
+    /// not at all where this transaction sees none of the table's, a loaded
+    /// table's usual case —, and the keys in order, so that the keys of one
+    /// segment find it once.  A `get` each was three reads of the tree a
+    /// row (the delta store, the directory, the marker): TPC-H Q19 on
+    /// column tables twice PostgreSQL's (issue #5).
+    fn get_many(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        keys: &[Vec<u8>],
+        wanted: Option<&[bool]>,
+        labels: &mut Labels,
+        out: &mut Vec<Option<Row>>,
+    ) -> Result<()> {
+        out.clear();
+        if keys.len() < 2 || t.copy == CopyState::MovingFromChanged {
+            for k in keys {
+                out.push(self.get(txn, t, k, wanted, labels)?);
+            }
+            return Ok(());
+        }
+        out.resize_with(keys.len(), || None);
+        let mut left: Vec<usize> = Vec::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            match gathered(t, k) {
+                Some(row) => out[i] = Some(row),
+                None => left.push(i),
+            }
+        }
+        if !left.is_empty() && holds_any(txn, t, DELTA)? {
+            let moved_keys: Vec<Vec<u8>> =
+                left.iter().map(|&i| moved(t, &keys[i], DELTA)).collect();
+            let mut rows = Vec::with_capacity(left.len());
+            RowStorage.get_many(txn, t, &moved_keys, wanted, labels, &mut rows)?;
+            let mut rest = Vec::with_capacity(left.len());
+            for (&i, row) in left.iter().zip(rows) {
+                match row {
+                    Some(row) => out[i] = Some(row),
+                    None => rest.push(i),
+                }
+            }
+            left = rest;
+        }
+        left.sort_unstable_by(|&a, &b| keys[a].cmp(&keys[b]));
+        let prefix = INDEX_PREFIX_LEN;
+        let mut found: Vec<(usize, Arc<Segment>, usize)> = Vec::with_capacity(left.len());
+        let mut seg: Option<Arc<Segment>> = None;
+        for &i in &left {
+            let key = keys[i].as_slice();
+            // Segments do not overlap: one that holds the last key's range
+            // and this key is this key's.
+            if !seg
+                .as_ref()
+                .is_some_and(|s| s.first.as_slice() <= key && key <= s.last.as_slice())
+            {
+                seg = segment_of(txn, t, key)?;
+            }
+            let Some(s) = &seg else { continue };
+            let rows = keys_of(txn, t, s)?;
+            let r = rows.search(&key[prefix..]);
+            if r < rows.len() && rows.get(r) == &key[prefix..] {
+                found.push((i, Arc::clone(s), r));
+            }
+        }
+        if !found.is_empty() && holds_any(txn, t, DELETED)? {
+            let markers: Vec<Vec<u8>> = found
+                .iter()
+                .map(|(i, _, _)| marker_key(t, &keys[*i]))
+                .collect();
+            let refs: Vec<&[u8]> = markers.iter().map(Vec::as_slice).collect();
+            let mut gone = Vec::with_capacity(refs.len());
+            txn.get_many(&refs, &mut gone)?;
+            let mut g = gone.into_iter();
+            found.retain(|_| g.next().flatten().is_none());
+        }
+        for (i, s, r) in found {
+            out[i] = Some(segment_row(txn, t, &s, r, wanted)?);
+        }
+        Ok(())
     }
 
     fn rows<'a>(&self, scan: Scan<'a>) -> Result<RowIter<'a>> {

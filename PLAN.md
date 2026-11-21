@@ -12054,6 +12054,24 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   - Left, issue #5: late materialization for column scans (the key
     filter's column first, the others for the rows left) and fetches
     grouped by segment.
+  - Issue #5 (2026-11-21; late materialization since taken, S6): Q19
+    again, one worker 90 ms — the index's rows fetched a `get` each, and
+    a column table's `get` three reads of the tree a row (the delta
+    store's key, the directory's `first`, the deleted-row marker), then
+    the segment's key search and the columns.  Taken: `ColumnStorage::
+    get_many` — the delta store's and the markers' keys read together
+    (`get_many`, the tree's group descents), or not at all where the
+    transaction sees none of the table's (one `first` over each range a
+    group: a loaded table's usual case), the keys in order so that keys
+    of one segment find it once.  Ten workers 32.9 → 24.0 ms (PostgreSQL
+    17.6), one 92 → 80, both orders.  Found with it: `BTree::seek_group`
+    never ended on no keys (no descent reached a leaf) — guarded, tested.
+    Tried, not taken: the directory read on by one scan in step with the
+    sorted keys (a fresh scan where a key lay more than eight entries
+    on) — 24 → 39 ms: a scan reads ahead.  Left: the directory's `first`
+    a group of keys in different segments still does a key each (~1.3
+    µs: a scan made for one entry, its versions resolved) — 44 % of the
+    fetches.
 
   *S6, ClickBench Q23 on column tables* (1.61×: `SELECT * … WHERE URL
   LIKE '%google%' ORDER BY EventTime LIMIT 10`, 110 against

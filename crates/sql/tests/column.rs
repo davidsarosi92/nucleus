@@ -53,6 +53,8 @@ const QUERIES: &[&str] = &[
     "SELECT * FROM TT WHERE s = 'name 7' AND x > 500 ORDER BY id",
     "SELECT * FROM TT WHERE x = 5 OR f IS NULL ORDER BY id",
     "SELECT id, s, d, ok FROM TT WHERE x < 300 ORDER BY id",
+    "SELECT id, g, s FROM TT WHERE x IN (3, 5, 7, 11, 13, 17, 19, 23) ORDER BY id",
+    "SELECT a.id, b.id, b.s FROM TT a JOIN TT b ON b.x = a.g WHERE a.id BETWEEN 30 AND 45 ORDER BY 1, 2",
     "SELECT id, s FROM TT WHERE 10 / (x - 5) > 1 ORDER BY id",
 ];
 
@@ -121,6 +123,15 @@ fn column_tables_agree_with_row_tables() {
         both(&mut s, step);
         compare(&mut s);
     }
+    // Rows were fetched through the index on x (many keys at a time:
+    // in segments, deleted from them, in the delta store).
+    let plan = outcome(&mut s, "EXPLAIN SELECT id FROM c WHERE x = 5 ORDER BY id").unwrap();
+    assert!(
+        plan.iter()
+            .flatten()
+            .any(|l| l.contains("Index Scan using c_x_idx")),
+        "{plan:?}"
+    );
     let segments = outcome(
         &mut s,
         "SELECT count(*), sum(rows) > 45000, sum(deleted) > 0 FROM nc_catalog.segments \

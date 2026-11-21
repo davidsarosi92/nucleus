@@ -425,6 +425,11 @@ impl BTree {
     /// AMAC, Kocberber et al., VLDB 2015): a lookup a group of eight in
     /// a 2-million-row tree ~780 → ~570 ns.
     pub fn seek_group(&self, keys: &[&[u8]], found: &mut Vec<Found>) -> Result<()> {
+        // No keys: no descent ever reaches a leaf (the loop below ends at
+        // the leaves).
+        if keys.is_empty() {
+            return Ok(());
+        }
         found.resize_with(keys.len().max(found.len()), Found::default);
         let mut ids: Vec<PageId> = vec![self.root; keys.len()];
         let mut overflow = Vec::new();

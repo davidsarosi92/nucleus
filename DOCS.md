@@ -3948,7 +3948,11 @@ other.  A merge rewrites the segments the incoming rows' key range overlaps —
 deleted rows dropped, delta rows moved — so appends make new segments
 and updates rewrite the segments they touch.  Scans merge the segments'
 rows with the delta store's in key order; a key lookup checks the delta
-store, then the segment whose range holds the key.  MVCC and crash safety
+store, then the segment whose range holds the key.  The rows an index
+finds are fetched a group at a time (`get_many`): the delta store's and
+the markers' keys read together — or, where the transaction sees none of
+the table's, not at all, a loaded table's usual case — and the keys in
+order, so the keys of one segment find it once.  MVCC and crash safety
 are the KV's: segments, markers and delta rows are versioned keys written
 in their transactions; a delete and a merge of one segment, in either
 order, both commit and the delete holds (`crates/sql/tests/column.rs`).

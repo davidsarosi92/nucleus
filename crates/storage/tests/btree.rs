@@ -843,6 +843,8 @@ fn a_group_sought_together_finds_each_ones_first_entry() {
                 .unwrap();
         }
         let mut found = Vec::<Found>::new();
+        // No keys: nothing found (it once never ended).
+        tree.seek_group(&[], &mut found).unwrap();
         for _ in 0..300 {
             let n = 1 + rng.below(10) as usize;
             let keys: Vec<Vec<u8>> = (0..n)
