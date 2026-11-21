@@ -390,3 +390,51 @@ fn vectors_stay_in_their_row() {
     assert_eq!(chunk_count(&*kv), 0);
     consistent(&*kv);
 }
+
+/// A `DELETE` from a table whose snapshot holds no value stored out of
+/// line deletes by its rows' keys alone (issue #7) and deletes the right
+/// rows; where a value is stored so it reads the rows and takes their
+/// chunks along — and a delete by keys of a row another transaction made
+/// long since conflicts with that write, so no chunk is left without its
+/// row.
+#[test]
+fn deletes_by_key_leave_no_chunk_behind() {
+    let (kv, _) = setup();
+    let mut a = Session::new(kv.clone());
+    let mut b = Session::new(kv.clone());
+    a.execute(
+        "CREATE TABLE files (id INT PRIMARY KEY, note TEXT); \
+         INSERT INTO files SELECT i, 'n' || i FROM generate_series(1, 20000) i",
+    )
+    .unwrap();
+    // By keys: the rows a tenth of the table.
+    a.execute("DELETE FROM files WHERE id % 10 = 0").unwrap();
+    assert_eq!(
+        rows(
+            &mut a,
+            "SELECT count(*), sum(id), min(note), max(note) FROM files"
+        ),
+        [["18000", "180000000", "n1", "n9999"]]
+    );
+    // `b`'s snapshot holds no chunk; `a` makes row 7's note long since.
+    b.execute("BEGIN ISOLATION LEVEL REPEATABLE READ").unwrap();
+    assert_eq!(rows(&mut b, "SELECT count(*) FROM files"), [["18000"]]);
+    a.execute("UPDATE files SET note = repeat('x', 3000) WHERE id = 7")
+        .unwrap();
+    assert_eq!(chunk_count(&*kv), 1);
+    // (The delete finds the write, or its commit does.)
+    let failed =
+        b.execute("DELETE FROM files WHERE id % 7 = 0").is_err() || b.execute("COMMIT").is_err();
+    assert!(failed, "row 7 was written since");
+    let _ = b.execute("ROLLBACK");
+    assert_eq!(chunk_count(&*kv), 1);
+    consistent(&*kv);
+    // With the chunk in the snapshot: the rows read, the chunk taken.
+    a.execute("DELETE FROM files WHERE id % 7 = 0").unwrap();
+    assert_eq!(chunk_count(&*kv), 0);
+    assert_eq!(
+        rows(&mut a, "SELECT count(*) FROM files"),
+        [[(18000 - (1..=20000).filter(|i| i % 7 == 0 && i % 10 != 0).count()).to_string()]]
+    );
+    consistent(&*kv);
+}

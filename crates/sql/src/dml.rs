@@ -2030,7 +2030,28 @@ pub fn delete(
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;
         let using = row_policy(&binder, &t, crate::policies::Command::Delete)?;
-        let ctx = Ctx::new(ro, reg, params);
+        let mut ctx = Ctx::new(ro, reg, params);
+        // Only the rows' keys wanted: found so.
+        if ret.is_none()
+            && using.is_none()
+            && deletes_by_key(ro, &t)?
+            && let Some(keys) = matching_keys(&t, &access, pred.as_ref(), &mut ctx)?
+        {
+            let count = keys.len() as u64;
+            let mut chunk = Vec::with_capacity(CHUNK);
+            for r in keys {
+                chunk.push(take_key(&mut r?, 0)?);
+                if chunk.len() == CHUNK {
+                    delete_keys(txn, &t, &mut chunk)?;
+                }
+            }
+            delete_keys(txn, &t, &mut chunk)?;
+            return Ok(Written {
+                count,
+                returning: None,
+            });
+        }
+        let ctx = ctx;
         // A partitioned table's rows are its partitions'.
         let targets: Vec<Table> = match &t.partition_by {
             None => vec![t.clone()],
@@ -2099,6 +2120,83 @@ pub fn delete(
         }
     };
     Ok(Written { count, returning })
+}
+
+/// Whether a `DELETE` from `t` needs no more of a row than its key: a
+/// table stored in rows (no column copy, no column's type being changed,
+/// not partitioned), with a primary key, nothing derived from its rows —
+/// no secondary index, no referencing foreign key, no embedding column —
+/// and no value stored out of line that this transaction sees (a row it
+/// deletes that another made long since conflicts with that write).
+///
+/// Issue #7: a tenth of a million-row table deleted spent ~40 ms on its
+/// rows — built on the scan's workers, stashed, read back, each value
+/// encoded again to see whether it was stored out of line — where only
+/// their keys were deleted.
+fn deletes_by_key(txn: &dyn KvTxn, t: &Table) -> Result<bool> {
+    if t.storage != "row"
+        || !t.columnar.is_empty()
+        || t.converting.is_some()
+        || t.partition_by.is_some()
+        || t.primary_key.is_empty()
+        || !t.indexes.is_empty()
+        || !t.referenced_by.is_empty()
+        || crate::embedding::columns_of(t).next().is_some()
+    {
+        return Ok(false);
+    }
+    let p = t.index_prefix(crate::large::LARGE_INDEX);
+    let end = nucleus_kv::prefix_end(&p).expect("an index prefix");
+    Ok(txn
+        .first(
+            std::ops::Bound::Included(&p),
+            std::ops::Bound::Excluded(&end),
+        )?
+        .is_none())
+}
+
+/// The keys of `t`'s rows matching `filter`, each a row of one value
+/// (as [`exec::keyed`] makes it): the scan reads only the primary key's
+/// and the filter's columns, in parallel where it can.  `None` where the
+/// vectorized executor cannot run the scan.
+fn matching_keys(
+    t: &Table,
+    access: &Access,
+    filter: Option<&Expr>,
+    ctx: &mut Ctx,
+) -> Result<Option<crate::spill::Stored>> {
+    let plan = Plan::Project {
+        input: Box::new(Plan::Scan {
+            table: t.clone(),
+            access: access.clone(),
+            filter: filter.cloned(),
+            estimate: None,
+        }),
+        exprs: t.primary_key.iter().map(|&c| Expr::Column(c)).collect(),
+    };
+    ctx.needed = crate::prune::needed(&plan);
+    let Some(rows) = crate::vector::rows(&plan, ctx, None)? else {
+        return Ok(None);
+    };
+    let mut s = crate::spill::Stash::new();
+    for r in rows {
+        s.push(vec![Value::Bytea(catalog::row_key(t, &r?).into())])?;
+    }
+    Ok(Some(s.seal()?))
+}
+
+/// Deletes the rows under `keys` (as [`deletes_by_key`] allows), and
+/// empties it.
+fn delete_keys(txn: &mut dyn KvTxn, t: &Table, keys: &mut Vec<Vec<u8>>) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    catalog::validate_table(&*txn, &t.name)?;
+    for k in keys.drain(..) {
+        txn.delete(&k)?;
+    }
+    crate::storage::written(t);
+    Ok(())
 }
 
 /// A stash's rows to apply — consumed, or, when `keep` (`RETURNING` reads

@@ -2770,7 +2770,15 @@ seen, rows in key order, the first error the one a single pass meets, a
 `LIMIT` stopping after the round it needs.  `UPDATE` and `DELETE` find
 their rows the same way (vectorized, in parallel when they can be) when
 the table is keyed by a primary key — each row's key computed from its
-values; a policy, or a table keyed by hidden row ids, scans row by row.  Sums of doubles and reals are
+values; a policy, or a table keyed by hidden row ids, scans row by row.
+A `DELETE` that needs no more of a row than its key — a row table with
+a primary key and nothing derived from its rows (no secondary index, no
+referencing foreign key, no embedding column, no column's type being
+changed, not partitioned), no policy, no `RETURNING`, and no value
+stored out of line in its snapshot (one `first` of the table's chunks;
+a row another transaction made long since conflicts with that write) —
+scans only the key's and the filter's columns and deletes by the keys
+(`dml::deletes_by_key`, issue #7).  Sums of doubles and reals are
 exact (`fsum::ExactSum`, §M14.27 S1: Neal's superaccumulator — the sum
 as an integer in units of 2⁻¹⁰⁷⁵, in 32-bit chunks held in 64-bit
 words, only the chunks touched kept; an addition or subtraction is three

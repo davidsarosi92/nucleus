@@ -12384,6 +12384,21 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     index, no row referenced, no `RETURNING`) — but the row tells
     whether values are stored out of line; the commit's install of the
     leaves on one thread.
+  - Issue #7, taken (2026-11-22): a `DELETE` by keys alone
+    (`dml::deletes_by_key`) — a row table with a primary key and nothing
+    derived from its rows (no secondary index, no referencing foreign
+    key, no embedding column, no type change, not partitioned), no
+    policy, no `RETURNING` — where its snapshot holds no value stored out
+    of line: one `first` of the table's chunk range answers what the
+    rows did (a row another transaction made long since conflicts with
+    that write, at the statement or its commit).  The scan projects the
+    primary key (the filter's columns read, no others), the keys
+    stashed and deleted.  `del.py`, both orders: 88 → 67 ms (PostgreSQL
+    67).  Tested by `deletes_by_key_leave_no_chunk_behind` (the right
+    rows deleted; a delete by keys of a row made long since fails; with
+    a chunk in the snapshot the rows read and the chunk taken; fails
+    when the chunks or a key are skipped), and the existing tests fail
+    when an index or a reference is ignored.
 
   *S11, the statistics suite* (sum 2.46×, variance 2.14×, corr 2.37×,
   avg 2.07× PostgreSQL's).  Its table is loaded by one `INSERT … SELECT`
