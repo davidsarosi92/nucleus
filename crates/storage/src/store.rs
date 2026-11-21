@@ -104,8 +104,10 @@ pub struct StoreOptions {
     /// an LSM tree's compaction) writes at most, so it leaves the disk to
     /// the writers (PLAN.md §M14.28 L4a); 0: no limit.
     pub compaction_bytes_per_sec: u64,
-    /// The bytes the LSM trees' block cache holds at most (§M14.28 L4c:
-    /// one cache for the process, as large as the largest store asks).
+    /// The memory budget the LSM trees' block cache shares with the page
+    /// cache (§M14.28 L4c: one cache for the process, as large as the
+    /// largest store asks): it holds what the buffer pools' frames leave
+    /// of it, at least a quarter.
     pub lsm_cache_bytes: usize,
     /// The memory recovery gathers the logged puts and deletes in before
     /// it applies them, sorted by key — each leaf read and written once a

@@ -1488,13 +1488,17 @@ fn next_run_id() -> u64 {
 /// every LSM tree of the process — a block read once is not read, checked
 /// and decompressed again while it stays.  CLOCK replacement (a block
 /// used since the hand passed it gets a second chance), in shards each
-/// under its own lock, within [`set_block_cache_bytes`].  Compactions
+/// under its own lock, within [`set_block_cache_bytes`] — a budget it
+/// shares with the page cache: it holds what the buffer pools' frames
+/// leave of it, at least a quarter (issues #11 and #13: at a fixed
+/// quarter of the default 128 MB, a 1M-row table's ~80 MB of blocks were
+/// read and decompressed again by every scan).  Compactions
 /// read through it without filling it.  A look-up takes its shard's lock
 /// shared (a block's use marked by an atomic flag) and hashes the key by
 /// [`mix`]: a merged scan's workers each look a block up every few dozen
 /// entries (issue #11: a sixth of a merged scan's time waited on the
 /// shards' locks).
-pub(crate) static CACHE: BlockCache = BlockCache::new();
+pub(crate) static CACHE: BlockCache = BlockCache::new(true);
 
 const SHARDS: usize = 16;
 
@@ -1502,6 +1506,9 @@ pub(crate) struct BlockCache {
     shards: [std::sync::RwLock<Shard>; SHARDS],
     /// Bytes it may hold, all shards together.
     capacity: std::sync::atomic::AtomicUsize,
+    /// Whether the page cache's frames take their part of `capacity`
+    /// (the process's cache; not a test's).
+    shared: bool,
 }
 
 struct Shard {
@@ -1551,12 +1558,13 @@ impl std::hash::Hasher for MixHasher {
     }
 }
 
-/// What the block cache holds at most, unless set: 64 MiB.
+/// The block cache's budget unless one is set: 64 MiB (less the page
+/// cache's frames, down to a quarter).
 pub const BLOCK_CACHE_BYTES: usize = 64 << 20;
 
-/// Sets what the block cache holds at most: the largest a store asked
-/// for ([`crate::StoreOptions::lsm_cache_bytes`]), [`BLOCK_CACHE_BYTES`]
-/// until one does.
+/// Sets the block cache's budget: the largest a store asked for
+/// ([`crate::StoreOptions::lsm_cache_bytes`]), [`BLOCK_CACHE_BYTES`] until
+/// one does.
 pub fn set_block_cache_bytes(bytes: usize) {
     CACHE
         .capacity
@@ -1564,8 +1572,9 @@ pub fn set_block_cache_bytes(bytes: usize) {
 }
 
 impl BlockCache {
-    const fn new() -> Self {
+    const fn new(shared: bool) -> Self {
         BlockCache {
+            shared,
             shards: [const {
                 std::sync::RwLock::new(Shard {
                     map: None,
@@ -1576,6 +1585,21 @@ impl BlockCache {
             }; SHARDS],
             capacity: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// What it may hold now: the budget less the page cache's frames,
+    /// down to a quarter of it.
+    fn bytes(&self) -> usize {
+        let budget = match self.capacity.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => BLOCK_CACHE_BYTES,
+            c => c,
+        };
+        let pages = if self.shared {
+            crate::buffer::FRAME_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+        } else {
+            0
+        };
+        budget.saturating_sub(pages).max(budget / 4)
     }
 
     fn shard_of(key: (u64, u32)) -> usize {
@@ -1596,10 +1620,7 @@ impl BlockCache {
     }
 
     fn put(&self, key: (u64, u32), block: Arc<Decoded>) {
-        let cap = match self.capacity.load(std::sync::atomic::Ordering::Relaxed) {
-            0 => BLOCK_CACHE_BYTES,
-            c => c,
-        } / SHARDS;
+        let cap = self.bytes() / SHARDS;
         let size = block.bytes();
         if size > cap {
             return;
@@ -2841,7 +2862,7 @@ mod tests {
     /// gives a block used since the hand passed a second chance.
     #[test]
     fn the_block_cache_keeps_within_its_bytes() {
-        let c = BlockCache::new();
+        let c = BlockCache::new(false);
         c.capacity
             .store(SHARDS * 10_000, std::sync::atomic::Ordering::Relaxed);
         let block = |n: usize| {

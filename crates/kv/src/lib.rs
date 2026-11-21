@@ -1193,7 +1193,9 @@ fn store_options(opts: &Options) -> StoreOptions {
         page_key: opts.encryption_key.clone(),
         previous_page_key: opts.previous_encryption_key.clone(),
         compaction_bytes_per_sec: 0,
-        lsm_cache_bytes: (opts.cache_bytes / 4).max(1 << 20),
+        // One budget: the block cache takes what the page cache's frames
+        // leave of it (at least a quarter).
+        lsm_cache_bytes: opts.cache_bytes.max(1 << 20),
         redo_bytes: redo_bytes(),
     }
 }

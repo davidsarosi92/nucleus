@@ -23,7 +23,9 @@
 //! reads the page without any lock; hits only touch their shard's briefly.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+use crate::PAGE_SIZE;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::{Error, Result};
@@ -146,6 +148,12 @@ pub struct PoolStats {
     pub writebacks: u64,
 }
 
+/// The bytes of the frames the process's buffer pools have made (each
+/// made on first use, kept until its pool goes): the page cache's part of
+/// the memory budget it shares with the LSM trees' block cache, which
+/// takes what is left (issue #11/#13, [`crate::lsm`]'s `BlockCache`).
+pub(crate) static FRAME_BYTES: AtomicUsize = AtomicUsize::new(0);
+
 /// A page cache over a [`Pager`].
 pub struct BufferPool {
     pager: Arc<Pager>,
@@ -222,6 +230,12 @@ impl Drop for PageRef<'_> {
     }
 }
 
+impl Drop for BufferPool {
+    fn drop(&mut self) {
+        FRAME_BYTES.fetch_sub(self.frames_made() * PAGE_SIZE, Ordering::Relaxed);
+    }
+}
+
 impl BufferPool {
     /// A pool of `capacity` frames (at least 1) over `pager`.
     pub fn new(pager: Arc<Pager>, capacity: usize) -> Self {
@@ -262,7 +276,10 @@ impl BufferPool {
 
     /// Frame `i`, made on first use.
     fn frame(&self, i: usize) -> &Frame {
-        self.frames[i].get_or_init(|| Frame::new(Page::new(PageType::UNUSED)))
+        self.frames[i].get_or_init(|| {
+            FRAME_BYTES.fetch_add(PAGE_SIZE, Ordering::Relaxed);
+            Frame::new(Page::new(PageType::UNUSED))
+        })
     }
 
     /// Puts `page` in frame `i` — the frame made with it on first use, so
@@ -270,7 +287,10 @@ impl BufferPool {
     /// a start every frame a cold scan fills is a first use.
     fn put(&self, i: usize, page: Page) -> &Frame {
         let mut page = Some(page);
-        let f = self.frames[i].get_or_init(|| Frame::new(page.take().expect("not taken yet")));
+        let f = self.frames[i].get_or_init(|| {
+            FRAME_BYTES.fetch_add(PAGE_SIZE, Ordering::Relaxed);
+            Frame::new(page.take().expect("not taken yet"))
+        });
         if let Some(page) = page {
             *f.page.write().unwrap_or_else(|e| e.into_inner()) = page;
         }
