@@ -830,7 +830,10 @@ impl<'a> Parser<'a> {
         let start = self.offset();
         let v = f(self)?;
         let end = self.offset();
-        Ok((v, self.sql[start..end].trim().to_string()))
+        // The lexer's spaces are ASCII's (as PostgreSQL's): another space
+        // (U+2006, say) is part of an identifier, and stays.
+        let text = self.sql[start..end].trim_matches(|c: char| c.is_ascii_whitespace());
+        Ok((v, text.to_string()))
     }
 
     // ------------------------------------------------------------ statements
@@ -5031,6 +5034,18 @@ fn select_query(items: Vec<JtItem>, from: TableRef) -> Query {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A statement's text is cut at the lexer's spaces only: a space
+    /// beyond ASCII (U+2006 here, found by the `sql_parse` fuzzer) is an
+    /// identifier's, as in PostgreSQL, and the text parses again the same.
+    #[test]
+    fn statement_text_keeps_spaces_beyond_ascii() {
+        for sql in ["SELECT ', '\u{2006}", "SELECT 1 \u{a0}x;  SELECT 2\u{2006}"] {
+            for (stmt, text) in parse_with_text(sql).unwrap() {
+                assert_eq!(parse_one(&text).unwrap(), stmt, "{text:?}");
+            }
+        }
+    }
 
     fn ok(sql: &str) -> Statement {
         parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"))
