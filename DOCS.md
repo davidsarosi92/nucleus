@@ -1243,9 +1243,12 @@ Then each value above the highest key the transaction wrote in the range
 (by either path: a key above it has no entry anywhere) goes into the
 store as a **final version at the transaction's snapshot** — not an
 intent a vacuum rewrites — gathered into 1 MiB batches
-(`Store::write_unlogged`); a key at or below it (out of order, or written
-again) takes the regular path, whose write wins.  The transaction's reads
-write the gathered batch first; `put_new`'s run of keys found empty and
+(`Store::write_unlogged`) — where there are threads, a full batch goes in
+on a thread of its own while the next is gathered, and every other
+flush (a read's, the commit's, a rollback's) waits for it first; a key
+at or below it (out of order, or written again) takes the regular path,
+whose write wins.  The transaction's reads write the gathered batch
+first; `put_new`'s run of keys found empty and
 `first`'s empty ranges forget where such a write enters them.  The commit
 writes the rest, **checkpoints** (commits go on meanwhile, §4.6) and then
 logs its commit record, which deletes the marks: what the commit record

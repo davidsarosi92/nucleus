@@ -437,3 +437,76 @@ fn crash_at_every_io_point_of_unlogged_loads() {
         });
     }
 }
+
+/// A platform of the simulation's with `.1` threads.
+struct Threads(Arc<SimPlatform>, usize);
+
+impl Platform for Threads {
+    fn fs(&self) -> &dyn nucleus_platform::FileSystem {
+        self.0.fs()
+    }
+    fn clock(&self) -> &dyn nucleus_platform::Clock {
+        self.0.clock()
+    }
+    fn rng(&self) -> &dyn Rng {
+        self.0.rng()
+    }
+    fn parallelism(&self) -> usize {
+        self.1
+    }
+}
+
+/// Where there are threads, a batch of unlogged writes goes into the store
+/// on one of its own while the next is gathered (issue #9): reads between
+/// see every write before them, a rollback deletes the range with the
+/// batch going in, and a commit is durable whole.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn unlogged_batches_go_in_behind_the_writes() {
+    let p = Arc::new(SimPlatform::new(5));
+    let threads: Arc<dyn Platform> = Arc::new(Threads(Arc::clone(&p), 4));
+    let open = || Engine::open(Arc::clone(&threads), Path::new("/db"), opts()).unwrap();
+    let e = open();
+    let value = |i: usize| format!("{i:060}").into_bytes();
+    // Rolled back with batches going in: nothing stays.
+    let mut t = e.begin();
+    t.fresh(START, END);
+    for i in 0..40_000 {
+        t.put(&ikey(i), &value(i)).unwrap();
+    }
+    drop(t);
+    assert_eq!(stored_in_range(&e), 0);
+    assert_eq!(marks(&e), 0);
+    // Written past several batches, read between.
+    let mut t = e.begin();
+    t.fresh(START, END);
+    // The put that fills the first batch (1 MiB of entries: key, value
+    // and 16 bytes each) hands it over: the read right after must wait
+    // for it.
+    let first_batch = (1usize << 20).div_ceil(7 + 60 + 16) - 1;
+    for i in 0..60_000 {
+        t.put(&ikey(i), &value(i)).unwrap();
+        if i == first_batch {
+            assert_eq!(t.get(&ikey(i)).unwrap(), Some(value(i)));
+        }
+        if i % 15_000 == 14_999 {
+            assert_eq!(t.get(&ikey(i - 14_000)).unwrap(), Some(value(i - 14_000)));
+            assert_eq!(
+                t.scan(Bound::Included(START), Bound::Excluded(END))
+                    .unwrap()
+                    .count(),
+                i + 1
+            );
+        }
+    }
+    t.commit().unwrap();
+    drop(e);
+    p.sim_fs().crash();
+    let e = open();
+    let got = all(&e);
+    assert_eq!(got.len(), 60_000);
+    for i in (0..60_000).step_by(997) {
+        assert_eq!(got[&ikey(i)], value(i));
+    }
+    assert_eq!(marks(&e), 0);
+}

@@ -1087,6 +1087,7 @@ impl Engine {
             reads: Mutex::new(ReadSet::default()),
             fresh: Vec::new(),
             pending: Mutex::new(Pending::default()),
+            applying: Mutex::new(None),
             gap: None,
             empty: Mutex::new(Vec::new()),
             mirrors: None,
@@ -2496,6 +2497,11 @@ pub struct Transaction {
     /// Writes into fresh ranges to go into the store without the WAL
     /// (D16), gathered into batches; reads write them first.
     pending: Mutex<Pending>,
+    /// The batch of unlogged writes going into the store on a thread of
+    /// its own while the next is gathered ([`flush_unlogged_behind`]).
+    ///
+    /// [`flush_unlogged_behind`]: Transaction::flush_unlogged_behind
+    applying: Mutex<Option<std::thread::JoinHandle<Result<()>>>>,
     /// The last run of keys [`put_new`](Transaction::put_new) found
     /// without an entry in the tree (until this transaction's own intents
     /// enter it).
@@ -2606,6 +2612,9 @@ impl Drop for Transaction {
             .map(|f| (f.start.clone(), f.end.clone()))
             .collect();
         if !unlogged.is_empty() {
+            // A batch going in finishes first (its error: the store's
+            // poisoned, the next opening deletes the ranges).
+            let _ = self.settle_unlogged();
             self.pending
                 .get_mut()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2914,7 +2923,7 @@ impl Transaction {
             .ops
             .push((encode_key(key, self.start), Some(encode_value(Some(value)))));
         if pending.bytes >= SPILL_CHUNK {
-            self.flush_unlogged()?;
+            self.flush_unlogged_behind()?;
         }
         Ok(Unlogged::Written)
     }
@@ -2953,6 +2962,45 @@ impl Transaction {
         Ok(true)
     }
 
+    /// The batch of unlogged writes going into the store on its own
+    /// thread, in: its error, if it failed.
+    fn settle_unlogged(&self) -> Result<()> {
+        match lock(&self.applying).take() {
+            Some(h) => h
+                .join()
+                .unwrap_or(Err(Error::Corrupt("an unlogged batch's writer panicked"))),
+            None => Ok(()),
+        }
+    }
+
+    /// [`flush_unlogged`](Self::flush_unlogged) on a thread of its own,
+    /// where there are threads: the store takes the batch while the next
+    /// is gathered (the one before it waited for first: they go in in
+    /// order).  Every other flush, a read's, the commit's, waits for it.
+    /// Issue #9: a large index build's writes were the encoding of its
+    /// entries and the tree's apply of them, one after the other.
+    fn flush_unlogged_behind(&self) -> Result<()> {
+        if self.engine.platform.parallelism() < 2 {
+            return self.flush_unlogged();
+        }
+        self.settle_unlogged()?;
+        let ops = {
+            let mut pending = lock(&self.pending);
+            pending.bytes = 0;
+            std::mem::take(&mut pending.ops)
+        };
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let engine = Arc::clone(&self.engine);
+        let h = std::thread::Builder::new()
+            .name("nucleus unlogged".into())
+            .spawn(move || Ok(engine.store.write_unlogged(Batch { meta: 0, ops })?))
+            .map_err(|_| Error::Corrupt("no thread for an unlogged batch"))?;
+        *lock(&self.applying) = Some(h);
+        Ok(())
+    }
+
     /// Writes the pending unlogged writes into the store.
     fn flush_unlogged(&self) -> Result<()> {
         // None without a fresh range (only writes into one are pending):
@@ -2960,6 +3008,7 @@ impl Transaction {
         if self.fresh.is_empty() {
             return Ok(());
         }
+        self.settle_unlogged()?;
         let mut pending = lock(&self.pending);
         if pending.ops.is_empty() {
             return Ok(());

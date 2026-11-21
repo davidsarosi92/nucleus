@@ -12624,6 +12624,17 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     `(l_partkey, l_suppkey)` 4.27 / 3.03 → 2.59 / 2.60 s, `(l_suppkey)`
     2.50 / 2.59 → 2.25 / 2.15. Tested by the same test, a 6 MB `work_mem`
     over 250,000 rows (fails when a worker's records are lost).
+    (f) A full batch of unlogged writes goes into the store on a thread
+    of its own (`Transaction::flush_unlogged_behind`) while the writer
+    encodes the next (the escape of its keys ~15 % of the build, the
+    tree's apply ~25 %, one after the other). One batch is in flight at
+    most; every other flush (a read's, the commit's, a rollback's) waits
+    for it. ABBA: `(l_partkey, l_suppkey)` 3.86 / 2.69 → 2.23 / 2.15 s,
+    `(l_suppkey)` 2.68 / 2.13 → 1.85 / 1.82, `orders (o_custkey)` 0.52 /
+    0.53 → 0.51 / 0.39. Tested by `unlogged_batches_go_in_behind_the_writes`
+    (four threads: a rollback with a batch going in, reads right after a
+    handover and between, a commit durable after a crash; fails when a
+    batch is lost or a read does not wait).
 
   *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
   "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's
