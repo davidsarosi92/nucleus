@@ -12667,6 +12667,33 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     (four threads: a rollback with a batch going in, reads right after a
     handover and between, a commit durable after a crash; fails when a
     batch is lost or a read does not wait).
+    (g) The commit's checkpoint (D16) was half the build: 1.28 s of the
+    first index's 2.6 (its pages and the load's not yet checkpointed),
+    0.56 of the second's — the build writes no WAL, so no checkpoint ran
+    while it went on.  Three changes, each measured alone (the seven
+    indexes of the TPC-H SF 1 load, ABBA, ~5.3 s before):
+    - checkpoints due on what a branch wrote without the WAL too
+      (`Store::unlogged_since_checkpoint` past an eighth of
+      `checkpoint_wal_bytes`; the writer only wakes the checkpointer),
+      and the frozen pages a writer frees while one runs kept for its
+      `flush_frozen` to write in its runs (`BufferPool::hold_freed_frozen`)
+      — each had been a write of its own on the writer's thread, into
+      the file's end, zeros ahead: the checkpoints alone made the
+      writes twice as slow (0.65 → 1.22 s) for a commit of 90 ms; with
+      the freed pages kept, ~4.7 s;
+    - a run of 16 pages or more written past the file's end grows it by
+      its own write (`Pager::write_run`), no zeros ahead — which wrote a
+      checkpoint's appended pages twice (785 MiB written for a 384 MiB
+      index): alone ~4.7 s;
+    - together 4.38 / 4.01 / 4.17 s against 5.58 / 4.87 / 5.16:
+      `(l_partkey, l_suppkey)` ~2.3 → 1.75 s, `(l_suppkey)` ~1.95 → 1.6
+      (PostgreSQL 1.38 / 0.90, its `maintenance_work_mem` 2 GB).  The
+      commit is ~0.1 s; left: the scan and sort (~0.8 s) and the writes
+      (~0.8 s).  Tested by `a_long_run_past_the_end_grows_the_file_by_itself`
+      (fails with zeros ahead), `unlogged_batches_go_in_behind_the_writes`
+      (unlogged bytes not checkpointed stay under 2 MiB of ~5 MB written;
+      fails when the trigger leaves them out), and the store's
+      overlapping-checkpoint tests (fail when the freed pages are lost).
 
   *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
   "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's
