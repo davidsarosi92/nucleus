@@ -12147,6 +12147,18 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     crash; a debug build fails when a part's moves are not offset).
     Next: the log's keys — a move logged by its delete's place and the
     new timestamp, or a batch's sorted keys prefix-coded.
+  - Issue #4, step 4 (2026-11-21): a batch's keys prefix-coded (WAL batch
+    version 5, every batch). Each op's key is logged as the bytes it
+    shares with the op's before and the rest; a move's source is logged
+    by what it shares with its key; lengths are LEB128 (LevelDB's and
+    RocksDB's block keys are coded the same way, against the restart
+    point before). Versions 1–4 are still read. The vacuum after TPC-H
+    SF 1's load (ABBA): it wrote 942 → 279 MiB, and took 3.90 / 3.82 →
+    3.26 / 3.53 s. `COPY` took 13.4 / 11.0 → 10.8 / 10.3 s (its keys
+    shrink too; noisy). Tested by `batch_roundtrip`: versions 1–5 read
+    back, every truncation refused, 300 keys of 204 bytes logged in less
+    than half of version 1's bytes. Left: the tree's merge of the deletes
+    and puts (~38 % before this step).
 
   *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
   1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in

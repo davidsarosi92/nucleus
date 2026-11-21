@@ -73,6 +73,13 @@ const BATCH_VERSION_DEFERRING: u8 = 3;
 /// op tagged 2 a put whose value is not logged — the key it moves from
 /// is (the bytes it shares with the put's key counted, the rest given).
 const BATCH_VERSION_MOVING: u8 = 4;
+/// Every batch now: version 4's sections, each op's key given by the
+/// bytes it shares with the op's before and the rest, every length a
+/// LEB128 number, a move's source by what it shares with its key — a
+/// batch's keys are sorted, so a key repeats most of the one before
+/// (an intent's delete, its version's put, the move's source: 2.3 keys'
+/// bytes logged a third as long; issue #4).
+const BATCH_VERSION_PACKED: u8 = 5;
 /// A logged op's tag: a put, a delete, a move.
 const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
@@ -265,6 +272,15 @@ pub struct Batch {
     pub ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
+/// `v` as LEB128.
+fn put_leb(out: &mut Vec<u8>, mut v: usize) {
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
 impl Batch {
     fn encode(&self) -> Vec<u8> {
         self.encode_covering(&[])
@@ -274,9 +290,75 @@ impl Batch {
         self.encode_full(covered, &[], &[])
     }
 
-    /// The batch as logged; `moves` (op indexes, ascending, and their
-    /// source keys) are puts logged without their values.
+    /// The batch as logged ([`BATCH_VERSION_PACKED`]); `moves` (op
+    /// indexes, ascending, and their source keys) are puts logged without
+    /// their values.
     fn encode_full(
+        &self,
+        covered: &[(Vec<u8>, Vec<u8>)],
+        deferred: &[(Vec<u8>, Vec<u8>)],
+        moves: &[(usize, Vec<u8>)],
+    ) -> Vec<u8> {
+        let size = self
+            .ops
+            .iter()
+            .map(|(k, v)| 6 + k.len() / 2 + v.as_ref().map_or(0, Vec::len))
+            .sum::<usize>();
+        let mut out = Vec::with_capacity(13 + size);
+        out.push(BATCH_VERSION_PACKED);
+        out.extend_from_slice(&self.meta.to_le_bytes());
+        out.extend_from_slice(&(self.ops.len() as u32).to_le_bytes());
+        let shared = |a: &[u8], b: &[u8]| a.iter().zip(b).take_while(|(x, y)| x == y).count();
+        let mut moves = moves.iter().peekable();
+        let mut prev: &[u8] = &[];
+        for (i, (k, v)) in self.ops.iter().enumerate() {
+            let moved = moves.next_if(|(m, _)| *m == i);
+            out.push(match (v, moved) {
+                (None, _) => OP_DELETE,
+                (Some(_), None) => OP_PUT,
+                (Some(_), Some(_)) => OP_MOVE,
+            });
+            let same = shared(prev, k);
+            put_leb(&mut out, same);
+            put_leb(&mut out, k.len() - same);
+            out.extend_from_slice(&k[same..]);
+            prev = k;
+            match (v, moved) {
+                (None, _) => {}
+                (Some(_), Some((_, source))) => {
+                    let same = shared(k, source);
+                    put_leb(&mut out, same);
+                    put_leb(&mut out, source.len() - same);
+                    out.extend_from_slice(&source[same..]);
+                }
+                (Some(v), None) => {
+                    put_leb(&mut out, v.len());
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+        debug_assert!(moves.next().is_none(), "a move of a delete or past the ops");
+        out.extend_from_slice(&(covered.len() as u32).to_le_bytes());
+        for (start, end) in covered {
+            for k in [start, end] {
+                out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                out.extend_from_slice(k);
+            }
+        }
+        out.extend_from_slice(&(deferred.len() as u32).to_le_bytes());
+        for (k, v) in deferred {
+            for b in [k, v] {
+                out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                out.extend_from_slice(b);
+            }
+        }
+        out
+    }
+
+    /// The batch as versions 1 to 4 logged it (the lowest version its
+    /// sections need), for the tests that read them back.
+    #[cfg(test)]
+    fn encode_legacy(
         &self,
         covered: &[(Vec<u8>, Vec<u8>)],
         deferred: &[(Vec<u8>, Vec<u8>)],
@@ -371,10 +453,31 @@ impl Batch {
             Ok(head)
         }
         let u32_of = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap()) as usize;
+        fn leb(b: &mut &[u8]) -> Result<usize> {
+            let mut v: u64 = 0;
+            for shift in (0..64).step_by(7) {
+                let x = take(b, 1)?[0];
+                v |= u64::from(x & 0x7f) << shift;
+                if x & 0x80 == 0 {
+                    return usize::try_from(v).map_err(|_| Error::Corrupt {
+                        page: PageId(0),
+                        reason: "WAL length out of range",
+                    });
+                }
+            }
+            Err(Error::Corrupt {
+                page: PageId(0),
+                reason: "WAL length out of range",
+            })
+        }
         let version = take(&mut b, 1)?[0];
         if !matches!(
             version,
-            BATCH_VERSION | BATCH_VERSION_COVERING | BATCH_VERSION_DEFERRING | BATCH_VERSION_MOVING
+            BATCH_VERSION
+                | BATCH_VERSION_COVERING
+                | BATCH_VERSION_DEFERRING
+                | BATCH_VERSION_MOVING
+                | BATCH_VERSION_PACKED
         ) {
             return Err(Error::Corrupt {
                 page: PageId(0),
@@ -383,14 +486,47 @@ impl Batch {
         }
         let meta = u64::from_le_bytes(take(&mut b, 8)?.try_into().unwrap());
         let n = u32_of(take(&mut b, 4)?);
-        let mut ops = Vec::with_capacity(n.min(1 << 16));
+        let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(n.min(1 << 16));
         let mut moves = Vec::new();
+        let packed = version == BATCH_VERSION_PACKED;
+        let past = |reason| Error::Corrupt {
+            page: PageId(0),
+            reason,
+        };
         for i in 0..n {
             let tag = take(&mut b, 1)?[0];
-            let klen = u32_of(take(&mut b, 4)?);
-            let key = take(&mut b, klen)?.to_vec();
+            let key = if packed {
+                let same = leb(&mut b)?;
+                let rest = leb(&mut b)?;
+                let prev = ops.last().map_or(&[][..], |(k, _)| k.as_slice());
+                if same > prev.len() {
+                    return Err(past("WAL key shares past the key before"));
+                }
+                let mut key = Vec::with_capacity(same + rest);
+                key.extend_from_slice(&prev[..same]);
+                key.extend_from_slice(take(&mut b, rest)?);
+                key
+            } else {
+                let klen = u32_of(take(&mut b, 4)?);
+                take(&mut b, klen)?.to_vec()
+            };
             let val = match tag {
                 OP_DELETE => None,
+                OP_MOVE if packed => {
+                    let same = leb(&mut b)?;
+                    let rest = leb(&mut b)?;
+                    if same > key.len() {
+                        return Err(past("WAL move's source past its key"));
+                    }
+                    let mut source = key[..same].to_vec();
+                    source.extend_from_slice(take(&mut b, rest)?);
+                    moves.push((i, source));
+                    Some(Vec::new())
+                }
+                OP_PUT if packed => {
+                    let vlen = leb(&mut b)?;
+                    Some(take(&mut b, vlen)?.to_vec())
+                }
                 OP_MOVE if version == BATCH_VERSION_MOVING => {
                     let shared = u32_of(take(&mut b, 4)?);
                     let rest = u32_of(take(&mut b, 4)?);
@@ -2651,9 +2787,13 @@ mod tests {
         };
         assert_eq!(Batch::decode(&b.encode()).unwrap(), b);
         assert!(Batch::decode(&b.encode()[..10]).is_err());
+        assert_eq!(b.encode()[0], BATCH_VERSION_PACKED);
+        let legacy = b.encode_legacy(&[], &[], &[]);
+        assert_eq!(legacy[0], BATCH_VERSION);
+        assert_eq!(Batch::decode(&legacy).unwrap(), b);
         // With covered ranges: version 2, read back whole.
         let covered = vec![(b"a".to_vec(), b"c".to_vec()), (vec![], vec![0])];
-        let e = b.encode_covering(&covered);
+        let e = b.encode_legacy(&covered, &[], &[]);
         assert_eq!(e[0], BATCH_VERSION_COVERING);
         assert_eq!(
             Batch::decode_covering(&e).unwrap(),
@@ -2661,10 +2801,16 @@ mod tests {
         );
         assert!(Batch::decode_covering(&e[..e.len() - 1]).is_err());
         assert_eq!(b.encode_covering(&[]), b.encode());
+        let e = b.encode_covering(&covered);
+        assert_eq!(
+            Batch::decode_covering(&e).unwrap(),
+            (b.clone(), covered.clone())
+        );
+        assert!(Batch::decode_covering(&e[..e.len() - 1]).is_err());
         // With deferred puts: version 3, its ranges maybe none.
         let deferred = vec![(b"t".to_vec(), b"9".to_vec())];
         for covered in [vec![], covered.clone()] {
-            let e = b.encode_full(&covered, &deferred, &[]);
+            let e = b.encode_legacy(&covered, &deferred, &[]);
             assert_eq!(e[0], BATCH_VERSION_DEFERRING);
             assert_eq!(
                 Batch::decode_full(&e).unwrap(),
@@ -2689,23 +2835,54 @@ mod tests {
         };
         for (covered, deferred) in [(vec![], vec![]), (covered.clone(), deferred.clone())] {
             let moves = vec![(1, b"key\x00a".to_vec()), (3, b"elsewhere".to_vec())];
-            let e = moved.encode_full(&covered, &deferred, &moves);
-            assert_eq!(e[0], BATCH_VERSION_MOVING);
-            assert!(!e.windows(12).any(|w| w == b"a long value"));
             let mut read = moved.clone();
             read.ops[1].1 = Some(Vec::new());
             read.ops[3].1 = Some(Vec::new());
-            assert_eq!(
-                Batch::decode_full(&e).unwrap(),
-                Decoded {
-                    batch: read,
-                    covered,
-                    deferred,
-                    moves,
+            // Version 4, and as logged now: each key by what it shares
+            // with the one before.
+            for (e, version) in [
+                (
+                    moved.encode_legacy(&covered, &deferred, &moves),
+                    BATCH_VERSION_MOVING,
+                ),
+                (
+                    moved.encode_full(&covered, &deferred, &moves),
+                    BATCH_VERSION_PACKED,
+                ),
+            ] {
+                assert_eq!(e[0], version);
+                assert!(!e.windows(12).any(|w| w == b"a long value"));
+                assert_eq!(
+                    Batch::decode_full(&e).unwrap(),
+                    Decoded {
+                        batch: read.clone(),
+                        covered: covered.clone(),
+                        deferred: deferred.clone(),
+                        moves: moves.clone(),
+                    }
+                );
+                for cut in 1..e.len() {
+                    assert!(
+                        Batch::decode_full(&e[..cut]).is_err(),
+                        "{version} cut {cut}"
+                    );
                 }
-            );
-            assert!(Batch::decode_full(&e[..e.len() - 1]).is_err());
+            }
         }
+        // Keys sharing with the one before, lengths past one LEB128 byte.
+        let long = Batch {
+            meta: 1,
+            ops: (0..300u32)
+                .map(|i| {
+                    let mut k = vec![7u8; 200];
+                    k.extend_from_slice(&i.to_be_bytes());
+                    (k, (i % 3 != 0).then(|| vec![i as u8; i as usize]))
+                })
+                .collect(),
+        };
+        let e = long.encode();
+        assert_eq!(Batch::decode(&e).unwrap(), long);
+        assert!(e.len() < long.encode_legacy(&[], &[], &[]).len() / 2);
     }
 
     /// A file system whose directories above `/apps/me` may not be

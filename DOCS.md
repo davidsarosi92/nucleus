@@ -691,7 +691,14 @@ with writes held off, and replay reads it from the tree, where the log
 replayed in order has brought it (gathered writes applied first; a
 source gone puts nothing).  The vacuum's versions made of committed
 intents (§5.3): their keys logged, not their rows again — the vacuum
-after TPC-H's load wrote 0.94 GiB instead of 1.81.  A batch whose keys are all
+after TPC-H's load wrote 0.94 GiB instead of 1.81.  Every batch is now
+written as version 5: version 4's sections, each op's key given by the
+bytes it shares with the key before it and the rest, every length in an
+op a LEB128 number. A batch's keys are sorted, so each key repeats most
+of the one before. The vacuum's moves log an intent's delete, its
+version's key and the source key, and the last two repeat all but eight
+bytes of the first. The vacuum after TPC-H's load writes 0.27 GiB instead
+of 0.94 (issue #4); versions 1–4 are still read.  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `write_unlogged(&Batch)`
 applies a batch without logging it (D16): durable only once a checkpoint
