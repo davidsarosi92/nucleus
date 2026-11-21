@@ -102,15 +102,41 @@ pub struct RealFs {
 
 /// A lock held through the OS (`flock` / `LockFileEx`) on an open file.
 struct RealLock {
-    _file: fs::File,
+    file: fs::File,
+    path: std::path::PathBuf,
 }
 
-impl crate::Lock for RealLock {}
+impl crate::Lock for RealLock {
+    fn still_here(&self) -> io::Result<bool> {
+        same_file(&self.file, &self.path)
+    }
+}
+
+/// Whether `file` is the file at `path` (on Unix the same device and
+/// inode; elsewhere, that one is there at all).
+fn same_file(file: &fs::File, path: &Path) -> io::Result<bool> {
+    let now = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = file.metadata()?;
+        Ok(now.dev() == held.dev() && now.ino() == held.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, now);
+        Ok(true)
+    }
+}
 
 /// A lock held in this process alone, where the system has none.
 struct ProcessLock {
     path: std::path::PathBuf,
-    _file: fs::File,
+    file: fs::File,
 }
 
 fn process_locks() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
@@ -130,12 +156,16 @@ impl ProcessLock {
         }
         Ok(Box::new(ProcessLock {
             path: path.to_path_buf(),
-            _file: file,
+            file,
         }))
     }
 }
 
-impl crate::Lock for ProcessLock {}
+impl crate::Lock for ProcessLock {
+    fn still_here(&self) -> io::Result<bool> {
+        same_file(&self.file, &self.path)
+    }
+}
 
 impl Drop for ProcessLock {
     fn drop(&mut self) {
@@ -155,7 +185,10 @@ impl FileSystem for RealFs {
             .truncate(false)
             .open(path)?;
         match file.try_lock() {
-            Ok(()) => Ok(Box::new(RealLock { _file: file })),
+            Ok(()) => Ok(Box::new(RealLock {
+                file,
+                path: path.to_path_buf(),
+            })),
             Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!("{} is locked by another process", path.display()),

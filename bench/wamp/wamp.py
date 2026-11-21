@@ -136,10 +136,16 @@ def cgroup_written(name):
     return total
 
 def wait_port(port):
-    for _ in range(6000):
+    # Recovery after the steady state can take many minutes (it replays
+    # the WAL through the page cache); a server not up within the hour is
+    # an error, never a silent return that would time a recovery not done.
+    deadline = time.monotonic() + 3600
+    while True:
         try:
             socket.create_connection(("127.0.0.1", port)).close(); return
         except OSError:
+            if time.monotonic() > deadline:
+                raise SystemExit(f"the server on port {port} did not come up within an hour")
             time.sleep(0.1)
 
 if sys.argv[1] in ("nucleus", "nucleus-docker"):
@@ -163,18 +169,30 @@ if sys.argv[1] in ("nucleus", "nucleus-docker"):
             return info.f17
         def size():
             return sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(db) for f in fs)
+        # The servers started and not stopped: killed before the database
+        # goes, whatever ends the run — one left recovering would remove the
+        # files of the next run's database at the same path (PLAN.md §M14.28).
+        running = []
         def start():
             s = subprocess.Popen([binary, "server", db, "--listen", f"127.0.0.1:{port}", "--no-auth"],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            running.append(s)
             wait_port(port)
+            if s.poll() is not None:
+                # Another process answers on the port: not ours to measure.
+                raise SystemExit(f"the server exited ({s.returncode}); is port {port} taken?")
             return s
         def stop(s):
             s.terminate(); s.wait()
+            running.remove(s)
         # A fresh database each run: made here, removed at the end.
         if os.path.exists(db):
             sys.exit(f"{db} exists: wamp makes the database itself (and removes it after)")
         import shutil
-        cleanup = lambda: shutil.rmtree(db, ignore_errors=True)
+        def cleanup():
+            for s in running:
+                s.kill(); s.wait()
+            shutil.rmtree(db, ignore_errors=True)
     else:
         volume, binary, port = sys.argv[2], sys.argv[3], int(sys.argv[4])
         NAME = "nucleus-wamp-nc"

@@ -338,6 +338,70 @@ fn works_on_the_real_file_system() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The files under `dir`, each with its length.
+fn files_under(dir: &Path) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                todo.push(e.path());
+            } else {
+                let name = e.path().strip_prefix(dir).unwrap().display().to_string();
+                out.insert(name, m.len());
+            }
+        }
+    }
+    out
+}
+
+/// A store whose directory is moved away while it is open, another made
+/// at its path since (how a benchmark's cleanup under a server still
+/// recovering cost the F1 run's LSM tables their runs, PLAN.md §M14.28):
+/// the first one's checkpoint refuses — poisoned — and leaves every file
+/// of the second one as it was, which opens with its rows.
+#[test]
+fn a_store_whose_directory_was_replaced_touches_nothing_there() {
+    let base = nucleus_platform::temp_dir().join(format!(
+        "nucleus-replaced-{}",
+        nucleus_platform::process_id()
+    ));
+    let (dir, away) = (base.join("db"), base.join("away"));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let real: Arc<dyn Platform> = Arc::new(RealPlatform::new().unwrap());
+    let put = |store: &Store, k: &[u8], v: &[u8]| {
+        store.commit(&Batch {
+            meta: 1,
+            ops: vec![(k.to_vec(), Some(v.to_vec()))],
+        })
+    };
+    let (old, _) = Store::open(Arc::clone(&real), &dir, &opts()).unwrap();
+    old.add_engine(b"l", b"m", nucleus_storage::EngineKind::Lsm)
+        .unwrap();
+    put(&old, b"la", b"old").unwrap();
+    std::fs::rename(&dir, &away).unwrap();
+    let (new, _) = Store::open(Arc::clone(&real), &dir, &opts()).unwrap();
+    new.add_engine(b"l", b"m", nucleus_storage::EngineKind::Lsm)
+        .unwrap();
+    put(&new, b"lb", b"new").unwrap();
+    new.checkpoint().unwrap();
+    let before = files_under(&dir);
+    assert!(before.keys().any(|n| n.contains("run-")), "{before:?}");
+    put(&old, b"lc", b"old").unwrap();
+    assert!(old.checkpoint().is_err());
+    assert!(matches!(put(&old, b"ld", b"old"), Err(Error::Poisoned)));
+    assert_eq!(files_under(&dir), before);
+    drop((old, new));
+    let (new, _) = Store::open(Arc::clone(&real), &dir, &opts()).unwrap();
+    assert_eq!(new.get(b"lb").unwrap(), Some(b"new".to_vec()));
+    assert_eq!(new.get(b"la").unwrap(), None);
+    drop(new);
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
 /// Batches with an occasional checkpoint (one a scrub).  Returns the models after each
 /// batch attempted (index 0 = empty) and how many batches were acknowledged.
 fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {

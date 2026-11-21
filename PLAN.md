@@ -4349,6 +4349,36 @@ recovery time after a crash mid-compaction.
   2026-11-20: kept as issues #11 (merged scans), #12 (deletes and short
   scans) and #13 (cold reads), F1's whole run first.
 
+  *F1's whole run: LSM rows gone — a benchmark's fault, the store
+  hardened* (2026-11-21).  `wamp-lsm`'s first run lost ~20 of ~25
+  million rows at the restart after the steady state: the files went
+  479 → 104 MiB, and what was left was the 5 million rows the restart
+  replayed from the WAL — the tables' engines had come up empty, their
+  manifests and runs removed.  Runs 2 and 3, and nine runs since (two
+  loops checking the count after every restart, and 30+ kills at random
+  moments under bulk loads and 100-row transactions), lost nothing.  The
+  cause: the `wamp` step before it had failed (the B+tree's recovery
+  after the steady state took longer than `wait_port`'s ten minutes,
+  issue #14); `wamp.py`'s cleanup removed `target/wamp-db` without
+  stopping the server it had just started, which went on recovering.
+  `wamp-lsm` then made its database at the same path (and the same
+  port); when the orphan's recovery ended, its open removed the engine
+  files its own manifests did not name — every one of the new store's.
+  Reproduced on purpose (a store reopened, its directory moved away
+  during the replay, an LSM store made at the path: the second one's
+  manifest gone, and it no longer opens).  Fixed three ways: `wamp.py`
+  kills the servers it started before it removes the database, and
+  refuses a server that exited (another process answering on the port);
+  `wamp-lsm` has a database and a port of its own; and the store asks its
+  lock whether `dir/LOCK` is still the file it locked (`Lock::still_here`:
+  the same device and inode on Unix, there at all elsewhere) before a
+  checkpoint writes or removes files by their names and before an
+  opening removes stale ones — a store whose directory was removed or
+  replaced while open poisons itself and touches nothing
+  (`a_store_whose_directory_was_replaced_touches_nothing_there`, which
+  fails without the check).  The `wamp` step's other fault — a
+  recovery not done timed as one — was fixed before the rerun.
+
 **Done when:** the study is written here — the workloads and their
 measured amplifications, the design behind the KV contract, the
 compaction policy chosen and why, what is left to the B+tree — and the

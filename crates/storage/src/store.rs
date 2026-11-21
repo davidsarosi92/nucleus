@@ -416,7 +416,7 @@ struct Shared {
     scrubbing: AtomicBool,
     wal_zeroed: AtomicU64,
     /// The exclusive lock on the directory (`LOCK`).
-    _lock: Box<dyn nucleus_platform::Lock>,
+    lock: Box<dyn nucleus_platform::Lock>,
 }
 
 impl Shared {
@@ -430,6 +430,29 @@ impl Shared {
 
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
+    }
+
+    /// Refuses — the store poisoned — once the directory is no longer the
+    /// one it locked: removed, moved away or replaced while open (a
+    /// benchmark's cleanup under a server still recovering, another store
+    /// made at the path since).  Asked before the checkpoint writes and
+    /// removes files by their names, and before an opening removes stale
+    /// ones: they would be the other store's.
+    fn still_here(&self) -> Result<()> {
+        match self.lock.still_here() {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.poison();
+                Err(Error::Io(std::io::Error::other(format!(
+                    "the database directory {} was removed or replaced while open",
+                    self.dir.display()
+                ))))
+            }
+            Err(e) => {
+                self.poison();
+                Err(Error::Io(e))
+            }
+        }
     }
 
     fn branches(&self) -> MutexGuard<'_, BTreeMap<u32, Arc<Branch>>> {
@@ -844,13 +867,14 @@ impl Store {
                 poisoned: AtomicBool::new(false),
                 scrubbing: AtomicBool::new(false),
                 wal_zeroed: AtomicU64::new(0),
-                _lock: lock,
+                lock,
             }),
             b: main,
         };
         // Engines' files of checkpoints that did not commit, or of
         // branches gone.
         let branches: Vec<Arc<Branch>> = store.shared.branches().values().cloned().collect();
+        store.shared.still_here()?;
         let keep: Vec<(u32, u64)> = branches
             .iter()
             .map(|b| (b.info.id, b.checkpoint_lsn.load(Ordering::Acquire)))
@@ -2137,6 +2161,7 @@ impl Checkpoint<'_> {
             _running,
         } = self;
         let result = (|| {
+            s.still_here()?;
             // The engines' states (an LSM tree's memtable written as a
             // run), writes going on (§M14.28 L4a).
             let edir = engines::engines_dir(&s.dir);
@@ -2149,6 +2174,9 @@ impl Checkpoint<'_> {
             }
             s.pool.flush_frozen()?;
             s.pool.pager().commit_frozen(frozen)?;
+            // Asked again before files go by their names (the WAL's
+            // segments, the engines' stale files): the savers took a while.
+            s.still_here()?;
             for (b, lsn) in &lsns {
                 b.checkpoint_lsn.store(*lsn, Ordering::Release);
                 if s.scrubbing.load(Ordering::Acquire) {

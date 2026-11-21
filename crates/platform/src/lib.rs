@@ -196,7 +196,16 @@ pub trait FileSystem: Send + Sync {
 }
 
 /// A held lock (see [`FileSystem::lock`]); dropping it releases the lock.
-pub trait Lock: Send + Sync {}
+pub trait Lock: Send + Sync {
+    /// Whether the file the lock is on is still the one at its path:
+    /// false once that file, or the directory it is in, was removed,
+    /// moved away or replaced.  What lives at the path then is someone
+    /// else's — another store made there — and the holder must not touch
+    /// it.  True where that cannot be told.
+    fn still_here(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+}
 
 /// An open file, addressed by offset (there is no cursor).  All methods take
 /// `&self`, so one handle can be shared between threads.

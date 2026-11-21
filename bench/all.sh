@@ -15,6 +15,9 @@
 # step; LONG_RUNS (default 3) those of the steps that take longer than
 # ten minutes a run.  The data each step needs is fetched by the command
 # its error names.  Heavy steps run under target/bench-tools/memcap.sh.
+# (memcap sums the group's resident memory, so PostgreSQL's shared buffers
+# count once in every backend that touched them: the caps of steps whose
+# PostgreSQL holds 8 GB of shared buffers are higher.)
 #
 # PostgreSQL runs native (brew install postgresql@18 and pgvector;
 # bench/pg.py's cluster under target/bench-pg); ParadeDB in Docker (the
@@ -109,7 +112,7 @@ step_knn() { m knn "$RUNS" -- $CAP 8000 "$PY" -I bench/vectors/knn.py "$N" --pg;
 # writer processes: ~8 GB as macOS counts it when memory is free.
 step_ann-sift() {
   need "$SIFT" "$PY bench/ann/data.py"
-  m ann-sift "$LONG" --also "pgvector=$CAP 8000 $PY bench/ann/pgvector_ref.py $SIFT" -- \
+  m ann-sift "$LONG" --also "pgvector=$CAP 12000 $PY bench/ann/pgvector_ref.py $SIFT" -- \
     $CAP 12000 "$PY" bench/ann/sql.py "$N" "$SIFT" --efs 10,20,40,60,80,120,200
 }
 step_ann-sift-int8() {
@@ -138,7 +141,7 @@ step_ann-sparse() {
 
 # --- statistics, text
 step_stats() {
-  m stats "$RUNS" --also "work_mem 1GB=$CAP 8000 $PY bench/stats/aggs.py $N --work-mem 1GB" -- \
+  m stats "$RUNS" --also "work_mem 1GB=$CAP 12000 $PY bench/stats/aggs.py $N --work-mem 1GB" -- \
     $CAP 8000 "$PY" bench/stats/aggs.py "$N" --pg --numpy --python
 }
 step_analyzers() {
@@ -246,8 +249,10 @@ step_wamp() {
   m wamp "$LONG" -- python3 -I bench/wamp/wamp.py nucleus "$N" "$db" 21006 0,1,2,3,4,5,6,7
 }
 step_wamp-lsm() {
-  local db=$ROOT/target/wamp-db
-  m wamp-lsm "$LONG" -- python3 -I bench/wamp/wamp.py --engine=lsm nucleus "$N" "$db" 21006 0,1,2,3,4,5,6,7
+  # A database and a port of its own: never the wamp step's, whatever that
+  # one left behind.
+  local db=$ROOT/target/wamp-lsm-db
+  m wamp-lsm "$LONG" -- python3 -I bench/wamp/wamp.py --engine=lsm nucleus "$N" "$db" 21007 0,1,2,3,4,5,6,7
 }
 step_ycsb() {
   m ycsb "$RUNS" -- $CAP 8000 cargo test --release -q -p nucleus-sql --test ycsb -- --ignored --nocapture

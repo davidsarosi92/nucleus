@@ -643,7 +643,13 @@ takes an exclusive lock on `dir/LOCK` (`FileSystem::lock`: `flock` /
 clears) and holds it as long as the store — a second process (or store)
 fails with `Error::Locked` ("in use by another process") instead of
 corrupting the database — then creates `dir/data` and `dir/wal/` if
-needed and recovers; returns `Recovery { meta, replayed }`.  `write(&Batch)` appends the batch to the
+needed and recovers; returns `Recovery { meta, replayed }`.  The lock
+also tells whether `dir/LOCK` is still the file it locked
+(`Lock::still_here`: the same device and inode on Unix): a checkpoint
+asks before it writes and removes files by their names, an opening
+before it removes stale ones, and a store whose directory was removed
+or replaced while open — another store made at the path — poisons
+itself rather than touch that one's files.  `write(&Batch)` appends the batch to the
 WAL and applies it under the tree's write lock (visible at once);
 `wait_durable(lsn)`; `commit` = both.  `write_filtered(&Batch, filter)`
 applies it through a `LeafFilter` (§4.4) — not logged: replay applies the
