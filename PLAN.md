@@ -12159,6 +12159,25 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     back, every truncation refused, 300 keys of 204 bytes logged in less
     than half of version 1's bytes. Left: the tree's merge of the deletes
     and puts (~38 % before this step).
+  - Issue #4, step 5 (2026-11-21): `ANALYZE` on the workers. A profile
+    of `ANALYZE` after the load showed the read of every row on one
+    thread (~60 %) and the columns' statistics (sorts and counts, ~25 %).
+    *Taken*:
+    - a row table's parts are sampled on the workers (one reservoir
+      each) and merged as one uniform sample: a hypergeometric draw of
+      each part's share, then a partial Fisher–Yates shuffle of each, in
+      one pass (`merge_uniform_many`; the pairwise merge, 8 parts in
+      turn, spent 22 % of the time shuffling and freeing);
+    - the unused rows are dropped on a thread of their own;
+    - each column's statistics are worked out on a worker.
+    The row count stays exact, which PostgreSQL's block sample (Vitter's
+    algorithm S over pages, then a reservoir of their rows) gives up.
+    That sample reads O(sample) and not O(table), so it is the next step
+    if `ANALYZE` must scale past a full read. TPC-H SF 1 after its load
+    (ABBA): 1.73 / 1.67 → 0.74 / 0.78 s. Tested by
+    `analyze_on_workers_estimates_as_on_one` (1 and 4 workers: exact
+    counts, NULL share and distinct values; fails when the merge's count
+    is not the parts' sum) and `many_parts_merge_uniformly`.
 
   *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
   1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in

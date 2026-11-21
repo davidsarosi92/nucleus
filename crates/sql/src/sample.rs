@@ -341,6 +341,89 @@ impl Reservoir {
     }
 }
 
+/// Two uniform samples — `a`'s items of the `na` its stream had, `b`'s
+/// of `nb` — as one of up to `n` items of the `na + nb`: each shuffled,
+/// then how many come from each drawn without replacement
+/// (hypergeometrically) and that many taken from each — uniform again (a
+/// uniform subset of a uniform subset is one).  The generator it drew
+/// with, from `state`, left for more draws.
+pub(crate) fn merge_uniform<T>(
+    n: usize,
+    (mut a, na): (Vec<T>, u64),
+    (mut b, nb): (Vec<T>, u64),
+    state: u64,
+) -> (Vec<T>, Reservoir) {
+    let mut rng = Reservoir::merged(n, state);
+    for v in [&mut a, &mut b] {
+        for i in (1..v.len()).rev() {
+            let j = rng.below(i as u64 + 1) as usize;
+            v.swap(i, j);
+        }
+    }
+    let take = n.min((na + nb) as usize);
+    let (mut na, mut nb) = (na, nb);
+    let (mut a, mut b) = (a.into_iter(), b.into_iter());
+    let mut out = Vec::with_capacity(take);
+    for _ in 0..take {
+        let next = if rng.below(na + nb) < na {
+            na -= 1;
+            a.next()
+        } else {
+            nb -= 1;
+            b.next()
+        };
+        out.extend(next);
+    }
+    (out, rng)
+}
+
+/// Uniform samples of the parts of a stream — each part's items and how
+/// many its stream had — as one of up to `n` items of the whole: how many
+/// come from each drawn at once (a multivariate hypergeometric draw, one
+/// item at a time over the parts' counts left), then that many of each
+/// part's by a partial Fisher–Yates shuffle — uniform, as
+/// [`merge_uniform`] is, in one pass over many parts.  What is left of the
+/// parts is handed back, for the caller to drop where it costs least.
+pub(crate) fn merge_uniform_many<T>(
+    n: usize,
+    parts: Vec<(Vec<T>, u64)>,
+    state: u64,
+) -> (Vec<T>, Vec<Vec<T>>) {
+    let mut rng = Reservoir::merged(n, state);
+    let mut left: Vec<u64> = parts.iter().map(|p| p.1).collect();
+    let mut all: u64 = left.iter().sum();
+    let mut take = vec![0usize; parts.len()];
+    for _ in 0..(n as u64).min(all) {
+        let mut r = rng.below(all);
+        let i = left
+            .iter()
+            .position(|&l| {
+                if r < l {
+                    true
+                } else {
+                    r -= l;
+                    false
+                }
+            })
+            .expect("a draw within the counts left");
+        left[i] -= 1;
+        all -= 1;
+        take[i] += 1;
+    }
+    let mut out = Vec::with_capacity(take.iter().sum());
+    let mut rest = Vec::with_capacity(parts.len());
+    for ((mut items, _), t) in parts.into_iter().zip(take) {
+        let t = t.min(items.len());
+        for j in 0..t {
+            let k = j + rng.below((items.len() - j) as u64) as usize;
+            items.swap(j, k);
+        }
+        rest.push(items.split_off(t));
+        out.append(&mut items);
+    }
+    (out, rest)
+}
+
 /// A group's reservoir.
 struct Sample {
     n: usize,
@@ -368,15 +451,7 @@ impl Sample {
         }
     }
 
-    fn shuffle(&mut self) {
-        for i in (1..self.values.len()).rev() {
-            let j = self.reservoir.below(i as u64 + 1) as usize;
-            self.values.swap(i, j);
-        }
-    }
-
-    /// Both reservoirs' rows as one: how many values come from each drawn
-    /// without replacement, then that many of each's shuffled values.
+    /// Both reservoirs' rows as one ([`merge_uniform`]).
     fn merge(&mut self, mut other: Sample) {
         if other.seen == 0 {
             return;
@@ -386,28 +461,15 @@ impl Sample {
             *self = other;
             return;
         }
-        self.shuffle();
-        other.shuffle();
-        let take = self.n.min((self.seen + other.seen) as usize);
-        let (mut na, mut nb) = (self.seen, other.seen);
-        let (mut a, mut b) = (self.values.drain(..), other.values.drain(..));
-        let mut out = Vec::with_capacity(take);
         let state = self.reservoir.state ^ other.reservoir.state.rotate_left(17);
-        let mut rng = Reservoir::merged(self.n, state);
-        for _ in 0..take {
-            let from_a = rng.below(na + nb) < na;
-            let next = if from_a {
-                na -= 1;
-                a.next()
-            } else {
-                nb -= 1;
-                b.next()
-            };
-            out.extend(next);
-        }
-        drop((a, b));
+        let (values, rng) = merge_uniform(
+            self.n,
+            (std::mem::take(&mut self.values), self.seen),
+            (std::mem::take(&mut other.values), other.seen),
+            state,
+        );
         self.seen += other.seen;
-        self.values = out;
+        self.values = values;
         self.reservoir = rng;
     }
 }
@@ -581,6 +643,55 @@ impl Accumulator for One {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parts' samples merged at once take each item of the whole as often
+    /// as one sample of the whole would: from parts kept whole (`seen` =
+    /// their items) and from a part's reservoir of a longer stream.
+    #[test]
+    fn many_parts_merge_uniformly() {
+        let trials = 4000u64;
+        let mut hits = vec![0u32; 1000];
+        let mut from_big = 0u64;
+        for t in 0..trials {
+            let parts = vec![
+                ((0..300).collect::<Vec<u32>>(), 300),
+                ((300..350).collect(), 50),
+                (Vec::new(), 0),
+                ((350..1000).collect(), 650),
+                // A reservoir of 100 out of 9,000 items.
+                ((1000..1100).collect(), 9_000),
+            ];
+            let (out, rest) = merge_uniform_many(100, parts, t.wrapping_mul(0x9E37_79B9));
+            assert_eq!(out.len(), 100);
+            assert_eq!(rest.iter().map(Vec::len).sum::<usize>(), 1100 - 100);
+            let mut seen = out.clone();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 100, "no item twice");
+            for i in out {
+                if i < 1000 {
+                    hits[i as usize] += 1;
+                } else {
+                    from_big += 1;
+                }
+            }
+        }
+        // Each of the first 1,000 of 10,000 items: 1 % of the draws.
+        let expect = trials as f64 * 100.0 / 10_000.0;
+        let total: u32 = hits.iter().sum();
+        assert!(
+            (total as f64 - expect * 1000.0).abs() < expect * 1000.0 * 0.05,
+            "{total}"
+        );
+        for (i, &h) in hits.iter().enumerate() {
+            assert!((h as f64) < expect * 2.5, "item {i}: {h} of {expect}");
+        }
+        let big = from_big as f64 / trials as f64;
+        assert!(
+            (big - 90.0).abs() < 1.0,
+            "{big} of 90 a merge from the reservoir"
+        );
+    }
 
     #[test]
     fn draws_are_unbiased_enough() {

@@ -272,6 +272,13 @@ pub trait TableStorage: Send + Sync {
         Ok(Box::new(RowsAsBatches(self.rows(scan)?)))
     }
 
+    /// Whether [`sample`](Self::sample) reads only its scan's range, so
+    /// `ANALYZE` may sample a table's parts apart, on workers (by default
+    /// not).
+    fn samples_in_parts(&self) -> bool {
+        false
+    }
+
     /// The rows of a range offered to `sample` in key order (`ANALYZE`):
     /// by default every row read and offered; a storage may make only the
     /// rows the sample takes.
@@ -662,6 +669,10 @@ impl TableStorage for RowStorage {
 
     fn batches<'a>(&self, scan: Scan<'a>) -> Result<Box<dyn BatchSource + 'a>> {
         Ok(Box::new(crate::vector::RowBatches::new(scan)?))
+    }
+
+    fn samples_in_parts(&self) -> bool {
+        true
     }
 
     fn sample(&self, scan: Scan<'_>, sample: &mut crate::stats::Sample) -> Result<()> {

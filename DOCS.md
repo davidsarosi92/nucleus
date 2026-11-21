@@ -3333,7 +3333,16 @@ rows through `stats::Sample`, which builds a row only when it takes it):
 a row table reads every entry but decodes only the rows taken, a column
 table decodes a segment's columns only when the sample takes one of its
 rows (§M14.20 W3b: `lineitem` 5.5 → 2.7 s in a row table, the column
-load's `ANALYZE` 5.7 → 2.9 s).  Selectivities: `=` 1/ndv, ranges from the
+load's `ANALYZE` 5.7 → 2.9 s).  On the statement's workers: a row
+table's range is cut at its split points
+(`TableStorage::samples_in_parts`) and each part is sampled on a worker
+over the transaction's shared reads. The parts' samples are merged in
+one pass (`sample::merge_uniform_many`): the count each part gives is a
+multivariate hypergeometric draw over their row counts, then that many
+are taken from each part's shuffled sample, so the merged sample is
+uniform still and the count exact. The rows not taken are dropped on a
+thread of their own. The columns' statistics are worked out a run of
+columns a worker (TPC-H SF 1's `ANALYZE` 1.70 → 0.76 s, issue #4).  Selectivities: `=` 1/ndv, ranges from the
 histogram (a column's lower and upper bound in one AND together: the
 histogram between them, not each side's product), `IS NULL` the null
 fraction, `IN` n/ndv, combined by AND/OR/NOT.  What the statistics cannot

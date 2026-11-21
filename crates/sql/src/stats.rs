@@ -169,6 +169,9 @@ impl TableStats {
 /// Rows ANALYZE looks at, at most: a uniform sample of a larger table (as
 /// PostgreSQL's 30 000).
 const SAMPLE: usize = 30_000;
+/// The sampled rows past which `ANALYZE` works out its columns' statistics
+/// on the statement's workers.
+const PARALLEL_COLUMNS_ROWS: usize = 4096;
 
 /// Rows of the sample kept for estimates ([`stats_sample`]), at most, and
 /// their bytes at most (a table of 768-dimension vectors keeps about 330).
@@ -256,22 +259,7 @@ pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
     crate::datetime::random_bytes(&mut seed)?;
     let seed = u64::from_le_bytes(seed);
     let (rows, total) = {
-        let mut sample = Sample::new(SAMPLE, seed);
-        let start = table.index_prefix(0);
-        let end = nucleus_kv::prefix_end(&start);
-        crate::storage::of(table)?.sample(
-            crate::storage::Scan {
-                txn: &*txn,
-                table,
-                start,
-                end,
-                wanted: None,
-                validated: false,
-                bounds: Vec::new(),
-                dicts: Vec::new(),
-            },
-            &mut sample,
-        )?;
+        let sample = sample_table(&*txn, table, seed)?;
         let total = sample.seen();
         (sample.into_rows(), total)
     };
@@ -282,8 +270,7 @@ pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
             ((n as f64) * (total as f64) / (rows.len() as f64)).round() as u64
         }
     };
-    let mut columns = Vec::with_capacity(table.columns.len());
-    for c in 0..table.columns.len() {
+    let column = |c: usize| {
         let mut vals: Vec<Value> = rows
             .iter()
             .map(|r| r[c].clone())
@@ -309,12 +296,34 @@ pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
             }
             bounds.dedup_by(|a, b| a.sort_cmp(b).is_eq());
         }
-        columns.push(ColumnStats {
+        ColumnStats {
             nulls,
             distinct,
             bounds,
-        });
-    }
+        }
+    };
+    // Each column's on its own: on the statement's workers, a run of
+    // columns each.
+    let n = table.columns.len();
+    let workers = crate::budget::workers().min(n);
+    let columns: Vec<ColumnStats> = if workers > 1 && rows.len() >= PARALLEL_COLUMNS_ROWS {
+        let per = n.div_ceil(workers);
+        let column = &column;
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = (0..n)
+                .step_by(per)
+                .map(|from| {
+                    sc.spawn(move || (from..(from + per).min(n)).map(column).collect::<Vec<_>>())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("a column's statistics"))
+                .collect()
+        })
+    } else {
+        (0..n).map(column).collect()
+    };
     let (groups, dependencies) = together_stats(table, &rows, (rows.len() as u64) < total, total);
     let stats = TableStats {
         rows: total,
@@ -379,6 +388,24 @@ impl Sample {
     /// The rows taken.
     pub fn into_rows(self) -> Vec<crate::types::Row> {
         self.rows
+    }
+
+    /// Samples of parts of a stream as one sample of the whole
+    /// ([`crate::sample::merge_uniform_many`]), drawn from `seed`; the
+    /// rows not taken dropped on a thread of their own (hundreds of
+    /// thousands of rows' values freed: most of the merge's time).
+    fn merged(size: usize, parts: Vec<Sample>, seed: u64) -> Sample {
+        let seen = parts.iter().map(|p| p.seen).sum();
+        let (rows, rest) = crate::sample::merge_uniform_many(
+            size,
+            parts.into_iter().map(|p| (p.rows, p.seen)).collect(),
+            seed,
+        );
+        std::thread::spawn(move || drop(rest));
+        let mut out = Sample::new(size, seed);
+        out.rows = rows;
+        out.seen = seen;
+        out
     }
 }
 
@@ -497,6 +524,85 @@ fn dependency(rows: &[crate::types::Row], from: usize, to: usize, sampled: bool)
         }
     }
     (repeated > 0).then(|| agree as f64 / repeated as f64)
+}
+
+/// [`SAMPLE`] rows of `table` and its row count, from every row: a row
+/// storage's range cut into parts read on the statement's workers over the
+/// transaction's shared reads, each part sampled on its own and the
+/// samples merged ([`Sample::merged`]: uniform still, the count exact) —
+/// the full read was most of `ANALYZE` after TPC-H's load (issue #4).
+fn sample_table(txn: &dyn KvTxn, table: &Table, seed: u64) -> Result<Sample> {
+    let storage = crate::storage::of(table)?;
+    let start = table.index_prefix(0);
+    let end = nucleus_kv::prefix_end(&start);
+    fn scan<'a>(
+        txn: &'a dyn KvTxn,
+        table: &'a Table,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+    ) -> crate::storage::Scan<'a> {
+        crate::storage::Scan {
+            txn,
+            table,
+            start,
+            end,
+            wanted: None,
+            validated: false,
+            bounds: Vec::new(),
+            dicts: Vec::new(),
+        }
+    }
+    let workers = crate::budget::workers();
+    let cuts = match txn.shared() {
+        Some(_) if workers > 1 && storage.samples_in_parts() => {
+            storage.split_points(txn, table, &start, end.as_deref(), workers)?
+        }
+        _ => Vec::new(),
+    };
+    let (Some(shared), false) = (txn.shared(), cuts.is_empty()) else {
+        let mut sample = Sample::new(SAMPLE, seed);
+        storage.sample(scan(txn, table, start, end), &mut sample)?;
+        return Ok(sample);
+    };
+    let mut bounds: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(cuts.len() + 1);
+    let mut from = start;
+    for c in cuts {
+        bounds.push((std::mem::replace(&mut from, c.clone()), Some(c)));
+    }
+    bounds.push((from, end));
+    let ambient = crate::parallel::Ambient::capture();
+    let instance = txn.instance();
+    let parts: Vec<Result<Sample>> = std::thread::scope(|sc| {
+        let handles: Vec<_> = bounds
+            .into_iter()
+            .enumerate()
+            .map(|(i, (from, to))| {
+                let (storage, ambient) = (&storage, &ambient);
+                nucleus_platform::session_thread("nucleus worker")
+                    .spawn_scoped(sc, move || {
+                        let (sample, scanned) = ambient.run(|| {
+                            let txn = crate::parallel::SharedTxn(shared, instance);
+                            let part_seed = seed.rotate_left(i as u32 + 1) ^ i as u64;
+                            let mut sample = Sample::new(SAMPLE, part_seed);
+                            storage.sample(scan(&txn, table, from, to), &mut sample)?;
+                            Ok(sample)
+                        });
+                        crate::budget::add_scanned(scanned);
+                        sample
+                    })
+                    .expect("a worker thread")
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(crate::error::Error::internal("a worker panicked")))
+            })
+            .collect()
+    });
+    let parts = parts.into_iter().collect::<Result<Vec<_>>>()?;
+    Ok(Sample::merged(SAMPLE, parts, seed))
 }
 
 /// `ANALYZE [table]`.

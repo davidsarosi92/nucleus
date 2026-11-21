@@ -162,3 +162,51 @@ fn vacuum_analyze_analyzes() {
     );
     assert_eq!(s.execute("VACUUM ANALYZE nope").unwrap_err().code, "42P01");
 }
+
+/// `ANALYZE` on the statement's workers (issue #4): the table's parts
+/// sampled apart and merged, its columns worked out apart — the row count
+/// exact and the estimates those of one sample of the whole.
+#[test]
+fn analyze_on_workers_estimates_as_on_one() {
+    let stats = |workers: usize| {
+        let mut s = Session::new(kv(Options::default()));
+        s.execute(&format!("SET parallel_workers = {workers}"))
+            .unwrap();
+        s.execute(
+            "CREATE TABLE t (id INT PRIMARY KEY, g INT, n INT, v TEXT); \
+             INSERT INTO t SELECT i, i % 10, CASE WHEN i % 4 = 0 THEN NULL ELSE i END, \
+             repeat('v', 30) FROM generate_series(1, 120000) i; ANALYZE t",
+        )
+        .unwrap();
+        rows(
+            &mut s,
+            "SELECT column_name, rows, nulls, distinct_values FROM nc_catalog.statistics \
+             ORDER BY column_name",
+        )
+    };
+    let int = |v: &Value| match v {
+        Value::Int(n) => *n,
+        v => panic!("{v:?}"),
+    };
+    for workers in [1, 4] {
+        let got = stats(workers);
+        let col = |name: &str| {
+            got.iter()
+                .find(|r| r[0] == Value::Text(name.into()))
+                .unwrap_or_else(|| panic!("{name} in {got:?}"))
+        };
+        for r in &got {
+            assert_eq!(int(&r[1]), 120_000, "{workers} workers: {r:?}");
+        }
+        assert_eq!(int(&col("g")[3]), 10, "{workers} workers");
+        assert_eq!(int(&col("id")[2]), 0, "{workers} workers");
+        // A quarter null, from a sample of 30,000: within 2 %.
+        let nulls = int(&col("n")[2]);
+        assert!(
+            (29_400..=30_600).contains(&nulls),
+            "{workers} workers: {nulls}"
+        );
+        // Unique columns estimated unique (within 10 %).
+        assert!(int(&col("id")[3]) >= 108_000, "{workers} workers: {got:?}");
+    }
+}
