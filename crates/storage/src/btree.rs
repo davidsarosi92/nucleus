@@ -1110,30 +1110,43 @@ impl BTree {
         at: usize,
         out: &mut Vec<Job>,
     ) -> Result<()> {
-        let leaf = {
+        // An internal node read where its page is, not decoded (its keys
+        // each made a vector: a fifth of a commit of 100 000 deletes, for
+        // a walk the insert repeats): each child's run found by its
+        // separators, then the children walked, the page let go.
+        let groups = {
             let r = self.pool.fetch(id)?;
             let page = r.read();
-            View::new(&page)
-                .map_err(|reason| Error::Corrupt { page: id, reason })?
-                .is_leaf()
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            let v = View::new(&page).map_err(corrupt)?;
+            if v.is_leaf() {
+                out.push(Job {
+                    id,
+                    run: at..at + entries.len(),
+                });
+                return Ok(());
+            }
+            let n = v.len();
+            let mut groups = Vec::new();
+            let mut start = 0;
+            while start < entries.len() {
+                // Child `i` holds the keys below separator `i`.
+                let i = v.child_index(&entries[start].0).map_err(corrupt)?;
+                let end = if i < n {
+                    let sep = v.key(i).map_err(corrupt)?;
+                    start
+                        + entries[start..]
+                            .partition_point(|(k, _)| sep.order(k) == std::cmp::Ordering::Greater)
+                } else {
+                    entries.len()
+                };
+                groups.push((v.child(i).map_err(corrupt)?, start..end));
+                start = end;
+            }
+            groups
         };
-        if leaf {
-            out.push(Job {
-                id,
-                run: at..at + entries.len(),
-            });
-            return Ok(());
-        }
-        let Node::Internal(node) = self.load(id)? else {
-            return Err(Error::Corrupt {
-                page: id,
-                reason: "an internal node read as a leaf",
-            });
-        };
-        let mut from = at;
-        for (i, g) in child_groups(&node, entries) {
-            self.leaf_jobs(node.children[i], g, from, out)?;
-            from += g.len();
+        for (child, run) in groups {
+            self.leaf_jobs(child, &entries[run.clone()], at + run.start, out)?;
         }
         Ok(())
     }
