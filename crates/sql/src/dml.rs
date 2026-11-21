@@ -2357,7 +2357,13 @@ mod tests {
         for (n, distinct) in [(10, 5), (300_000, 1 << 40), (300_000, 300), (300_000, 1)] {
             let mut want = sorted(&entries(n, distinct));
             want.sort();
-            for threads in [1, 3, 8] {
+            // WASI has no threads (the browser edition).
+            let threads: &[usize] = if cfg!(target_os = "wasi") {
+                &[1]
+            } else {
+                &[1, 3, 8]
+            };
+            for &threads in threads {
                 let mut e = entries(n, distinct);
                 e.sort_on(threads);
                 let got = sorted(&e);
