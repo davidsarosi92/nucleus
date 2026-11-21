@@ -12137,6 +12137,22 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   - Not taken: a delete marked in place beside the version it ends is
     issue #4's logged in-place rewrite; within the writes' target (≤ 2×).
     Issue #7.
+  - Issue #7, measured again (2026-11-21, `del.py`: five tables of
+    bench/run.py's, each loaded, updated a quarter, then deleted a
+    tenth): 85–88 ms; the same `DELETE` rolled back 50 ms, so the commit
+    ~38; the scan alone (`count(*)` with the filter) 8–10 ms.  So ~40 ms
+    go to the 100 000 matching rows made `Row`s on the scan's workers,
+    stashed, read back and buffered as deletes (`delete_rows`: each
+    value encoded again to see whether it was stored out of line), and
+    the commit's ~380 ns a row to the main thread installing ~14 000
+    rewritten leaves while its workers wait (`Shared::work`'s `cvwait`
+    the workers' top frame) — no single part above a tenth.  Taken:
+    `BTree::leaf_jobs` walks the internal nodes in their pages (`View`)
+    instead of decoding them (each separator a vector): −1.5 %, within
+    the noise.  Left: a delete that needs only the keys (no secondary
+    index, no row referenced, no `RETURNING`) — but the row tells
+    whether values are stored out of line; the commit's install of the
+    leaves on one thread.
 
   *S11, the statistics suite* (sum 2.46×, variance 2.14×, corr 2.37×,
   avg 2.07× PostgreSQL's).  Its table is loaded by one `INSERT … SELECT`
