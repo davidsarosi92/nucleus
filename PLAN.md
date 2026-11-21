@@ -12017,8 +12017,24 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     `BTree::apply_sorted_owned` moves the keys and small values into
     the cells.  The vacuum (each binary alone in turn, ABBA): 5.64 →
     4.20 s (sorted) → 3.72 s (owned); `COPY` 10.3 → 9.9 s by the same
-    path.  Left: the WAL's copy of every value (~25 % of the rest) —
-    step 2, the logged retime.
+    path.
+  - Issue #4, step 2 (2026-11-21): the vacuum's versions logged as
+    moves (`Store::write_moving`, WAL batch version 4): a version made of
+    an intent carries the intent's key in the log, not the row; replay
+    reads the value from the tree (the log in order brought it there).
+    Bytes the server wrote during the vacuum (`proc_pid_rusage`): 1.81 →
+    0.94 GiB.  Its time did not move here (3.77 → 3.76 s, ABBA): on this
+    machine's SSD the WAL's writes were page-cache copies and the sweep
+    is bound by the CPU — the rest is `sweep_chunk`'s walk of every entry
+    (~40 % of the samples: keys and values copied out, a few allocations
+    an entry) and the tree's merge of the deletes and puts (~33 %).  Kept
+    for the disks that are not (a cloud volume's 250 MB/s: ~3.5 s of
+    writing saved).  Tested by `vacuums_survive_a_crash_at_every_io_point`
+    (spilled transactions, vacuums between writes over the same keys,
+    replay with no gathering, 300 bytes and the default; fails when a
+    replayed move's value is not its source's).  Left, with PostgreSQL's
+    `VACUUM ANALYZE` at 1.1 s against 3.7 + 1.7: a retime of a leaf's
+    entries in place, without taking each one out — the next step.
 
   *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
   1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in

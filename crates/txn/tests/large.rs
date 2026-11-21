@@ -927,3 +927,89 @@ fn intents_are_read_only_where_their_span_reaches() {
     assert_eq!(e.intent_count().unwrap(), 0);
     check(&e, &model);
 }
+
+/// A vacuum logs the versions it makes of committed intents as moves —
+/// their keys, not their values (issue #4) — which replay reads from the
+/// tree: a crash anywhere, before, during or after vacuums and writes over
+/// the same keys, recovers some commit's state, whatever recovery gathers
+/// (`redo_bytes` none, small, the default).
+#[test]
+fn vacuums_survive_a_crash_at_every_io_point() {
+    for (mode, redo_bytes) in [
+        (CrashMode::DropUnsynced, 0),
+        (CrashMode::Torn, 300),
+        (CrashMode::DropUnsynced, nucleus_storage::store::REDO_BYTES),
+    ] {
+        let opts = || {
+            let mut o = opts();
+            o.store.redo_bytes = redo_bytes;
+            o
+        };
+        harness::run("txn_large_vacuums_crash_at_every_io_point", 2, |seed| {
+            type Model = BTreeMap<Vec<u8>, Vec<u8>>;
+            let run = |p: &Arc<SimPlatform>| -> (Vec<Model>, usize, u64) {
+                let rng = SplitMix64::new(seed);
+                let mut states = vec![Model::new()];
+                let (mut acked, mut moved) = (0, 0);
+                let _ = (|| -> Result<(), Error> {
+                    let e = engine_on(p, opts())?;
+                    let mut model = Model::new();
+                    for i in 1..=6usize {
+                        let mut t = e.begin();
+                        // Odd ones spill: their intents stay committed
+                        // until a vacuum moves them.
+                        let n = if i % 2 == 1 { 120 } else { 6 };
+                        for _ in 0..n {
+                            let k = key(rng.below(100) as usize);
+                            if rng.below(5) == 0 {
+                                t.delete(&k)?;
+                                model.remove(&k);
+                            } else {
+                                let v = vec![i as u8; 30 + rng.below(40) as usize];
+                                t.put(&k, &v)?;
+                                model.insert(k, v);
+                            }
+                        }
+                        states.push(model.clone());
+                        t.commit()?;
+                        acked = i;
+                        if i % 2 == 0 {
+                            moved += e.intent_count()?;
+                            e.vacuum()?;
+                        }
+                    }
+                    Ok(())
+                })();
+                (states, acked, moved)
+            };
+            let dry = Arc::new(SimPlatform::new(seed));
+            let (states, acked, moved) = run(&dry);
+            assert_eq!(acked, 6);
+            assert!(moved > 100, "{moved} intents moved");
+            let total = dry.sim_fs().op_count();
+            for n in (1..=total).step_by(2) {
+                let p = Arc::new(SimPlatform::new(seed));
+                p.sim_fs().set_faults(Faults {
+                    crash_mode: mode,
+                    ..Faults::default()
+                });
+                p.sim_fs().crash_after_ops(n);
+                let (_, acked, _) = run(&p);
+                let e =
+                    engine_on(&p, opts()).unwrap_or_else(|err| panic!("{mode:?} op {n}: {err}"));
+                let k: usize = e.visible().to_string().parse().unwrap();
+                assert!(
+                    k >= acked && k < states.len(),
+                    "{mode:?} op {n}: at {k}, acked {acked}"
+                );
+                assert!(
+                    all(&e) == states[k],
+                    "{mode:?} op {n}: state is not that of commit {k}"
+                );
+                e.vacuum().unwrap();
+                assert!(all(&e) == states[k], "{mode:?} op {n}: vacuum");
+                assert_eq!(e.intent_count().unwrap(), 0, "{mode:?} op {n}: intents");
+            }
+        });
+    }
+}

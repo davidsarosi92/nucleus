@@ -674,7 +674,16 @@ brings more than `DEFERRED_MAX` (4096); replay puts them back in memory
 (and `open` checkpoints after a replay); a later batch's put or delete
 of the key replaces the deferred entry.  A memtable for entries read
 seldom — the commit times (§5.2), each of which would otherwise rewrite
-a leaf of its own per commit.  A batch whose keys are all
+a leaf of its own per commit.  `write_moving(&Batch, covered, moves)`
+logs some of a batch's puts as *moves* (WAL batch version 4: version
+3's layout, an op tagged 2 a put without its value, the key it moves
+from given instead — the bytes it shares with the put's key counted):
+the batch carries the value the source key holds, which the caller read
+with writes held off, and replay reads it from the tree, where the log
+replayed in order has brought it (gathered writes applied first; a
+source gone puts nothing).  The vacuum's versions made of committed
+intents (§5.3): their keys logged, not their rows again — the vacuum
+after TPC-H's load wrote 0.94 GiB instead of 1.81.  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `write_unlogged(&Batch)`
 applies a batch without logging it (D16): durable only once a checkpoint

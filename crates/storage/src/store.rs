@@ -69,6 +69,14 @@ const BATCH_VERSION_COVERING: u8 = 2;
 /// A batch with deferred puts ([`Store::write_deferring`]): version 2's
 /// layout (its ranges maybe none), then the deferred puts.
 const BATCH_VERSION_DEFERRING: u8 = 3;
+/// A batch with moves ([`Store::write_moving`]): version 3's layout, an
+/// op tagged 2 a put whose value is not logged — the key it moves from
+/// is (the bytes it shares with the put's key counted, the rest given).
+const BATCH_VERSION_MOVING: u8 = 4;
+/// A logged op's tag: a put, a delete, a move.
+const OP_PUT: u8 = 0;
+const OP_DELETE: u8 = 1;
+const OP_MOVE: u8 = 2;
 /// Deferred entries kept in memory at most: past it they go into the tree
 /// with the batch that brought them there.
 pub const DEFERRED_MAX: usize = 4096;
@@ -152,11 +160,14 @@ impl Redo {
     fn replay(
         &mut self,
         tree: &mut Tables,
-        batch: Batch,
+        mut batch: Batch,
         covered: &[(Vec<u8>, Vec<u8>)],
+        moves: &[(usize, Vec<u8>)],
     ) -> Result<()> {
-        if self.budget == 0 || !covered.is_empty() {
+        if self.budget == 0 || !covered.is_empty() || !moves.is_empty() {
+            // A move reads the tree as the batch found it.
             self.flush(tree)?;
+            resolve_moves(tree, &mut batch, moves)?;
             apply(tree, &batch, None)?;
             return remove_covered(tree, covered);
         }
@@ -193,6 +204,38 @@ impl Redo {
     }
 }
 
+/// A replayed batch's moves given their values: each the value its source
+/// key holds in `tree` now — as when the batch was written, the log
+/// replayed in order up to it.  A move whose source is gone puts nothing.
+fn resolve_moves(tree: &Tables, batch: &mut Batch, moves: &[(usize, Vec<u8>)]) -> Result<()> {
+    let mut gone = Vec::new();
+    for (i, source) in moves {
+        match tree.get(source)? {
+            Some(v) => batch.ops[*i].1 = Some(v),
+            None => gone.push(*i),
+        }
+    }
+    if !gone.is_empty() {
+        let mut i = 0;
+        batch.ops.retain(|_| {
+            i += 1;
+            gone.binary_search(&(i - 1)).is_err()
+        });
+    }
+    Ok(())
+}
+
+/// A logged batch read back: the batch (a move's value empty), its
+/// covered ranges, deferred puts and moves (each op's index, ascending,
+/// and its source key).
+#[derive(Debug, PartialEq, Eq)]
+struct Decoded {
+    batch: Batch,
+    covered: Vec<(Vec<u8>, Vec<u8>)>,
+    deferred: Vec<(Vec<u8>, Vec<u8>)>,
+    moves: Vec<(usize, Vec<u8>)>,
+}
+
 /// The journal of a batch of pages sealed again in place (K3f), beside
 /// the data file.
 const RESEAL_JOURNAL: &str = "data.reseal";
@@ -226,16 +269,26 @@ impl Batch {
     }
 
     fn encode_covering(&self, covered: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
-        self.encode_full(covered, &[])
+        self.encode_full(covered, &[], &[])
     }
 
+    /// The batch as logged; `moves` (op indexes, ascending, and their
+    /// source keys) are puts logged without their values.
     fn encode_full(
         &self,
         covered: &[(Vec<u8>, Vec<u8>)],
         deferred: &[(Vec<u8>, Vec<u8>)],
+        moves: &[(usize, Vec<u8>)],
     ) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.push(if !deferred.is_empty() {
+        let size = self
+            .ops
+            .iter()
+            .map(|(k, v)| 9 + k.len() + v.as_ref().map_or(0, Vec::len))
+            .sum::<usize>();
+        let mut out = Vec::with_capacity(13 + size);
+        out.push(if !moves.is_empty() {
+            BATCH_VERSION_MOVING
+        } else if !deferred.is_empty() {
             BATCH_VERSION_DEFERRING
         } else if covered.is_empty() {
             BATCH_VERSION
@@ -244,16 +297,32 @@ impl Batch {
         });
         out.extend_from_slice(&self.meta.to_le_bytes());
         out.extend_from_slice(&(self.ops.len() as u32).to_le_bytes());
-        for (k, v) in &self.ops {
-            out.push(u8::from(v.is_none()));
+        let mut moves = moves.iter().peekable();
+        for (i, (k, v)) in self.ops.iter().enumerate() {
+            let moved = moves.next_if(|(m, _)| *m == i);
+            out.push(match (v, moved) {
+                (None, _) => OP_DELETE,
+                (Some(_), None) => OP_PUT,
+                (Some(_), Some(_)) => OP_MOVE,
+            });
             out.extend_from_slice(&(k.len() as u32).to_le_bytes());
             out.extend_from_slice(k);
-            if let Some(v) = v {
-                out.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                out.extend_from_slice(v);
+            match (v, moved) {
+                (None, _) => {}
+                (Some(_), Some((_, source))) => {
+                    let shared = k.iter().zip(source).take_while(|(a, b)| a == b).count();
+                    out.extend_from_slice(&(shared as u32).to_le_bytes());
+                    out.extend_from_slice(&((source.len() - shared) as u32).to_le_bytes());
+                    out.extend_from_slice(&source[shared..]);
+                }
+                (Some(v), None) => {
+                    out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                    out.extend_from_slice(v);
+                }
             }
         }
-        if !covered.is_empty() || !deferred.is_empty() {
+        debug_assert!(moves.next().is_none(), "a move of a delete or past the ops");
+        if !covered.is_empty() || !deferred.is_empty() || out[0] == BATCH_VERSION_MOVING {
             out.extend_from_slice(&(covered.len() as u32).to_le_bytes());
             for (start, end) in covered {
                 for k in [start, end] {
@@ -262,7 +331,7 @@ impl Batch {
                 }
             }
         }
-        if !deferred.is_empty() {
+        if !deferred.is_empty() || out[0] == BATCH_VERSION_MOVING {
             out.extend_from_slice(&(deferred.len() as u32).to_le_bytes());
             for (k, v) in deferred {
                 for b in [k, v] {
@@ -276,21 +345,18 @@ impl Batch {
 
     #[cfg(test)]
     fn decode(b: &[u8]) -> Result<Self> {
-        Ok(Self::decode_full(b)?.0)
+        Ok(Self::decode_full(b)?.batch)
     }
 
     #[cfg(test)]
     fn decode_covering(b: &[u8]) -> Result<(Self, Vec<(Vec<u8>, Vec<u8>)>)> {
-        let (batch, covered, _) = Self::decode_full(b)?;
-        Ok((batch, covered))
+        let d = Self::decode_full(b)?;
+        Ok((d.batch, d.covered))
     }
 
-    /// A batch, its covered ranges (none before version 2) and its
-    /// deferred puts (none before version 3).
-    #[allow(clippy::type_complexity)]
-    fn decode_full(
-        mut b: &[u8],
-    ) -> Result<(Self, Vec<(Vec<u8>, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>)> {
+    /// A batch, its covered ranges (none before version 2), its deferred
+    /// puts (none before version 3) and its moves (none before version 4).
+    fn decode_full(mut b: &[u8]) -> Result<Decoded> {
         fn take<'a>(b: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
             if b.len() < n {
                 return Err(Error::Corrupt {
@@ -306,7 +372,7 @@ impl Batch {
         let version = take(&mut b, 1)?[0];
         if !matches!(
             version,
-            BATCH_VERSION | BATCH_VERSION_COVERING | BATCH_VERSION_DEFERRING
+            BATCH_VERSION | BATCH_VERSION_COVERING | BATCH_VERSION_DEFERRING | BATCH_VERSION_MOVING
         ) {
             return Err(Error::Corrupt {
                 page: PageId(0),
@@ -316,15 +382,31 @@ impl Batch {
         let meta = u64::from_le_bytes(take(&mut b, 8)?.try_into().unwrap());
         let n = u32_of(take(&mut b, 4)?);
         let mut ops = Vec::with_capacity(n.min(1 << 16));
-        for _ in 0..n {
-            let delete = take(&mut b, 1)?[0] == 1;
+        let mut moves = Vec::new();
+        for i in 0..n {
+            let tag = take(&mut b, 1)?[0];
             let klen = u32_of(take(&mut b, 4)?);
             let key = take(&mut b, klen)?.to_vec();
-            let val = if delete {
-                None
-            } else {
-                let vlen = u32_of(take(&mut b, 4)?);
-                Some(take(&mut b, vlen)?.to_vec())
+            let val = match tag {
+                OP_DELETE => None,
+                OP_MOVE if version == BATCH_VERSION_MOVING => {
+                    let shared = u32_of(take(&mut b, 4)?);
+                    let rest = u32_of(take(&mut b, 4)?);
+                    if shared > key.len() {
+                        return Err(Error::Corrupt {
+                            page: PageId(0),
+                            reason: "WAL move's source past its key",
+                        });
+                    }
+                    let mut source = key[..shared].to_vec();
+                    source.extend_from_slice(take(&mut b, rest)?);
+                    moves.push((i, source));
+                    Some(Vec::new())
+                }
+                _ => {
+                    let vlen = u32_of(take(&mut b, 4)?);
+                    Some(take(&mut b, vlen)?.to_vec())
+                }
             };
             ops.push((key, val));
         }
@@ -342,7 +424,7 @@ impl Batch {
             }
         }
         let mut deferred = Vec::new();
-        if version == BATCH_VERSION_DEFERRING {
+        if version >= BATCH_VERSION_DEFERRING {
             let n = u32_of(take(&mut b, 4)?);
             for _ in 0..n.min(1 << 20) {
                 let k = bytes(&mut b)?;
@@ -350,7 +432,12 @@ impl Batch {
                 deferred.push((k, v));
             }
         }
-        Ok((Self { meta, ops }, covered, deferred))
+        Ok(Decoded {
+            batch: Self { meta, ops },
+            covered,
+            deferred,
+            moves,
+        })
     }
 }
 
@@ -789,12 +876,12 @@ fn open_branch(
     let header = wal.record_len(0);
     let mut redo = Redo::new(opts.redo_bytes);
     wal.replay(applied, |lsn, payload| {
-        let (batch, covered, put) = Batch::decode_full(payload)?;
+        let d = Batch::decode_full(payload)?;
         // The deferred puts are not the tree's: the order between them
         // and the tree's writes does not matter.
-        overlay(&mut deferred, &batch, put);
-        meta = batch.meta;
-        redo.replay(&mut tree, batch, &covered)?;
+        overlay(&mut deferred, &d.batch, d.deferred);
+        meta = d.batch.meta;
+        redo.replay(&mut tree, d.batch, &d.covered, &d.moves)?;
         replayed += 1;
         applied = lsn + header + payload.len() as u64;
         Ok(())
@@ -1272,6 +1359,41 @@ impl Store {
         self.write_encoded(batch, &encoded, None, Vec::new())
     }
 
+    /// [`write_covering`](Store::write_covering) with *moves*: for each
+    /// `(i, source)` (ascending by `i`), the batch's put `i` sets the value
+    /// `source` holds in the tree — what the caller read, the writes
+    /// between held off — and is logged without it: replay reads it from
+    /// the tree, as the log brought it there.  A vacuum making intents
+    /// versions logs their keys, not their rows again (issue #4).  The
+    /// source's delete, if wanted, is an op of the batch's own.
+    pub fn write_moving<'a>(
+        &self,
+        batch: impl WriteBatch<'a>,
+        covered: &[(Vec<u8>, Vec<u8>)],
+        moves: &[(usize, Vec<u8>)],
+    ) -> Result<Lsn> {
+        let b = batch.batch();
+        debug_assert!(moves.windows(2).all(|w| w[0].0 < w[1].0));
+        debug_assert!(
+            moves
+                .iter()
+                .all(|(i, _)| b.ops.get(*i).is_some_and(|o| o.1.is_some()))
+        );
+        #[cfg(debug_assertions)]
+        {
+            let tree = self.read()?;
+            for (i, source) in moves {
+                debug_assert_eq!(
+                    tree.get(source)?.as_ref(),
+                    b.ops[*i].1.as_ref(),
+                    "a move's value is its source's"
+                );
+            }
+        }
+        let encoded = b.encode_full(covered, &[], moves);
+        self.write_encoded(batch, &encoded, None, Vec::new())
+    }
+
     /// [`write_filtered`](Store::write_filtered), with puts `deferred`:
     /// logged with the batch, kept out of the tree until the next
     /// checkpoint or until [`DEFERRED_MAX`] wait ([`Store::deferred`]
@@ -1283,7 +1405,7 @@ impl Store {
         deferred: Vec<(Vec<u8>, Vec<u8>)>,
         filter: &dyn LeafFilter,
     ) -> Result<Lsn> {
-        let encoded = batch.batch().encode_full(&[], &deferred);
+        let encoded = batch.batch().encode_full(&[], &deferred, &[]);
         self.write_encoded(batch, &encoded, Some(filter), deferred)
     }
 
@@ -2537,12 +2659,46 @@ mod tests {
         assert_eq!(b.encode_covering(&[]), b.encode());
         // With deferred puts: version 3, its ranges maybe none.
         let deferred = vec![(b"t".to_vec(), b"9".to_vec())];
-        for covered in [vec![], covered] {
-            let e = b.encode_full(&covered, &deferred);
+        for covered in [vec![], covered.clone()] {
+            let e = b.encode_full(&covered, &deferred, &[]);
             assert_eq!(e[0], BATCH_VERSION_DEFERRING);
             assert_eq!(
                 Batch::decode_full(&e).unwrap(),
-                (b.clone(), covered.clone(), deferred.clone())
+                Decoded {
+                    batch: b.clone(),
+                    covered: covered.clone(),
+                    deferred: deferred.clone(),
+                    moves: Vec::new(),
+                }
+            );
+            assert!(Batch::decode_full(&e[..e.len() - 1]).is_err());
+        }
+        // With moves: version 4, the moved puts' values not logged.
+        let moved = Batch {
+            meta: 9,
+            ops: vec![
+                (b"key\x00a".to_vec(), None),
+                (b"key\x00b".to_vec(), Some(b"a long value".to_vec())),
+                (b"other".to_vec(), Some(b"2".to_vec())),
+                (b"zz".to_vec(), Some(b"3".to_vec())),
+            ],
+        };
+        for (covered, deferred) in [(vec![], vec![]), (covered.clone(), deferred.clone())] {
+            let moves = vec![(1, b"key\x00a".to_vec()), (3, b"elsewhere".to_vec())];
+            let e = moved.encode_full(&covered, &deferred, &moves);
+            assert_eq!(e[0], BATCH_VERSION_MOVING);
+            assert!(!e.windows(12).any(|w| w == b"a long value"));
+            let mut read = moved.clone();
+            read.ops[1].1 = Some(Vec::new());
+            read.ops[3].1 = Some(Vec::new());
+            assert_eq!(
+                Batch::decode_full(&e).unwrap(),
+                Decoded {
+                    batch: read,
+                    covered,
+                    deferred,
+                    moves,
+                }
             );
             assert!(Batch::decode_full(&e[..e.len() - 1]).is_err());
         }
