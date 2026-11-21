@@ -12104,6 +12104,25 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     the copy, ~5 % of a cold scan; a ring would make warm scans read the
     file.  Issue #6.  ClickBench Q31 on row tables cold (≈ 1.09×, its
     interval ±12 %) is the same read: warm it is 0.86×.
+  - Issue #6 (2026-11-21): profiled again (`coldq6.py`: `lineitem`
+    alone, restarted before each cold run, sampled), the allocation was
+    the top of the cold scan's work — `_xzm_xzone_malloc_small_freelist`
+    1 575 samples against `pread`'s 874: the system allocator's 8 KiB
+    class serializes its threads (a test of 16 384 allocations of 8 KiB,
+    each written once: one thread 18.7 ms, eight 21.3; one block cut in
+    pages, one thread 12.3, eight 3.4).  Taken, without `unsafe` (as a
+    run's pages share the read that brought them — PostgreSQL's
+    `io_combine_limit` reads into consecutive buffers): `read_run` reads
+    a run of pages in the clear into one buffer, an `Arc` its pages
+    share (`Page::of_run`), each copied out when written to (a frame's
+    page made writable, a seal) — one allocation a run, no copy.  A page
+    kept while half or more of its run is gone is copied out at its next
+    hit (`Frame::unshare`), so a page in use holds 8 KiB, not 128.  Cold
+    Q6, nine restarts, ABBA: 204.6 / 170.6 → 151.0 / 149.4 ms (again,
+    the machine busier: 206.6 / 194.9 → 164.4 / 164.5), warm 92.4 / 90.3
+    → 89.0 / 88.7; PostgreSQL's cold 172.  TPC-H SF 0.1 on row tables,
+    three rounds each: cold geometric mean 0.908× (Q6 28.6 → 21.8 ms,
+    Q18 39.9 → 31.4), warm 0.989× (within the noise).
 
   *S9, TPC-H Q20 on column tables* (1.18×).  Not its plan's: on one
   worker the same query took 316 ms, 89 with the decoded columns' cache

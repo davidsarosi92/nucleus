@@ -470,7 +470,13 @@ meanwhile), so threads reading cold pages do not wait on each other.
 `read_ahead(ids)` reads a run of consecutive page ids (up to 16, 128 KiB —
 PostgreSQL's `io_combine_limit`) with one read, into frames not yet
 referenced, so the clock takes them first if unused; pages cached
-meanwhile are kept, and a write-back meanwhile drops the rest.  A B+tree
+meanwhile are kept, and a write-back meanwhile drops the rest.  A run
+in the clear is read into one buffer its pages share (`Page::of_run`, an
+`Arc`): one allocation a run and no copy (8 KiB allocations serialized a
+cold scan's threads in the system allocator); a page is copied out when
+written to, and one kept while half or more of its run has gone is
+copied out at its next hit, the buffer left to the rest (a page in use
+holds 8 KiB, not the run's 128).  A B+tree
 cursor moving to a leaf that is not cached reads the parent's next leaves
 with it, the window growing with the leaves it has moved through since
 its last seek (1, 2, 4 … 16, as Linux's read-ahead ramps up), so an index

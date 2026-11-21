@@ -40,6 +40,11 @@ struct Frame {
     pins: AtomicU32,
     dirty: AtomicBool,
     referenced: AtomicBool,
+    /// Its page, read with a run of others ([`Page::of_run`]), keeps the
+    /// run's buffer alive with half or more of them gone: to be copied
+    /// out at its next hit, the buffer then left to the rest (a page in
+    /// use kept, the scan's others evicted, holds 8 KiB, not 128).
+    unshare: AtomicBool,
 }
 
 impl Frame {
@@ -49,6 +54,7 @@ impl Frame {
             pins: AtomicU32::new(0),
             dirty: AtomicBool::new(false),
             referenced: AtomicBool::new(false),
+            unshare: AtomicBool::new(false),
         }
     }
 }
@@ -187,7 +193,11 @@ impl<'a> PageRef<'a> {
 
     /// Latches the page for reading.
     pub fn read(&self) -> RwLockReadGuard<'_, Page> {
-        self.frame().page.read().unwrap_or_else(|e| e.into_inner())
+        let page = self.frame().page.read().unwrap_or_else(|e| e.into_inner());
+        if page.shares_sparsely() {
+            self.frame().unshare.store(true, Ordering::Relaxed);
+        }
+        page
     }
 
     /// Latches the page for writing and marks it dirty.  Fails with
@@ -264,6 +274,7 @@ impl BufferPool {
         if let Some(page) = page {
             *f.page.write().unwrap_or_else(|e| e.into_inner()) = page;
         }
+        f.unshare.store(false, Ordering::Relaxed);
         f
     }
 
@@ -335,6 +346,13 @@ impl BufferPool {
                 let inner = shard.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(&frame) = inner.table.get(&id) {
                     shard.hits.fetch_add(1, Ordering::Relaxed);
+                    let f = self.frame(frame);
+                    if f.unshare.load(Ordering::Relaxed)
+                        && let Ok(mut page) = f.page.try_write()
+                    {
+                        page.unshare();
+                        f.unshare.store(false, Ordering::Relaxed);
+                    }
                     return Ok(self.pin(frame, id));
                 }
                 self.writebacks.load(Ordering::Acquire)

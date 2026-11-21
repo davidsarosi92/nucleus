@@ -231,6 +231,51 @@ fn read_ahead_caches_a_run_and_keeps_what_is_cached() {
     }
 }
 
+/// A run read ahead shares one buffer (issue #6): a page written in the
+/// pool is copied out, its neighbours and the file unchanged until it is
+/// written back; a page kept while the rest of its run is evicted, hit
+/// again, is copied out too — its contents the same throughout.
+#[test]
+fn pages_read_as_a_run_are_written_and_kept_apart() {
+    let (_p, a) = pool(64);
+    let ids = make_pages(&a, 48);
+    a.flush().unwrap();
+    let b = BufferPool::new(Arc::clone(a.pager()), 16);
+    b.read_ahead(&ids[..16]);
+    write_u64_at(
+        b.fetch(ids[3]).unwrap().write().unwrap().payload_mut(),
+        0,
+        777,
+    );
+    for (i, id) in ids[..16].iter().enumerate() {
+        assert_eq!(tag(&b, *id), if i == 3 { 777 } else { id.0 });
+    }
+    // Page 7 kept in use while two more runs go through the pool.
+    let kept = b.fetch(ids[7]).unwrap();
+    b.read_ahead(&ids[16..32]);
+    b.read_ahead(&ids[32..48]);
+    assert_eq!(read_u64_at(kept.read().payload(), 0), ids[7].0);
+    drop(kept);
+    for _ in 0..3 {
+        assert_eq!(tag(&b, ids[7]), ids[7].0);
+    }
+    write_u64_at(
+        b.fetch(ids[7]).unwrap().write().unwrap().payload_mut(),
+        0,
+        778,
+    );
+    b.flush().unwrap();
+    let c = BufferPool::new(Arc::clone(a.pager()), 64);
+    for (i, id) in ids.iter().enumerate() {
+        let want = match i {
+            3 => 777,
+            7 => 778,
+            _ => id.0,
+        };
+        assert_eq!(tag(&c, *id), want, "page {i}");
+    }
+}
+
 /// A large pool costs only the pages it holds — a flush too, which went
 /// through every frame and made each one (found fuzzing, PLAN.md
 /// §M14.29 S2: the first checkpoint allocated the whole cache).

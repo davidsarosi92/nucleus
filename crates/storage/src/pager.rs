@@ -1488,6 +1488,29 @@ fn read_run(
     n: usize,
     cipher: Option<&PageCipher>,
 ) -> Result<Vec<Page>> {
+    if n > 1 && cipher.is_none() {
+        // Pages in the clear, several: read into one buffer they share
+        // (each copied out when written to) — one allocation, no copy.
+        let mut run = vec![0u8; n * PAGE_SIZE];
+        match file.read_exact_at(&mut run, first.offset()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(Error::Corrupt {
+                    page: first,
+                    reason: "never written (past end of file)",
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+        for (bytes, id) in run.as_chunks::<PAGE_SIZE>().0.iter().zip(first.0..) {
+            crate::page::verify_bytes(bytes, PageId(id)).map_err(|reason| Error::Corrupt {
+                page: PageId(id),
+                reason,
+            })?;
+        }
+        let run = Arc::new(run);
+        return Ok((0..n).map(|i| Page::of_run(&run, i)).collect());
+    }
     READ_BUFFER.with_borrow_mut(|buf| {
         if buf.len() < n * PAGE_SIZE {
             buf.resize(n * PAGE_SIZE, 0);
