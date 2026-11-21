@@ -1033,65 +1033,130 @@ fn method_rows<'a>(
         )));
     }
     // The rows in key order, a block at a time: a merge with the table's
-    // scan ([`rows_at`]).
+    // scan ([`rows_at`]).  A block with rows for more than one worker is
+    // read on the workers with the condition checked there too (the
+    // method's recheck, issue #10) when it may run on any thread; the
+    // rest checked here.
     let prefix = table.index_prefix(0);
+    let on_workers = match ctx.txn.shared() {
+        Some(shared)
+            if (filter.is_some() || !keys.is_empty())
+                && outer.is_none()
+                && ctx.profile.is_none()
+                && filter.is_none_or(|f| crate::vector::parallel_safe_in(f, ctx)) =>
+        {
+            Some(shared)
+        }
+        _ => None,
+    };
     let (mut at, mut block, mut density) = (0usize, FOUND_BLOCK, None);
+    let keys = std::sync::Arc::new(keys);
     let blocks = std::iter::from_fn(move || -> Option<Result<Vec<Row>>> {
         if at >= pks.len() {
             return None;
         }
-        let end = (at + block).min(pks.len());
+        let next = (block * if block < FOUND_PART { 2 } else { 4 }).min(FOUND_BLOCK_MOST);
+        // What is left joins this block when the next would take it all:
+        // read now on as many workers as it has rows for, not after.
+        let end = if pks.len() - at <= block + next {
+            pks.len()
+        } else {
+            at + block
+        };
         let found: Vec<Vec<u8>> = pks[at..end]
             .iter()
             .map(|pk| [prefix.as_slice(), pk].concat())
             .collect();
         at = end;
-        block = (block * if block < FOUND_PART { 2 } else { 4 }).min(FOUND_BLOCK_MOST);
-        Some(
-            rows_at(
-                ctx.txn,
-                table,
-                &found,
-                wanted.map(Vec::as_slice),
-                &mut density,
-            )
-            .and_then(|rows| {
-                if rows.len() < found.len() {
-                    return Err(Error::internal(
-                        "an index method found a row its table does not have",
-                    ));
+        block = next;
+        let missing = || Error::internal("an index method found a row its table does not have");
+        let workers = crate::budget::workers().min(found.len() / FOUND_PART);
+        if let Some(shared) = on_workers.filter(|_| workers > 1) {
+            let part = found.len().div_ceil(workers);
+            let runs: Vec<&[Vec<u8>]> = found.chunks(part).collect();
+            let start = density;
+            let storage = match crate::storage::of(table) {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let keys = &keys;
+            let got =
+                crate::vector::on_workers(ctx, shared, workers, runs.len(), true, &|wctx, m| {
+                    let (mut rows, mut read, mut density) = (Vec::new(), 0, start);
+                    let mut failed = None;
+                    storage.rows_at(
+                        wctx.txn,
+                        table,
+                        runs[m],
+                        wanted.map(Vec::as_slice),
+                        &mut density,
+                        &mut |_, row| {
+                            read += 1;
+                            if failed.is_some() || !crate::keyfilter::passes(keys, &row) {
+                                return Ok(());
+                            }
+                            match filter.map(|f| f.holds(&env(&row, wctx, None))) {
+                                None | Some(Ok(true)) => rows.push(row),
+                                Some(Ok(false)) => {}
+                                Some(Err(e)) => failed = Some(e),
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    if let Some(e) = failed {
+                        return Err(e);
+                    }
+                    if read < runs[m].len() {
+                        return Err(missing());
+                    }
+                    Ok(rows)
+                });
+            let mut out = Vec::new();
+            for g in got {
+                match g {
+                    Some(Ok(rows)) => out.extend(rows),
+                    Some(Err(e)) => return Some(Err(e)),
+                    None => return Some(Err(Error::internal("a piece of rows not run"))),
                 }
-                Ok(rows.into_iter().map(|(_, row)| row).collect())
-            }),
-        )
+            }
+            return Some(Ok(out));
+        }
+        let rows = match rows_at(
+            ctx.txn,
+            table,
+            &found,
+            wanted.map(Vec::as_slice),
+            &mut density,
+        ) {
+            Ok(rows) if rows.len() < found.len() => return Some(Err(missing())),
+            Ok(rows) => rows,
+            Err(e) => return Some(Err(e)),
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (_, row) in rows {
+            if !crate::keyfilter::passes(&keys, &row) {
+                continue;
+            }
+            match filter.map(|f| f.holds(&env(&row, ctx, outer))) {
+                None | Some(Ok(true)) => out.push(row),
+                Some(Ok(false)) => {}
+                Some(Err(e)) => return Some(Err(e)),
+            }
+        }
+        Some(Ok(out))
     });
     let rows = blocks.flat_map(|b| match b {
         Ok(rows) => rows.into_iter().map(Ok).collect::<Vec<_>>(),
         Err(e) => vec![Err(e)],
     });
-    Ok(Some((
-        Box::new(rows.filter_map(move |row| {
-            let row = match row {
-                Ok(row) => row,
-                Err(e) => return Some(Err(e)),
-            };
-            if !crate::keyfilter::passes(&keys, &row) {
-                return None;
-            }
-            match filter.map(|f| f.holds(&env(&row, ctx, outer))) {
-                None | Some(Ok(true)) => Some(Ok(row)),
-                Some(Ok(false)) => None,
-                Some(Err(e)) => Some(Err(e)),
-            }
-        })),
-        false,
-    )))
+    Ok(Some((Box::new(rows), false)))
 }
 
 /// The found rows a scan through an index method reads first; then each
 /// block twice the last while one worker reads it ([`FOUND_PART`]), four
-/// times past that, up to [`FOUND_BLOCK_MOST`] — a limit above stops it
-/// early, having read at most twice its rows while they are few.
+/// times past that, up to [`FOUND_BLOCK_MOST`], what is left joining a
+/// block the next would end with — a limit above stops it early, having
+/// read at most about three times its rows while they are few.
 const FOUND_BLOCK: usize = 8;
 const FOUND_BLOCK_MOST: usize = 16_384;
 

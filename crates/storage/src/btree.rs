@@ -433,8 +433,20 @@ impl BTree {
         found.resize_with(keys.len().max(found.len()), Found::default);
         let mut ids: Vec<PageId> = vec![self.root; keys.len()];
         let mut overflow = Vec::new();
+        // Each level's pages once: sorted keys share their upper nodes (the
+        // root is every key's), so a page is fetched, latched and read
+        // once for the keys next to each other on it (issue #10).
+        let (mut uniq, mut slot): (Vec<PageId>, Vec<usize>) = (Vec::new(), Vec::new());
         loop {
-            let refs = ids
+            uniq.clear();
+            slot.clear();
+            for &id in &ids {
+                if uniq.last() != Some(&id) {
+                    uniq.push(id);
+                }
+                slot.push(uniq.len() - 1);
+            }
+            let refs = uniq
                 .iter()
                 .map(|&id| self.pool.fetch(id))
                 .collect::<Result<Vec<_>>>()?;
@@ -449,11 +461,18 @@ impl BTree {
                 }
             }
             std::hint::black_box(touch);
+            let views = pages
+                .iter()
+                .zip(&uniq)
+                .map(|(page, &id)| {
+                    View::new(page).map_err(|reason| Error::Corrupt { page: id, reason })
+                })
+                .collect::<Result<Vec<_>>>()?;
             let mut leaves = 0;
-            for (j, page) in pages.iter().enumerate() {
+            for j in 0..ids.len() {
                 let id = ids[j];
                 let corrupt = |reason| Error::Corrupt { page: id, reason };
-                let v = View::new(page).map_err(corrupt)?;
+                let v = &views[slot[j]];
                 if !v.is_leaf() {
                     ids[j] = v
                         .child(v.child_index(keys[j]).map_err(corrupt)?)
@@ -476,12 +495,13 @@ impl BTree {
                 }
             }
             if leaves > 0 {
-                if leaves < pages.len() {
+                if leaves < ids.len() {
                     return Err(Error::Corrupt {
                         page: self.root,
                         reason: "leaves at different depths",
                     });
                 }
+                drop(views);
                 drop(pages);
                 drop(refs);
                 for (j, id, first, len, raw) in overflow {

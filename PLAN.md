@@ -12531,6 +12531,23 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
   - Not taken alone: the found rows in one block from the start, 12%
     (blocks start small for a limit above).
   - Left: issue #10 — PostgreSQL reaches a tuple by its TID, no descent.
+  - Issue #10 (2026-11-21; server-side `\timing`, median of 40, both
+    orders; then `bench/json/index.py` against PostgreSQL).  *Taken*:
+    `seek_group` fetches, latches and reads a page the group's keys share
+    once (the root always, mostly the level below): 1.83 → 1.71 ms; the
+    recheck on the workers that read the found rows (the filter with
+    them, where `parallel_safe_in`: they give back the rows that pass),
+    1.76 → 1.59; what is left of the found rows joining a block the next
+    would end with (2,000 rows: 504 in the growing blocks, then 1,496 on
+    five workers, not 1,024 on four and a serial 472), 1.65 → 1.33.
+    `bench/json/index.py`: 1.77 → 1.30 ms, PostgreSQL 1.16 (1.12×).
+    *Not taken*: a galloping search from the key before's slot on a
+    shared node (Bentley–Yao; 1.71 → 1.68, within noise: the found keys
+    lie ~4 separators apart, so a binary search of ~8 looks is little
+    more); the first block sized by a limit above (the executor has no
+    row goal to tell it; the 504 rows before the first parallel block
+    are now most of what is left, with the descents PostgreSQL's TIDs
+    do not need).
 
   *S20, the rest of the list, measured again or weighed — none taken.*
   - ann-sparse load (100,000 SPLADE-like rows as `INSERT … VALUES`

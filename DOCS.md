@@ -559,7 +559,9 @@ read), `cursor`
 `seek_group` (up to `GROUP` = 8 keys' first entries, the descents a
 level at a time: each level's pages and their first kilobyte read for the
 whole group before any is searched, so that their cache misses overlap —
-group prefetching, AMAC; what a secondary index's row fetches use), `destroy`,
+group prefetching, AMAC; a page the keys next to each other share — the
+root always — fetched and latched once; what a secondary index's row
+fetches use), `destroy`,
 `check` (ordering, separators, equal leaf depth, minimum fill, overflow
 lengths, no page used twice; returns the pages used).  `&self` reads,
 `&mut self` writes: callers wrap the tree in an `RwLock` (D11).  **Reads
@@ -4182,8 +4184,8 @@ method is exact; a lossy one says it is not — `exact(ix, function)`
 false, the JSON containment index's hashes, §8.31 — and the conjunct
 then stays in the filter, checked on each row found, PostgreSQL's
 recheck) — in key order, a block at a time (8, then twice the
-last up to 256, four times past it, up to 16,384: a limit above stops it
-early), by a merge with the table's scan (`exec::rows_at`,
+last up to 256, four times past it, up to 16,384, what is left joining a
+block the next would end with: a limit above stops it early), by a merge with the table's scan (`exec::rows_at`,
 `TableStorage::rows_at`; the row storage's `exec::entries_at`, PLAN.md
 §M14.21 T5b): where the keys lie far apart they are looked up a group
 of `GET_MANY` at a time (their descents' cache misses overlapped), where they
@@ -4193,7 +4195,10 @@ passed, measured as it goes (a probe of 16 entries where it is not yet
 known and every 1,024th lookup, each chunk read on) and kept across the
 statement's blocks, reading on above one in `SEEK_ENTRIES` (16, what a
 lookup costs in entries read); past 256 keys a run each on the
-statement's workers over the transaction's shared reads.  Where
+statement's workers over the transaction's shared reads — the filter
+(the recheck with the rest of the conditions) checked on the workers
+too where it may run on any thread (`vector::parallel_safe_in`, no
+enclosing row), so they give back only the rows that pass (issue #10).  Where
 `rows_where` says `None`
 every row is read with `cond` checked.  `EXPLAIN`: `Index Scan using ix on t (col f arg)`.
 `selectivity(txn, t, i, function, args)`: the share of the table's rows

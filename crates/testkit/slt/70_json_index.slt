@@ -151,5 +151,39 @@ SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3"}'
 ----
 300
 
+# Found rows enough for the statement's workers, which check the
+# condition again as they read them (issue #10): every term in 3,300
+# rows, all of it in 300.
+
+# nucleus-only: the statement's workers.
+statement ok
+SET parallel_workers = 4
+
+statement ok
+INSERT INTO docs SELECT g, '{"a": [{"b": 1}, {"c": 2}]}' FROM generate_series(3000, 5999) g
+
+statement ok
+INSERT INTO docs SELECT g, '{"a": [{"b": 1, "c": 2}]}' FROM generate_series(6000, 6299) g
+
+query I
+SELECT count(*) FROM docs WHERE doc @> '{"a": [{"b": 1, "c": 2}]}'
+----
+300
+
+query I
+SELECT id FROM docs WHERE doc @> '{"a": [{"b": 1, "c": 2}]}' ORDER BY id LIMIT 3
+----
+6000
+6001
+6002
+
+query I
+SELECT count(*) FROM docs WHERE doc @> '{"a": [{"c": 2}]}' AND id % 2 = 0
+----
+1651
+
+statement error 22012
+SELECT count(*) FROM docs WHERE doc @> '{"a": [{"c": 2}]}' AND 1 / (id - 4000) <> 7
+
 statement ok
 DROP TABLE docs
