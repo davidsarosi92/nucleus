@@ -1480,7 +1480,13 @@ distributed implementation will provide (§F3).
   whose tombstones a scan would otherwise step over until the whole
   vacuum runs (RocksDB's queue pattern; an HNSW index's delta, §8.18);
   `Engine::vacuum_range`, a chunk of the vacuum's sweep (`sweep_chunk`)
-  bounded by the range.  `Kv::scrub(ranges, wait)` → `Option<Scrub {
+  bounded by the range.  A whole vacuum (`Engine::vacuum`) sweeps the
+  keyspace in parts cut at user keys' first versions where the B+tree's
+  internal nodes cut its leaves evenly (`Tables::split_keys`; one part
+  where another engine holds keys), a window of them at once on up to 8
+  threads (the platform's parallelism), each up to a chunk of writes,
+  their writes one batch in key order; the background vacuum one chunk
+  at a time (issue #4).  `Kv::scrub(ranges, wait)` → `Option<Scrub {
   complete, versions, pages, wal_bytes }>` (erasure, §8.29): the full
   vacuum if intents are pending, then — once no snapshot older than the
   call runs (polled every 2 ms up to `wait`; else `complete: false`) —

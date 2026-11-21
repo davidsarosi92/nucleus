@@ -429,6 +429,10 @@ impl Inner {
 
 /// Entries vacuum changes per batch (each under the commit lock).
 const VACUUM_CHUNK: usize = 16_384;
+/// The threads a whole vacuum sweeps on at most ([`Engine::vacuum`]).
+const SWEEPERS: usize = 8;
+/// The fewest leaves of a part a whole vacuum sweeps the keyspace in.
+const SWEEP_PART_LEAVES: usize = 64;
 
 /// … and in the background ([`Engine::vacuum_paced`]): small batches, so
 /// the tree and the commit lock are held only briefly.
@@ -1103,7 +1107,134 @@ impl Engine {
     /// before it began have no intent left: their status records go.
     pub fn vacuum(&self) -> Result<u64> {
         *lock(&self.inner.sweep) = None;
-        self.vacuum_paced(VACUUM_CHUNK, &mut || true)
+        let committed = self.inner.unresolved_ids();
+        let workers = self.inner.platform.parallelism().clamp(1, SWEEPERS);
+        // The keyspace in parts, each a run of whole user keys: a window
+        // of them swept at once, one a worker (the sweep only reads), up
+        // to a chunk of writes each, their writes one batch in key order
+        // — the parts lie in order (issue #4: the walk was ~45 % of the
+        // vacuum after TPC-H's load, on one thread).
+        let mut parts = std::collections::VecDeque::from(self.sweep_parts(workers * 8)?);
+        let mut removed = 0;
+        while !parts.is_empty() {
+            let commit = lock(&self.inner.commit);
+            let wm = self.inner.current_watermark();
+            let window: Vec<(Vec<u8>, Option<Vec<u8>>)> =
+                parts.drain(..workers.min(parts.len())).collect();
+            let sweep = |(from, to): &(Vec<u8>, Option<Vec<u8>>)| {
+                let mut removed = 0;
+                self.sweep_chunk(
+                    from,
+                    to.as_deref(),
+                    Some(&committed),
+                    VACUUM_CHUNK,
+                    wm,
+                    &mut removed,
+                )
+                .map(|s| (s, removed))
+            };
+            let swept: Vec<Result<(Swept, u64)>> = if window.len() == 1 {
+                vec![sweep(&window[0])]
+            } else {
+                std::thread::scope(|sc| {
+                    let handles: Vec<_> = window
+                        .iter()
+                        .map(|part| sc.spawn(move || sweep(part)))
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| {
+                            h.join()
+                                .unwrap_or(Err(Error::Corrupt("a sweep worker panicked")))
+                        })
+                        .collect()
+                })
+            };
+            let (mut ops, mut covered, mut moves) = (Vec::new(), Vec::new(), Vec::new());
+            let mut again = Vec::new();
+            for ((_, to), s) in window.into_iter().zip(swept) {
+                let (s, r) = s?;
+                removed += r;
+                let base = ops.len();
+                moves.extend(s.moves.into_iter().map(|(i, k)| (base + i, k)));
+                ops.extend(s.ops);
+                covered.extend(s.covered);
+                if let Some(next) = s.next {
+                    again.push((next, to));
+                }
+            }
+            for part in again.into_iter().rev() {
+                parts.push_front(part);
+            }
+            let done = parts.is_empty();
+            if done {
+                for &(id, _) in &committed {
+                    ops.push((status_key(id), None));
+                }
+            }
+            if !ops.is_empty() {
+                let lsn = self.inner.store.write_moving(
+                    Batch { meta: *commit, ops },
+                    &covered,
+                    &moves,
+                )?;
+                drop(commit);
+                if done {
+                    self.forget_swept(&committed, lsn)?;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// The keyspace cut into about `n` parts for a sweep ([`vacuum`](Self::vacuum)):
+    /// `(from, to)`, `to` exclusive (`None`: the end), each cut a user
+    /// key's first version — so a key's versions are all in one part —
+    /// where the B+tree's internal nodes cut its leaves evenly
+    /// ([`Tables::split_keys`]: one part where another engine holds keys).
+    fn sweep_parts(&self, n: usize) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>> {
+        let tree = self.inner.store.read()?;
+        let cuts = if n > 1 {
+            tree.split_keys(&RESERVED_END, None, n, SWEEP_PART_LEAVES)?
+        } else {
+            Vec::new()
+        };
+        let mut bounds: Vec<Vec<u8>> = Vec::with_capacity(cuts.len());
+        let mut k = Vec::new();
+        for cut in cuts {
+            let mut range = tree.range(Bound::Included(&cut[..]), Bound::Unbounded)?;
+            if !range.next_key_into(&mut k)? {
+                break;
+            }
+            let Some((user, _)) = decode_key(&k) else {
+                return Err(Error::Corrupt("undecodable version key"));
+            };
+            let first = mvcc::first_version(&user);
+            if bounds.last().is_none_or(|b| *b < first) && first[..] > RESERVED_END[..] {
+                bounds.push(first);
+            }
+        }
+        let mut parts = Vec::with_capacity(bounds.len() + 1);
+        let mut from = Vec::new();
+        for b in bounds {
+            parts.push((std::mem::replace(&mut from, b.clone()), Some(b)));
+        }
+        parts.push((from, None));
+        Ok(parts)
+    }
+
+    /// After a whole sweep's last batch (`lsn`): the commit times no
+    /// snapshot needs trimmed, and the swept transactions' statuses
+    /// forgotten once the batch is durable — and with it every batch
+    /// before (the log is in order): an intent never outlives its status.
+    fn forget_swept(&self, committed: &[(u64, u64)], lsn: nucleus_storage::wal::Lsn) -> Result<()> {
+        self.trim_times()?;
+        self.inner.store.wait_durable(lsn)?;
+        for &(id, _) in committed {
+            write(&self.inner.unresolved).remove(&id);
+            self.inner.side_users.fetch_sub(1, Ordering::AcqRel);
+        }
+        Ok(())
     }
 
     /// [`vacuum`](Self::vacuum) in batches of about `chunk` entries,
@@ -1140,15 +1271,7 @@ impl Engine {
                 )?;
                 drop(commit);
                 if next.is_none() {
-                    self.trim_times()?;
-                    // Durable — and with it every batch before (the log is
-                    // in order) — before the statuses are forgotten: an
-                    // intent never outlives its status.
-                    self.inner.store.wait_durable(lsn)?;
-                    for &(id, _) in &committed {
-                        write(&self.inner.unresolved).remove(&id);
-                        self.inner.side_users.fetch_sub(1, Ordering::AcqRel);
-                    }
+                    self.forget_swept(&committed, lsn)?;
                 }
             }
             match next {

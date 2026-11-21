@@ -1013,3 +1013,110 @@ fn vacuums_survive_a_crash_at_every_io_point() {
         });
     }
 }
+
+/// A platform that says it has `n` threads (the simulation's say one).
+struct Threads(Arc<SimPlatform>, usize);
+
+impl Platform for Threads {
+    fn fs(&self) -> &dyn nucleus_platform::FileSystem {
+        self.0.fs()
+    }
+    fn clock(&self) -> &dyn nucleus_platform::Clock {
+        self.0.clock()
+    }
+    fn rng(&self) -> &dyn Rng {
+        self.0.rng()
+    }
+    fn parallelism(&self) -> usize {
+        self.1
+    }
+}
+
+/// A whole vacuum sweeps the keyspace's parts a window at a time, one a
+/// worker (issue #4), and leaves what one sweep in order leaves: the
+/// committed intents made versions, the aborted ones and the versions no
+/// snapshot sees gone, every key's value as it was — with keys holding
+/// zeros (escaped) and a reader's snapshot holding versions back.
+#[test]
+fn a_whole_vacuum_sweeps_its_parts_on_workers() {
+    // No checkpoint on the way: the crash below replays every batch.
+    let opts = || EngineOptions {
+        checkpoint_wal_bytes: 1 << 40,
+        ..opts()
+    };
+    let run = |threads: usize| {
+        let sim = Arc::new(SimPlatform::new(11));
+        let p: Arc<dyn Platform> = Arc::new(Threads(Arc::clone(&sim), threads));
+        let e = Engine::open(p, Path::new("/db"), opts()).unwrap();
+        let value = |i: usize, what: &str| format!("{what}-{i:06}-{}", "x".repeat(40)).into_bytes();
+        let zkey = |i: usize| {
+            let mut k = key(i);
+            k.insert(1, 0);
+            k
+        };
+        let mut big = e.begin();
+        for i in 0..30_000 {
+            big.put(&key(i), &value(i, "big")).unwrap();
+            if i % 7 == 0 {
+                big.put(&zkey(i), &value(i, "zero")).unwrap();
+            }
+        }
+        big.commit().unwrap();
+        let mut aborted = e.begin();
+        for i in (0..30_000).step_by(3) {
+            aborted
+                .put(format!("a{i:06}").as_bytes(), b"never")
+                .unwrap();
+        }
+        // Versions over the intents: some kept for a snapshot, some not.
+        for round in 0..3 {
+            let mut t = e.begin();
+            for i in (round..30_000).step_by(97) {
+                if i % 2 == 0 {
+                    t.delete(&key(i)).unwrap();
+                } else {
+                    t.put(&key(i), &value(i, "small")).unwrap();
+                }
+            }
+            t.commit().unwrap();
+        }
+        let snapshot = e.begin();
+        let mut t = e.begin();
+        for i in (5..30_000).step_by(1001) {
+            t.put(&key(i), b"after the snapshot").unwrap();
+        }
+        t.commit().unwrap();
+        aborted.rollback();
+        assert!(e.intent_count().unwrap() > 30_000);
+        let before = all(&e);
+        let seen = |t: &nucleus_txn::Transaction| -> Vec<(Vec<u8>, Vec<u8>)> {
+            t.scan(Bound::Unbounded, Bound::Unbounded)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let at_snapshot = seen(&snapshot);
+        e.vacuum().unwrap();
+        assert_eq!(e.intent_count().unwrap(), 0);
+        assert_eq!(all(&e), before);
+        assert_eq!(seen(&snapshot), at_snapshot);
+        let kept = e.version_count().unwrap();
+        // The vacuum's batches replayed after a crash: the same state.
+        sim.sim_fs().crash();
+        drop(snapshot);
+        drop(e);
+        let p: Arc<dyn Platform> = Arc::new(Threads(Arc::clone(&sim), threads));
+        let e = Engine::open(p, Path::new("/db"), opts()).unwrap();
+        assert_eq!(e.intent_count().unwrap(), 0);
+        assert_eq!(all(&e), before);
+        e.vacuum().unwrap();
+        assert_eq!(all(&e), before);
+        (before, kept, e.version_count().unwrap())
+    };
+    let one = run(1);
+    let four = run(4);
+    assert_eq!(one, four);
+    // Versions only for the live keys once no snapshot holds them back.
+    assert_eq!(four.2, four.0.len() as u64);
+    assert!(four.1 > four.2);
+}

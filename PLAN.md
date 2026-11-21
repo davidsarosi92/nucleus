@@ -12124,6 +12124,29 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     replayed move's value is not its source's).  Left, with PostgreSQL's
     `VACUUM ANALYZE` at 1.1 s against 3.7 + 1.7: a retime of a leaf's
     entries in place, without taking each one out — the next step.
+  - Issue #4, step 3 (2026-11-21): the whole vacuum's walk on workers.
+    The retime in place weighed first: after a checkpoint the tree's
+    pages are copy-on-write, so a leaf retimed "in place" is still a new
+    page and its parents rewritten — what the merge does now — and it
+    needs a new log record and replay; its gain is the merge's cell work
+    and the log's keys, not the pages.  Before it, the cheaper half: the
+    walk only reads, so `Engine::vacuum` cuts the keyspace into parts at
+    user keys' first versions (`Tables::split_keys` over the B+tree's
+    internal nodes, about 8 a worker, at least 64 leaves each; one part
+    where another engine holds keys) and sweeps a window of them at once,
+    one a worker (`platform.parallelism()`, up to 8), each up to a chunk
+    of writes, their writes one batch in key order (the parts lie in
+    order).  The background vacuum stays one chunk at a time.  The
+    vacuum after TPC-H SF 1's load (ABBA): 4.07 / 4.16 → 3.52 / 3.61 s.
+    Profile after: the batch's write ~75 % — the tree's merge ~38 %, the
+    log's append ~26 % (942 MiB, nearly all keys: an intent's delete,
+    its version's key, the move's source) and its encoding ~8 % — the
+    walk's wait ~17 %.  Tested by
+    `a_whole_vacuum_sweeps_its_parts_on_workers` (four workers against
+    one: the same state, a snapshot's versions kept, replay after a
+    crash; a debug build fails when a part's moves are not offset).
+    Next: the log's keys — a move logged by its delete's place and the
+    new timestamp, or a batch's sorted keys prefix-coded.
 
   *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
   1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in
