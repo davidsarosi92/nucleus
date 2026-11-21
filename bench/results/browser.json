@@ -1,10 +1,10 @@
 {
- "method": 1,
+ "method": 2,
  "name": "browser",
  "script": "bench/method.py run browser bench/results/browser.json --runs 5 -- node drivers/js/test/browser.mjs",
  "environment": {
-  "method": 1,
-  "at": "2026-11-17T09:18:08+00:00",
+  "method": 2,
+  "at": "2026-11-20T22:05:54+00:00",
   "machine": {
    "arch": "arm64",
    "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
@@ -23,7 +23,7 @@
   },
   "disk": {
    "path": ".",
-   "free_bytes": 36234842112,
+   "free_bytes": 15455383552,
    "total_bytes": 494384795648,
    "device": "/dev/disk3s5",
    "solid_state": true,
@@ -31,21 +31,28 @@
    "file_system": "apfs"
   },
   "load_before": [
-   3.00927734375,
-   2.96044921875,
-   2.6640625
+   2.74462890625,
+   3.05322265625,
+   2.857421875
   ],
   "systems": {},
   "data": {},
   "nucleus": {
-   "commit": "7ff7b48e38513463f1fd2a0f9b6da723bd6f9095",
+   "commit": "18041cf93c0065d9b49688b79a1f59a7073ae31a",
    "dirty": true
   },
   "load_after": [
-   3.025390625,
-   2.96240234375,
-   2.669921875
-  ]
+   2.9248046875,
+   3.08544921875,
+   2.86962890625
+  ],
+  "quiet": {
+   "rounds": 5,
+   "waited_s": 0.0,
+   "other_cores_max": 1.37,
+   "over_bound": 0,
+   "bound": 2.5
+  }
  },
  "samples": [
   {
@@ -54,18 +61,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    174,
-    164,
-    162,
+    180,
+    165,
+    165,
     166,
-    163
+    160
    ],
-   "median": 164,
+   "median": 165,
    "ci": [
-    162,
-    174
+    160,
+    180
    ],
-   "cv": 0.029050891625554392,
+   "cv": 0.04503552774405909,
    "flagged": false,
    "attempts": 1
   },
@@ -75,18 +82,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    107,
-    108,
-    108,
-    108,
-    109
+    112,
+    115,
+    113,
+    111,
+    117
    ],
-   "median": 108,
+   "median": 113,
    "ci": [
-    107,
-    109
+    111,
+    117
    ],
-   "cv": 0.006547285010986552,
+   "cv": 0.02119999045562024,
    "flagged": false,
    "attempts": 1
   },
@@ -96,18 +103,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    61,
-    65,
+    62,
     63,
-    67,
-    69
+    62,
+    62,
+    65
    ],
-   "median": 65,
+   "median": 62,
    "ci": [
-    61,
-    69
+    62,
+    65
    ],
-   "cv": 0.04865042554105199,
+   "cv": 0.020761791099371495,
    "flagged": false,
    "attempts": 1
   },
@@ -117,18 +124,18 @@
    "phase": "warm",
    "unit": "ms",
    "times": [
-    63,
-    68,
-    64,
+    62,
+    69,
     65,
-    66
+    66,
+    69
    ],
-   "median": 65,
+   "median": 66,
    "ci": [
-    63,
-    68
+    62,
+    69
    ],
-   "cv": 0.02950212279397445,
+   "cv": 0.044555532337621225,
    "flagged": false,
    "attempts": 1
   },
@@ -138,18 +145,18 @@
    "phase": "cold",
    "unit": "ms",
    "times": [
-    124,
-    123,
     123,
     127,
-    124
-   ],
-   "median": 124,
-   "ci": [
-    123,
+    124,
+    128,
     127
    ],
-   "cv": 0.013230013466308359,
+   "median": 127,
+   "ci": [
+    123,
+    128
+   ],
+   "cv": 0.017233293631700158,
    "flagged": false,
    "attempts": 1
   }

@@ -1,0 +1,819 @@
+{
+ "method": 2,
+ "name": "wamp-lsm",
+ "script": "bench/method.py run wamp-lsm bench/results/wamp-lsm.json --runs 3 -- python3 -I bench/wamp/wamp.py --engine=lsm nucleus ./target/release/nucleus ./target/wamp-lsm-db 21007 0,1,2,3,4,5,6,7",
+ "environment": {
+  "method": 2,
+  "at": "2026-11-21T11:28:42+00:00",
+  "machine": {
+   "arch": "arm64",
+   "os": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+   "kernel": "25.6.0",
+   "python": "3.13.0",
+   "logical_cpus": 10,
+   "cpu": "Apple M2 Pro",
+   "model": "Mac14,9",
+   "physical_cpus": 10,
+   "performance_cores": 6,
+   "efficiency_cores": 4,
+   "memory_bytes": 34359738368,
+   "low_power_mode": false,
+   "on_battery": false,
+   "thermal_warning": false
+  },
+  "disk": {
+   "path": ".",
+   "free_bytes": 30219206656,
+   "total_bytes": 494384795648,
+   "device": "/dev/disk3s5",
+   "solid_state": true,
+   "protocol": "Apple Fabric",
+   "file_system": "apfs"
+  },
+  "load_before": [
+   2.732421875,
+   2.29248046875,
+   2.16796875
+  ],
+  "systems": {},
+  "data": {},
+  "nucleus": {
+   "commit": "f2ba1d0ab94b4e02348416506648a93eecf05c25",
+   "dirty": true
+  },
+  "load_after": [
+   2.96484375,
+   2.68896484375,
+   2.57177734375
+  ],
+  "quiet": {
+   "rounds": 3,
+   "waited_s": 0.0,
+   "other_cores_max": 1.11,
+   "over_bound": 0,
+   "bound": 2.5
+  }
+ },
+ "samples": [
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    2.7119691851851853,
+    2.7119691851851853,
+    2.7119691851851853
+   ],
+   "median": 2.7119691851851853,
+   "ci": [
+    2.7119691851851853,
+    2.7119691851851853
+   ],
+   "cv": 2.0055389462954674e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    8.268466542009264,
+    8.299896957934834,
+    8.250670584035106
+   ],
+   "median": 8.268466542009264,
+   "ci": [
+    8.250670584035106,
+    8.299896957934834
+   ],
+   "cv": 0.0030129174580069296,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    197.95482921600342,
+    197.95482921600342,
+    197.95482921600342
+   ],
+   "median": 197.95482921600342,
+   "ci": [
+    197.95482921600342,
+    197.95482921600342
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.19219507685185186,
+    0.19219507685185186,
+    0.19219507685185186
+   ],
+   "median": 0.19219507685185186,
+   "ci": [
+    0.19219507685185186,
+    0.19219507685185186
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, keys in order: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.9797648750245571,
+    0.9850971249397844,
+    0.9771060419734567
+   ],
+   "median": 0.9797648750245571,
+   "ci": [
+    0.9771060419734567,
+    0.9850971249397844
+   ],
+   "cv": 0.004149662644066562,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    2.916882962962963,
+    2.915506251851852,
+    2.9220446814814816
+   ],
+   "median": 2.916882962962963,
+   "ci": [
+    2.915506251851852,
+    2.9220446814814816
+   ],
+   "cv": 0.0011812207232242803,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    49.24093120894395,
+    48.95244362496305,
+    48.82327091600746
+   ],
+   "median": 48.95244362496305,
+   "ci": [
+    48.82327091600746,
+    49.24093120894395
+   ],
+   "cv": 0.004363472379382645,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    429.3200798034668,
+    429.3200798034668,
+    429.3200798034668
+   ],
+   "median": 429.3200798034668,
+   "ci": [
+    429.3200798034668,
+    429.3200798034668
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.20841422777777777,
+    0.20841422777777777,
+    0.20841422777777777
+   ],
+   "median": 0.20841422777777777,
+   "ci": [
+    0.20841422777777777,
+    0.20841422777777777
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "bulk, 1M rows a transaction, random keys: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    2.381195458001457,
+    2.3906742919934914,
+    2.406372750061564
+   ],
+   "median": 2.3906742919934914,
+   "ci": [
+    2.381195458001457,
+    2.406372750061564
+   ],
+   "cv": 0.005314409139720683,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    149.3625362962963,
+    149.45242074074073,
+    149.20438518518517
+   ],
+   "median": 149.3625362962963,
+   "ci": [
+    149.20438518518517,
+    149.45242074074073
+   ],
+   "cv": 0.0008408594501312135,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    17.349927583010867,
+    18.09039354196284,
+    17.12302258401178
+   ],
+   "median": 17.349927583010867,
+   "ci": [
+    17.12302258401178,
+    18.09039354196284
+   ],
+   "cv": 0.028873484075151293,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    373.37166595458984,
+    373.37166595458984,
+    373.37166595458984
+   ],
+   "median": 373.37166595458984,
+   "ci": [
+    373.37166595458984,
+    373.37166595458984
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.1803522056384743,
+    0.1803522056384743,
+    0.1803522056384743
+   ],
+   "median": 0.1803522056384743,
+   "ci": [
+    0.1803522056384743,
+    0.1803522056384743
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, keys in order: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.3271760829957202,
+    0.33283649990335107,
+    0.3277358749182895
+   ],
+   "median": 0.3277358749182895,
+   "ci": [
+    0.3271760829957202,
+    0.33283649990335107
+   ],
+   "cv": 0.009473148511052592,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    149.97617777777776,
+    150.1639111111111,
+    149.99134814814815
+   ],
+   "median": 149.99134814814815,
+   "ci": [
+    149.97617777777776,
+    150.1639111111111
+   ],
+   "cv": 0.0006950290140451614,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    17.330920416978188,
+    17.627185666933656,
+    17.21320666698739
+   ],
+   "median": 17.330920416978188,
+   "ci": [
+    17.21320666698739,
+    17.627185666933656
+   ],
+   "cv": 0.012265965549026597,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    377.6251287460327,
+    377.6251287460327,
+    377.6251287460327
+   ],
+   "median": 377.6251287460327,
+   "ci": [
+    377.6251287460327,
+    377.6251287460327
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.1815037802530253,
+    0.1815037802530253,
+    0.1815037802530253
+   ],
+   "median": 0.1815037802530253,
+   "ci": [
+    0.1815037802530253,
+    0.1815037802530253
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "a row a transaction, random keys: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.3218883340014145,
+    0.3265723750228062,
+    0.3329994580708444
+   ],
+   "median": 0.3265723750228062,
+   "ci": [
+    0.3218883340014145,
+    0.3329994580708444
+   ],
+   "cv": 0.01705102903481598,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    3.0993066666666667,
+    3.10272,
+    3.098168888888889
+   ],
+   "median": 3.0993066666666667,
+   "ci": [
+    3.098168888888889,
+    3.10272
+   ],
+   "cv": 0.0007640075848297686,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    3.2117515000281855,
+    3.2680296669714153,
+    3.2135279159992933
+   ],
+   "median": 3.2135279159992933,
+   "ci": [
+    3.2117515000281855,
+    3.2680296669714153
+   ],
+   "cv": 0.009901182281276035,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    379.08817863464355,
+    379.08817863464355,
+    379.08817863464355
+   ],
+   "median": 379.08817863464355,
+   "ci": [
+    379.08817863464355,
+    379.08817863464355
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.1813094170771757,
+    0.1813094170771757,
+    0.1813094170771757
+   ],
+   "median": 0.1813094170771757,
+   "ci": [
+    0.1813094170771757,
+    0.1813094170771757
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.22655300004407763,
+    0.22276162495836616,
+    0.22273179097101092
+   ],
+   "median": 0.22276162495836616,
+   "ci": [
+    0.22273179097101092,
+    0.22655300004407763
+   ],
+   "cv": 0.009810100903187928,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    3.0579674074074075,
+    3.057610903703704,
+    3.058141866666667
+   ],
+   "median": 3.0579674074074075,
+   "ci": [
+    3.057610903703704,
+    3.058141866666667
+   ],
+   "cv": 8.850262574930869e-05,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    172.9324588329764,
+    172.24843229097314,
+    172.57534612494055
+   ],
+   "median": 172.57534612494055,
+   "ci": [
+    172.24843229097314,
+    172.9324588329764
+   ],
+   "cv": 0.0019823480534041232,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    478.538067817688,
+    478.538067817688,
+    478.538067817688
+   ],
+   "median": 478.538067817688,
+   "ci": [
+    478.538067817688,
+    478.538067817688
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.18364204838237447,
+    0.18364204838237447,
+    0.18364204838237447
+   ],
+   "median": 0.18364204838237447,
+   "ci": [
+    0.18364204838237447,
+    0.18364204838237447
+   ],
+   "cv": 1.8510738247148395e-16,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, random keys, 5M rows: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    5.880242582992651,
+    5.87706500000786,
+    5.8411292909877375
+   ],
+   "median": 5.87706500000786,
+   "ci": [
+    5.8411292909877375,
+    5.880242582992651
+   ],
+   "cv": 0.0037031060824277294,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, updates: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    3.1060195555555556,
+    3.103857777777778,
+    3.1046542222222224
+   ],
+   "median": 3.1046542222222224,
+   "ci": [
+    3.103857777777778,
+    3.1060195555555556
+   ],
+   "cv": 0.0003521250654826101,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, updates: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    48.31964245904237,
+    47.26931808295194,
+    47.11136570805684
+   ],
+   "median": 47.26931808295194,
+   "ci": [
+    47.11136570805684,
+    48.31964245904237
+   ],
+   "cv": 0.013807278398049794,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, updates: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    508.4079694747925,
+    508.4079694747925,
+    508.4079694747925
+   ],
+   "median": 508.4079694747925,
+   "ci": [
+    508.4079694747925,
+    508.4079694747925
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, updates: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.19510481444883618,
+    0.19510481444883618,
+    0.19510481444883618
+   ],
+   "median": 0.19510481444883618,
+   "ci": [
+    0.19510481444883618,
+    0.19510481444883618
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, updates: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.9889253750443459,
+    0.971003916929476,
+    0.9707212500507012
+   ],
+   "median": 0.971003916929476,
+   "ci": [
+    0.9707212500507012,
+    0.9889253750443459
+   ],
+   "cv": 0.010676314101073295,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, deletes: write amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    2.049024,
+    2.0487585185185186,
+    2.0508065185185185
+   ],
+   "median": 2.049024,
+   "ci": [
+    2.0487585185185186,
+    2.0508065185185185
+   ],
+   "cv": 0.0005433999170800783,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, deletes: time",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    41.05194116698112,
+    40.97691708302591,
+    41.2013334169751
+   ],
+   "median": 41.05194116698112,
+   "ci": [
+    40.97691708302591,
+    41.2013334169751
+   ],
+   "cv": 0.002781219789552218,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, deletes: files",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "MiB",
+   "times": [
+    519.4476165771484,
+    519.4476165771484,
+    519.4476165771484
+   ],
+   "median": 519.4476165771484,
+   "ci": [
+    519.4476165771484,
+    519.4476165771484
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, deletes: space amplification",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "x",
+   "times": [
+    0.2075446974546563,
+    0.2075446974546563,
+    0.2075446974546563
+   ],
+   "median": 0.2075446974546563,
+   "ci": [
+    0.2075446974546563,
+    0.2075446974546563
+   ],
+   "cv": 0.0,
+   "flagged": false,
+   "attempts": 1
+  },
+  {
+   "name": "100 rows a transaction, deletes: recovery",
+   "system": "nucleus lsm",
+   "phase": "write",
+   "unit": "s",
+   "times": [
+    0.8580748749664053,
+    0.8684477080823854,
+    0.8800980839878321
+   ],
+   "median": 0.8684477080823854,
+   "ci": [
+    0.8580748749664053,
+    0.8800980839878321
+   ],
+   "cv": 0.012680531532721298,
+   "flagged": false,
+   "attempts": 1
+  }
+ ]
+}
