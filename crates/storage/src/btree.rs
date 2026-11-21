@@ -252,6 +252,22 @@ impl BTree {
 
     // ---------------------------------------------------------------- values
 
+    /// [`make_val`](Self::make_val) of a value handed over: a small one
+    /// becomes the cell's as it is, not copied.
+    fn make_val_owned(&self, key: &[u8], value: Vec<u8>) -> Result<Val> {
+        if value.len() >= COMPRESS_MIN {
+            return self.make_val(key, &value);
+        }
+        let val = Val::Inline(value);
+        if leaf_cell_size(key, &val) - SLOT <= MAX_INLINE_CELL {
+            return Ok(val);
+        }
+        let Val::Inline(value) = val else {
+            unreachable!("made inline above")
+        };
+        self.make_val(key, &value)
+    }
+
     fn make_val(&self, key: &[u8], value: &[u8]) -> Result<Val> {
         // Compressed when that saves an eighth or more.
         let mut block = Vec::new();
@@ -685,6 +701,33 @@ impl BTree {
         self.apply_sorted_with(ops, Some(filter))
     }
 
+    /// [`apply_sorted`](Self::apply_sorted) (`filter` as
+    /// [`apply_sorted_filtered`](Self::apply_sorted_filtered)'s) of ops
+    /// handed over: their keys and values become the cells' — moved, not
+    /// copied (a commit's or a vacuum's batch, built to be written: a
+    /// copy of each and its freeing were a fifth of a vacuum, issue #4).
+    pub fn apply_sorted_owned(
+        &mut self,
+        ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
+        if let Some((k, _)) = ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
+            return Err(Error::KeyTooLarge(k.len()));
+        }
+        debug_assert!(ops.windows(2).all(|w| w[0].0 < w[1].0));
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let vals = ops
+            .into_iter()
+            .map(|(k, v)| {
+                let v = v.map(|v| self.make_val_owned(&k, v)).transpose()?;
+                Ok((k, v))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.apply_vals(vals, filter)
+    }
+
     fn apply_sorted_with(
         &mut self,
         ops: &[(Vec<u8>, Option<Vec<u8>>)],
@@ -706,6 +749,15 @@ impl BTree {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        self.apply_vals(vals, filter)
+    }
+
+    /// The sorted ops, their values made, into the tree.
+    fn apply_vals(
+        &mut self,
+        vals: Vec<(Vec<u8>, Option<Val>)>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
         // A batch reaching many leaves: workers prepare them (merged,
         // filtered, encoded into pages of their own) a window ahead of
         // this thread, which installs each as its walk reaches it — the

@@ -30,6 +30,6 @@ pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::{Pager, Rekey};
 pub use store::{
     Batch, BranchInfo, Checkpoint, DEFERRED_MAX, Deferred, MAIN, MAIN_NAME, Recovery, Scrubbed,
-    Store, StoreOptions, valid_branch_name,
+    Store, StoreOptions, WriteBatch, valid_branch_name,
 };
 pub use wal::{Lsn, Wal};

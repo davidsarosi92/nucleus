@@ -248,7 +248,7 @@ fn a_damaged_record_before_the_last_segment_is_corruption() {
     let (store, _) = open(&p).unwrap();
     let rng = SplitMix64::new(3);
     for i in 1..=40 {
-        store.commit(&random_batch(&rng, i)).unwrap();
+        store.commit(random_batch(&rng, i)).unwrap();
     }
     drop(store);
     let mut names = wal_files(&p, ".wal");

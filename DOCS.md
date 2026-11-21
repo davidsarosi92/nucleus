@@ -652,7 +652,10 @@ before it removes stale ones, and a store whose directory was removed
 or replaced while open — another store made at the path — poisons
 itself rather than touch that one's files.  `write(&Batch)` appends the batch to the
 WAL and applies it under the tree's write lock (visible at once);
-`wait_durable(lsn)`; `commit` = both.  `write_filtered(&Batch, filter)`
+`wait_durable(lsn)`; `commit` = both.  Each write takes the batch
+borrowed or owned (`WriteBatch`): an owned one's keys and values move
+into the leaves' cells instead of being copied (the transaction
+layer's commits and vacuums hand theirs over).  `write_filtered(&Batch, filter)`
 applies it through a `LeafFilter` (§4.4) — not logged: replay applies the
 batch without it, so what a filter drops must be garbage its layer can
 find again after a crash.  `write_covering(&Batch, covered)` logs a

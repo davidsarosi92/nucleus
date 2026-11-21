@@ -371,7 +371,7 @@ fn roll_back_to(store: &Store, at: u64) -> Result<()> {
                 }
                 let Some(last) = last else { return Ok(()) };
                 if !ops.is_empty() {
-                    store.write(&Batch { meta, ops })?;
+                    store.write(Batch { meta, ops })?;
                 }
                 from = last;
                 first = false;
@@ -1132,7 +1132,7 @@ impl Engine {
                 let lsn = self
                     .inner
                     .store
-                    .write_covering(&Batch { meta: *commit, ops }, &covered)?;
+                    .write_covering(Batch { meta: *commit, ops }, &covered)?;
                 drop(commit);
                 if next.is_none() {
                     self.trim_times()?;
@@ -1196,7 +1196,7 @@ impl Engine {
             if ops.is_empty() {
                 return Ok(());
             }
-            self.inner.store.write(&Batch { meta: *commit, ops })?;
+            self.inner.store.write(Batch { meta: *commit, ops })?;
         }
     }
 
@@ -1243,7 +1243,7 @@ impl Engine {
             if !ops.is_empty() {
                 self.inner
                     .store
-                    .write_covering(&Batch { meta: *commit, ops }, &covered)?;
+                    .write_covering(Batch { meta: *commit, ops }, &covered)?;
             }
             drop(commit);
             match next {
@@ -1277,6 +1277,12 @@ impl Engine {
     ) -> Result<(Ops, Vec<(Vec<u8>, Vec<u8>)>, Option<Vec<u8>>)> {
         let others = self.inner.others(None);
         let mut ops = Vec::new();
+        // This key's intents made versions: after its intents' deletes —
+        // an intent's store key is below every version's — so the chunk's
+        // writes are in key order and the store applies them as they are,
+        // not copied and sorted (a quarter of the vacuum after TPC-H's
+        // load, issue #4).
+        let mut made: Ops = Vec::new();
         let mut covered = Vec::new();
         let mut kept_one = false;
         let mut next = None;
@@ -1309,6 +1315,8 @@ impl Engine {
                 let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
                 let escaped = &k[..n - mvcc::OVERHEAD];
                 if !(prev.len() == n && prev.starts_with(escaped)) {
+                    made.sort_by(|a, b| a.0.cmp(&b.0));
+                    ops.append(&mut made);
                     if ops.len() >= chunk.max(1) {
                         next = Some(version_key(escaped, u64::MAX));
                         break 'ranges;
@@ -1327,8 +1335,8 @@ impl Engine {
                     };
                     if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
                         range.value_into(&mut v)?;
-                        ops.push((version_key(escaped, cts), Some(v.clone())));
                         ops.push((k.clone(), None));
+                        made.push((version_key(escaped, cts), Some(v.clone())));
                         *removed += 1;
                     } else if !others.contains(&id)
                         && !read(&self.inner.unresolved).contains_key(&id)
@@ -1359,6 +1367,8 @@ impl Engine {
                 kept_one = true;
             }
         }
+        made.sort_by(|a, b| a.0.cmp(&b.0));
+        ops.append(&mut made);
         Ok((ops, covered, next))
     }
 
@@ -1979,7 +1989,7 @@ impl Inner {
                 }
             }
             if !ops.is_empty() {
-                self.store.write(&Batch { meta: *last, ops })?;
+                self.store.write(Batch { meta: *last, ops })?;
             }
             match next {
                 Some(n) => from = n,
@@ -2008,7 +2018,7 @@ impl Inner {
             if ops.is_empty() {
                 return Ok(());
             }
-            self.store.write(&Batch { meta: *last, ops })?;
+            self.store.write(Batch { meta: *last, ops })?;
         }
     }
 
@@ -2040,7 +2050,7 @@ impl Inner {
             if done {
                 ops.push((unlogged_key(start), None));
             }
-            self.store.write(&Batch { meta: *last, ops })?;
+            self.store.write(Batch { meta: *last, ops })?;
             if done {
                 lock(&self.unlogged).retain(|(s, _)| s != start);
                 return Ok(());
@@ -2090,7 +2100,7 @@ impl Inner {
             if done {
                 ops.push((status_key(id), None));
             }
-            self.store.write(&Batch { meta: *last, ops })?;
+            self.store.write(Batch { meta: *last, ops })?;
             if done {
                 write(&self.unresolved).remove(&id);
                 self.side_users.fetch_sub(1, Ordering::AcqRel);
@@ -2774,7 +2784,7 @@ impl Transaction {
                 }
             }
         }
-        engine.store.write(&Batch {
+        engine.store.write(Batch {
             meta: *last,
             ops: vec![(unlogged_key(start), Some(end.clone()))],
         })?;
@@ -2954,7 +2964,7 @@ impl Transaction {
                 Some(encode_value(value.as_deref())),
             ));
             if bytes >= SPILL_CHUNK {
-                engine.store.write(&Batch {
+                engine.store.write(Batch {
                     meta: *last,
                     ops: std::mem::take(&mut ops),
                 })?;
@@ -2962,7 +2972,7 @@ impl Transaction {
             }
         }
         if !ops.is_empty() {
-            engine.store.write(&Batch { meta: *last, ops })?;
+            engine.store.write(Batch { meta: *last, ops })?;
         }
         self.write_bytes = 0;
         engine.checkpoint_if_due()
@@ -3177,10 +3187,10 @@ impl Transaction {
             let lsn = if deferred.is_empty() {
                 engine
                     .store
-                    .write_filtered(&Batch { meta: ts, ops }, &Collect { wm, intents })?
+                    .write_filtered(Batch { meta: ts, ops }, &Collect { wm, intents })?
             } else {
                 engine.store.write_deferring(
-                    &Batch { meta: ts, ops },
+                    Batch { meta: ts, ops },
                     deferred,
                     &Collect { wm, intents },
                 )?

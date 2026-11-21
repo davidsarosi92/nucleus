@@ -790,6 +790,36 @@ impl Tables {
         Ok(())
     }
 
+    /// [`apply_sorted`](Self::apply_sorted) of ops handed over: the
+    /// B+tree's moved into its cells, not copied.
+    pub(crate) fn apply_sorted_owned(
+        &mut self,
+        ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
+        if self.routes.is_empty() {
+            return self.tree.apply_sorted_owned(ops, filter);
+        }
+        let mut tree_ops = Vec::new();
+        let mut engine_ops: Vec<Vec<(Vec<u8>, Option<Vec<u8>>)>> =
+            vec![Vec::new(); self.routes.len()];
+        for op in ops {
+            match self.engine_of(&op.0) {
+                None => tree_ops.push(op),
+                Some(i) => engine_ops[i].push(op),
+            }
+        }
+        self.tree.apply_sorted_owned(tree_ops, filter)?;
+        for (e, ops) in self.engines.iter_mut().zip(&engine_ops) {
+            match filter {
+                _ if ops.is_empty() => {}
+                Some(f) => e.apply_filtered(ops, f)?,
+                None => e.apply(ops)?,
+            }
+        }
+        Ok(())
+    }
+
     /// Sets `key` (one op, in its engine).
     pub(crate) fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         match self.engine_of(key) {

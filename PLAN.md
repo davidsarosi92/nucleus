@@ -12006,6 +12006,19 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     index builds' rest: the sorted entries written a `put` at a time
     (`put_unlogged`) and the runs sorted on one thread; a bottom-up build
     of the fresh range's leaves is PostgreSQL's `_bt_load`.
+  - Issue #4, step 1 (2026-11-21): the vacuum's batches arrive sorted
+    and handed over.  A profile of the vacuum after the load (`sample`,
+    ~4 000 samples): `store::apply` copied and sorted every batch (~20 %)
+    — `sweep_chunk` put a key's version before its intent's delete, and
+    an intent's store key sorts below every version's — and the tree
+    copied each key and value into its cells (`make_val`) and freed the
+    batch after (~12 %).  Now a key's new versions follow its intents'
+    deletes, and `Store`'s writes take a batch owned (`WriteBatch`):
+    `BTree::apply_sorted_owned` moves the keys and small values into
+    the cells.  The vacuum (each binary alone in turn, ABBA): 5.64 →
+    4.20 s (sorted) → 3.72 s (owned); `COPY` 10.3 → 9.9 s by the same
+    path.  Left: the WAL's copy of every value (~25 % of the rest) —
+    step 2, the logged retime.
 
   *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
   1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in

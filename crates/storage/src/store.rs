@@ -354,6 +354,35 @@ impl Batch {
     }
 }
 
+/// A batch handed to a write: borrowed — its keys and values copied into
+/// the tree — or owned — moved there, a copy and its freeing a key and a
+/// value saved (a commit's or a vacuum's batch, built to be written;
+/// issue #4).
+pub trait WriteBatch<'a> {
+    /// The batch.
+    fn batch(&self) -> &Batch;
+    /// Its ops, given up.
+    fn into_ops(self) -> std::borrow::Cow<'a, [(Vec<u8>, Option<Vec<u8>>)]>;
+}
+
+impl<'a> WriteBatch<'a> for &'a Batch {
+    fn batch(&self) -> &Batch {
+        self
+    }
+    fn into_ops(self) -> std::borrow::Cow<'a, [(Vec<u8>, Option<Vec<u8>>)]> {
+        std::borrow::Cow::Borrowed(&self.ops)
+    }
+}
+
+impl WriteBatch<'static> for Batch {
+    fn batch(&self) -> &Batch {
+        self
+    }
+    fn into_ops(self) -> std::borrow::Cow<'static, [(Vec<u8>, Option<Vec<u8>>)]> {
+        std::borrow::Cow::Owned(self.ops)
+    }
+}
+
 /// What [`Store::open`] recovered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Recovery {
@@ -1210,7 +1239,7 @@ impl Store {
     /// Appends `batch` to the WAL and applies it.  Visible to readers when
     /// this returns; durable once [`Store::wait_durable`] with the returned
     /// LSN returns.
-    pub fn write(&self, batch: &Batch) -> Result<Lsn> {
+    pub fn write<'a>(&self, batch: impl WriteBatch<'a>) -> Result<Lsn> {
         self.write_with(batch, None)
     }
 
@@ -1218,7 +1247,11 @@ impl Store {
     /// batch rewrites ([`LeafFilter`]) — not logged: what it drops must be
     /// garbage the layer above can live with finding again after a crash
     /// (replay applies the batch without it).
-    pub fn write_filtered(&self, batch: &Batch, filter: &dyn LeafFilter) -> Result<Lsn> {
+    pub fn write_filtered<'a>(
+        &self,
+        batch: impl WriteBatch<'a>,
+        filter: &dyn LeafFilter,
+    ) -> Result<Lsn> {
         self.write_with(batch, Some(filter))
     }
 
@@ -1230,8 +1263,13 @@ impl Store {
     /// delete of what is left of something a filter thinned out stays
     /// whole after a crash (the transaction layer's vacuum of a key's
     /// last versions, below a filtered commit's drops).
-    pub fn write_covering(&self, batch: &Batch, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<Lsn> {
-        self.write_encoded(batch, &batch.encode_covering(covered), None, Vec::new())
+    pub fn write_covering<'a>(
+        &self,
+        batch: impl WriteBatch<'a>,
+        covered: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<Lsn> {
+        let encoded = batch.batch().encode_covering(covered);
+        self.write_encoded(batch, &encoded, None, Vec::new())
     }
 
     /// [`write_filtered`](Store::write_filtered), with puts `deferred`:
@@ -1239,28 +1277,35 @@ impl Store {
     /// checkpoint or until [`DEFERRED_MAX`] wait ([`Store::deferred`]
     /// holds them meanwhile).  For entries read seldom, by whoever reads
     /// them through both.
-    pub fn write_deferring(
+    pub fn write_deferring<'a>(
         &self,
-        batch: &Batch,
+        batch: impl WriteBatch<'a>,
         deferred: Vec<(Vec<u8>, Vec<u8>)>,
         filter: &dyn LeafFilter,
     ) -> Result<Lsn> {
-        let encoded = batch.encode_full(&[], &deferred);
+        let encoded = batch.batch().encode_full(&[], &deferred);
         self.write_encoded(batch, &encoded, Some(filter), deferred)
     }
 
-    fn write_with(&self, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<Lsn> {
-        self.write_encoded(batch, &batch.encode(), filter, Vec::new())
+    fn write_with<'a>(
+        &self,
+        batch: impl WriteBatch<'a>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<Lsn> {
+        let encoded = batch.batch().encode();
+        self.write_encoded(batch, &encoded, filter, Vec::new())
     }
 
-    fn write_encoded(
+    fn write_encoded<'a>(
         &self,
-        batch: &Batch,
+        batch: impl WriteBatch<'a>,
         encoded: &[u8],
         filter: Option<&dyn LeafFilter>,
         deferred: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<Lsn> {
+        let meta = batch.batch().meta;
         if let Some(k) = batch
+            .batch()
             .ops
             .iter()
             .map(|(k, _)| k)
@@ -1277,9 +1322,12 @@ impl Store {
             b.writers_waiting.fetch_add(1, Ordering::AcqRel);
             let mut tree = b.tree.write().unwrap_or_else(|e| e.into_inner());
             b.writers_waiting.fetch_sub(1, Ordering::AcqRel);
-            apply(&mut tree, batch, filter)?;
+            // The deferred puts first, while the batch's keys are at hand:
+            // they are not the tree's, and no reader sees either before
+            // the tree's lock is let go.
             let mut d = b.deferred.lock().unwrap_or_else(|e| e.into_inner());
-            overlay(&mut d, batch, deferred);
+            overlay(&mut d, batch.batch(), deferred);
+            apply_ops(&mut tree, batch.into_ops(), filter)?;
             if d.len() > DEFERRED_MAX {
                 settle(&mut tree, &mut d)?;
             }
@@ -1287,7 +1335,7 @@ impl Store {
         });
         match result {
             Ok(lsn) => {
-                *w = (lsn, batch.meta);
+                *w = (lsn, meta);
                 Ok(lsn)
             }
             Err(e) => {
@@ -1345,7 +1393,7 @@ impl Store {
     }
 
     /// [`Store::write`] then [`Store::wait_durable`].
-    pub fn commit(&self, batch: &Batch) -> Result<Lsn> {
+    pub fn commit<'a>(&self, batch: impl WriteBatch<'a>) -> Result<Lsn> {
         let lsn = self.write(batch)?;
         self.wait_durable(lsn)?;
         Ok(lsn)
@@ -2398,7 +2446,43 @@ fn remove_covered(tree: &mut Tables, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<(
     Ok(())
 }
 
+/// [`apply`] of ops borrowed or handed over: these moved into the tree.
+fn apply_ops(
+    tree: &mut Tables,
+    ops: std::borrow::Cow<'_, [(Vec<u8>, Option<Vec<u8>>)]>,
+    filter: Option<&dyn LeafFilter>,
+) -> Result<()> {
+    let mut ops = match ops {
+        std::borrow::Cow::Borrowed(ops) => return apply_borrowed(tree, ops, filter),
+        std::borrow::Cow::Owned(ops) => ops,
+    };
+    let many = ops.len() > 1 || (filter.is_some() && !ops.is_empty());
+    if many && !ops.windows(2).all(|w| w[0].0 < w[1].0) {
+        // Stably: a key's writes keep their order.
+        ops.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    if many && ops.windows(2).all(|w| w[0].0 < w[1].0) {
+        return tree.apply_sorted_owned(ops, filter);
+    }
+    // A key twice (or one op): one at a time, each key's in its order.
+    for (k, v) in &ops {
+        match v {
+            Some(v) => tree.insert(k, v)?,
+            None => tree.remove(k)?,
+        }
+    }
+    Ok(())
+}
+
 fn apply(tree: &mut Tables, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<()> {
+    apply_borrowed(tree, &batch.ops, filter)
+}
+
+fn apply_borrowed(
+    tree: &mut Tables,
+    ops: &[(Vec<u8>, Option<Vec<u8>>)],
+    filter: Option<&dyn LeafFilter>,
+) -> Result<()> {
     let sorted =
         |tree: &mut Tables, ops: &[(Vec<u8>, Option<Vec<u8>>)]| tree.apply_sorted(ops, filter);
     // When no key comes twice (how the engine writes batches), the order
@@ -2407,16 +2491,16 @@ fn apply(tree: &mut Tables, batch: &Batch, filter: Option<&dyn LeafFilter>) -> R
     // (Already sorted — how the engine writes its commits —, as it is.)
     // A filter wants the sorted pass even for one key (it acts as leaves
     // are rewritten).
-    let many = batch.ops.len() > 1 || (filter.is_some() && !batch.ops.is_empty());
-    if many && batch.ops.windows(2).all(|w| w[0].0 < w[1].0) {
-        return sorted(tree, &batch.ops);
+    let many = ops.len() > 1 || (filter.is_some() && !ops.is_empty());
+    if many && ops.windows(2).all(|w| w[0].0 < w[1].0) {
+        return sorted(tree, ops);
     }
-    let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = batch.ops.clone();
-    ops.sort_by(|a, b| a.0.cmp(&b.0));
-    if ops.len() > 1 && ops.windows(2).all(|w| w[0].0 != w[1].0) {
-        return sorted(tree, &ops);
+    let mut copy: Vec<(Vec<u8>, Option<Vec<u8>>)> = ops.to_vec();
+    copy.sort_by(|a, b| a.0.cmp(&b.0));
+    if copy.len() > 1 && copy.windows(2).all(|w| w[0].0 != w[1].0) {
+        return sorted(tree, &copy);
     }
-    for (k, v) in &batch.ops {
+    for (k, v) in ops {
         match v {
             Some(v) => tree.insert(k, v)?,
             None => tree.remove(k)?,

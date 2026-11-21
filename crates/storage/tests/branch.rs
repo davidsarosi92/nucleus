@@ -189,7 +189,7 @@ fn dropping_gives_back_what_the_branch_changed() {
 
     main.drop_branch("a").unwrap();
     assert!(matches!(a.get(b"k0001"), Err(Error::Branch(_))));
-    assert!(matches!(a.commit(&Batch::default()), Err(Error::Branch(_))));
+    assert!(matches!(a.commit(Batch::default()), Err(Error::Branch(_))));
     main.checkpoint().unwrap(); // frees the pages freed in the drop's commit
     main.check_pages().unwrap();
     assert!(
