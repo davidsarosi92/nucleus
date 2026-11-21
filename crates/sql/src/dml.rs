@@ -290,9 +290,9 @@ impl IndexBuild {
         t: &Table,
         duplicate: &dyn Fn(&str) -> Error,
     ) -> Result<()> {
-        for (s, i) in self.sorters.into_iter().zip(self.indexes) {
+        for (mut s, i) in self.sorters.into_iter().zip(self.indexes) {
             let mut last_unique: Option<Vec<u8>> = None;
-            s.each(&mut |k, pk, unique| {
+            let mut put = |k: &[u8], pk: &[u8], unique: bool| -> Result<()> {
                 if unique {
                     if last_unique.as_deref() == Some(k) {
                         return Err(duplicate(&t.indexes[i].name));
@@ -302,7 +302,85 @@ impl IndexBuild {
                     last.extend_from_slice(k);
                 }
                 Ok(txn.put(k, pk)?)
+            };
+            if crate::budget::workers() < 2 || !s.many() {
+                s.each(&mut put)?;
+                continue;
+            }
+            // Many: the entries merged (or read in order) on a thread of
+            // their own, handed over in blocks, while this one writes the
+            // blocks before (issue #9: the merge and the writes were a
+            // quarter and half of a large build, one after the other).
+            s.prepare()?;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<EntryBlock>(2);
+            std::thread::scope(|sc| -> Result<()> {
+                let merger = sc.spawn(move || -> Result<()> {
+                    let mut block = EntryBlock::default();
+                    s.each(&mut |k, pk, unique| {
+                        block.push(k, pk, unique);
+                        if block.bytes.len() >= ENTRY_BLOCK_BYTES {
+                            tx.send(std::mem::take(&mut block))
+                                .map_err(|_| Error::internal("an index build's writer stopped"))?;
+                        }
+                        Ok(())
+                    })?;
+                    if !block.lens.is_empty() {
+                        let _ = tx.send(block);
+                    }
+                    Ok(())
+                });
+                let mut written = Ok(());
+                for block in &rx {
+                    written = block.each(&mut put);
+                    if written.is_err() {
+                        break;
+                    }
+                }
+                // A writer's error first: the merger, cut off, stops with
+                // one of its own.
+                drop(rx);
+                let merged = merger
+                    .join()
+                    .unwrap_or(Err(Error::internal("an index build's merge panicked")));
+                written.and(merged)
             })?;
+        }
+        Ok(())
+    }
+}
+
+/// Entries an index build's merge hands its writer at once.
+const ENTRY_BLOCK_BYTES: usize = 1 << 20;
+
+/// Entries past which an index build in memory merges apart from its
+/// writes.
+const PIPELINE_ENTRIES: usize = 1 << 16;
+
+/// Index entries in order, handed from a build's merge to its writer:
+/// keys and primary keys side by side, each entry's lengths and flag.
+#[derive(Default)]
+struct EntryBlock {
+    bytes: Vec<u8>,
+    lens: Vec<(u32, u32, bool)>,
+}
+
+impl EntryBlock {
+    fn push(&mut self, k: &[u8], pk: &[u8], unique: bool) {
+        self.bytes.extend_from_slice(k);
+        self.bytes.extend_from_slice(pk);
+        self.lens.push((k.len() as u32, pk.len() as u32, unique));
+    }
+
+    fn each(&self, f: &mut dyn FnMut(&[u8], &[u8], bool) -> Result<()>) -> Result<()> {
+        let mut at = 0;
+        for &(k, pk, unique) in &self.lens {
+            let (k, pk) = (k as usize, pk as usize);
+            f(
+                &self.bytes[at..at + k],
+                &self.bytes[at + k..at + k + pk],
+                unique,
+            )?;
+            at += k + pk;
         }
         Ok(())
     }
@@ -553,6 +631,8 @@ struct EntrySorter {
     budget: usize,
     entries: Entries,
     runs: Vec<Arc<crate::spill::Sealed>>,
+    /// The entries in memory sorted already ([`prepare`](Self::prepare)).
+    sorted: bool,
 }
 
 impl EntrySorter {
@@ -561,7 +641,29 @@ impl EntrySorter {
             budget,
             entries: Entries::default(),
             runs: Vec::new(),
+            sorted: false,
         }
+    }
+
+    /// What [`each`](Self::each) does before it hands out the first
+    /// entry — the entries in memory sorted, or spilled as the last run —
+    /// done here, on the statement's thread, whose workers the sort
+    /// shares them out to.
+    fn prepare(&mut self) -> Result<()> {
+        if self.runs.is_empty() {
+            if !self.sorted {
+                self.entries.sort();
+                self.sorted = true;
+            }
+        } else if !self.entries.items.is_empty() {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// Entries it holds, in memory or spilled (about).
+    fn many(&self) -> bool {
+        !self.runs.is_empty() || self.entries.items.len() >= PIPELINE_ENTRIES
     }
 
     fn spill_past_budget(&mut self) -> Result<()> {
@@ -594,7 +696,9 @@ impl EntrySorter {
     /// they are an error).
     fn each(mut self, f: &mut dyn FnMut(&[u8], &[u8], bool) -> Result<()>) -> Result<()> {
         if self.runs.is_empty() {
-            self.entries.sort();
+            if !self.sorted {
+                self.entries.sort();
+            }
             let e = &self.entries;
             return e
                 .items

@@ -12606,6 +12606,17 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     entry's value left empty (the primary key read from its key's end:
     its 66 readers), −27 %; then posting lists for repeated values, as
     PostgreSQL 13's deduplication.
+    (d) 2026-11-21, after #4's rekeying: a large build's merge (or its
+    read of the sorted entries) on a thread of its own, handed to the
+    writer in 1 MiB blocks over a channel of two, while the writer puts
+    the blocks before. Sorting or the last spill stays on the statement's
+    thread, whose workers the sample sort uses; a duplicate the writer
+    finds drops the channel, and the merge stops at its next send. Only
+    with workers and many entries (spilled, or 65,536 in memory). ABBA:
+    `(l_partkey, l_suppkey)` 3.68 / 3.53 → 2.95 / 3.10 s, `(l_suppkey)`
+    2.71 / 2.61 → 2.48 / 2.48. Tested by `index_builds_sort_past_work_mem`
+    (four workers, spilled and in memory, a duplicate found; fails when a
+    block is lost).
 
   *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
   "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's

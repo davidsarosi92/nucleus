@@ -203,17 +203,31 @@ fn writes_collect_their_rows_past_work_mem() {
 /// Index builds (PLAN.md §M14.20 W2) sort their entries, past `work_mem`
 /// in sorted runs merged: the same index, and the same duplicates found,
 /// with 64 kB as with the default — for `CREATE INDEX`, `CREATE UNIQUE
-/// INDEX` and `ALTER COLUMN … TYPE`, which rebuilds every index.
+/// INDEX` and `ALTER COLUMN … TYPE`, which rebuilds every index.  On four
+/// workers, a large build's merge runs apart from its writes (issue #9):
+/// past `work_mem`, and in memory with many entries — a duplicate found by
+/// the writer stops the merge.
 #[test]
 fn index_builds_sort_past_work_mem() {
-    for (mem, storage) in [("64MB", "row"), ("64kB", "row"), ("64kB", "column")] {
+    for (mem, storage, workers, n) in [
+        ("64MB", "row", 1, 20_000),
+        ("64kB", "row", 1, 20_000),
+        ("64kB", "column", 1, 20_000),
+        ("64kB", "row", 4, 20_000),
+        ("64MB", "row", 4, 70_000),
+    ] {
+        let mem = &format!("{mem}, {workers} workers");
         let kv: Arc<dyn Kv> = Arc::new(database());
         let mut s = Session::new(kv.clone());
-        s.execute(&format!("SET work_mem = '{mem}'")).unwrap();
+        s.execute(&format!(
+            "SET work_mem = '{}'; SET parallel_workers = {workers}",
+            mem.split(',').next().unwrap()
+        ))
+        .unwrap();
         s.execute(&format!(
             "CREATE TABLE t (id INT PRIMARY KEY, a INT, b TEXT, u INT) WITH (storage = {storage}); \
              INSERT INTO t SELECT i, (i * 7919) % 1000, 'v' || ((i * 31) % 97), \
-                    CASE WHEN i % 10 = 0 THEN NULL ELSE i END FROM generate_series(1, 20000) i; \
+                    CASE WHEN i % 10 = 0 THEN NULL ELSE i END FROM generate_series(1, {n}) i; \
              CREATE INDEX t_a ON t (a, b); \
              CREATE UNIQUE INDEX t_u ON t (u)"
         ))

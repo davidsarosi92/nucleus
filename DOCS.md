@@ -3211,7 +3211,10 @@ order with no merge after; past it each `work_mem`'s worth becomes one sorted ru
 of byte records in scratch space (`spill::Run::push_record`), and the
 runs are merged by a heap of run positions, the keys left where they
 are.  A unique index's duplicates are neighbours in that order — found
-without a look at the tree (`23505`); the writes go to the index's
+without a look at the tree (`23505`).  A large build (spilled, or 65,536
+entries in memory, with workers) merges on a thread of its own, handing
+the writer 1 MiB blocks of entries while it writes the ones before.  The
+writes go to the index's
 `fresh` range in key order: into the store as they come, without the WAL
 (D16, §5.2), `apply_sorted` packing them into full pages — or, with
 `--wal full`, through the write set, which keeps them as appends.
