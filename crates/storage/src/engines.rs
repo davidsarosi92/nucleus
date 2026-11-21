@@ -801,6 +801,70 @@ impl Tables {
         Ok(())
     }
 
+    /// Each range's keys that end with one of `tails`' old ends rewritten
+    /// to end with its new one, values kept: the B+tree's in place where
+    /// they keep their order ([`BTree::rekey`]), the rest — those it gave
+    /// back, an engine's — moved (each deleted, its value put under the
+    /// new key).  Applied the same way when a log is replayed: the same
+    /// keys rewritten, wherever they lie (issue #4).
+    pub(crate) fn rekey(
+        &mut self,
+        ranges: &[(Vec<u8>, Option<Vec<u8>>)],
+        tails: &btree::Tails,
+    ) -> Result<()> {
+        if tails.is_empty() {
+            return Ok(());
+        }
+        let mut moves: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for (start, end) in ranges {
+            let end_b = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+            for piece in self.pieces(Bound::Included(start), end_b) {
+                let key = |b: &Bound<Vec<u8>>| match b {
+                    Bound::Included(k) | Bound::Excluded(k) => Some(k.clone()),
+                    Bound::Unbounded => None,
+                };
+                match piece.engine {
+                    None => {
+                        let from = key(&piece.start).unwrap_or_default();
+                        let to = key(&piece.end);
+                        moves.extend(self.tree.rekey(&from, to.as_deref(), tails)?);
+                    }
+                    Some(i) => {
+                        let mut scan = self.engines[i].scan(
+                            borrow(&piece.start),
+                            borrow(&piece.end),
+                            false,
+                        )?;
+                        let mut k = Vec::new();
+                        while scan.next_key_into(&mut k)? {
+                            if let Some(t) = tails.new_end(&k) {
+                                let mut new = k.clone();
+                                let at = new.len() - t.len();
+                                new[at..].copy_from_slice(t);
+                                moves.push((k.clone(), new));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if moves.is_empty() {
+            return Ok(());
+        }
+        // Each moved: its delete and its put, in key order (a new key may
+        // sort before or after other old ones).
+        let mut ops = Vec::with_capacity(2 * moves.len());
+        for (old, new) in moves {
+            let Some(v) = self.get(&old)? else {
+                continue;
+            };
+            ops.push((old, None));
+            ops.push((new, Some(v)));
+        }
+        ops.sort_by(|a, b| a.0.cmp(&b.0));
+        self.apply_sorted_owned(ops, None)
+    }
+
     /// [`apply_sorted`](Self::apply_sorted) of ops handed over: the
     /// B+tree's moved into its cells, not copied.
     pub(crate) fn apply_sorted_owned(

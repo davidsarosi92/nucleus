@@ -871,3 +871,89 @@ fn a_group_sought_together_finds_each_ones_first_entry() {
         }
     });
 }
+
+/// A rekeying (issue #4) on one worker and on four: every key in its range
+/// that ends with an old tail ends with the new one, its value kept; the
+/// keys that would pass a neighbour given back to move; the tree whole —
+/// its pages written over where writable, copied where a commit holds
+/// them.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn a_rekeying_on_workers_rewrites_key_tails() {
+    let key = |u: u64, suffix: u64| {
+        // Long keys: a deep tree, internal nodes of few children.
+        let mut k = vec![b'r'; 100];
+        k.extend_from_slice(&u.to_be_bytes());
+        k.extend_from_slice(&[0, 0]);
+        k.extend_from_slice(&suffix.to_be_bytes());
+        k
+    };
+    let tail = |x: u64| {
+        let mut t = vec![0, 0];
+        t.extend_from_slice(&x.to_be_bytes());
+        t
+    };
+    let tails = nucleus_storage::Tails::new(vec![(tail(5), tail(u64::MAX - 100))]);
+    let (start, end) = (key(1_000, 0), key(18_000, 0));
+    let run = |workers: usize| {
+        let p = platform(43);
+        let mut tree = new_tree(&p, 256);
+        tree.set_workers(workers);
+        let rng = SplitMix64::new(9);
+        let mut model = BTreeMap::new();
+        for half in 0..2u64 {
+            let mut ops = Vec::new();
+            for u in half * 10_000..(half + 1) * 10_000 {
+                if u % 3 != 0 {
+                    ops.push((key(u, 5), Some(value(&rng))));
+                }
+                if u % 11 == 0 {
+                    // Newer than the commit: the intent's new key passes it.
+                    ops.push((key(u, u64::MAX - 200), Some(b"newer".to_vec())));
+                }
+            }
+            ops.sort();
+            tree.apply_sorted(&ops).unwrap();
+            for (k, v) in ops {
+                model.insert(k, v.unwrap());
+            }
+            if half == 0 {
+                // The first half's pages held by a commit: copied; the
+                // second's written over.
+                commit(&tree).unwrap();
+            }
+        }
+        let back = tree.rekey(&start, Some(&end), &tails).unwrap();
+        assert!(!back.is_empty(), "some keys pass a neighbour");
+        for (old, new) in &back {
+            assert!(tails.new_end(old).is_some() && new != old);
+            let v = tree.get(old).unwrap().unwrap();
+            tree.apply_sorted(&[(old.clone(), None), (new.clone(), Some(v))])
+                .unwrap();
+        }
+        tree.check().unwrap();
+        commit(&tree).unwrap();
+        let got: BTreeMap<Vec<u8>, Vec<u8>> = tree
+            .range(Bound::Unbounded, Bound::Unbounded)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (k, v) in &got {
+            assert_eq!(tree.get(k).unwrap().as_ref(), Some(v));
+        }
+        (model, got)
+    };
+    let (model, one) = run(1);
+    let mut want = BTreeMap::new();
+    for (k, v) in model {
+        let mut k = k;
+        if k >= start && k < end && k.ends_with(&tail(5)) {
+            let at = k.len() - 10;
+            k[at..].copy_from_slice(&tail(u64::MAX - 100));
+        }
+        want.insert(k, v);
+    }
+    assert_eq!(one, want);
+    let (_, four) = run(4);
+    assert_eq!(four, want);
+}

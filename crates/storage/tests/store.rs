@@ -1271,3 +1271,132 @@ fn deferred_puts_wait_in_memory_then_reach_the_tree() {
     assert_eq!(contents_deferred(&store), model);
     store.read().unwrap().check().unwrap();
 }
+
+/// `user ‖ 00 00 ‖ suffix`, as the transaction layer keys its versions.
+fn version_key(user: u32, suffix: u64) -> Vec<u8> {
+    let mut k = format!("user{user:05}").into_bytes();
+    k.extend_from_slice(&[0, 0]);
+    k.extend_from_slice(&suffix.to_be_bytes());
+    k
+}
+
+/// A rekeying (issue #4) rewrites, in its ranges, the keys ending with an
+/// old tail to end with its new one, values kept: in place in a leaf —
+/// writable, or (after a checkpoint) copied — or moved where the new key
+/// would pass a neighbour; the same again when the log is replayed.
+#[test]
+fn a_rekeying_rewrites_key_tails_now_and_on_replay() {
+    for checkpointed in [false, true] {
+        let p = sim(11);
+        let (store, _) = open(&p).unwrap();
+        let rng = SplitMix64::new(11);
+        let mut model = Model::new();
+        let mut ops = Vec::new();
+        for u in 0..4000u32 {
+            // Intents of transactions 5, 6, 7 (suffix the id), each key's
+            // versions after them (suffix MAX - ts, ts below 2^63).
+            if u % 3 != 0 {
+                let id = 5 + u64::from(u % 4).min(2);
+                // Long values in a run of keys: leaves of a few keys,
+                // their prefix reaching near the tails (a slot's head
+                // rewritten too).
+                let len = if (1000..1200).contains(&u) {
+                    2000
+                } else {
+                    [1, 40, 300, 3000][rng.below(4) as usize]
+                };
+                // Bytes that do not compress: the leaves stay small.
+                let value = (0..len).map(|_| rng.next_u64() as u8).collect();
+                ops.push((version_key(u, id), Some(value)));
+            }
+            if u % 5 == 0 {
+                // A version newer than transaction 5's commit (ts 100):
+                // its intent's new key passes it, so it moves.
+                ops.push((version_key(u, u64::MAX - 200), Some(b"newer".to_vec())));
+            }
+            if u % 7 == 0 {
+                ops.push((version_key(u, u64::MAX - 50), Some(b"older".to_vec())));
+            }
+        }
+        ops.sort();
+        let load = Batch { meta: 1, ops };
+        store.commit(&load).unwrap();
+        apply(&mut model, &load);
+        if checkpointed {
+            store.checkpoint().unwrap();
+        }
+        let tails = nucleus_storage::Tails::new(vec![
+            (
+                5u64.to_be_bytes().to_vec(),
+                (u64::MAX - 100).to_be_bytes().to_vec(),
+            ),
+            (
+                6u64.to_be_bytes().to_vec(),
+                (u64::MAX - 120).to_be_bytes().to_vec(),
+            ),
+            // Transaction 7 not committed: its intents stay.
+        ]);
+        let ranges = vec![
+            (b"user00100".to_vec(), Some(b"user02000".to_vec())),
+            (b"user02500".to_vec(), None),
+        ];
+        let rekeying = nucleus_storage::Rekeying {
+            ranges: ranges.clone(),
+            tails: tails.clone(),
+        };
+        // The batch's own ops: other keys.
+        let others = Batch {
+            meta: 2,
+            ops: vec![
+                (version_key(3, 7), None),
+                (b"zz".to_vec(), Some(b"after".to_vec())),
+            ],
+        };
+        store.write_rekeying(&others, &[], &rekeying).unwrap();
+        let lsn = store
+            .write(&Batch {
+                meta: 3,
+                ops: vec![],
+            })
+            .unwrap();
+        store.wait_durable(lsn).unwrap();
+        apply(&mut model, &others);
+        let mut want = Model::new();
+        for (k, v) in &model {
+            let inside = ranges
+                .iter()
+                .any(|(s, e)| k.as_slice() >= s.as_slice() && e.as_ref().is_none_or(|e| k < e));
+            let tail = &k[k.len().saturating_sub(8)..];
+            let new = tails
+                .pairs()
+                .iter()
+                .find(|(o, _)| o.as_slice() == tail)
+                .map(|(_, n)| n);
+            let mut k = k.clone();
+            if let (true, Some(n)) = (inside, new) {
+                let at = k.len() - 8;
+                k[at..].copy_from_slice(n);
+            }
+            want.insert(k, v.clone());
+        }
+        assert_ne!(want, model, "some keys are rewritten");
+        assert_eq!(contents(&store), want, "checkpointed {checkpointed}");
+        store.read().unwrap().check().unwrap();
+        // Found by a search, too: the slots' heads agree.
+        let tree = store.read().unwrap();
+        for (k, v) in &want {
+            assert_eq!(tree.get(k).unwrap().as_ref(), Some(v), "{k:?}");
+        }
+        drop(tree);
+        drop(store);
+        p.sim_fs().crash();
+        let (store, rec) = open(&p).unwrap();
+        assert!(rec.replayed >= 2);
+        assert_eq!(
+            contents(&store),
+            want,
+            "replayed, checkpointed {checkpointed}"
+        );
+        store.read().unwrap().check().unwrap();
+    }
+}

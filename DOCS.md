@@ -695,10 +695,22 @@ after TPC-H's load wrote 0.94 GiB instead of 1.81.  Every batch is now
 written as version 5: version 4's sections, each op's key given by the
 bytes it shares with the key before it and the rest, every length in an
 op a LEB128 number. A batch's keys are sorted, so each key repeats most
-of the one before. The vacuum's moves log an intent's delete, its
-version's key and the source key, and the last two repeat all but eight
-bytes of the first. The vacuum after TPC-H's load writes 0.27 GiB instead
-of 0.94 (issue #4); versions 1–4 are still read.  A batch whose keys are all
+of the one before (versions 1–4 are still read).  `write_rekeying(&Batch,
+covered, &Rekeying)` (WAL batch version 6: version 5's sections, then
+key ranges and pairs of an old and a new key end, all of one length)
+rewrites, in each range, every key ending with an old end to end with
+its new one, the value kept (`BTree::rekey`): the leaves in the range
+listed by a walk of the internal nodes, looked through on the tree's
+workers (read only), then each leaf patched in place on one thread — the
+key's last bytes written over, and its slot's head where the end reaches
+into it, where the new key keeps its order between its neighbours and
+separators and the end lies past the leaf's prefix; a leaf a checkpoint
+holds copied to a new page, its parent's pointer changed so. A key that
+cannot be patched so is moved (deleted and put). The log holds only the
+ranges and the ends: replay rewrites the same keys, the log having
+brought the tree to them. The vacuum makes committed intents versions
+so (§5.3): after TPC-H's load it logs almost nothing (0.27 GiB with
+moves before) and takes ~1.4 s instead of 3.3 (issue #4).  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `write_unlogged(&Batch)`
 applies a batch without logging it (D16): durable only once a checkpoint
@@ -1177,7 +1189,10 @@ status record (`id → ts`) — so
 it is atomic however large the transaction, and **each write is written
 once**: nothing moves after the commit.  `vacuum()` later rewrites
 committed intents as versions at their timestamps and deletes aborted
-ones; once a whole sweep is done (durable), the statuses of the
+ones — a committed intent's key ends `00 00 ‖ id` and its version's
+`00 00 ‖ MAX − ts`, so the vacuum rekeys each swept range's keys from
+the one end to the other (`Store::write_rekeying`), its rows left where
+they are; once a whole sweep is done (durable), the statuses of the
 transactions committed before it began are dropped.  Meanwhile reads pay
 a little for them (a read of a key with intents walks them before its
 versions; a scan merges them in one streaming pass), and vacuum leaves

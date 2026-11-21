@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use nucleus_platform::{FileSystem, OpenMode, Platform};
 
-use crate::btree::{BTree, LeafFilter};
+use crate::btree::{BTree, LeafFilter, Tails};
 use crate::buffer::BufferPool;
 use crate::engines::{self, Engine, EngineKind, Route, Tables};
 use crate::error::{Error, Result};
@@ -80,6 +80,10 @@ const BATCH_VERSION_MOVING: u8 = 4;
 /// (an intent's delete, its version's put, the move's source: 2.3 keys'
 /// bytes logged a third as long; issue #4).
 const BATCH_VERSION_PACKED: u8 = 5;
+/// A batch with a rekeying ([`Store::write_rekeying`]): version 5's
+/// sections, then the rekeying's ranges and tails, every length a LEB128
+/// number.  Version 5 still for every other batch.
+const BATCH_VERSION_REKEYING: u8 = 6;
 /// A logged op's tag: a put, a delete, a move.
 const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
@@ -172,13 +176,19 @@ impl Redo {
         mut batch: Batch,
         covered: &[(Vec<u8>, Vec<u8>)],
         moves: &[(usize, Vec<u8>)],
+        rekeying: Option<&Rekeying>,
     ) -> Result<()> {
-        if self.budget == 0 || !covered.is_empty() || !moves.is_empty() {
-            // A move reads the tree as the batch found it.
+        if self.budget == 0 || !covered.is_empty() || !moves.is_empty() || rekeying.is_some() {
+            // A move reads the tree as the batch found it; a rekeying,
+            // the keys it rewrites.
             self.flush(tree)?;
             resolve_moves(tree, &mut batch, moves)?;
             apply(tree, &batch, None)?;
-            return remove_covered(tree, covered);
+            remove_covered(tree, covered)?;
+            if let Some(r) = rekeying {
+                tree.rekey(&r.ranges, &r.tails)?;
+            }
+            return Ok(());
         }
         // A key and a value's bytes, and what a gathered entry costs
         // beside them (its two vectors and the tuple).
@@ -243,6 +253,18 @@ struct Decoded {
     covered: Vec<(Vec<u8>, Vec<u8>)>,
     deferred: Vec<(Vec<u8>, Vec<u8>)>,
     moves: Vec<(usize, Vec<u8>)>,
+    rekeying: Option<Rekeying>,
+}
+
+/// Keys rewritten in place by a batch ([`Store::write_rekeying`]): in each
+/// range `[start, end)` (`None`: the end), each key that ends with one of
+/// the tails' old ends, to end with its new one, its value kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rekeying {
+    /// The ranges, ascending, apart.
+    pub ranges: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// The ends rewritten.
+    pub tails: Tails,
 }
 
 /// The journal of a batch of pages sealed again in place (K3f), beside
@@ -287,7 +309,7 @@ impl Batch {
     }
 
     fn encode_covering(&self, covered: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
-        self.encode_full(covered, &[], &[])
+        self.encode_full(covered, &[], &[], None)
     }
 
     /// The batch as logged ([`BATCH_VERSION_PACKED`]); `moves` (op
@@ -298,6 +320,7 @@ impl Batch {
         covered: &[(Vec<u8>, Vec<u8>)],
         deferred: &[(Vec<u8>, Vec<u8>)],
         moves: &[(usize, Vec<u8>)],
+        rekeying: Option<&Rekeying>,
     ) -> Vec<u8> {
         let size = self
             .ops
@@ -305,7 +328,11 @@ impl Batch {
             .map(|(k, v)| 6 + k.len() / 2 + v.as_ref().map_or(0, Vec::len))
             .sum::<usize>();
         let mut out = Vec::with_capacity(13 + size);
-        out.push(BATCH_VERSION_PACKED);
+        out.push(if rekeying.is_some() {
+            BATCH_VERSION_REKEYING
+        } else {
+            BATCH_VERSION_PACKED
+        });
         out.extend_from_slice(&self.meta.to_le_bytes());
         out.extend_from_slice(&(self.ops.len() as u32).to_le_bytes());
         let shared = |a: &[u8], b: &[u8]| a.iter().zip(b).take_while(|(x, y)| x == y).count();
@@ -350,6 +377,22 @@ impl Batch {
             for b in [k, v] {
                 out.extend_from_slice(&(b.len() as u32).to_le_bytes());
                 out.extend_from_slice(b);
+            }
+        }
+        if let Some(r) = rekeying {
+            put_leb(&mut out, r.ranges.len());
+            for (start, end) in &r.ranges {
+                put_leb(&mut out, start.len());
+                out.extend_from_slice(start);
+                put_leb(&mut out, end.as_ref().map_or(0, |e| e.len() + 1));
+                out.extend_from_slice(end.as_deref().unwrap_or_default());
+            }
+            let pairs = r.tails.pairs();
+            put_leb(&mut out, pairs.len());
+            put_leb(&mut out, pairs.first().map_or(0, |p| p.0.len()));
+            for (old, new) in pairs {
+                out.extend_from_slice(old);
+                out.extend_from_slice(new);
             }
         }
         out
@@ -478,6 +521,7 @@ impl Batch {
                 | BATCH_VERSION_DEFERRING
                 | BATCH_VERSION_MOVING
                 | BATCH_VERSION_PACKED
+                | BATCH_VERSION_REKEYING
         ) {
             return Err(Error::Corrupt {
                 page: PageId(0),
@@ -488,7 +532,7 @@ impl Batch {
         let n = u32_of(take(&mut b, 4)?);
         let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(n.min(1 << 16));
         let mut moves = Vec::new();
-        let packed = version == BATCH_VERSION_PACKED;
+        let packed = version >= BATCH_VERSION_PACKED;
         let past = |reason| Error::Corrupt {
             page: PageId(0),
             reason,
@@ -570,11 +614,38 @@ impl Batch {
                 deferred.push((k, v));
             }
         }
+        let mut rekeying = None;
+        if version == BATCH_VERSION_REKEYING {
+            let n = leb(&mut b)?;
+            let mut ranges = Vec::with_capacity(n.min(1 << 16));
+            for _ in 0..n {
+                let len = leb(&mut b)?;
+                let start = take(&mut b, len)?.to_vec();
+                let end = match leb(&mut b)? {
+                    0 => None,
+                    len => Some(take(&mut b, len - 1)?.to_vec()),
+                };
+                ranges.push((start, end));
+            }
+            let n = leb(&mut b)?;
+            let len = leb(&mut b)?;
+            let mut pairs = Vec::with_capacity(n.min(1 << 16));
+            for _ in 0..n {
+                let old = take(&mut b, len)?.to_vec();
+                let new = take(&mut b, len)?.to_vec();
+                pairs.push((old, new));
+            }
+            rekeying = Some(Rekeying {
+                ranges,
+                tails: Tails::new(pairs),
+            });
+        }
         Ok(Decoded {
             batch: Self { meta, ops },
             covered,
             deferred,
             moves,
+            rekeying,
         })
     }
 }
@@ -1019,7 +1090,13 @@ fn open_branch(
         // and the tree's writes does not matter.
         overlay(&mut deferred, &d.batch, d.deferred);
         meta = d.batch.meta;
-        redo.replay(&mut tree, d.batch, &d.covered, &d.moves)?;
+        redo.replay(
+            &mut tree,
+            d.batch,
+            &d.covered,
+            &d.moves,
+            d.rekeying.as_ref(),
+        )?;
         replayed += 1;
         applied = lsn + header + payload.len() as u64;
         Ok(())
@@ -1494,7 +1571,7 @@ impl Store {
         covered: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<Lsn> {
         let encoded = batch.batch().encode_covering(covered);
-        self.write_encoded(batch, &encoded, None, Vec::new())
+        self.write_encoded(batch, &encoded, None, Vec::new(), None)
     }
 
     /// [`write_covering`](Store::write_covering) with *moves*: for each
@@ -1528,8 +1605,26 @@ impl Store {
                 );
             }
         }
-        let encoded = b.encode_full(covered, &[], moves);
-        self.write_encoded(batch, &encoded, None, Vec::new())
+        let encoded = b.encode_full(covered, &[], moves, None);
+        self.write_encoded(batch, &encoded, None, Vec::new(), None)
+    }
+
+    /// [`write_covering`](Store::write_covering), then a *rekeying*: in
+    /// its ranges, each key ending with one of its tails' old ends made to
+    /// end with the new one, the value kept — in place in the B+tree's
+    /// leaves where the key keeps its order there, else moved
+    /// ([`Tables::rekey`]).  Logged as its ranges and tails alone: replay
+    /// rewrites the same keys, the log having brought the tree to them.
+    /// The batch's ops must not touch the keys it rewrites.  What a vacuum
+    /// makes committed intents versions with (issue #4).
+    pub fn write_rekeying<'a>(
+        &self,
+        batch: impl WriteBatch<'a>,
+        covered: &[(Vec<u8>, Vec<u8>)],
+        rekeying: &Rekeying,
+    ) -> Result<Lsn> {
+        let encoded = batch.batch().encode_full(covered, &[], &[], Some(rekeying));
+        self.write_encoded(batch, &encoded, None, Vec::new(), Some(rekeying))
     }
 
     /// [`write_filtered`](Store::write_filtered), with puts `deferred`:
@@ -1543,8 +1638,8 @@ impl Store {
         deferred: Vec<(Vec<u8>, Vec<u8>)>,
         filter: &dyn LeafFilter,
     ) -> Result<Lsn> {
-        let encoded = batch.batch().encode_full(&[], &deferred, &[]);
-        self.write_encoded(batch, &encoded, Some(filter), deferred)
+        let encoded = batch.batch().encode_full(&[], &deferred, &[], None);
+        self.write_encoded(batch, &encoded, Some(filter), deferred, None)
     }
 
     fn write_with<'a>(
@@ -1553,7 +1648,7 @@ impl Store {
         filter: Option<&dyn LeafFilter>,
     ) -> Result<Lsn> {
         let encoded = batch.batch().encode();
-        self.write_encoded(batch, &encoded, filter, Vec::new())
+        self.write_encoded(batch, &encoded, filter, Vec::new(), None)
     }
 
     fn write_encoded<'a>(
@@ -1562,6 +1657,7 @@ impl Store {
         encoded: &[u8],
         filter: Option<&dyn LeafFilter>,
         deferred: Vec<(Vec<u8>, Vec<u8>)>,
+        rekeying: Option<&Rekeying>,
     ) -> Result<Lsn> {
         let meta = batch.batch().meta;
         if let Some(k) = batch
@@ -1588,6 +1684,9 @@ impl Store {
             let mut d = b.deferred.lock().unwrap_or_else(|e| e.into_inner());
             overlay(&mut d, batch.batch(), deferred);
             apply_ops(&mut tree, batch.into_ops(), filter)?;
+            if let Some(r) = rekeying {
+                tree.rekey(&r.ranges, &r.tails)?;
+            }
             if d.len() > DEFERRED_MAX {
                 settle(&mut tree, &mut d)?;
             }
@@ -2819,6 +2918,7 @@ mod tests {
                     covered: covered.clone(),
                     deferred: deferred.clone(),
                     moves: Vec::new(),
+                    rekeying: None,
                 }
             );
             assert!(Batch::decode_full(&e[..e.len() - 1]).is_err());
@@ -2838,16 +2938,31 @@ mod tests {
             let mut read = moved.clone();
             read.ops[1].1 = Some(Vec::new());
             read.ops[3].1 = Some(Vec::new());
+            // A rekeying: two ranges (one to the end), two tails.
+            let rekeying = Rekeying {
+                ranges: vec![(b"a".to_vec(), Some(b"k".to_vec())), (b"m".to_vec(), None)],
+                tails: Tails::new(vec![
+                    (b"\x00\x05".to_vec(), b"\xff\x9b".to_vec()),
+                    (b"\x00\x06".to_vec(), b"\xff\x88".to_vec()),
+                ]),
+            };
             // Version 4, and as logged now: each key by what it shares
-            // with the one before.
-            for (e, version) in [
+            // with the one before; with a rekeying, version 6.
+            for (e, version, rekeyed) in [
                 (
                     moved.encode_legacy(&covered, &deferred, &moves),
                     BATCH_VERSION_MOVING,
+                    None,
                 ),
                 (
-                    moved.encode_full(&covered, &deferred, &moves),
+                    moved.encode_full(&covered, &deferred, &moves, None),
                     BATCH_VERSION_PACKED,
+                    None,
+                ),
+                (
+                    moved.encode_full(&covered, &deferred, &moves, Some(&rekeying)),
+                    BATCH_VERSION_REKEYING,
+                    Some(rekeying.clone()),
                 ),
             ] {
                 assert_eq!(e[0], version);
@@ -2859,6 +2974,7 @@ mod tests {
                         covered: covered.clone(),
                         deferred: deferred.clone(),
                         moves: moves.clone(),
+                        rekeying: rekeyed,
                     }
                 );
                 for cut in 1..e.len() {

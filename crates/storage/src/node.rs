@@ -282,6 +282,61 @@ pub fn encode_leaf(page: &mut Page, entries: &[(&[u8], ValRef)]) {
     p[slot..end].fill(0);
 }
 
+/// Writes `tail` over the last bytes of leaf entry `i`'s key in `page`,
+/// in place — its slot's head too where the tail reaches into it — and
+/// whether it could: the tail within the key's rest past the leaf's
+/// prefix ([`BTree::rekey`](crate::btree::BTree::rekey) keeps the keys'
+/// order; nothing else changes, the value left where it is).
+pub fn patch_key_tail(page: &mut Page, i: usize, tail: &[u8]) -> Decode<bool> {
+    let p = page.payload_mut();
+    let (hdr, slot) = layout(p);
+    let n = u16::from_le_bytes([p[2], p[3]]) as usize;
+    if i >= n || hdr + slot * n > PAYLOAD_SIZE {
+        return Err("leaf entry out of range");
+    }
+    let at = hdr + slot * i;
+    let off = u16::from_le_bytes([p[at], p[at + 1]]) as usize;
+    if off < hdr + slot * n || off + 7 > PAYLOAD_SIZE {
+        return Err("node cell offset out of range");
+    }
+    let klen = u16::from_le_bytes([p[off], p[off + 1]]) as usize;
+    if off + 7 + klen > PAYLOAD_SIZE {
+        return Err("node cell runs past the page");
+    }
+    if klen < tail.len() {
+        return Ok(false);
+    }
+    let rest = off + 7..off + 7 + klen;
+    p[rest.end - tail.len()..rest.end].copy_from_slice(tail);
+    if slot == SLOT && klen - tail.len() < 4 {
+        let h = head(&p[rest]);
+        p[at + 2..at + SLOT].copy_from_slice(&h.to_be_bytes());
+    }
+    Ok(true)
+}
+
+/// Sets internal node `page`'s child `i` to `id`, in place.
+pub fn set_child(page: &mut Page, i: usize, id: PageId) -> Decode<()> {
+    let p = page.payload_mut();
+    let at = if i == 0 {
+        leftmost_at(p)
+    } else {
+        let (hdr, slot) = layout(p);
+        let n = u16::from_le_bytes([p[2], p[3]]) as usize;
+        if i > n || hdr + slot * n > PAYLOAD_SIZE {
+            return Err("internal child out of range");
+        }
+        let s = hdr + slot * (i - 1);
+        let off = u16::from_le_bytes([p[s], p[s + 1]]) as usize;
+        if off < hdr + slot * n || off + 10 > PAYLOAD_SIZE {
+            return Err("node cell offset out of range");
+        }
+        off + 2
+    };
+    p[at..at + 8].copy_from_slice(&id.0.to_le_bytes());
+    Ok(())
+}
+
 /// The encoded size of an internal node's cell of `key`.
 pub fn internal_cell_size(key: &[u8]) -> usize {
     SLOT + 10 + key.len()
@@ -730,6 +785,11 @@ impl<'a> View<'a> {
     /// The child of an internal node that holds `key`.
     pub fn child_index(&self, key: &[u8]) -> Decode<usize> {
         self.search(key, true)
+    }
+
+    /// The length of the key prefix its keys share.
+    pub fn prefix_len(&self) -> usize {
+        self.prefix.len()
     }
 
     /// The first entry (or separator) whose key is not below `key` —

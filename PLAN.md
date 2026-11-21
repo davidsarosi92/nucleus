@@ -12178,6 +12178,40 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     `analyze_on_workers_estimates_as_on_one` (1 and 4 workers: exact
     counts, NULL share and distinct values; fails when the merge's count
     is not the parts' sum) and `many_parts_merge_uniformly`.
+  - Issue #4, step 6 (2026-11-21): committed intents rekeyed in place —
+    what step 3 weighed and left. A committed intent's key differs from
+    its version's only in its last eight bytes (`00 00 ‖ id` against
+    `00 00 ‖ MAX − ts`), and a version sorts after its key's intents and
+    before older versions — so in a leaf the new key almost always keeps
+    its place. *Taken*: `BTree::rekey` rewrites those bytes in the leaf
+    page (and the slot's head where they reach into it), a leaf a
+    checkpoint holds copied and its parent's pointer changed; a key that
+    would pass a neighbour or a separator, or whose end reaches into the
+    leaf's prefix, comes back and is moved. A batch logs it as its ranges
+    and the ends (WAL batch version 6), and replay rewrites the same keys.
+    The sweep reads no intent's value any more, nor writes a delete and a
+    put for it. The steps, each measured ABBA on the vacuum after TPC-H
+    SF 1's load (one run of all of them in turn, then back):
+    - the rekeying, each leaf in turn: 3.30 / 3.26 → 1.95 / 1.93 s, the
+      log 279 MiB → ~0;
+    - the leaf's two key buffers kept across its keys (an allocation and
+      two reallocations a key, a quarter of the walk): 1.77 / 1.82 s;
+    - the leaves looked through on the tree's workers, and only then
+      written, on one thread: 1.58 / 1.22 s. The first try, each worker
+      writing its own leaves, gained ~7 %: the workers waited on the
+      pager's lock (whether a page is writable, a new page, a free — five
+      or six times a leaf) more than they worked. So the walk is now
+      three passes: list the leaves (internal nodes only), look through
+      them in runs on the workers, write them on one thread.
+    Not taken: a page copied by installing the patched copy itself rather
+    than writing it over a zeroed new page (no gain, within the noise).
+    PostgreSQL's `VACUUM ANALYZE` after the load takes 1.1 s; ours is now
+    ~1.4 + 0.76 s. Tested by `a_rekeying_rewrites_key_tails_now_and_on_replay`
+    (store: in place, copied after a checkpoint, moves, replay; fails when
+    the patch, the parent's pointer, the moves, the slot's head or the
+    replay is left out) and `a_rekeying_on_workers_rewrites_key_tails`
+    (tree: one worker and four, writable and committed pages; fails when
+    a worker's moved pages or keys to move are lost).
 
   *S5, TPC-H on column tables* (by the method again: Q19 1.89×, Q20
   1.18×, Q8 ≈ 1.10×, Q16 0.77×).  Q19: `part`'s 477 rows looked up in

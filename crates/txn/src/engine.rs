@@ -8,7 +8,7 @@ use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
 use nucleus_storage::{
-    Batch, BranchInfo, Deferred, EngineKind, Recovery, Store, StoreOptions, Tables,
+    Batch, BranchInfo, Deferred, EngineKind, Recovery, Rekeying, Store, StoreOptions, Tables, Tails,
 };
 
 use crate::error::{Error, Result};
@@ -1108,6 +1108,7 @@ impl Engine {
     pub fn vacuum(&self) -> Result<u64> {
         *lock(&self.inner.sweep) = None;
         let committed = self.inner.unresolved_ids();
+        let tails = Self::intent_tails(&committed);
         let workers = self.inner.platform.parallelism().clamp(1, SWEEPERS);
         // The keyspace in parts, each a run of whole user keys: a window
         // of them swept at once, one a worker (the sweep only reads), up
@@ -1150,15 +1151,17 @@ impl Engine {
                         .collect()
                 })
             };
-            let (mut ops, mut covered, mut moves) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut ops, mut covered) = (Vec::new(), Vec::new());
+            let mut ranges = Vec::new();
             let mut again = Vec::new();
-            for ((_, to), s) in window.into_iter().zip(swept) {
+            for ((from, to), s) in window.into_iter().zip(swept) {
                 let (s, r) = s?;
                 removed += r;
-                let base = ops.len();
-                moves.extend(s.moves.into_iter().map(|(i, k)| (base + i, k)));
                 ops.extend(s.ops);
                 covered.extend(s.covered);
+                // Above the reserved keys: their ends are not versions'.
+                let start = from.as_slice().max(&RESERVED_END[..]).to_vec();
+                ranges.push((start, s.next.clone().or_else(|| to.clone())));
                 if let Some(next) = s.next {
                     again.push((next, to));
                 }
@@ -1172,11 +1175,15 @@ impl Engine {
                     ops.push((status_key(id), None));
                 }
             }
-            if !ops.is_empty() {
-                let lsn = self.inner.store.write_moving(
+            let rekeying = Rekeying {
+                ranges,
+                tails: tails.clone(),
+            };
+            if !ops.is_empty() || !tails.is_empty() {
+                let lsn = self.inner.store.write_rekeying(
                     Batch { meta: *commit, ops },
                     &covered,
-                    &moves,
+                    &rekeying,
                 )?;
                 drop(commit);
                 if done {
@@ -1185,6 +1192,24 @@ impl Engine {
             }
         }
         Ok(removed)
+    }
+
+    /// The committed transactions' intents' store key ends, each made its
+    /// version's: `00 00 ‖ id` to `00 00 ‖ MAX - commit ts` — what a
+    /// sweep rekeys ([`Store::write_rekeying`]: the leaves written over in
+    /// place, not each intent deleted and its version put; issue #4).
+    fn intent_tails(committed: &[(u64, u64)]) -> Tails {
+        let end = |suffix: u64| {
+            let mut t = vec![0, 0];
+            t.extend_from_slice(&suffix.to_be_bytes());
+            t
+        };
+        Tails::new(
+            committed
+                .iter()
+                .map(|&(id, cts)| (end(u64::MAX - intent_ts(id)), end(u64::MAX - cts)))
+                .collect(),
+        )
     }
 
     /// The keyspace cut into about `n` parts for a sweep ([`vacuum`](Self::vacuum)):
@@ -1253,7 +1278,6 @@ impl Engine {
             let Swept {
                 mut ops,
                 covered,
-                moves,
                 next,
             } = self.sweep_chunk(&from, None, Some(&committed), chunk, wm, &mut removed)?;
             if next.is_none() {
@@ -1263,11 +1287,18 @@ impl Engine {
                     ops.push((status_key(id), None));
                 }
             }
-            if !ops.is_empty() {
-                let lsn = self.inner.store.write_moving(
+            let tails = Self::intent_tails(&committed);
+            if !ops.is_empty() || !tails.is_empty() {
+                // Above the reserved keys: their ends are not versions'.
+                let start = from.as_slice().max(&RESERVED_END[..]).to_vec();
+                let rekeying = Rekeying {
+                    ranges: vec![(start, next.clone())],
+                    tails,
+                };
+                let lsn = self.inner.store.write_rekeying(
                     Batch { meta: *commit, ops },
                     &covered,
-                    &moves,
+                    &rekeying,
                 )?;
                 drop(commit);
                 if next.is_none() {
@@ -1366,9 +1397,8 @@ impl Engine {
             } else {
                 self.inner.current_watermark()
             };
-            let Swept {
-                ops, covered, next, ..
-            } = self.sweep_chunk(&from, Some(&to), None, VACUUM_CHUNK, wm, &mut removed)?;
+            let Swept { ops, covered, next } =
+                self.sweep_chunk(&from, Some(&to), None, VACUUM_CHUNK, wm, &mut removed)?;
             if !ops.is_empty() {
                 self.inner
                     .store
@@ -1406,24 +1436,11 @@ impl Engine {
     ) -> Result<Swept> {
         let others = self.inner.others(None);
         let mut ops = Vec::new();
-        // This key's intents made versions: after its intents' deletes —
-        // an intent's store key is below every version's — so the chunk's
-        // writes are in key order and the store applies them as they are,
-        // not copied and sorted (a quarter of the vacuum after TPC-H's
-        // load, issue #4).  Each a move from its intent: logged without
-        // the row ([`Store::write_moving`]).
-        let mut made: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut moves = Vec::new();
-        let flush_made = |made: &mut Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
-                          ops: &mut Ops,
-                          moves: &mut Vec<(usize, Vec<u8>)>| {
-            made.sort_by(|a, b| a.0.cmp(&b.0));
-            for (key, value, intent) in made.drain(..) {
-                moves.push((ops.len(), intent));
-                ops.push((key, Some(value)));
-            }
-        };
         let mut covered = Vec::new();
+        // The committed intents the store makes versions — each key's end
+        // rewritten, its row left where it is ([`Store::write_rekeying`],
+        // issue #4): a chunk's writes as well.
+        let mut rekeys = 0;
         let mut kept_one = false;
         let mut next = None;
         let tree = self.inner.store.read()?;
@@ -1455,8 +1472,7 @@ impl Engine {
                 let ts = u64::MAX - u64::from_be_bytes(k[n - 8..].try_into().expect("eight bytes"));
                 let escaped = &k[..n - mvcc::OVERHEAD];
                 if !(prev.len() == n && prev.starts_with(escaped)) {
-                    flush_made(&mut made, &mut ops, &mut moves);
-                    if ops.len() >= chunk.max(1) {
+                    if ops.len() + rekeys >= chunk.max(1) {
                         next = Some(version_key(escaped, u64::MAX));
                         break 'ranges;
                     }
@@ -1472,10 +1488,8 @@ impl Engine {
                     let Some(committed) = committed else {
                         continue;
                     };
-                    if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
-                        range.value_into(&mut v)?;
-                        ops.push((k.clone(), None));
-                        made.push((version_key(escaped, cts), v.clone(), k.clone()));
+                    if committed.iter().any(|&(u, _)| u == id) {
+                        rekeys += 1;
                         *removed += 1;
                     } else if !others.contains(&id)
                         && !read(&self.inner.unresolved).contains_key(&id)
@@ -1506,13 +1520,7 @@ impl Engine {
                 kept_one = true;
             }
         }
-        flush_made(&mut made, &mut ops, &mut moves);
-        Ok(Swept {
-            ops,
-            covered,
-            moves,
-            next,
-        })
+        Ok(Swept { ops, covered, next })
     }
 
     /// Store entries (all versions) — for tests and statistics.
@@ -2342,8 +2350,6 @@ struct Swept {
     ops: Ops,
     /// The key ranges they cover ([`Store::write_covering`]).
     covered: Vec<(Vec<u8>, Vec<u8>)>,
-    /// The puts that move an intent's value ([`Store::write_moving`]).
-    moves: Vec<(usize, Vec<u8>)>,
     /// The store key the next chunk starts at (`None`: through).
     next: Option<Vec<u8>>,
 }

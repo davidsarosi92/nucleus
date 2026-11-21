@@ -21,7 +21,7 @@ pub mod sealed;
 pub mod store;
 pub mod wal;
 
-pub use btree::BTree;
+pub use btree::{BTree, Tails};
 pub use buffer::{BufferPool, PageRef};
 pub use cipher::PageCipher;
 pub use engines::{EngineKind, Route, Tables};
@@ -29,7 +29,7 @@ pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::{Pager, Rekey};
 pub use store::{
-    Batch, BranchInfo, Checkpoint, DEFERRED_MAX, Deferred, MAIN, MAIN_NAME, Recovery, Scrubbed,
-    Store, StoreOptions, WriteBatch, valid_branch_name,
+    Batch, BranchInfo, Checkpoint, DEFERRED_MAX, Deferred, MAIN, MAIN_NAME, Recovery, Rekeying,
+    Scrubbed, Store, StoreOptions, WriteBatch, valid_branch_name,
 };
 pub use wal::{Lsn, Wal};

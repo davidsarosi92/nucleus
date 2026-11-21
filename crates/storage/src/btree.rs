@@ -149,6 +149,68 @@ pub trait LeafFilter: Sync {
     fn drops_above(&self, _entries: &[LeafEntry], _drop: &mut [bool]) {}
 }
 
+/// A leaf a rekeying looks through: its page and separators.
+struct RekeyLeaf {
+    id: PageId,
+    lo: Option<Vec<u8>>,
+    hi: Option<Vec<u8>>,
+}
+
+/// A leaf's entries a rekeying patches in place: each its index and new
+/// tail.
+type Patches<'t> = Vec<(usize, &'t [u8])>;
+
+/// Leaves a rekeying's worker looks through at least.
+const REKEY_RUN: usize = 64;
+
+/// The key ends [`BTree::rekey`] rewrites: pairs of an old end and the
+/// new one, all of one length.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tails {
+    pairs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Tails {
+    /// The pairs (`old`, `new`), each pair's ends of one length, every
+    /// pair's the same; the first pair of an old end counts.
+    pub fn new(pairs: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        debug_assert!(
+            pairs
+                .iter()
+                .all(|(o, n)| o.len() == n.len() && o.len() == pairs[0].0.len())
+        );
+        let mut pairs = pairs;
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs.dedup_by(|a, b| a.0 == b.0);
+        Self { pairs }
+    }
+
+    /// The pairs.
+    pub fn pairs(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.pairs
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// Their ends' length (0 for none).
+    pub fn len(&self) -> usize {
+        self.pairs.first().map_or(0, |p| p.0.len())
+    }
+
+    /// The new end of `key`, if it ends with an old one.
+    pub fn new_end(&self, key: &[u8]) -> Option<&[u8]> {
+        let n = self.pairs.first()?.0.len();
+        let end = key.get(key.len().checked_sub(n)?..)?;
+        self.pairs
+            .binary_search_by(|(o, _)| o.as_slice().cmp(end))
+            .ok()
+            .map(|i| self.pairs[i].1.as_slice())
+    }
+}
+
 impl BTree {
     /// Creates an empty tree.
     pub fn create(pool: Arc<BufferPool>) -> Result<Self> {
@@ -1327,6 +1389,343 @@ impl BTree {
         let mut small = vec![false; node.children.len()];
         small[i] = true;
         self.normalize(node, small)
+    }
+
+    /// Rewrites the keys in `[start, end)` that end with one of `tails`'
+    /// old ends to end with its new one, in place where the key keeps its
+    /// order among its leaf's keys and within its separators: the leaf's
+    /// page written over (or, shared with a checkpoint, copied to a new
+    /// one and its parents' pointers changed) — no entry taken out and put
+    /// back, no value read.  The keys it could not rewrite so — a new key
+    /// past the key after it, a tail reaching into the leaf's prefix —
+    /// come back, each with its new key, for the caller to move.  What a
+    /// vacuum makes a committed intent's versions with (issue #4).
+    pub fn rekey(
+        &mut self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        tails: &Tails,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if tails.is_empty() || end.is_some_and(|e| e <= start) {
+            return Ok(Vec::new());
+        }
+        // The leaves in the range, in order, each with its separators: a
+        // walk of the internal nodes alone (the tree's height known, a
+        // leaf is not read to be told one).
+        let mut height = 0;
+        let mut id = self.root;
+        loop {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let v = View::new(&page).map_err(|reason| Error::Corrupt { page: id, reason })?;
+            if v.is_leaf() {
+                break;
+            }
+            id = v
+                .child(0)
+                .map_err(|reason| Error::Corrupt { page: id, reason })?;
+            height += 1;
+        }
+        let mut leaves = Vec::new();
+        self.rekey_leaves(self.root, height, start, end, (None, None), &mut leaves)?;
+        // Each leaf looked through — on the workers, in runs, where there
+        // are many: what is patched in place and what comes back to move.
+        // Only read: the writes, each a few of the pager's locks (taken by
+        // threads at once, waited on more than worked), after, on one.
+        let scan = |run: &[RekeyLeaf]| -> Result<(Vec<Patches<'_>>, Vec<(Vec<u8>, Vec<u8>)>)> {
+            let mut back = Vec::new();
+            let mut patches = Vec::with_capacity(run.len());
+            for leaf in run {
+                patches.push(self.rekey_scan(leaf, start, end, tails, &mut back)?);
+            }
+            Ok((patches, back))
+        };
+        let workers = self.workers.min(leaves.len() / REKEY_RUN).max(1);
+        let (patches, back) = if workers == 1 {
+            scan(&leaves)?
+        } else {
+            let per = leaves.len().div_ceil(workers);
+            let runs: Vec<Result<_>> = std::thread::scope(|sc| {
+                let handles: Vec<_> = leaves
+                    .chunks(per)
+                    .map(|run| sc.spawn(|| scan(run)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or(Err(Error::Corrupt {
+                            page: self.root,
+                            reason: "a rekeying worker panicked",
+                        }))
+                    })
+                    .collect()
+            });
+            let (mut patches, mut back) = (Vec::with_capacity(leaves.len()), Vec::new());
+            for run in runs {
+                let (p, b) = run?;
+                patches.extend(p);
+                back.extend(b);
+            }
+            (patches, back)
+        };
+        // Written: the leaves, and the nodes above any moved, by the same
+        // walk.
+        let mut next = 0;
+        if let Some(moved) =
+            self.rekey_write(self.root, height, start, end, &leaves, &patches, &mut next)?
+        {
+            self.root = moved;
+        }
+        debug_assert_eq!(next, leaves.len());
+        Ok(back)
+    }
+
+    /// The children of internal node `v` (page `id`, keys within `bounds`)
+    /// holding keys of `[start, end)`: each its index, page and separators.
+    fn rekey_children(
+        v: &View<'_>,
+        id: PageId,
+        start: &[u8],
+        end: Option<&[u8]>,
+        bounds: (Option<&[u8]>, Option<&[u8]>),
+    ) -> Result<Vec<(usize, PageId, Option<Vec<u8>>, Option<Vec<u8>>)>> {
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        let first = v.child_index(start).map_err(corrupt)?;
+        let last = match end {
+            Some(e) => v.child_index(e).map_err(corrupt)?,
+            None => v.len(),
+        };
+        let mut children = Vec::with_capacity(last + 1 - first);
+        for c in first..=last {
+            let lo = if c == 0 {
+                bounds.0.map(<[u8]>::to_vec)
+            } else {
+                Some(v.key(c - 1).map_err(corrupt)?.to_vec())
+            };
+            let hi = if c == v.len() {
+                bounds.1.map(<[u8]>::to_vec)
+            } else {
+                Some(v.key(c).map_err(corrupt)?.to_vec())
+            };
+            children.push((c, v.child(c).map_err(corrupt)?, lo, hi));
+        }
+        Ok(children)
+    }
+
+    /// The leaves under page `id`, `height` levels above them, holding
+    /// keys of `[start, end)`, onto `out` in order.
+    fn rekey_leaves(
+        &self,
+        id: PageId,
+        height: usize,
+        start: &[u8],
+        end: Option<&[u8]>,
+        bounds: (Option<&[u8]>, Option<&[u8]>),
+        out: &mut Vec<RekeyLeaf>,
+    ) -> Result<()> {
+        if height == 0 {
+            out.push(RekeyLeaf {
+                id,
+                lo: bounds.0.map(<[u8]>::to_vec),
+                hi: bounds.1.map(<[u8]>::to_vec),
+            });
+            return Ok(());
+        }
+        let children = {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let v = View::new(&page).map_err(|reason| Error::Corrupt { page: id, reason })?;
+            if v.is_leaf() {
+                return Err(Error::Corrupt {
+                    page: id,
+                    reason: "a leaf above the leaves",
+                });
+            }
+            Self::rekey_children(&v, id, start, end, bounds)?
+        };
+        for (_, child, lo, hi) in children {
+            let b = (lo.as_deref(), hi.as_deref());
+            self.rekey_leaves(child, height - 1, start, end, b, out)?;
+        }
+        Ok(())
+    }
+
+    /// Leaf `leaf`'s entries in `[start, end)` that end with an old tail:
+    /// those patched in place (entry index, new tail), the rest onto
+    /// `back` with their new keys.
+    fn rekey_scan<'t>(
+        &self,
+        leaf: &RekeyLeaf,
+        start: &[u8],
+        end: Option<&[u8]>,
+        tails: &'t Tails,
+        back: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<Patches<'t>> {
+        let id = leaf.id;
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        let (lo, hi) = (leaf.lo.as_deref(), leaf.hi.as_deref());
+        let r = self.pool.fetch(id)?;
+        let page = r.read();
+        let v = View::new(&page).map_err(corrupt)?;
+        if !v.is_leaf() {
+            return Err(corrupt("an internal node among the leaves"));
+        }
+        let from = v.search(start, false).map_err(corrupt)?;
+        let to = match end {
+            Some(e) => v.search(e, false).map_err(corrupt)?,
+            None => v.len(),
+        };
+        let plen = v.prefix_len();
+        let tlen = tails.len();
+        // A leaf of an older format (before version 4's slots) is not
+        // written in place.
+        let current = page.payload()[0] >= 5;
+        // The key before, rewritten (unless `!rewritten`: as it is, in the
+        // leaf); two buffers swapped, kept for every key.
+        let (mut prev, mut rewritten) = (Vec::with_capacity(64), false);
+        let mut new = Vec::with_capacity(64);
+        let mut patches = Vec::new();
+        for i in from..to {
+            let key = v.key(i).map_err(corrupt)?;
+            // A key's tail looked up in its rest: no copy of a key whose
+            // tail is no old end.
+            let rest = key.rest;
+            let Some(at) = rest.len().checked_sub(tlen) else {
+                // A tail reaching into the prefix: moved, if one.
+                let mut full = Vec::new();
+                key.append_to(&mut full);
+                if let Some(t) = tails.new_end(&full) {
+                    let mut to = full.clone();
+                    let at = to.len() - t.len();
+                    to[at..].copy_from_slice(t);
+                    back.push((full, to));
+                }
+                rewritten = false;
+                continue;
+            };
+            let Some(tail) = tails.new_end(&rest[at..]) else {
+                rewritten = false;
+                continue;
+            };
+            new.clear();
+            key.append_to(&mut new);
+            let at = new.len() - tail.len();
+            new[at..].copy_from_slice(tail);
+            let above = match (rewritten, i) {
+                (true, _) => new > prev,
+                (false, 0) => lo.is_none_or(|lo| new.as_slice() >= lo),
+                (false, _) => v.key(i - 1).map_err(corrupt)?.order(&new).is_lt(),
+            };
+            let below = if i + 1 < v.len() {
+                v.key(i + 1).map_err(corrupt)?.order(&new).is_gt()
+            } else {
+                hi.is_none_or(|hi| new.as_slice() < hi)
+            };
+            // Strictly past the prefix: the prefix stays all the first
+            // and last keys share.
+            if above && below && at > plen && current {
+                patches.push((i, tail));
+                std::mem::swap(&mut prev, &mut new);
+                rewritten = true;
+            } else {
+                let mut old = Vec::new();
+                key.append_to(&mut old);
+                back.push((old, new.clone()));
+                rewritten = false;
+            }
+        }
+        Ok(patches)
+    }
+
+    /// [`rekey`](Self::rekey)'s writes under page `id`, `height` levels
+    /// above the leaves: each leaf's patches (`leaves[*next..]` and
+    /// `patches`, in the order [`rekey_leaves`](Self::rekey_leaves) gave
+    /// them), a moved page's new id in its parent.  Where the page went,
+    /// if it moved.
+    #[allow(clippy::too_many_arguments)]
+    fn rekey_write(
+        &self,
+        id: PageId,
+        height: usize,
+        start: &[u8],
+        end: Option<&[u8]>,
+        leaves: &[RekeyLeaf],
+        patches: &[Patches<'_>],
+        next: &mut usize,
+    ) -> Result<Option<PageId>> {
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        if height == 0 {
+            let i = *next;
+            *next += 1;
+            if leaves.get(i).is_none_or(|l| l.id != id) {
+                return Err(corrupt("a leaf the rekeying did not look through"));
+            }
+            if patches[i].is_empty() {
+                return Ok(None);
+            }
+            return self.rekey_page(id, true, |page| {
+                for &(e, tail) in &patches[i] {
+                    if !crate::node::patch_key_tail(page, e, tail).map_err(corrupt)? {
+                        return Err(corrupt("a key's tail past its rest"));
+                    }
+                }
+                Ok(())
+            });
+        }
+        // The bounds matter not here: the same children as the walk that
+        // listed the leaves.
+        let children = {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let v = View::new(&page).map_err(corrupt)?;
+            Self::rekey_children(&v, id, start, end, (None, None))?
+        };
+        let mut moved = Vec::new();
+        for (c, child, _, _) in children {
+            if let Some(to) =
+                self.rekey_write(child, height - 1, start, end, leaves, patches, next)?
+            {
+                moved.push((c, to));
+            }
+        }
+        if moved.is_empty() {
+            return Ok(None);
+        }
+        self.rekey_page(id, false, |page| {
+            for &(c, to) in &moved {
+                crate::node::set_child(page, c, to).map_err(corrupt)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Page `id` changed by `patch`: in place where it is writable, else a
+    /// copy, `id` freed — the copy's id then.
+    fn rekey_page(
+        &self,
+        id: PageId,
+        leaf: bool,
+        patch: impl FnOnce(&mut Page) -> Result<()>,
+    ) -> Result<Option<PageId>> {
+        if self.pool.is_writable(id) {
+            let r = self.pool.fetch(id)?;
+            patch(&mut *r.write()?)?;
+            return Ok(None);
+        }
+        let mut copy = {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            page.clone()
+        };
+        patch(&mut copy)?;
+        let r = self
+            .pool
+            .create(if leaf { LEAF } else { crate::node::INTERNAL })?;
+        let to = r.id();
+        r.write()?.payload_mut().copy_from_slice(copy.payload());
+        drop(r);
+        self.pool.free_in(id, self.branch)?;
+        Ok(Some(to))
     }
 
     /// Removes `key`; returns whether it was present.
