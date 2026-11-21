@@ -12348,6 +12348,27 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     encoded key and value allocated each, then the sorted apply), the
     commit's checkpoint ~25 ms (its ordered sync 14).  A bulk load of
     sorted entries into leaves is the remedy — issue #9.
+  - Issue #9 (2026-11-21), TPC-H SF 1's indexes on row tables, each
+    timed (`loadsteps.py`): 8.7–9.4 s against PostgreSQL's 2.72
+    (`lineitem (l_partkey, l_suppkey)` 4.5–4.8 s against 1.38,
+    `lineitem (l_suppkey)` 2.9–3.1 against 0.90).  Sampled: the sort ~25 %
+    of the session thread, the entries put one at a time ~30 %, the
+    commit's checkpoint ~20 %, the scan's workers ~8 %.  Not the spill:
+    `work_mem` 2 GB (PostgreSQL's `maintenance_work_mem` here) changed
+    nothing.  Taken: (a) the unlogged batch handed to the tree owned
+    (`Store::write_unlogged` takes a `WriteBatch`): the JSON expression
+    indexes 95.0 → 85.0 and 94.4 → 87.5 ms; (b) the sort's abbreviated
+    keys past the index's 9-byte prefix, which all entries share (every
+    entry had the same number: each comparison went on to the bytes),
+    and sixteen bytes, not eight (an integer's key is a tag and eight
+    bytes, leading zeros first) — `Item` stays 32 bytes, the uniqueness
+    flag in the primary key's length; (c) a sample sort instead of parts
+    sorted on threads and merged on one (the merge most of the sort):
+    the buckets by ranges of the abbreviated keys, each sorted on a
+    thread, no merge.  (b) alone was within the noise; (b)+(c), alone in
+    turn, both orders: the indexes 8.97 → 7.19 s, `(l_partkey,
+    l_suppkey)` 4.63 → 3.56, `(l_suppkey)` 3.00 → 2.51, `orders
+    (o_custkey)` 0.79 → 0.60.
 
   *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
   "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's

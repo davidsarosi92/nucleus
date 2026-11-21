@@ -310,37 +310,75 @@ impl IndexBuild {
 
 /// Index entries in one buffer — keys and primary keys side by side, no
 /// allocation of their own — and, per entry, its place and its key's first
-/// eight bytes as a number: most comparisons of a sort end there, without
-/// a look at the bytes (PostgreSQL's abbreviated keys, the normalized key
-/// prefix of DuckDB's sort).
+/// sixteen bytes past the index's prefix as a number: most comparisons of
+/// a sort end there, without a look at the bytes (PostgreSQL's abbreviated
+/// keys, the normalized key prefix of DuckDB's sort).  The entries are one
+/// index's, so they share its prefix ([`SHARED`]), which orders nothing:
+/// abbreviated from the key's start, every key had the same number, and
+/// every comparison went on to the bytes (issue #9).  Sixteen bytes, not
+/// eight: an integer's key is a tag and eight bytes whose first ones are
+/// zeros, so eight held a small number's tag and zeros.
 #[derive(Default)]
 struct Entries {
     bytes: Vec<u8>,
     items: Vec<Item>,
 }
 
+/// An entry: 32 bytes (the uniqueness flag in the primary key's length).
 #[derive(Clone, Copy)]
 struct Item {
-    /// The key's first eight bytes, big-endian, zeros past its end.
-    prefix: u64,
+    /// The key's first sixteen bytes past [`SHARED`], big-endian, zeros
+    /// past its end.
+    prefix: u128,
     /// Where the key starts in the buffer, the primary key right after.
     at: usize,
     key: u32,
+    /// The primary key's length, and [`UNIQUE`] for a unique entry.
     pk: u32,
-    unique: bool,
+}
+
+const UNIQUE: u32 = 1 << 31;
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Item>() == 32);
+
+impl Item {
+    fn key_len(&self) -> usize {
+        self.key as usize
+    }
+
+    fn pk_len(&self) -> usize {
+        (self.pk & !UNIQUE) as usize
+    }
+
+    fn unique(&self) -> bool {
+        self.pk & UNIQUE != 0
+    }
 }
 
 impl Entries {
     fn push(&mut self, k: &[u8], pk: &[u8], unique: bool) {
-        let mut prefix = [0u8; 8];
-        let n = k.len().min(8);
-        prefix[..n].copy_from_slice(&k[..n]);
+        debug_assert!(self.items.first().is_none_or(|f| {
+            let first = key_in(&self.bytes, f);
+            first[..SHARED.min(first.len())] == k[..SHARED.min(k.len())]
+        }));
+        let rest = &k[SHARED.min(k.len())..];
+        let mut prefix = [0u8; 16];
+        let n = rest.len().min(16);
+        prefix[..n].copy_from_slice(&rest[..n]);
+        // Keys and primary keys are a few kilobytes at most (the store's
+        // limit, checked when they are written): far below 2 GiB.
+        let len = |n: usize| {
+            u32::try_from(n)
+                .ok()
+                .filter(|&n| n < UNIQUE)
+                .expect("an index key below 2 GiB")
+        };
         self.items.push(Item {
-            prefix: u64::from_be_bytes(prefix),
+            prefix: u128::from_be_bytes(prefix),
             at: self.bytes.len(),
-            key: k.len() as u32,
-            pk: pk.len() as u32,
-            unique,
+            key: len(k.len()),
+            pk: len(pk.len()) | if unique { UNIQUE } else { 0 },
         });
         self.bytes.extend_from_slice(k);
         self.bytes.extend_from_slice(pk);
@@ -369,57 +407,98 @@ impl Entries {
     }
 
     fn pk(&self, it: &Item) -> &[u8] {
-        let from = it.at + it.key as usize;
-        &self.bytes[from..from + it.pk as usize]
+        let from = it.at + it.key_len();
+        &self.bytes[from..from + it.pk_len()]
     }
 
-    /// Sorts the entries by key: cut in parts sorted on threads of their
-    /// own, the parts merged.
+    /// Sorts the entries by key, on the statement's threads: a sample
+    /// sort — the entries dealt into as many buckets as threads by ranges
+    /// of their abbreviated keys (the ranges' bounds picked from a sample),
+    /// each bucket sorted on a thread of its own, the buckets in order one
+    /// after another.  No merge after: it was a k-way merge of sorted parts
+    /// on one thread, most of the sort's time (issue #9).  Equal
+    /// abbreviations fall in one bucket; a bucket of most of the entries
+    /// (few distinct ones) is sorted on one thread, as a part was.
     fn sort(&mut self) {
-        let threads = crate::budget::workers();
-        let chunk = self.items.len().div_ceil(threads).max(SORT_CHUNK);
+        self.sort_on(crate::budget::workers());
+    }
+
+    /// [`sort`](Self::sort) on `threads` threads.
+    fn sort_on(&mut self, threads: usize) {
         let bytes = &self.bytes;
         let items = &mut self.items;
-        if items.len() <= chunk {
+        let n = items.len();
+        let parts = threads.min(n / SORT_CHUNK);
+        if parts <= 1 {
             items.sort_unstable_by(|a, b| cmp_in(bytes, a, b));
-        } else {
-            std::thread::scope(|sc| {
-                for part in items.chunks_mut(chunk) {
-                    sc.spawn(|| part.sort_unstable_by(|a, b| cmp_in(bytes, a, b)));
-                }
-            });
+            return;
         }
-        if items.len() > chunk {
-            let parts: Vec<&[Item]> = items.chunks(chunk).collect();
-            let at: Vec<std::cell::Cell<usize>> =
-                parts.iter().map(|_| Default::default()).collect();
-            let mut merged = Vec::with_capacity(items.len());
-            merge(
-                parts.len(),
-                |p| at[p].get() < parts[p].len(),
-                |a, b| cmp_in(bytes, &parts[a][at[a].get()], &parts[b][at[b].get()]).is_lt(),
-                |p| {
-                    merged.push(parts[p][at[p].get()]);
-                    at[p].set(at[p].get() + 1);
-                    Ok(())
-                },
-            )
-            .expect("an in-memory merge does not fail");
-            *items = merged;
-        }
+        // The buckets' bounds: of a sample spread over the entries.
+        let step = (n / (parts * 64)).max(1);
+        let mut sample: Vec<u128> = items.iter().step_by(step).map(|it| it.prefix).collect();
+        sample.sort_unstable();
+        let mut bounds: Vec<u128> = (1..parts)
+            .map(|i| sample[i * sample.len() / parts])
+            .collect();
+        bounds.dedup();
+        let buckets = bounds.len() + 1;
+        let bucket = |p: u128| bounds.partition_point(|&b| b <= p);
+        // Each chunk's entries dealt into buckets, on threads.
+        let chunk = n.div_ceil(parts);
+        let dealt: Vec<Vec<Vec<Item>>> = std::thread::scope(|sc| {
+            let hands: Vec<_> = items
+                .chunks(chunk)
+                .map(|part| {
+                    sc.spawn(move || {
+                        let mut out: Vec<Vec<Item>> = (0..buckets).map(|_| Vec::new()).collect();
+                        for it in part {
+                            out[bucket(it.prefix)].push(*it);
+                        }
+                        out
+                    })
+                })
+                .collect();
+            hands
+                .into_iter()
+                .map(|h| h.join().expect("a sort thread"))
+                .collect()
+        });
+        // Each bucket gathered into its place and sorted, on threads.
+        std::thread::scope(|sc| {
+            let mut rest: &mut [Item] = items;
+            for b in 0..buckets {
+                let len: usize = dealt.iter().map(|d| d[b].len()).sum();
+                let (here, tail) = std::mem::take(&mut rest).split_at_mut(len);
+                rest = tail;
+                let dealt = &dealt;
+                sc.spawn(move || {
+                    let mut at = 0;
+                    for d in dealt {
+                        here[at..at + d[b].len()].copy_from_slice(&d[b]);
+                        at += d[b].len();
+                    }
+                    here.sort_unstable_by(|a, b| cmp_in(bytes, a, b));
+                });
+            }
+        });
     }
 }
 
+/// The bytes every key of one index's entries begins with: the index's
+/// prefix ([`crate::catalog::INDEX_PREFIX_LEN`]).
+const SHARED: usize = crate::catalog::INDEX_PREFIX_LEN;
+
 fn key_in<'a>(bytes: &'a [u8], it: &Item) -> &'a [u8] {
-    &bytes[it.at..it.at + it.key as usize]
+    &bytes[it.at..it.at + it.key_len()]
 }
 
-/// Entries' order: by the keys' first bytes as numbers, the bytes past
-/// them only where those are equal.
+/// Entries' order: by the keys' first bytes past the shared prefix as
+/// numbers, the bytes past them only where those are equal.
 fn cmp_in(bytes: &[u8], a: &Item, b: &Item) -> std::cmp::Ordering {
-    a.prefix
-        .cmp(&b.prefix)
-        .then_with(|| key_in(bytes, a).cmp(key_in(bytes, b)))
+    a.prefix.cmp(&b.prefix).then_with(|| {
+        let (a, b) = (key_in(bytes, a), key_in(bytes, b));
+        a[SHARED.min(a.len())..].cmp(&b[SHARED.min(b.len())..])
+    })
 }
 
 /// A k-way merge of `n` sorted sources: `live(i)` whether source `i` has
@@ -503,7 +582,7 @@ impl EntrySorter {
                 &it.key.to_le_bytes(),
                 e.key(it),
                 e.pk(it),
-                &[u8::from(it.unique)],
+                &[u8::from(it.unique())],
             ])?;
         }
         self.runs.push(run.seal()?);
@@ -520,7 +599,7 @@ impl EntrySorter {
             return e
                 .items
                 .iter()
-                .try_for_each(|it| f(e.key(it), e.pk(it), it.unique));
+                .try_for_each(|it| f(e.key(it), e.pk(it), it.unique()));
         }
         if !self.entries.items.is_empty() {
             self.spill()?;
@@ -2238,4 +2317,60 @@ pub fn explain_scan(
         filter,
         estimate: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One index's entries: its prefix, then values like an integer's key
+    /// (a tag, eight bytes with leading zeros) — many equal in their first
+    /// sixteen bytes past it, so the bytes past those decide — and a
+    /// primary key.
+    fn entries(n: u64, distinct: u64) -> Entries {
+        let mut e = Entries::default();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for i in 0..n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let mut k = vec![1, 0, 0, 0, 7, 0, 0, 0, 3];
+            k.push(0x02);
+            k.extend_from_slice(&(x % distinct).to_be_bytes());
+            k.push(0x02);
+            k.extend_from_slice(&(x >> 40).to_be_bytes());
+            let pk = i.to_be_bytes();
+            e.push(&k, &pk, i % 3 == 0);
+        }
+        e
+    }
+
+    fn sorted(e: &Entries) -> Vec<(Vec<u8>, Vec<u8>, bool)> {
+        e.items
+            .iter()
+            .map(|it| (e.key(it).to_vec(), e.pk(it).to_vec(), it.unique()))
+            .collect()
+    }
+
+    #[test]
+    fn entries_sorted_on_threads_are_in_key_order() {
+        for (n, distinct) in [(10, 5), (300_000, 1 << 40), (300_000, 300), (300_000, 1)] {
+            let mut want = sorted(&entries(n, distinct));
+            want.sort();
+            for threads in [1, 3, 8] {
+                let mut e = entries(n, distinct);
+                e.sort_on(threads);
+                let got = sorted(&e);
+                // Equal keys in no particular order: compared as sets of
+                // their entries, the keys in order.
+                assert!(
+                    got.windows(2).all(|w| w[0].0 <= w[1].0),
+                    "{n} {distinct} {threads}"
+                );
+                let mut got = got;
+                got.sort();
+                assert_eq!(got, want, "{n} {distinct} {threads}");
+            }
+        }
+    }
 }

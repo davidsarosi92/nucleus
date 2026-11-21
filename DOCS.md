@@ -3143,11 +3143,14 @@ a table's rows — are gathered, sorted and written in key order.
 table (`split_points`) scanned a round at a time on the statement's
 workers, and computes only that index's keys.  The entries lie in one
 buffer — keys and primary keys side by side, no allocation per entry —
-with, per entry, its place and its key's first eight bytes as a number,
-on which most comparisons end (PostgreSQL's abbreviated keys, DuckDB's
-normalized-key prefix).  Up to `work_mem` (shared by the indexes built
-at once) they are sorted in memory, in parts on threads of their own and
-the parts merged; past it each `work_mem`'s worth becomes one sorted run
+with, per entry, its place and its key's first sixteen bytes past the
+index's prefix (which every entry shares) as a number, on which most
+comparisons end (PostgreSQL's abbreviated keys, DuckDB's normalized-key
+prefix).  Up to `work_mem` (shared by the indexes built at once) they
+are sorted in memory by a sample sort: dealt into as many buckets as
+the statement has threads by ranges of those numbers (bounds from a
+sample), each bucket sorted on a thread of its own, the buckets in
+order with no merge after; past it each `work_mem`'s worth becomes one sorted run
 of byte records in scratch space (`spill::Run::push_record`), and the
 runs are merged by a heap of run positions, the keys left where they
 are.  A unique index's duplicates are neighbours in that order — found
