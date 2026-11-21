@@ -177,6 +177,17 @@ impl Run {
         Ok(())
     }
 
+    /// Appends `count` records already laid out as
+    /// [`push_record`](Self::push_record) lays them (each its length,
+    /// then its bytes): records made apart, on other threads.
+    pub fn push_records(&mut self, records: &[u8], count: u64) -> Result<()> {
+        self.flush()?;
+        self.scratch.write_at(self.len, records).map_err(storage)?;
+        self.len += records.len() as u64;
+        self.rows += count;
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<()> {
         if !self.buf.is_empty() {
             self.scratch

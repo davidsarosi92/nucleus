@@ -3208,7 +3208,9 @@ are sorted in memory by a sample sort: dealt into as many buckets as
 the statement has threads by ranges of those numbers (bounds from a
 sample), each bucket sorted on a thread of its own, the buckets in
 order with no merge after; past it each `work_mem`'s worth becomes one sorted run
-of byte records in scratch space (`spill::Run::push_record`), and the
+of byte records in scratch space (`spill::Run::push_record`; a large
+run's records laid out on the workers, a few MiB each, written in
+order), and the
 runs are merged by a heap of run positions, the keys left where they
 are.  A unique index's duplicates are neighbours in that order — found
 without a look at the tree (`23505`).  A large build (spilled, or 65,536

@@ -349,6 +349,9 @@ impl IndexBuild {
     }
 }
 
+/// Entries a worker lays out as run records at once ([`EntrySorter::spill`]).
+const SPILL_ROUND: usize = 1 << 15;
+
 /// Entries an index build's merge hands its writer at once.
 const ENTRY_BLOCK_BYTES: usize = 1 << 20;
 
@@ -679,13 +682,51 @@ impl EntrySorter {
         let mut e = std::mem::take(&mut self.entries);
         e.sort();
         let mut run = crate::spill::Run::new()?;
-        for it in &e.items {
-            run.push_record(&[
-                &it.key.to_le_bytes(),
-                e.key(it),
-                e.pk(it),
-                &[u8::from(it.unique())],
-            ])?;
+        // The records laid out on the statement's workers, a run of
+        // entries each, then written in order (issue #9: laid out on one
+        // thread, between the scan's rounds, a quarter of a large build).
+        let record = |out: &mut Vec<u8>, it: &Item| {
+            let (k, pk) = (e.key(it), e.pk(it));
+            out.extend_from_slice(&((4 + k.len() + pk.len() + 1) as u32).to_le_bytes());
+            out.extend_from_slice(&it.key.to_le_bytes());
+            out.extend_from_slice(k);
+            out.extend_from_slice(pk);
+            out.push(u8::from(it.unique()));
+        };
+        let lay = |items: &[Item]| {
+            let mut out =
+                Vec::with_capacity(items.iter().map(|it| 9 + it.key_len() + it.pk_len()).sum());
+            for it in items {
+                record(&mut out, it);
+            }
+            out
+        };
+        let workers = crate::budget::workers();
+        if workers < 2 || e.items.len() < PIPELINE_ENTRIES {
+            for it in &e.items {
+                run.push_record(&[
+                    &it.key.to_le_bytes(),
+                    e.key(it),
+                    e.pk(it),
+                    &[u8::from(it.unique())],
+                ])?;
+            }
+        } else {
+            // A round at a time: a few MiB a worker laid out at once.
+            for round in e.items.chunks(workers * SPILL_ROUND) {
+                let laid: Vec<Option<Vec<u8>>> = std::thread::scope(|sc| {
+                    let handles: Vec<_> = round
+                        .chunks(SPILL_ROUND)
+                        .map(|items| sc.spawn(move || lay(items)))
+                        .collect();
+                    handles.into_iter().map(|h| h.join().ok()).collect()
+                });
+                for (bytes, items) in laid.into_iter().zip(round.chunks(SPILL_ROUND)) {
+                    let bytes = bytes
+                        .ok_or_else(|| Error::internal("an index build's spill worker panicked"))?;
+                    run.push_records(&bytes, items.len() as u64)?;
+                }
+            }
         }
         self.runs.push(run.seal()?);
         Ok(())

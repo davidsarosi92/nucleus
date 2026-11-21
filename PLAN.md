@@ -12617,6 +12617,13 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     2.71 / 2.61 → 2.48 / 2.48. Tested by `index_builds_sort_past_work_mem`
     (four workers, spilled and in memory, a duplicate found; fails when a
     block is lost).
+    (e) A spill's records laid out on the statement's workers — a round
+    of 32,768 entries a worker, a few MiB each, then written in order
+    (`spill::Run::push_records`) — where they were laid out one at a time
+    between the scan's rounds (~25 % of the build after (d)). ABBA:
+    `(l_partkey, l_suppkey)` 4.27 / 3.03 → 2.59 / 2.60 s, `(l_suppkey)`
+    2.50 / 2.59 → 2.25 / 2.15. Tested by the same test, a 6 MB `work_mem`
+    over 250,000 rows (fails when a worker's records are lost).
 
   *S19, rows a JSON index finds* (json-index, `doc @> '{"kind": "k3",
   "tags": ["t3"]}'`: 2,000 rows of 200,000, 2.14 ms, PostgreSQL's

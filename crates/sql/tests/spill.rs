@@ -206,7 +206,7 @@ fn writes_collect_their_rows_past_work_mem() {
 /// INDEX` and `ALTER COLUMN … TYPE`, which rebuilds every index.  On four
 /// workers, a large build's merge runs apart from its writes (issue #9):
 /// past `work_mem`, and in memory with many entries — a duplicate found by
-/// the writer stops the merge.
+/// the writer stops the merge; a large spill's records laid out apart.
 #[test]
 fn index_builds_sort_past_work_mem() {
     for (mem, storage, workers, n) in [
@@ -215,6 +215,9 @@ fn index_builds_sort_past_work_mem() {
         ("64kB", "column", 1, 20_000),
         ("64kB", "row", 4, 20_000),
         ("64MB", "row", 4, 70_000),
+        // Spills of over 65,536 entries: their records laid out on the
+        // workers.
+        ("6MB", "row", 4, 250_000),
     ] {
         let mem = &format!("{mem}, {workers} workers");
         let kv: Arc<dyn Kv> = Arc::new(database());
