@@ -2682,6 +2682,20 @@ impl Transaction {
             && !self.wrote_watched()
     }
 
+    /// Whether every read of this transaction is its snapshot's alone: it
+    /// wrote nothing (no write, no intent spilled, no range deleted, none
+    /// declared fresh) and its reads need not be recorded (not a
+    /// serializable transaction that writes) — so what is derived from a
+    /// read holds for any such transaction at the same snapshot (a new
+    /// snapshot starts where every commit before it is applied).
+    pub fn reads_snapshot(&self) -> bool {
+        !(self.isolation == Isolation::Serializable && !self.read_only)
+            && self.writes.is_empty()
+            && self.spilled.is_none()
+            && self.spans.ranges.is_empty()
+            && self.fresh.is_empty()
+    }
+
     /// Whether this transaction wrote into a watched range.
     fn wrote_watched(&self) -> bool {
         // Nothing written: nothing to look for (and no lock taken — a

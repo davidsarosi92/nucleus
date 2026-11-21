@@ -509,3 +509,76 @@ fn a_column_sample_takes_what_the_rows_give() {
         assert_eq!(own.into_rows(), every.into_rows(), "{size}");
     }
 }
+
+/// A snapshot's segment directory read whole for its index lookups (issue
+/// #5) answers only transactions that read that snapshot alone: an older
+/// snapshot keeps its segments after a commit adds some, a newer one sees
+/// them, a transaction that merged rows itself sees its own segments
+/// where another at the same snapshot has the directory read — and the
+/// one that did not write never sees them.
+#[test]
+fn a_directory_read_whole_answers_its_snapshot_alone() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(8)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut a = Session::new(Arc::clone(&db));
+    let mut b = Session::new(Arc::clone(&db));
+    a.execute(
+        "CREATE TABLE c (id INT PRIMARY KEY, x INT, s TEXT) WITH (storage = column); \
+         CREATE INDEX c_x ON c (x); \
+         INSERT INTO c SELECT i, i % 997, 'r' || i FROM generate_series(1, 100000) i; \
+         ANALYZE c",
+    )
+    .unwrap();
+    // Fetched through the index, ~100 rows a value, in a few segments.
+    let q = "SELECT count(*), sum(id), max(s) FROM c WHERE x = 5";
+    let plan = outcome(&mut a, &format!("EXPLAIN {q}")).unwrap();
+    assert!(
+        plan.iter().flatten().any(|l| l.contains("c_x")),
+        "an index lookup: {plan:?}"
+    );
+    let expect = |hi: i64| {
+        let ids: Vec<i64> = (1..=hi).filter(|i| i % 997 == 5).collect();
+        let max = ids.iter().map(|i| format!("r{i}")).max().unwrap();
+        vec![vec![
+            ids.len().to_string(),
+            ids.iter().sum::<i64>().to_string(),
+            max,
+        ]]
+    };
+    // An older snapshot, its directory read whole.
+    a.execute("BEGIN ISOLATION LEVEL REPEATABLE READ").unwrap();
+    for _ in 0..3 {
+        assert_eq!(outcome(&mut a, q).unwrap(), expect(100_000));
+    }
+    b.execute("INSERT INTO c SELECT i, i % 997, 'r' || i FROM generate_series(100001, 150000) i")
+        .unwrap();
+    assert_eq!(outcome(&mut a, q).unwrap(), expect(100_000));
+    a.execute("COMMIT").unwrap();
+    // A newer one.
+    for _ in 0..3 {
+        assert_eq!(outcome(&mut a, q).unwrap(), expect(150_000));
+    }
+    // `b` reads the directory whole at the current snapshot; `a`, at the
+    // same snapshot, merges rows of its own: it reads its segments, and
+    // `b` (its directory kept) never does.
+    for _ in 0..3 {
+        assert_eq!(outcome(&mut b, q).unwrap(), expect(150_000));
+    }
+    a.execute("BEGIN").unwrap();
+    a.execute("INSERT INTO c SELECT i, i % 997, 'r' || i FROM generate_series(150001, 200000) i")
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(outcome(&mut a, q).unwrap(), expect(200_000));
+    }
+    for _ in 0..3 {
+        assert_eq!(outcome(&mut b, q).unwrap(), expect(150_000));
+    }
+    a.execute("ROLLBACK").unwrap();
+    assert_eq!(outcome(&mut b, q).unwrap(), expect(150_000));
+}

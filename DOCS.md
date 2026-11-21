@@ -4026,7 +4026,14 @@ store, then the segment whose range holds the key.  The rows an index
 finds are fetched a group at a time (`get_many`): the delta store's and
 the markers' keys read together — or, where the transaction sees none of
 the table's, not at all, a loaded table's usual case — and the keys in
-order, so the keys of one segment find it once.  MVCC and crash safety
+order, so the keys of one segment find it once.  A snapshot's lookups
+that ask the directory often enough — 64 keys, or a quarter of its
+segments when it was last read — read it whole once and look segments up
+in memory from then on: kept by (database, table, snapshot), 16 at a
+time, for transactions whose reads are their snapshot's alone
+(`KvTxn::reads_snapshot`: nothing written, reads not recorded); a
+transaction that wrote looks its own segments up in the store (issue
+#5).  MVCC and crash safety
 are the KV's: segments, markers and delta rows are versioned keys written
 in their transactions; a delete and a merge of one segment, in either
 order, both commit and the delete holds (`crates/sql/tests/column.rs`).

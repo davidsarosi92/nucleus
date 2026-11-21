@@ -100,6 +100,10 @@ impl KvTxn for SharedTxn<'_> {
     fn instance(&self) -> u64 {
         self.1
     }
+
+    fn reads_snapshot(&self) -> bool {
+        self.0.reads_snapshot()
+    }
 }
 
 /// The statement's thread-local state, carried to a worker.

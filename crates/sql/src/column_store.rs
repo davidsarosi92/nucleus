@@ -550,6 +550,131 @@ fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Arc<Segme
     Ok((seg.first.as_slice() <= key).then_some(seg))
 }
 
+// -------------------------------------------------------------- directory
+
+/// A table's segments as a snapshot's directory lists them, in key order.
+type Directory = Arc<Vec<Arc<Segment>>>;
+
+/// Where a snapshot's directory of a table is.
+enum Listed {
+    /// Not read whole: its lookups asked it `asked` times; it is read
+    /// once they asked it `need` times.
+    Asked { asked: usize, need: usize },
+    /// Being read by a thread (the others look it up as before meanwhile).
+    Reading,
+    /// Read.
+    Read(Directory),
+}
+
+/// Lookups of a snapshot that ask the directory this many times read it
+/// whole — at least: as many as a quarter of its segments the last time
+/// it was read (a lookup's `first` of the directory and a segment read
+/// whole cost about the same).
+const DIRECTORY_AFTER: usize = 64;
+
+/// The directories kept, the last ones listed (a few statements' tables).
+const DIRECTORIES: usize = 16;
+
+/// The directories kept, by (database, table, snapshot) — a snapshot's
+/// directory is the same for every transaction that reads only it
+/// ([`KvTxn::reads_snapshot`]).
+type Directories = std::sync::Mutex<VecDeque<((u64, u32, nucleus_kv::Timestamp), Listed)>>;
+
+fn directories() -> &'static Directories {
+    static DIRS: OnceLock<Directories> = OnceLock::new();
+    DIRS.get_or_init(Directories::default)
+}
+
+/// `t`'s directory at `txn`'s snapshot, where kept — or read now, its
+/// lookups having asked it `asked` more times.  None where the
+/// transaction's reads are not its snapshot's alone (it wrote: its own
+/// segments), and for a table whose rows are being moved.
+///
+/// Issue #5: TPC-H Q19 on column tables fetches ~14,000 rows through an
+/// index, each a `first` of the directory (~1.3 µs, a scan built for one
+/// entry, its versions resolved): ~22 % of the lookups.  A snapshot's
+/// directory read once answers them from memory.
+fn directory(txn: &dyn KvTxn, t: &Table, asked: usize) -> Result<Option<Directory>> {
+    if t.copy == CopyState::MovingFromChanged || txn.instance() == 0 || !txn.reads_snapshot() {
+        return Ok(None);
+    }
+    let key = (txn.instance(), t.id, txn.read_ts());
+    let lock = || directories().lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let mut dirs = lock();
+        let at = match dirs.iter().position(|(k, _)| *k == key) {
+            Some(at) => at,
+            None => {
+                // As many lookups as a quarter of the segments the table had
+                // when last read.
+                let need = dirs
+                    .iter()
+                    .filter_map(|((db, id, _), l)| match l {
+                        Listed::Read(d) if (*db, *id) == (key.0, key.1) => Some(d.len() / 4),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .max(DIRECTORY_AFTER);
+                if dirs.len() == DIRECTORIES {
+                    dirs.pop_front();
+                }
+                dirs.push_back((key, Listed::Asked { asked: 0, need }));
+                dirs.len() - 1
+            }
+        };
+        match &mut dirs[at].1 {
+            Listed::Read(d) => return Ok(Some(Arc::clone(d))),
+            Listed::Reading => return Ok(None),
+            Listed::Asked { asked: a, need } => {
+                *a += asked;
+                if *a < *need {
+                    return Ok(None);
+                }
+            }
+        }
+        dirs[at].1 = Listed::Reading;
+    }
+    let read = read_directory(txn, t);
+    let mut dirs = lock();
+    let at = dirs.iter().position(|(k, _)| *k == key);
+    match read {
+        Ok(d) => {
+            let d: Directory = Arc::new(d);
+            if let Some(at) = at {
+                dirs[at].1 = Listed::Read(Arc::clone(&d));
+            }
+            Ok(Some(d))
+        }
+        Err(e) => {
+            if let Some(at) = at {
+                dirs.remove(at);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Every segment in `t`'s directory, in key order.
+fn read_directory(txn: &dyn KvTxn, t: &Table) -> Result<Vec<Arc<Segment>>> {
+    let p = t.index_prefix(DIRECTORY);
+    let to = prefix_end(&p).expect("directory prefix");
+    let mut out = Vec::new();
+    for r in txn.scan(Bound::Included(&p), Bound::Excluded(&to))? {
+        let (k, v) = r?;
+        out.push(entry(t, &k[p.len()..], &v)?);
+    }
+    Ok(out)
+}
+
+/// [`segment_of`] in a directory read whole.
+fn in_directory(dir: &[Arc<Segment>], key: &[u8]) -> Option<Arc<Segment>> {
+    let i = dir.partition_point(|s| s.last.as_slice() < key);
+    dir.get(i)
+        .filter(|s| s.first.as_slice() <= key)
+        .map(Arc::clone)
+}
+
 // ------------------------------------------------------------------ cache
 
 /// A segment's row keys (suffixes after the table's primary index prefix).
@@ -1024,7 +1149,11 @@ fn locate(
     key: &[u8],
     validated: bool,
 ) -> Result<Option<(Arc<Segment>, usize)>> {
-    match segment_of(txn, t, key)? {
+    let seg = match directory(txn, t, 1)? {
+        Some(dir) => in_directory(&dir, key),
+        None => segment_of(txn, t, key)?,
+    };
+    match seg {
         None => Ok(None),
         Some(seg) => locate_in(txn, t, key, validated, seg),
     }
@@ -2332,6 +2461,7 @@ impl TableStorage for ColumnStorage {
         let prefix = INDEX_PREFIX_LEN;
         let mut found: Vec<(usize, Arc<Segment>, usize)> = Vec::with_capacity(left.len());
         let mut seg: Option<Arc<Segment>> = None;
+        let dir = directory(txn, t, left.len())?;
         for &i in &left {
             let key = keys[i].as_slice();
             // Segments do not overlap: one that holds the last key's range
@@ -2340,7 +2470,10 @@ impl TableStorage for ColumnStorage {
                 .as_ref()
                 .is_some_and(|s| s.first.as_slice() <= key && key <= s.last.as_slice())
             {
-                seg = segment_of(txn, t, key)?;
+                seg = match &dir {
+                    Some(dir) => in_directory(dir, key),
+                    None => segment_of(txn, t, key)?,
+                };
             }
             let Some(s) = &seg else { continue };
             let rows = keys_of(txn, t, s)?;

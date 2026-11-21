@@ -12249,6 +12249,23 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     a group of keys in different segments still does a key each (~1.3
     µs: a scan made for one entry, its versions resolved) — 44 % of the
     fetches.
+  - Issue #5, the directory (2026-11-21): a snapshot's directory is the
+    same for every transaction that reads only it — nothing written,
+    reads not recorded (`KvTxn::reads_snapshot`, new; a new snapshot
+    starts where every commit before it is applied).  Taken: lookups
+    that ask a table's directory 64 times at one snapshot (or a quarter
+    of its segments when last read) read it whole once, and look a
+    key's segment up by a binary search in memory; kept by (database,
+    table, snapshot), sixteen at a time — what a catalog cache keyed by
+    the snapshot is, and InnoDB's adaptive hash index in spirit (built
+    once the lookups show they repeat).  A transaction that wrote
+    looks up the store as before.  Q19 on column tables, both orders:
+    one worker 84 → 55 ms, ten 24.1 → 17.5 ms (PostgreSQL 17.6).
+    Tested by `a_directory_read_whole_answers_its_snapshot_alone` (an
+    older snapshot past a commit adding segments, a newer one, a
+    transaction merging its own rows at a snapshot whose directory
+    another read whole; fails when the cache ignores the own writes or
+    the snapshot, or finds a neighbour segment).
 
   *S6, ClickBench Q23 on column tables* (1.61×: `SELECT * … WHERE URL
   LIKE '%google%' ORDER BY EventTime LIMIT 10`, 110 against

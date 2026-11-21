@@ -676,6 +676,10 @@ pub trait KvRead: Sync {
     fn read_ts(&self) -> Timestamp;
     /// [`KvTxn::get`].
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    /// [`KvTxn::reads_snapshot`].  The default: no.
+    fn reads_snapshot(&self) -> bool {
+        false
+    }
     /// [`KvTxn::get_many`].  By default a [`get`](Self::get) each.
     fn get_many(&self, keys: &[&[u8]], out: &mut Vec<Option<Vec<u8>>>) -> Result<()> {
         out.clear();
@@ -919,6 +923,16 @@ pub trait KvTxn: Send {
         Err(Error::Storage(
             format!("no engine \"{kind}\" here: this store keeps every key in one").into(),
         ))
+    }
+
+    /// Whether every read of this transaction is a function of its
+    /// snapshot ([`read_ts`](Self::read_ts), in its database's
+    /// [`instance`](Self::instance)) alone: it wrote nothing, and its
+    /// reads need not be recorded — what a layer above derives from them
+    /// may be kept for any such transaction at the same snapshot.  The
+    /// default: no.
+    fn reads_snapshot(&self) -> bool {
+        false
     }
 
     /// Whether this transaction reads the [watched](Kv::watch) keys as a
@@ -1613,6 +1627,10 @@ impl KvRead for LocalTxn {
         self.0.read_ts()
     }
 
+    fn reads_snapshot(&self) -> bool {
+        self.0.reads_snapshot()
+    }
+
     fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self.0.first_shared(start, end)?)
     }
@@ -1753,6 +1771,10 @@ impl KvTxn for LocalTxn {
 
     fn watched_as_at(&self, at: Timestamp) -> bool {
         self.0.watched_as_at(at)
+    }
+
+    fn reads_snapshot(&self) -> bool {
+        self.0.reads_snapshot()
     }
 
     fn put_new(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
