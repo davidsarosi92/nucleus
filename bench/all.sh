@@ -40,7 +40,7 @@ mkdir -p "$R"
 STEPS="suite phases tpch clickbench knn ann-sift ann-sift-int8 ann-filtered ann-dbpedia ann-related ann-sparse
 stats analyzers bm25 bm25-filters bm25-snippets msmarco hybrid hybrid-sparse tsearch tsearch-rank
 embed-speed embed-beir longmemeval recall erasure backup retype sealing page-crypto encrypted aead aes
-keys json json-pg json-index json-schema json-schema-pg wamp wamp-lsm ycsb history branches python wasm browser"
+keys json json-pg json-index json-schema json-schema-pg json-forms json-forms-pg wamp wamp-lsm ycsb history branches python wasm browser"
 
 need() { # need PATH HOW: a step's data, or how to get it
   [ -e "$1" ] || { echo "missing $1: $2" >&2; exit 1; }
@@ -242,6 +242,10 @@ step_json-pg() { m json-pg "$RUNS" -- python3 bench/json/pg.py --nucleus "$N"; }
 step_json-index() { m json-index "$RUNS" -- python3 bench/json/index.py --nucleus "$N"; }
 step_json-schema() { m json-schema "$RUNS" -- target/json/release/schema; }
 step_json-schema-pg() { m json-schema-pg "$RUNS" -- python3 bench/json/schema.py --nucleus "$N"; }
+step_json-forms() { m json-forms "$RUNS" -- target/json/release/forms; }
+step_json-forms-pg() {
+  m json-forms-pg "$RUNS" -- python3 bench/json/forms.py --nucleus "$N" --forms target/json/release/forms
+}
 
 # --- writes
 step_wamp() {

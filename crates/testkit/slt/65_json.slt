@@ -48,6 +48,32 @@ SELECT doc -> 'address' ->> 'city' FROM docs WHERE id = 1
 ----
 Pécs
 
+# A chain by constant keys is one walk (PLAN.md §M15 D1): keys and
+# positions mixed, a step that finds nothing or meets a scalar or the
+# wrong container NULL from there on, as each step alone gives.
+query IITTTT
+SELECT id, length(doc -> 'tags' ->> 1), doc -> 'address' -> 'city', doc -> 2 -> 'three', doc -> 'tags' -> 0 -> 'x', doc -> 'name' -> 'x' -> 'y' FROM docs ORDER BY id
+----
+1 1 "Pécs" NULL NULL NULL
+2 NULL NULL NULL NULL NULL
+3 NULL NULL 3 NULL NULL
+4 NULL NULL NULL NULL NULL
+5 NULL NULL NULL NULL NULL
+6 NULL NULL NULL NULL NULL
+
+query TT
+SELECT doc -> 'scores' ->> -1, doc -> 'address' ->> 'zip' FROM docs WHERE id IN (1, 2) ORDER BY id
+----
+NULL 7621
+-3 NULL
+
+# nucleus-only: the plan shows the walk.
+query T
+EXPLAIN SELECT doc -> 'address' ->> 'city' FROM docs
+----
+Project: ->>(json,path)(#1, 'address', 'city')
+  Seq Scan on docs
+
 query TTTT
 SELECT doc -> 0, doc -> 2, doc -> -1, doc -> 9 FROM docs WHERE id = 3
 ----

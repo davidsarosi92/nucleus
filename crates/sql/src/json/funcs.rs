@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use super::ops;
 use crate::error::{Error, Result};
+use crate::expr::Expr;
 use crate::ext::{
-    Accumulator, Aggregate, Arg, ArgInfo, CallContext, Registry, Returns, ScalarFunction,
+    Accumulator, Aggregate, Arg, ArgInfo, CallContext, FnRef, Registry, Returns, ScalarFunction,
     Signature, TableFunction, TableSignature, Volatility,
 };
 use crate::types::{DataType, Row, Value};
@@ -89,6 +90,8 @@ pub(super) struct Func {
     strict: bool,
     volatility: Volatility,
     body: Body,
+    /// For `->` and `->>`: a step of a path, and whether it gives text.
+    step: Option<bool>,
 }
 
 impl Func {
@@ -102,7 +105,15 @@ impl Func {
             strict: true,
             volatility: Volatility::Immutable,
             body,
+            step: None,
         }
+    }
+
+    /// `->` (`false`) or `->>` (`true`): a chain of them by constant keys
+    /// is bound as one [`Path`].
+    fn step(mut self, text: bool) -> Self {
+        self.step = Some(text);
+        self
     }
 
     pub(super) fn arity(mut self, arity: RangeInclusive<usize>) -> Self {
@@ -140,8 +151,78 @@ impl ScalarFunction for Func {
     fn volatility(&self) -> Volatility {
         self.volatility
     }
+    fn rewrite(&self, args: &[Expr]) -> Option<Expr> {
+        Path::chained(args, self.step?)
+    }
     fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
         (self.body)(args)
+    }
+}
+
+/// `x -> k1 -> … -> kn` (or `… ->> kn`), each key a constant — a text
+/// key or an integer index —, as one call: `x`'s bytes walked to the
+/// value, nothing copied on the way.  Each `->` alone copies its value
+/// out, so a path three deep copied two values a row that only the
+/// third's text was wanted from: 1.11× PostgreSQL's chain on 1 KB
+/// documents, even with it as one walk (PLAN.md §M15 D1).  Its
+/// arguments: `x`, then the keys.
+struct Path {
+    text: bool,
+}
+
+impl Path {
+    const JSON: &'static str = "->(json,path)";
+    const TEXT: &'static str = "->>(json,path)";
+
+    /// The call `x -> k` (or `->>`, `text`) of bound `args` as a path,
+    /// when `x` is itself a step by a constant key and `k` a constant.
+    fn chained(args: &[Expr], text: bool) -> Option<Expr> {
+        let constant = |e: &Expr| matches!(e, Expr::Literal(Value::Text(_) | Value::Int(_)));
+        let [x, k] = args else { return None };
+        if !constant(k) {
+            return None;
+        }
+        let Expr::Call(f, inner) = x else { return None };
+        let is_step = matches!(f.name(), "->(json,text)" | "->(json,integer)" | Self::JSON);
+        if !is_step || inner.len() < 2 || !inner[1..].iter().all(constant) {
+            return None;
+        }
+        let mut all = inner.clone();
+        all.push(k.clone());
+        Some(Expr::Call(FnRef::new(Arc::new(Path { text })), all))
+    }
+}
+
+impl ScalarFunction for Path {
+    fn name(&self) -> &str {
+        if self.text { Self::TEXT } else { Self::JSON }
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=usize::MAX
+    }
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        let mut a = vec![u(json())];
+        a.resize(args.len(), Arg::Keep);
+        let returns = if self.text { DataType::Text } else { json() };
+        Ok(Signature::new(a, Returns::Type(Some(returns))))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let mut at = Some(jb(&args[0])?);
+        for k in &args[1..] {
+            let Some(b) = at else { break };
+            at = match k {
+                Value::Int(i) => ops::element(b, *i)?,
+                k => ops::field(b, text(k)?)?,
+            };
+        }
+        if self.text {
+            maybe_text(at)
+        } else {
+            Ok(maybe_json(at))
+        }
     }
 }
 
@@ -154,40 +235,52 @@ pub(super) fn u(t: DataType) -> Arg {
 fn operators(r: &mut Registry) -> Result<()> {
     let j = json();
     let ints = [DataType::SmallInt, DataType::Integer, DataType::BigInt];
-    let op =
-        |name, right, returns, body| Arc::new(Func::new(name, vec![u(j), u(right)], returns, body));
+    let func = |name, right, returns, body| Func::new(name, vec![u(j), u(right)], returns, body);
+    let op = |name, right, returns, body| Arc::new(func(name, right, returns, body));
     r.add_operator(
         "->",
         j,
         DataType::Text,
-        op("->(json,text)", DataType::Text, j, |a| {
-            Ok(maybe_json(ops::field(jb(&a[0])?, text(&a[1])?)?))
-        }),
+        Arc::new(
+            func("->(json,text)", DataType::Text, j, |a| {
+                Ok(maybe_json(ops::field(jb(&a[0])?, text(&a[1])?)?))
+            })
+            .step(false),
+        ),
     )?;
     r.add_operator(
         "->>",
         j,
         DataType::Text,
-        op("->>(json,text)", DataType::Text, DataType::Text, |a| {
-            maybe_text(ops::field(jb(&a[0])?, text(&a[1])?)?)
-        }),
+        Arc::new(
+            func("->>(json,text)", DataType::Text, DataType::Text, |a| {
+                maybe_text(ops::field(jb(&a[0])?, text(&a[1])?)?)
+            })
+            .step(true),
+        ),
     )?;
     for t in ints {
         r.add_operator(
             "->",
             j,
             t,
-            op("->(json,integer)", t, j, |a| {
-                Ok(maybe_json(ops::element(jb(&a[0])?, int(&a[1])?)?))
-            }),
+            Arc::new(
+                func("->(json,integer)", t, j, |a| {
+                    Ok(maybe_json(ops::element(jb(&a[0])?, int(&a[1])?)?))
+                })
+                .step(false),
+            ),
         )?;
         r.add_operator(
             "->>",
             j,
             t,
-            op("->>(json,integer)", t, DataType::Text, |a| {
-                maybe_text(ops::element(jb(&a[0])?, int(&a[1])?)?)
-            }),
+            Arc::new(
+                func("->>(json,integer)", t, DataType::Text, |a| {
+                    maybe_text(ops::element(jb(&a[0])?, int(&a[1])?)?)
+                })
+                .step(true),
+            ),
         )?;
     }
     r.add_operator(
@@ -195,7 +288,10 @@ fn operators(r: &mut Registry) -> Result<()> {
         j,
         text_array(),
         op("#>(json,text[])", text_array(), j, |a| {
-            Ok(maybe_json(ops::at_path(jb(&a[0])?, &texts(&a[1])?)?))
+            Ok(maybe_json(ops::at_path(
+                jb(&a[0])?,
+                steps(elements(&a[1])?)?,
+            )?))
         }),
     )?;
     r.add_operator(
@@ -203,7 +299,7 @@ fn operators(r: &mut Registry) -> Result<()> {
         j,
         text_array(),
         op("#>>(json,text[])", text_array(), DataType::Text, |a| {
-            maybe_text(ops::at_path(jb(&a[0])?, &texts(&a[1])?)?)
+            maybe_text(ops::at_path(jb(&a[0])?, steps(elements(&a[1])?)?)?)
         }),
     )?;
     r.add_operator(
@@ -236,8 +332,8 @@ fn operators(r: &mut Registry) -> Result<()> {
         text_array(),
         op("?|(json,text[])", text_array(), DataType::Bool, |a| {
             let b = jb(&a[0])?;
-            for k in texts(&a[1])?.into_iter().flatten() {
-                if ops::exists(b, &k)? {
+            for k in steps(elements(&a[1])?)?.flatten() {
+                if ops::exists(b, k)? {
                     return Ok(Value::Bool(true));
                 }
             }
@@ -250,8 +346,8 @@ fn operators(r: &mut Registry) -> Result<()> {
         text_array(),
         op("?&(json,text[])", text_array(), DataType::Bool, |a| {
             let b = jb(&a[0])?;
-            for k in texts(&a[1])?.into_iter().flatten() {
-                if !ops::exists(b, &k)? {
+            for k in steps(elements(&a[1])?)?.flatten() {
+                if !ops::exists(b, k)? {
                     return Ok(Value::Bool(false));
                 }
             }
@@ -404,14 +500,27 @@ fn insert(a: &[Value]) -> Result<Value> {
     )?))
 }
 
-fn path_of(a: &[Value]) -> Result<Vec<Option<String>>> {
-    a[1..]
+/// A path's steps as `#>` and `json_extract_path` take them — text or
+/// `NULL` each —, borrowed: nothing copied a row (PLAN.md §M15 D1).
+fn steps(items: &[Value]) -> Result<impl Iterator<Item = Option<&str>>> {
+    if let Some(v) = items
         .iter()
-        .map(|v| match v {
-            Value::Null => Ok(None),
-            v => text(v).map(|s| Some(s.to_string())),
-        })
-        .collect()
+        .find(|v| !matches!(v, Value::Null | Value::Text(_)))
+    {
+        text(v)?;
+    }
+    Ok(items.iter().map(|v| match v {
+        Value::Text(s) => Some(s.as_str()),
+        _ => None,
+    }))
+}
+
+/// A `text[]` argument's elements.
+fn elements(v: &Value) -> Result<&[Value]> {
+    match v {
+        Value::Array(items) => Ok(items),
+        _ => Err(Error::internal("not a text[] value")),
+    }
 }
 
 fn functions(r: &mut Registry) -> Result<()> {
@@ -510,7 +619,7 @@ fn functions(r: &mut Registry) -> Result<()> {
         r,
         &["json_extract_path", "jsonb_extract_path"],
         Func::new("json_extract_path", vec![u(j), u(t)], j, |a| {
-            Ok(maybe_json(ops::at_path(jb(&a[0])?, &path_of(a)?)?))
+            Ok(maybe_json(ops::at_path(jb(&a[0])?, steps(&a[1..])?)?))
         })
         .arity(2..=100)
         .lax(),
@@ -519,7 +628,7 @@ fn functions(r: &mut Registry) -> Result<()> {
         r,
         &["json_extract_path_text", "jsonb_extract_path_text"],
         Func::new("json_extract_path_text", vec![u(j), u(t)], t, |a| {
-            maybe_text(ops::at_path(jb(&a[0])?, &path_of(a)?)?)
+            maybe_text(ops::at_path(jb(&a[0])?, steps(&a[1..])?)?)
         })
         .arity(2..=100)
         .lax(),

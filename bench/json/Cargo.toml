@@ -19,6 +19,9 @@ nucleus-sql = { path = "../../crates/sql" }
 serde_json = "1"
 # JSON Schema checks compared (src/bin/schema.rs).
 jsonschema = { version = "0", default-features = false }
+# BSON's raw documents, against which the document form is measured
+# (src/bin/forms.rs, PLAN.md §M15 D1).
+bson = "2"
 
 [profile.release]
 debug = false

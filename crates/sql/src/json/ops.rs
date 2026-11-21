@@ -46,7 +46,10 @@ fn index(i: i64, len: usize) -> Option<usize> {
 
 /// `j #> path`: the value at a path of keys and array positions; `None`
 /// where it leads nowhere (or holds a `NULL`).
-pub fn at_path<'a>(b: &'a [u8], path: &[Option<String>]) -> Result<Option<&'a [u8]>> {
+pub fn at_path<'a, 's>(
+    b: &'a [u8],
+    path: impl IntoIterator<Item = Option<&'s str>>,
+) -> Result<Option<&'a [u8]>> {
     let mut cur = b;
     for step in path {
         let Some(step) = step else { return Ok(None) };

@@ -12433,6 +12433,38 @@ result, a profile), and the shape models write best.
   outside the core, in `bench/`) and `jsonb` (PostgreSQL 18), on
   documents of 1 KB and 16 KB; a change to the form only where it
   loses, under a new encoding version (principle 6).
+
+  ✅ *Done 2026-11-21.*  `bench/json/src/bin/forms.rs` (the `bson` crate
+  in `bench/json` only) and `bench/json/forms.py` (`bash bench/all.sh
+  json-forms json-forms-pg`), on generated user documents of 0.9 KB and
+  16 KB, fields in the order written.  *The form does not lose*: in the
+  process a top-level field 27–44 ns wherever it was written, BSON's
+  walk 38 ns (the second field) to 214 ns (the last, 1 KB) and 1,620 ns
+  (the last, 16 KB) — BSON ahead only on the second field of the large
+  document (39.7 against 43.8 ns, 1.10×); a path three deep 99–101 ns
+  against 274–278; the whole document as text 6.8× and 6.4× faster
+  than BSON's through relaxed Extended JSON; the form the smallest (787
+  B against BSON's 917 and the text's 860; 13.9 KB against 18.6 and
+  16.0).  No encoding change.  *What lost was evaluation*: in SQL
+  against `jsonb`, fields 0.89–0.94× its time on 1 KB documents, ~0.53×
+  on 16 KB (jsonb decompresses them), the text 0.46× and 0.59× — but
+  the path `doc -> 'address' -> 'geo' ->> 'lat'` 1.11× (14.7 against
+  13.3 ms, 100,000 rows): each `->` copied its value out for the next
+  to read.  Taken: a chain of `->` by constant keys is bound as one
+  call (`->(json,path)` / `->>(json,path)`, through
+  `ScalarFunction::rewrite` — the technique of PostgreSQL's
+  `jsonb_extract_path`, done by the binder so that what users write is
+  what runs): 10.9–11.4 ms, 0.80–0.86× PostgreSQL's; a chain of two
+  12.2 → 10.2 ms.  And `#>`, `#>>`, `?|`, `?&`, `json_extract_path`
+  read their keys in place instead of copying the `text[]` a row:
+  `#>>` 14.2 → 12.4–13.3 ms (PostgreSQL 14.4).  Expression indexes
+  bind the same (their SQL is bound again), tested in
+  `slt/69_expression_indexes.slt`; values and `NULL`s midway in
+  `slt/65_json.slt`, both as PostgreSQL 18 has them.  Not taken:
+  compressing large documents as `jsonb`'s TOAST does (8.9 KB against
+  the form's 13.9 at 16 KB) — a matter of how large values are stored,
+  not of the form; `-37.0` reads back `-37` (the canonical form keeps
+  no scale, as agreed), so the bench writes odd thousandths.
 - **D2 — collections**: `CREATE / DROP / ALTER COLLECTION`, the catalog
   kind and `nc_catalog.collections`, `_id` as the stored key (made
   where absent), `WITH (schema = …)`; insert, replace, update by

@@ -74,6 +74,26 @@ EXPLAIN SELECT id FROM users WHERE (doc->>'age')::int >= 31
 Project: #0
   Index Scan using users_age on users (((doc->>'age')::int) >= 31)
 
+# An index on a chain of keys: its expression and the query's bound the
+# same (one walk, PLAN.md §M15 D1).
+statement ok
+CREATE INDEX users_first_tag ON users ((doc -> 'tags' ->> 0))
+
+query I
+SELECT id FROM users WHERE doc -> 'tags' ->> 0 = 'a'
+----
+1
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT id FROM users WHERE doc -> 'tags' ->> 0 = 'a'
+----
+Project: #0
+  Index Scan using users_first_tag on users ((doc -> 'tags' ->> 0) = 'a')
+
+statement ok
+DROP INDEX users_first_tag
+
 # A unique expression: two rows may not share a name, NULLs aside.
 statement error 23505
 INSERT INTO users VALUES (5, 'x@y.z', 1, '{"name": "ann"}')

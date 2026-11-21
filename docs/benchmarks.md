@@ -1691,6 +1691,69 @@ In SQL (`bash bench/all.sh json-schema-pg`; `bench/json/schema.py`,
 
 Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus 18041cf93+changes — 2026-11-20T20:30:38+00:00
 
+**The form against BSON and `jsonb`** (`bash bench/all.sh json-forms
+json-forms-pg`; `bench/json/src/bin/forms.rs`, `bench/json/forms.py`,
+PLAN.md §M15 D1): a user's document as applications keep one — profile
+fields, an address, preferences, orders, a text; the large kind 80 more
+fields and a history — of ~1 KB and ~16 KB, fields in the order
+written.  In the process, nucleus's `json` form (keys sorted, a key
+found by binary search) against BSON's raw document (the `bson` crate:
+fields in the order written, each found by walking those before it) —
+a field of the top object, the second written, the middle one and the
+last; a path three deep; the whole document out as JSON text (BSON's
+through the crate's relaxed Extended JSON):
+
+| json-forms | text | nucleus | bson |
+|---|---:|---:|---:|
+| size (1 KB), B | 860 [860–860] ±0% | 787 [787–787] ±0% | 917 [917–917] ±0% |
+| second field (1 KB), ns | — | 26.7 [26.5–27.2] ±1% | 38.2 [38.2–40.0] ±2% |
+| middle field (1 KB), ns | — | 33.9 [33.7–34.4] ±1% | 108 [107–110] ±1% |
+| last field (1 KB), ns | — | 27.6 [27.1–29.4] ±3% | 214 [214–221] ±1% |
+| path address.geo.lat (1 KB), ns | — | 98.9 [98.4–101] ±1% | 278 [277–285] ±1% |
+| whole document as text (1 KB), ns | — | 1,338 [1,331–1,374] ±1% | 9,148 [9,117–9,232] ±1% |
+| size (16 KB), B | 16,017 [16,017–16,017] ±0% | 13,898 [13,898–13,898] ±0% | 18,592 [18,592–18,592] ±0% |
+| second field (16 KB), ns | — | 43.8 [43.7–46.6] ±3% | 39.7 [39.6–41.1] ±2% |
+| middle field (16 KB), ns | — | 44.1 [43.6–45.1] ±1% | 804 [799–823] ±1% |
+| last field (16 KB), ns | — | 36.3 [36.2–37.6] ±2% | 1,620 [1,609–1,658] ±1% |
+| path address.geo.lat (16 KB), ns | — | 101 [101–102] ±0% | 274 [273–287] ±2% |
+| whole document as text (16 KB), ns | — | 32,459 [32,348–33,311] ±1% | 206,928 [202,412–209,471] ±1% |
+
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — nucleus b9ec7c50b+changes — 2026-11-21T12:13:57+00:00
+
+A key costs the same wherever it was written; BSON's walk grows with
+the position — its best case, the second field of 80-odd, 1.10× faster
+than the binary search.  The form is the smallest of the three.
+
+In SQL, against PostgreSQL 18's `jsonb` on the same documents, 100,000
+of 1 KB and 10,000 of 16 KB: `sum(length(doc ->> k))` for each field,
+`sum(length(doc -> 'address' -> 'geo' ->> 'lat'))`, and
+`sum(length(doc::text))`; `jsonb`'s size is `pg_column_size`, TOAST's
+compression past ~2 KB included (nucleus's form is stored as it is):
+
+| json-forms-pg | nucleus | postgresql |
+|---|---:|---:|
+| second field (1 KB), ms | 11.2 [11.0–11.3] ±6% | 11.9 [11.8–12.0] ±9% |
+| middle field (1 KB), ms | 10.8 [10.7–10.9] ±7% | 12.1 [12.0–12.1] ±3% |
+| last field (1 KB), ms | 10.4 [10.3–10.5] ±31% ⚠ | 11.6 [11.5–11.7] ±4% |
+| path address.geo.lat (1 KB), ms | 12.2 [12.0–12.4] ±8% | 13.7 [13.5–13.9] ±4% |
+| whole document as text (1 KB), ms | 40.2 [39.8–40.5] ±6% | 88.1 [88.0–88.3] ±3% |
+| size a document (1 KB), B | — | 1,085 [1,085–1,085] ±0% |
+| second field (16 KB), ms | 107 [105–108] ±4% | 202 [201–203] ±2% |
+| middle field (16 KB), ms | 109 [107–110] ±6% | 204 [203–205] ±2% |
+| last field (16 KB), ms | 108 [107–109] ±8% | 201 [201–202] ±1% |
+| path address.geo.lat (16 KB), ms | 109 [107–110] ±3% | 205 [203–206] ±2% |
+| whole document as text (16 KB), ms | 557 [555–560] ±2% | 950 [948–957] ±1% |
+| size a document (16 KB), B | — | 8,923 [8,923–8,923] ±0% |
+
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus b9ec7c50b+changes — 2026-11-21T12:24:48+00:00
+
+Fields and paths 0.89–0.94× `jsonb`'s time on 1 KB documents and about
+half on 16 KB ones (`jsonb` decompresses them first); the whole text
+0.46× and 0.59×.  The chain of `->` is one walk (DOCS.md §8.31,
+operators); as three calls copying the values between, it was 1.11×
+PostgreSQL's.  `jsonb` stores the 16 KB documents in 8.9 KB, compressed;
+nucleus's form takes 13.9 KB.
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (`bash bench/all.sh

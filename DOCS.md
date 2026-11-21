@@ -6014,6 +6014,13 @@ checked against PostgreSQL 18 by `slt/65_json.slt`):
 | `j - 'k'`, `j - '{k,l}'::text[]`, `j - 2` | without the keys (strings, for an array), without the element |
 | `j #- '{a,0}'` | without the value at a path |
 
+A chain of `->` by constant keys or positions, ending in `->` or `->>`
+(`doc -> 'address' -> 'geo' ->> 'lat'`), is bound as one call,
+`->(json,path)` / `->>(json,path)` (`EXPLAIN` shows it): the document's
+bytes walked to the value, no value between copied out — each `->`
+alone copies its value (PLAN.md §M15 D1).  `#>`, `#>>`, `?|`, `?&` and
+`json_extract_path` read their keys in place, nothing copied a row.
+
 An untyped right side (`doc -> 'name'`, `doc -> $1`) is `text` where
 the operator has a `text` form (as PostgreSQL's `unknown`), else the
 type its only form takes (`#> '{a,b}'`: `text[]`) — the binder's rule
