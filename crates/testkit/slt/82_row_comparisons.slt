@@ -1,0 +1,98 @@
+# Row constructors compared (issue #16).
+
+statement ok
+CREATE TABLE r (k1 int, k2 int, v text, PRIMARY KEY (k1, k2))
+
+statement ok
+INSERT INTO r VALUES (1, 1, 'a'), (1, 2, 'b'), (1, 3, 'c'), (2, 1, 'd'), (2, 2, 'e'), (3, 1, 'f')
+
+# Keyset paging: the rows after (1, 2), in key order.
+query IIT
+SELECT * FROM r WHERE (k1, k2) > (1, 2) ORDER BY k1, k2 LIMIT 3
+----
+1 3 c
+2 1 d
+2 2 e
+
+query IIT
+SELECT * FROM r WHERE (k1, k2) <= (2, 1) ORDER BY k1 DESC, k2 DESC
+----
+2 1 d
+1 3 c
+1 2 b
+1 1 a
+
+query IIT rowsort
+SELECT * FROM r WHERE ROW(k1, k2) >= ROW(2, 2) OR (k1, k2) < (1, 2)
+----
+1 1 a
+2 2 e
+3 1 f
+
+query IIT rowsort
+SELECT * FROM r WHERE (k1, k2) = (2, 1) OR (k1, v) = (3, 'f')
+----
+2 1 d
+3 1 f
+
+query I
+SELECT count(*) FROM r WHERE (k1, k2) <> (1, 1)
+----
+5
+
+query IIT rowsort
+SELECT * FROM r WHERE (k1, k2) IN ((1, 3), (3, 1), (9, 9))
+----
+1 3 c
+3 1 f
+
+query I
+SELECT count(*) FROM r WHERE (k1, k2) NOT IN ((1, 3), (3, 1))
+----
+4
+
+# NULLs: the first pair not equal decides; a NULL pair before it makes
+# the comparison NULL.
+query TTTTTT
+SELECT (1, NULL) < (2, 0), (NULL, 1) < (2, 0), (1, NULL) < (1, 2), (1, NULL) = (2, NULL), (1, NULL) = (1, NULL), (1, NULL) <> (2, NULL)
+----
+t NULL NULL f NULL t
+
+query TTTT
+SELECT (1, 2) <= (1, 2), (1, 2) < (1, 2), (1, 2, 3) > (1, 2, 2), (2, 0, 0) > (1, 9, 9)
+----
+t f t t
+
+query TTTT
+SELECT (1, NULL) IS DISTINCT FROM (1, NULL), (1, NULL) IS NOT DISTINCT FROM (1, NULL), (1, 2) IS DISTINCT FROM (1, NULL), (1, NULL) IN ((1, NULL), (2, 2))
+----
+f t t NULL
+
+query TTTT
+SELECT ROW(NULL, NULL) IS NULL, (1, NULL) IS NULL, (1, NULL) IS NOT NULL, (1, 2) IS NOT NULL
+----
+t f f t
+
+# Nested rows; fields of any type.
+query TT
+SELECT ((1, 2), 3) = ((1, 2), 3), ('b', 1.5) > ('a', 9)
+----
+t t
+
+statement error 42601
+SELECT (1, 2) = (1, 2, 3)
+
+# nucleus-only: not as values of their own yet.
+statement error 0A000
+SELECT (k1, k2) FROM r
+
+# nucleus-only: nor against a subquery.
+statement error 0A000
+SELECT * FROM r WHERE (k1, k2) IN (SELECT k1, k2 FROM r)
+
+# nucleus-only: the first field's bound bounds the key's scan.
+query T
+EXPLAIN SELECT * FROM r WHERE (k1, k2) > (1, 2) ORDER BY k1, k2 LIMIT 3
+----
+Limit: 3
+  Index Scan using primary key on r (k1 >= 1) filter: ((#0 >= 1) AND ((#0 > 1) OR ((#0 = 1) AND (#1 > 2))))

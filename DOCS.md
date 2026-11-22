@@ -2393,6 +2393,16 @@ projected to the layout — its keys, `NULL` for the others, its mask a
 constant, the aggregates — so every executor runs it as ordinary
 groupings.
 
+Row constructors (`rows`): `(a, b, …)` and `ROW(…)` compared — `=`,
+`<>`, `<`, `<=`, `>`, `>=`, `IS [NOT] DISTINCT FROM`, `[NOT] IN (rows)`,
+`IS [NOT] NULL` — are rewritten before binding to comparisons of their
+fields with PostgreSQL's meaning: `=` every pair equal, `<>` one
+unequal, the ordering ones decided by the first pair not equal (`a1 < b1
+OR (a1 = b1 AND …)`, a `NULL` pair before it making the result `NULL`),
+with the first pair's bound (`a1 <= b1`, implied) before it, so an index
+on the first column bounds the scan.  Unequal lengths are `42601`; a row
+as a value of its own (a record type) or against a subquery `0A000`.
+
 A statement's own `WITH` with a data-modifying CTE, or before `INSERT`,
 `UPDATE` or `DELETE`, is a `Statement::WithStatement`: the session runs
 the CTEs' statements in order and gives each part bound after them —

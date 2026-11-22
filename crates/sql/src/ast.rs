@@ -1345,6 +1345,8 @@ pub enum Expr {
     },
     /// `$n`.
     Param(usize),
+    /// A row constructor: `(a, b, …)` or `ROW(…)`.
+    Row(Vec<Expr>),
     /// A prefix operator: `-`, `+`, `NOT`.
     Unary {
         /// The operator.

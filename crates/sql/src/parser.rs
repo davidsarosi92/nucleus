@@ -3945,11 +3945,37 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::Subquery(Box::new(q)));
                 }
                 let e = self.expr()?;
+                if self.eat_op(",") {
+                    // A row constructor: `(a, b, …)`.
+                    let mut fields = vec![e];
+                    loop {
+                        fields.push(self.expr()?);
+                        if !self.eat_op(",") {
+                            break;
+                        }
+                    }
+                    self.expect_op(")")?;
+                    return Ok(Expr::Row(fields));
+                }
                 self.expect_op(")")?;
                 e
             }
             Token::Word(w) => match w.as_str() {
                 "null" => Expr::Literal(Value::Null),
+                "row" if self.peek_op("(") => {
+                    self.pos += 1;
+                    let mut fields = Vec::new();
+                    if !self.eat_op(")") {
+                        loop {
+                            fields.push(self.expr()?);
+                            if !self.eat_op(",") {
+                                break;
+                            }
+                        }
+                        self.expect_op(")")?;
+                    }
+                    Expr::Row(fields)
+                }
                 "true" => Expr::Literal(Value::Bool(true)),
                 "false" => Expr::Literal(Value::Bool(false)),
                 "case" => self.case()?,

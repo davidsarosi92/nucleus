@@ -61,6 +61,7 @@ mod keyfilter;
 pub mod keys;
 mod keytable;
 pub(crate) mod object_cache;
+mod rows;
 mod shape;
 /// Sizes the decoded index objects kept across transactions
 /// (`--index-cache`; by default a quarter of the machine's memory).

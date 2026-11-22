@@ -265,7 +265,11 @@ INTERSECT [ALL]`, `ORDER BY … [ASC|DESC] [NULLS FIRST|LAST]`, `LIMIT`,
 `OFFSET`.  Expressions: `IS [NOT] DISTINCT FROM`, `BETWEEN`, `IN (list |
 subquery)`, `EXISTS`, `= ANY (array | subquery)`, `LIKE`, `ILIKE`, `~`
 (regular expressions), `CASE`, `CAST(x AS t)` / `x::t`, `ARRAY[…]`,
-`a[i]` (1-based), integer bitwise `& | # ~ << >>`.
+`a[i]` (1-based), integer bitwise `& | # ~ << >>`; rows compared —
+`(a, b) > ($1, $2)` (keyset paging: an index on `(a, b)` bounds the
+scan), `=`, `<>`, `IN ((1, 2), (3, 4))`, `IS [NOT] DISTINCT FROM`,
+`IS [NOT] NULL` (not a row as a value of its own, nor against a
+subquery).
 
 **Functions:** `lower upper length trim substr replace strpos concat
 lpad rpad ltrim rtrim btrim split_part concat_ws translate reverse initcap

@@ -297,7 +297,7 @@ fn any_node(e: &ast::Expr, f: &dyn Fn(&ast::Expr) -> bool) -> bool {
                 || whens.iter().any(|(w, t)| any(w) || any(t))
                 || otherwise.as_deref().is_some_and(any)
         }
-        A::Array(items) => items.iter().any(any),
+        A::Array(items) | A::Row(items) => items.iter().any(any),
         A::Subscript { expr, index } => any(expr) || any(index),
         A::Slice { expr, lower, upper } => {
             any(expr) || lower.as_deref().is_some_and(any) || upper.as_deref().is_some_and(any)
@@ -2859,8 +2859,12 @@ impl<'a> Binder<'a> {
         sub: &mut dyn FnMut(&ast::Expr, &mut Self) -> Result<Typed>,
     ) -> Result<Typed> {
         use ast::Expr as A;
+        if let Some(x) = crate::rows::expand(e)? {
+            return self.expr_with(&x, sub);
+        }
         Ok(match e {
             A::Literal(v) => (Expr::Literal(v.clone()), literal_type(v)),
+            A::Row(_) => return Err(crate::rows::unsupported()),
             A::Column { .. }
             | A::Exists { .. }
             | A::Subquery(_)

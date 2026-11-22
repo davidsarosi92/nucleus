@@ -13081,6 +13081,20 @@ Found and fixed:
   through pg-compat (three mutations — the
   delimiter's escape, CSV's quoting of the `NULL` string, `CopyDone` —
   each failing).
+- Issue #16, eighth step — row constructors compared: `(a, b, …)` and
+  `ROW(…)` with `=`, `<>`, `<`, `<=`, `>`, `>=`, `IS [NOT] DISTINCT
+  FROM`, `[NOT] IN (rows)`, `IS [NOT] NULL`, rewritten before binding to
+  comparisons of their fields (`rows.rs`), PostgreSQL's `NULL` meaning
+  kept; the ordering ones carry the first pair's implied bound, so keyset
+  paging (`WHERE (k1, k2) > ($1, $2) ORDER BY k1, k2`) scans the key from
+  `k1 >= $1`.  For the performance pass: the whole row as the scan's
+  bound (from `(1, 2)` exclusive, as PostgreSQL's index condition), not
+  only its first field.  Still to come: a row as a value of its own (a
+  record type: `SELECT DISTINCT (a, d)`, the issue's last form) and a row
+  against a subquery.  Tested by `82_row_comparisons.slt`, every record
+  but three nucleus-only ones as PostgreSQL 18's (three mutations — the
+  equal prefix, the first pair's bound, `IS NULL` over every field —
+  each failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and
