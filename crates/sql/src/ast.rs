@@ -483,12 +483,15 @@ pub enum Statement {
         /// `IF EXISTS`.
         if_exists: bool,
     },
-    /// `ALTER TABLE … ADD COLUMN`.
+    /// `ALTER TABLE … ADD [COLUMN] [IF NOT EXISTS]`.
     AddColumn {
         /// Table.
         table: String,
         /// The new column.
         column: ColumnSpec,
+        /// `IF NOT EXISTS`: a column of that name already there is no
+        /// error (and is left as it is).
+        if_not_exists: bool,
     },
     /// `ALTER TABLE … ADD [CONSTRAINT name] …`.
     AddConstraint {
@@ -527,6 +530,16 @@ pub enum Statement {
         filter: Option<Expr>,
         /// `RETURNING` items.
         returning: Vec<SelectItem>,
+    },
+    /// `TRUNCATE [TABLE] name, … [CONTINUE | RESTART IDENTITY] [CASCADE |
+    /// RESTRICT]`: every row deleted.
+    Truncate {
+        /// The tables.
+        tables: Vec<String>,
+        /// `ONLY` was written before one of them.
+        only: bool,
+        /// `CASCADE`: the tables referencing them by foreign keys too.
+        cascade: bool,
     },
     /// `DELETE`.
     Delete {
@@ -1453,6 +1466,8 @@ pub enum Expr {
         order_by: Vec<OrderItem>,
         /// `order_by` is `WITHIN GROUP`'s (an ordered-set aggregate's).
         within_group: bool,
+        /// An aggregate's `FILTER (WHERE …)`: the rows it is fed.
+        filter: Option<Box<Expr>>,
     },
 }
 
@@ -1501,6 +1516,8 @@ pub enum UnaryOp {
     Plus,
     /// `NOT`.
     Not,
+    /// `~`: an integer's bits inverted.
+    BitNot,
 }
 
 /// An infix operator.

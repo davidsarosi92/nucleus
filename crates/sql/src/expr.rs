@@ -1126,6 +1126,7 @@ pub(crate) fn unary(op: UnaryOp, v: Value) -> Result<Value> {
             i.checked_neg()
                 .ok_or_else(|| Error::out_of_range("bigint out of range"))?,
         ),
+        (UnaryOp::BitNot, Value::Int(i)) => Value::Int(!i),
         (UnaryOp::Neg, Value::Float(f)) => Value::Float(-f),
         (UnaryOp::Neg, Value::Real(f)) => Value::Real(-f),
         (UnaryOp::Neg, Value::Numeric(d)) => Value::Numeric(d.negate()),
@@ -1141,7 +1142,11 @@ pub(crate) fn unary(op: UnaryOp, v: Value) -> Result<Value> {
         (op, v) => {
             return Err(Error::undefined_function(format!(
                 "operator does not exist: {}{}",
-                if op == UnaryOp::Neg { "-" } else { "+" },
+                match op {
+                    UnaryOp::Neg => "-",
+                    UnaryOp::BitNot => "~",
+                    _ => "+",
+                },
                 type_name(&v)
             )));
         }

@@ -1008,7 +1008,7 @@ pub fn authorize_ddl(
                 c.require_owner(txn, Kind::Table, table)?;
             }
         }
-        Statement::AddColumn { table, column } => {
+        Statement::AddColumn { table, column, .. } => {
             if crate::catalog::get_table(txn, table)?.is_some() {
                 c.require_owner(txn, Kind::Table, table)?;
             }

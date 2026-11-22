@@ -5,12 +5,14 @@
 
 pub mod access;
 pub mod advisor;
+mod agg_filter;
 mod alter;
 pub mod ast;
 pub mod audit;
 pub mod backup;
 pub mod bigint;
 pub mod binder;
+pub mod bits;
 pub mod branches;
 pub mod buckets;
 pub mod budget;

@@ -15,7 +15,7 @@ pub fn parse(sql: &str) -> Result<Vec<Statement>> {
         if p.at_end() {
             return Ok(out);
         }
-        out.push(p.statement()?);
+        out.push(p.top_statement()?);
         if !p.at_end() && !p.eat_op(";") {
             return Err(p.error("expected ; or end of input"));
         }
@@ -31,7 +31,7 @@ pub fn parse_with_text(sql: &str) -> Result<Vec<(Statement, String)>> {
         if p.at_end() {
             return Ok(out);
         }
-        let (stmt, text) = p.text_of(|p| p.statement())?;
+        let (stmt, text) = p.text_of(|p| p.top_statement())?;
         out.push((stmt, text));
         if !p.at_end() && !p.eat_op(";") {
             return Err(p.error("expected ; or end of input"));
@@ -181,6 +181,10 @@ struct Parser<'a> {
     links: usize,
     /// The greatest height of the frames finished inside the current one.
     inner: usize,
+    /// How many queries deep the parse is (1: the statement's own).
+    queries: usize,
+    /// `SELECT … INTO name`'s table: the statement is a `CREATE TABLE AS`.
+    into: Option<String>,
 }
 
 /// What a frame saves of the one around it.
@@ -247,6 +251,8 @@ impl<'a> Parser<'a> {
             depth: 0,
             links: 0,
             inner: 0,
+            queries: 0,
+            into: None,
         })
     }
 
@@ -948,15 +954,28 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A statement of the input: `SELECT … INTO` only where it makes the
+    /// statement a `CREATE TABLE AS` (not in `CREATE TABLE … AS` or
+    /// `INSERT … SELECT`, say).
+    fn top_statement(&mut self) -> Result<Statement> {
+        let s = self.statement()?;
+        if self.into.take().is_some() {
+            return Err(Error::syntax(
+                "SELECT … INTO is not allowed here: only a statement of its own makes a table",
+            ));
+        }
+        Ok(s)
+    }
+
     fn statement(&mut self) -> Result<Statement> {
         let Some(Token::Word(w)) = self.peek() else {
             if self.peek_op("(") {
-                return Ok(Statement::Query(self.query()?));
+                return self.query_statement();
             }
             return Err(self.error("expected a statement"));
         };
         match w.as_str() {
-            "select" | "values" | "with" => Ok(Statement::Query(self.query()?)),
+            "select" | "values" | "with" => self.query_statement(),
             "summarize" => {
                 self.pos += 1;
                 let query = self.peek_op("(")
@@ -1008,6 +1027,7 @@ impl<'a> Parser<'a> {
             "insert" => self.insert(),
             "update" => self.update(),
             "delete" => self.delete(),
+            "truncate" => self.truncate(),
             "begin" | "start" => {
                 self.pos += 1;
                 if !self.eat_kw("transaction") {
@@ -2786,9 +2806,11 @@ impl<'a> Parser<'a> {
             });
         }
         self.eat_kw("column");
+        let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
         Ok(Statement::AddColumn {
             table,
             column: self.column_spec()?,
+            if_not_exists,
         })
     }
 
@@ -2892,6 +2914,33 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `TRUNCATE [TABLE] [ONLY] name [*], … [CONTINUE | RESTART IDENTITY]
+    /// [CASCADE | RESTRICT]`.  `RESTART IDENTITY` has nothing to restart:
+    /// no column owns a sequence.
+    fn truncate(&mut self) -> Result<Statement> {
+        self.expect_kw("truncate")?;
+        self.eat_kw("table");
+        let (mut tables, mut only) = (Vec::new(), false);
+        loop {
+            only |= self.eat_kw("only");
+            tables.push(self.relation()?);
+            self.eat_op("*");
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        let _ = self.eat_kws(&["continue", "identity"]) || self.eat_kws(&["restart", "identity"]);
+        let cascade = self.eat_kw("cascade");
+        if !cascade {
+            self.eat_kw("restrict");
+        }
+        Ok(Statement::Truncate {
+            tables,
+            only,
+            cascade,
+        })
+    }
+
     // --------------------------------------------------------------- queries
 
     /// `ALL` / `DISTINCT` after a set operator: whether `ALL`.
@@ -2936,8 +2985,49 @@ impl<'a> Parser<'a> {
 
     fn query(&mut self) -> Result<Query> {
         let frame = self.enter(QUERY_WEIGHT)?;
+        self.queries += 1;
         let r = self.query_body();
+        self.queries -= 1;
         self.leave(frame, r)
+    }
+
+    /// A statement that is a query — or, with `SELECT … INTO name`, the
+    /// `CREATE TABLE name AS` of it (PostgreSQL's).
+    fn query_statement(&mut self) -> Result<Statement> {
+        let query = Box::new(self.query()?);
+        Ok(match self.into.take() {
+            Some(name) => Statement::CreateTableAs {
+                name,
+                columns: vec![],
+                query,
+                if_not_exists: false,
+                options: vec![],
+                with_data: true,
+            },
+            None => Statement::Query(*query),
+        })
+    }
+
+    /// After a select list: `INTO [TABLE] name`, only in the statement's
+    /// own query, once.
+    fn select_into(&mut self) -> Result<()> {
+        if !self.eat_kw("into") {
+            return Ok(());
+        }
+        if self.queries != 1 || self.into.is_some() {
+            return Err(self.error("SELECT … INTO is not allowed here"));
+        }
+        if ["temporary", "temp", "unlogged"]
+            .iter()
+            .any(|k| self.peek_kw(k))
+        {
+            return Err(Error::feature(
+                "SELECT … INTO a temporary or unlogged table: nucleus has neither",
+            ));
+        }
+        self.eat_kw("table");
+        self.into = Some(self.relation()?);
+        Ok(())
     }
 
     fn query_body(&mut self) -> Result<Query> {
@@ -3038,6 +3128,7 @@ impl<'a> Parser<'a> {
             self.eat_kw("all");
         }
         let items = self.select_items()?;
+        self.select_into()?;
         let mut from = Vec::new();
         if self.eat_kw("from") {
             from.push(self.table_ref()?);
@@ -3427,6 +3518,14 @@ impl<'a> Parser<'a> {
                 expr: Box::new(self.expr_prec(PREC_UNARY)?),
             });
         }
+        // `~x`, PostgreSQL's prefix operator: it takes what binds tighter
+        // than its operators (`~1 + 1` is `~(1 + 1)`).
+        if self.eat_op("~") {
+            return Ok(Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr: Box::new(self.expr_prec(PREC_CONCAT + 1)?),
+            });
+        }
         let e = self.primary()?;
         self.postfix(e)
     }
@@ -3601,6 +3700,7 @@ impl<'a> Parser<'a> {
                         star: false,
                         order_by: vec![],
                         within_group: false,
+                        filter: None,
                     }
                 }
                 _ if DataType::is_prefix(&[w.as_str()]) && self.typed_literal_ahead() => {
@@ -3801,6 +3901,7 @@ impl<'a> Parser<'a> {
                     star: false,
                     order_by: vec![],
                     within_group: false,
+                    filter: None,
                 });
             }
             self.pos = save;
@@ -3812,6 +3913,7 @@ impl<'a> Parser<'a> {
             star: false,
             order_by: vec![],
             within_group: false,
+            filter: None,
         };
         // position(sub IN s): strpos(s, sub).
         if first == "position" && self.peek_op("(") {
@@ -3915,6 +4017,16 @@ impl<'a> Parser<'a> {
                 order_by = self.order_items()?;
                 self.expect_op(")")?;
             }
+            // FILTER (WHERE …): a word of its own only before `(`.
+            let filter = if self.peek_kw("filter") && self.peek_at(1) == Some(&Token::Op("(")) {
+                self.pos += 2;
+                self.expect_kw("where")?;
+                let cond = self.expr()?;
+                self.expect_op(")")?;
+                Some(Box::new(cond))
+            } else {
+                None
+            };
             let call = Expr::Function {
                 name: first,
                 args,
@@ -3922,6 +4034,7 @@ impl<'a> Parser<'a> {
                 star,
                 order_by,
                 within_group,
+                filter,
             };
             if self.eat_kw("over") {
                 let over = if self.eat_op("(") {
@@ -4027,6 +4140,7 @@ impl<'a> Parser<'a> {
                     star: false,
                     order_by,
                     within_group: false,
+                    filter: None,
                 };
                 returning_cast(f, returning)
             }
@@ -4629,6 +4743,17 @@ impl<'a> Parser<'a> {
                         expr: boxed,
                         negated,
                     }
+                } else if self.eat_kw("unknown") {
+                    // x IS UNKNOWN: a boolean's IS NULL — `x AND true`
+                    // keeps x's truth and refuses a non-boolean.
+                    Expr::IsNull {
+                        expr: Box::new(Expr::Binary {
+                            op: BinaryOp::And,
+                            left: boxed,
+                            right: Box::new(Expr::Literal(Value::Bool(true))),
+                        }),
+                        negated,
+                    }
                 } else if self.eat_kw("true") || self.eat_kw("false") {
                     let v = self.toks[self.pos - 1].0.is("true");
                     // x IS TRUE: false for NULL, unlike x = TRUE.
@@ -4646,6 +4771,7 @@ impl<'a> Parser<'a> {
                         star: false,
                         order_by: vec![],
                         within_group: false,
+                        filter: None,
                     };
                     if negated {
                         Expr::Unary {
@@ -4665,6 +4791,7 @@ impl<'a> Parser<'a> {
                         star: false,
                         order_by: vec![],
                         within_group: false,
+                        filter: None,
                     };
                     if negated {
                         Expr::Unary {
@@ -4824,6 +4951,7 @@ fn json_call(name: &str, args: Vec<Expr>) -> Expr {
         star: false,
         order_by: vec![],
         within_group: false,
+        filter: None,
     }
 }
 

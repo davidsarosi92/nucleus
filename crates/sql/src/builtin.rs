@@ -147,6 +147,7 @@ impl Module for Builtin {
         crate::regression::register(r)?;
         crate::bytea::register(r)?;
         crate::strings::register(r)?;
+        crate::bits::register(r)?;
         crate::inet::register(r)?;
         crate::statements::register(r)?;
         crate::time_travel::register(r)?;

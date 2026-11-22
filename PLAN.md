@@ -12997,6 +12997,43 @@ Found and fixed:
   only spaces (`trim(E'\thi ')` is `\thi`); and a negative substring
   length was `22023`, PostgreSQL's `22011`.  Tested by the test kit's
   `75_strings.slt`.
+- Issue #16, second step — the integers' bitwise operators: `&`, `|`,
+  `#` (exclusive or), `<<`, `>>` as operators of a module (`bits.rs`,
+  every pair of integer types, the wider one's result; a shift the left
+  one's), `~` a prefix of the grammar.  As PostgreSQL's: precedence of
+  its other operators (`1 + 2 & 3` is `(1 + 2) & 3`, `~1 + 1` is
+  `~(1 + 1)`), shifts wrap — the count modulo the width, a `smallint`
+  shifted in 32 bits and cut back, never an error.  Tested by
+  `76_bits.slt` (five mutations, each failing).
+- Issue #16, third step: `IS [NOT] UNKNOWN` (a boolean's `IS NULL`; a
+  non-boolean refused, `42804`); `ALTER TABLE … ADD [COLUMN] IF NOT
+  EXISTS`; `TRUNCATE [TABLE] [ONLY] t, … [CONTINUE | RESTART IDENTITY]
+  [CASCADE | RESTRICT]` — every row deleted as `DELETE` deletes them, in
+  the transaction's snapshot (PostgreSQL's `TRUNCATE` is not MVCC-safe:
+  a concurrent snapshot sees the table empty), under `DELETE`'s privilege
+  and row policies; as PostgreSQL's, a table another references by a
+  foreign key is refused (`0A000`) unless that one goes too (named or by
+  `CASCADE`), and the referencing are emptied first; `RESTART IDENTITY`
+  has nothing to restart (no column owns a sequence).  Not PostgreSQL's
+  speed: the rows are deleted one by one — a table's ranges dropped at
+  once is for the performance pass.  `SELECT … INTO [TABLE] t` is the
+  `CREATE TABLE t AS` of the query (in the statement's own query only;
+  inside `CREATE TABLE … AS` or `INSERT … SELECT` a `42601`).  Tested by
+  `77_sql_forms.slt` (six mutations, each failing).
+- Issue #16, fourth step — aggregate `FILTER (WHERE …)` (also S7's
+  note, §M14.27): the call bound as an aggregate of its own
+  (`agg_filter.rs`), the inner one wrapped and fed the condition first,
+  passing on the rows it holds for — so every executor runs it as it is
+  (a row at a time, vectorized, partial states on the workers, window
+  frames, `DISTINCT`, ordered-set calls); named `… FILTER`, so nothing
+  that knows an aggregate by its name takes it for the plain call.  Not
+  `agg(CASE WHEN c THEN x END)`: that holds only for an aggregate that
+  leaves `NULL`s out — `array_agg` keeps them.  As PostgreSQL's: a
+  non-aggregate refused (`42809`), a non-boolean condition (`42804`),
+  an aggregate in it (`42803`); `filter` stays a name elsewhere.  Tested
+  by `78_filter.slt`, checked against PostgreSQL 18 (three mutations —
+  the batch path, the row path, the `NULL`s and the type — each
+  failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and

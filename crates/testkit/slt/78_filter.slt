@@ -1,0 +1,113 @@
+# Aggregate FILTER (WHERE …) (issue #16).
+
+statement ok
+CREATE TABLE m (id int PRIMARY KEY, g text, x int)
+
+statement ok
+INSERT INTO m VALUES (1, 'a', 1), (2, 'a', NULL), (3, 'a', 3), (4, 'b', 4), (5, 'b', 5), (6, 'c', NULL)
+
+query IIIRI
+SELECT count(*) FILTER (WHERE x > 2), count(x) FILTER (WHERE id < 4), sum(x) FILTER (WHERE g = 'b'), avg(x) FILTER (WHERE x % 2 = 1), count(*) FILTER (WHERE x IS NULL) FROM m
+----
+3 2 9 3.000 2
+
+# array_agg keeps NULLs: the filter leaves out rows, not values.
+query TT
+SELECT array_agg(x ORDER BY id) FILTER (WHERE id < 4)::text, array_agg(x ORDER BY id)::text FROM m
+----
+{1,NULL,3} {1,NULL,3,4,5,NULL}
+
+query TIIT rowsort
+SELECT g, count(*) FILTER (WHERE x IS NOT NULL), sum(x) FILTER (WHERE x > 3), string_agg(id::text, ',' ORDER BY id) FILTER (WHERE x IS NULL) FROM m GROUP BY g
+----
+a 2 NULL 2
+b 2 9 NULL
+c 0 NULL 6
+
+# nucleus-only: EXPLAIN shows the condition after the call.
+query T
+EXPLAIN SELECT count(*) FILTER (WHERE x > 2), sum(x) FILTER (WHERE id < 3) FROM m
+----
+Aggregate: count(*) FILTER (WHERE (#2 > 2)), sum(#2) FILTER (WHERE (#0 < 3))
+  Seq Scan on m
+
+# A NULL condition is not true.
+query I
+SELECT count(*) FILTER (WHERE x > NULL) FROM m
+----
+0
+
+query II
+SELECT count(DISTINCT g) FILTER (WHERE x IS NOT NULL), count(DISTINCT g) FROM m
+----
+2 3
+
+query R
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FILTER (WHERE g = 'a') FROM m
+----
+2.000
+
+query T rowsort
+SELECT g FROM m GROUP BY g HAVING count(*) FILTER (WHERE x IS NULL) > 0
+----
+a
+c
+
+query II
+SELECT id, sum(x) FILTER (WHERE x % 2 = 1) OVER (ORDER BY id) FROM m ORDER BY id
+----
+1 1
+2 1
+3 4
+4 4
+5 9
+6 9
+
+statement error 42809
+SELECT lower(g) FILTER (WHERE true) FROM m
+
+statement error 42804
+SELECT count(*) FILTER (WHERE x) FROM m
+
+statement error 42803
+SELECT count(*) FILTER (WHERE sum(x) > 1) FROM m
+
+# FILTER is a word of its own only before (.
+statement ok
+CREATE TABLE f (filter int)
+
+statement ok
+INSERT INTO f VALUES (7)
+
+query I
+SELECT filter FROM f
+----
+7
+
+# Over enough rows for the vectorized, parallel grouping, and a column
+# table.
+statement ok
+CREATE TABLE big (id int PRIMARY KEY, k int, v int)
+
+statement ok
+INSERT INTO big SELECT i, i % 7, i FROM generate_series(1, 50000) i
+
+# nucleus-only: a column table.
+statement ok
+ALTER TABLE big SET STORAGE column
+
+query IIII rowsort
+SELECT k, count(*) FILTER (WHERE v % 2 = 0), sum(v) FILTER (WHERE v > 49990), count(v) FROM big GROUP BY k
+----
+0 3571 49994 7142
+1 3571 49995 7143
+2 3572 49996 7143
+3 3571 49997 7143
+4 3572 99989 7143
+5 3571 99991 7143
+6 3572 99993 7143
+
+query II
+SELECT count(*) FILTER (WHERE v % 3 = 0), sum(v) FILTER (WHERE v <= 10) FROM big
+----
+16666 55

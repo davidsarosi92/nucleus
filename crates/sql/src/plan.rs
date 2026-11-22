@@ -1043,14 +1043,23 @@ impl Plan {
                                 if *desc { " DESC" } else { "" }
                             );
                         }
-                        let arg = if a.args.is_empty() {
+                        // A FILTER's call: its condition first.
+                        let (name, args, filter) =
+                            match a.func.name().strip_suffix(crate::agg_filter::SUFFIX) {
+                                Some(inner) => (
+                                    inner,
+                                    &a.args[1..],
+                                    format!(" FILTER (WHERE {})", show(&a.args[0])),
+                                ),
+                                None => (a.func.name(), &a.args[..], String::new()),
+                            };
+                        let arg = if args.is_empty() {
                             "*".to_string()
                         } else {
-                            a.args.iter().map(show).collect::<Vec<_>>().join(", ")
+                            args.iter().map(show).collect::<Vec<_>>().join(", ")
                         };
                         format!(
-                            "{}({}{arg})",
-                            a.func.name(),
+                            "{name}({}{arg}){filter}",
                             if a.distinct { "DISTINCT " } else { "" }
                         )
                     })
@@ -1409,6 +1418,7 @@ pub fn show_with(e: &Expr, col: &dyn Fn(usize) -> String) -> String {
             match op {
                 crate::ast::UnaryOp::Neg => "-",
                 crate::ast::UnaryOp::Plus => "+",
+                crate::ast::UnaryOp::BitNot => "~",
                 crate::ast::UnaryOp::Not => "NOT ",
             },
             show_with(e, col)

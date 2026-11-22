@@ -1,0 +1,72 @@
+# The integers' bitwise operators (issue #16): & | # ~ << >>.
+
+query IIII
+SELECT 12 & 10, 12 | 10, 12 # 10, ~12
+----
+8 14 6 -13
+
+query IIII
+SELECT 1 << 4, 256 >> 4, -16 >> 2, ~0
+----
+16 16 -4 -1
+
+# Shifts wrap as PostgreSQL's: no error, the count modulo the width.
+query IIII
+SELECT 1 << 31, 1 << 32, 1::bigint << 63, 1::smallint << 16
+----
+-2147483648 1 -9223372036854775808 0
+
+# The result's type: the wider operand's (a shift: the left one's).
+statement error 22003
+SELECT (1::smallint & 1::smallint) + 32767::smallint
+
+statement error 22003
+SELECT (1::smallint | 1) + 2147483647
+
+statement error 22003
+SELECT (1::smallint << 14) + 32767::smallint
+
+query I
+SELECT (2 # 1::bigint) + 2147483647
+----
+2147483650
+
+# As PostgreSQL's other operators: below + and *, above comparisons; ~
+# a prefix taking what binds tighter.
+query IIIB
+SELECT 1 + 2 & 3, 2 * 3 | 1, ~1 + 1, 5 & 4 = 4
+----
+3 7 -3 true
+
+query III
+SELECT NULL & 1, 1 | NULL, ~NULL::int
+----
+NULL NULL NULL
+
+statement error 42883
+SELECT 1.5 & 1
+
+statement error 42883
+SELECT 'a'::text | 'b'
+
+statement ok
+CREATE TABLE flags (id int PRIMARY KEY, f int, big bigint)
+
+statement ok
+INSERT INTO flags VALUES (1, 5, 1), (2, 6, 2), (3, 8, 4), (4, NULL, NULL)
+
+query II rowsort
+SELECT id, f & 4 FROM flags WHERE f & 4 <> 0
+----
+1 4
+2 4
+
+query I
+SELECT count(*) FROM flags WHERE (f | 1) # big > 3
+----
+3
+
+query I
+SELECT sum(~f) FROM flags
+----
+-22

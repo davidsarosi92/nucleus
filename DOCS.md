@@ -2272,13 +2272,19 @@ types — without a length or a numeric's precision — and no constraints;
 filled by the query unless `WITH NO DATA`; tagged `SELECT n`), `DROP TABLE [IF
 EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]` (of
 columns and expressions), `DROP INDEX
-[IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] …`, `ALTER TABLE … ADD
+[IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] [IF NOT EXISTS] …`, `ALTER TABLE … ADD
 [CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
 CONSTRAINT [IF EXISTS] n`, `ALTER TABLE … RENAME …`, `… DROP COLUMN …`,
 `… ALTER COLUMN … SET / DROP DEFAULT | SET / DROP NOT NULL`, `ALTER INDEX
 … RENAME TO` (§8.35), `INSERT … VALUES | SELECT | DEFAULT VALUES
 [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
-[RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
+[RETURNING]`, `TRUNCATE [TABLE] t, … [CONTINUE | RESTART IDENTITY]
+[CASCADE | RESTRICT]` (every row deleted as `DELETE` deletes them — in
+the transaction's snapshot, under `DELETE`'s privilege and row policies;
+a table another references by a foreign key only with that one, named or
+by `CASCADE`; `RESTART IDENTITY` has nothing to restart, no column owning
+a sequence), queries (`SELECT … INTO [TABLE] t …`: `CREATE TABLE t AS`
+the query, as PostgreSQL's), `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
 `READ ONLY|WRITE`, `AS OF TIMESTAMP|COMMIT …`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
 name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `CREATE
 STATISTICS [IF NOT EXISTS] name [(ndistinct, dependencies, mcv)] ON a, b
@@ -2304,8 +2310,9 @@ column lists (`AS t (a, b)`),
 name AS (…)`, `UNION |
 EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
 (`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases, expressions), `LIMIT`,
-`OFFSET`.  Expressions: arithmetic, `||`, comparisons, `AND/OR/NOT`, `IS
-[NOT] NULL|TRUE|FALSE|DISTINCT FROM`, `[NOT] BETWEEN`, `[NOT] IN (list |
+`OFFSET`.  Expressions: arithmetic, `||`, the integers' bitwise `& | #
+~ << >>` (shifts wrapping as PostgreSQL's), comparisons, `AND/OR/NOT`, `IS
+[NOT] NULL|TRUE|FALSE|UNKNOWN|DISTINCT FROM`, `[NOT] BETWEEN`, `[NOT] IN (list |
 subquery)` (of an empty subquery, `IN` is false and `NOT IN` true, a
 NULL operand's too), `[NOT] EXISTS`, `op ANY|SOME|ALL (array | subquery)`, scalar
 subqueries, `[NOT] LIKE / ILIKE`, `~ ~* !~ !~*` (regular expressions,
@@ -2328,7 +2335,8 @@ transaction reads, §8.28; and the catalog functions of §8.11); aggregates `cou
 sum avg min max string_agg array_agg bool_and bool_or every any_value` (the
 last SQL:2023's: a value of the group's that is not `NULL`, the first
 seen; with
-`DISTINCT`, `count(*)`, `ORDER BY` inside the call); window calls `f(…)
+`DISTINCT`, `count(*)`, `ORDER BY` inside the call, `FILTER (WHERE …)` after
+it — also on an aggregate over a window); window calls `f(…)
 OVER name | ([name] [PARTITION BY …] [ORDER BY …] [ROWS | RANGE | GROUPS
 {start | BETWEEN start AND end} [EXCLUDE CURRENT ROW | GROUP | TIES | NO
 OTHERS]])`, a bound `UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n
@@ -2336,7 +2344,7 @@ FOLLOWING | UNBOUNDED FOLLOWING` (§8.5).
 
 Not yet: `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
 UTC, multi-dimensional arrays, data-modifying CTEs, user functions,
-`TRUNCATE`, `SELECT … INTO`, `ADD COLUMN IF NOT EXISTS` (issue #16).
+the rest of issue #16's forms.
 
 ### 8.4 Binder (`binder`)
 

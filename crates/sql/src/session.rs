@@ -1584,6 +1584,7 @@ impl Session {
                 | Statement::Insert { .. }
                 | Statement::Update { .. }
                 | Statement::Delete { .. }
+                | Statement::Truncate { .. }
                 | Statement::Copy { .. }
                 | Statement::Remember(_)
                 | Statement::Explain(..)
@@ -3237,8 +3238,15 @@ pub(crate) fn execute_statement(
             }
             Output::Command("DROP INDEX".into())
         }
-        Statement::AddColumn { table, column } => {
+        Statement::AddColumn {
+            table,
+            column,
+            if_not_exists,
+        } => {
             let t = catalog::table(&*txn, table)?;
+            if *if_not_exists && t.column(&column.name).is_some() {
+                return Ok(Output::Command("ALTER TABLE".into()));
+            }
             if t.partition_of.is_some() {
                 return Err(Error::wrong_object_type(format!(
                     "cannot add a column to partition \"{table}\": add it to its partitioned table"
@@ -3311,6 +3319,14 @@ pub(crate) fn execute_statement(
             "DELETE",
             dml::delete(txn, reg, table, filter.as_ref(), returning, params)?,
         ),
+        Statement::Truncate {
+            tables,
+            only,
+            cascade,
+        } => {
+            truncate(txn, reg, tables, *only, *cascade, params)?;
+            Output::Command("TRUNCATE TABLE".into())
+        }
         Statement::Analyze(table) => {
             crate::stats::analyze(txn, table.as_deref())?;
             Output::Command("ANALYZE".into())
@@ -3327,6 +3343,82 @@ pub(crate) fn execute_statement(
 }
 
 /// `ALTER TABLE table ADD COLUMN column`.
+/// `TRUNCATE`: every row of `tables` deleted — as `DELETE`, in the
+/// transaction's snapshot (PostgreSQL's is not), under `DELETE`'s
+/// privilege and row policies.  As PostgreSQL's: a table another
+/// references by a foreign key is refused unless that one is truncated
+/// too (named, or by `CASCADE`); the referencing go first.
+fn truncate(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    tables: &[String],
+    only: bool,
+    cascade: bool,
+    params: &[Value],
+) -> Result<()> {
+    let mut all: Vec<catalog::Table> = Vec::new();
+    for name in tables {
+        let t = catalog::table(&*txn, name)?;
+        if only && t.partition_by.is_some() {
+            return Err(Error::wrong_object_type(format!(
+                "cannot truncate only a partitioned table: \"{name}\""
+            )));
+        }
+        if !all.iter().any(|a| a.name == t.name) {
+            all.push(t);
+        }
+    }
+    let mut i = 0;
+    while i < all.len() {
+        for (child, constraint) in all[i].referenced_by.clone() {
+            if all.iter().any(|a| a.name == child) {
+                continue;
+            }
+            if !cascade {
+                return Err(Error::feature(format!(
+                    "cannot truncate a table referenced in a foreign key constraint: \
+                     table \"{child}\" references \"{}\" ({constraint}); \
+                     truncate it too, or use TRUNCATE … CASCADE",
+                    all[i].name
+                )));
+            }
+            all.push(catalog::table(&*txn, &child)?);
+        }
+        i += 1;
+    }
+    // The referencing before the referenced, so no row is left pointing
+    // at a deleted one (a cycle: in the order named).
+    let mut order: Vec<usize> = Vec::new();
+    let mut placed = vec![false; all.len()];
+    while order.len() < all.len() {
+        let before = order.len();
+        for j in 0..all.len() {
+            let waits = all[j].referenced_by.iter().any(|(c, _)| {
+                c != &all[j].name
+                    && all
+                        .iter()
+                        .enumerate()
+                        .any(|(k, a)| a.name == *c && !placed[k])
+            });
+            if !placed[j] && !waits {
+                placed[j] = true;
+                order.push(j);
+            }
+        }
+        if order.len() == before {
+            let rest = (0..all.len()).filter(|j| !placed[*j]).collect::<Vec<_>>();
+            for j in rest {
+                placed[j] = true;
+                order.push(j);
+            }
+        }
+    }
+    for j in order {
+        dml::delete(txn, reg, &all[j].name, None, &[], params)?;
+    }
+    Ok(())
+}
+
 fn add_column(
     txn: &mut dyn KvTxn,
     reg: &Registry,

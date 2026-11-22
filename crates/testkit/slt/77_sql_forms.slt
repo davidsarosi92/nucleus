@@ -1,0 +1,121 @@
+# SQL forms of issue #16: IS [NOT] UNKNOWN, ADD COLUMN IF NOT EXISTS,
+# TRUNCATE, SELECT … INTO.
+
+query BBBB
+SELECT NULL::bool IS UNKNOWN, true IS UNKNOWN, (1 > NULL) IS NOT UNKNOWN, false IS NOT UNKNOWN
+----
+true false false true
+
+statement error 42804
+SELECT 1 IS UNKNOWN
+
+statement ok
+CREATE TABLE t (id int PRIMARY KEY, a int)
+
+statement ok
+INSERT INTO t VALUES (1, 10)
+
+statement ok
+ALTER TABLE t ADD COLUMN IF NOT EXISTS a text
+
+statement ok
+ALTER TABLE t ADD IF NOT EXISTS b text DEFAULT 'x'
+
+statement error 42701
+ALTER TABLE t ADD COLUMN a int
+
+query IIT
+SELECT id, a + 1, b FROM t
+----
+1 11 x
+
+statement ok
+CREATE TABLE p (id int PRIMARY KEY)
+
+statement ok
+CREATE TABLE c (id int PRIMARY KEY, p int REFERENCES p (id))
+
+statement ok
+INSERT INTO p VALUES (1), (2)
+
+statement ok
+INSERT INTO c VALUES (1, 1), (2, 2), (3, NULL)
+
+# A table another references is truncated only with it.
+statement error 0A000
+TRUNCATE p
+
+statement ok
+TRUNCATE TABLE c, p
+
+query II
+SELECT (SELECT count(*) FROM p), (SELECT count(*) FROM c)
+----
+0 0
+
+statement ok
+INSERT INTO p VALUES (1), (2)
+
+statement ok
+INSERT INTO c VALUES (1, 1), (2, NULL)
+
+statement ok
+TRUNCATE p CASCADE
+
+query II
+SELECT (SELECT count(*) FROM p), (SELECT count(*) FROM c)
+----
+0 0
+
+statement ok
+INSERT INTO t VALUES (2, 20, 'y')
+
+statement ok
+TRUNCATE ONLY t RESTART IDENTITY RESTRICT
+
+query I
+SELECT count(*) FROM t
+----
+0
+
+statement error 42P01
+TRUNCATE nowhere
+
+statement ok
+CREATE TABLE nums (id int PRIMARY KEY)
+
+statement ok
+INSERT INTO nums SELECT g FROM generate_series(1, 5) g
+
+statement ok
+SELECT id, id * 2 AS d INTO doubled FROM nums WHERE id < 3
+
+query II
+SELECT id, d FROM doubled ORDER BY id
+----
+1 2
+2 4
+
+statement ok
+SELECT 1 AS x INTO TABLE u UNION SELECT 2
+
+query I
+SELECT x FROM u ORDER BY x
+----
+1
+2
+
+statement error 42P07
+SELECT 1 AS x INTO u
+
+statement error 42601
+SELECT * FROM (SELECT 1 AS x INTO z) s
+
+statement error 42601
+CREATE TABLE w2 AS SELECT 1 AS x INTO w
+
+statement error 42601
+INSERT INTO nums SELECT 9 INTO w
+
+statement error 42P01
+SELECT * FROM w

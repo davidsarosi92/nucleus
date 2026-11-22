@@ -624,6 +624,7 @@ impl<'a> Binder<'a> {
                     star: false,
                     order_by: vec![],
                     within_group: false,
+                    filter: None,
                 };
                 let (x, t) = self.expr(&call, &empty)?;
                 (TableFunc::Scalar, vec![x], vec![(None, t)])
@@ -1797,12 +1798,35 @@ impl<'a> Binder<'a> {
     /// An ordered-set aggregate's call, `name(args) WITHIN GROUP (ORDER BY
     /// x)`: the aggregate called with `[x, args…, descending]`
     /// ([`crate::ext::Aggregate::ordered_set`]).
+    /// An aggregate's `FILTER (WHERE c)`: `c` bound by `bind`, a boolean
+    /// with no aggregate or window call in it (as PostgreSQL's).
+    fn filter_condition(
+        &mut self,
+        c: &ast::Expr,
+        bind: impl FnOnce(&mut Self) -> Result<Typed>,
+    ) -> Result<Expr> {
+        if contains_agg(self.registry, c) {
+            return Err(Error::grouping(
+                "aggregate functions are not allowed in FILTER",
+            ));
+        }
+        if contains_window(c) {
+            return Err(Error::windowing(
+                "window functions are not allowed in FILTER",
+            ));
+        }
+        let (x, t) = bind(self)?;
+        expect(t, DataType::Bool, "FILTER")?;
+        Ok(x)
+    }
+
     fn ordered_set_call(
         &mut self,
         name: &str,
         func: crate::ext::AggRef,
         args: &[ast::Expr],
         order_by: &[ast::OrderItem],
+        filter: Option<&ast::Expr>,
         g: &mut Grouping,
     ) -> Result<Typed> {
         let from = g.from.clone();
@@ -1858,6 +1882,11 @@ impl<'a> Binder<'a> {
             })
             .collect();
         func.check_direct(&direct)?;
+        let cond = match filter {
+            Some(c) => Some(self.filter_condition(c, |me| me.expr(c, &from))?),
+            None => None,
+        };
+        let (func, args) = with_filter(func, args, cond);
         let agg = Agg {
             func,
             args,
@@ -1890,6 +1919,7 @@ impl<'a> Binder<'a> {
             star,
             order_by,
             within_group,
+            filter,
         } = e
             && let Some(func) = self.registry.aggregate(name).cloned()
         {
@@ -1904,7 +1934,7 @@ impl<'a> Binder<'a> {
                 }));
             }
             if *within_group {
-                return self.ordered_set_call(name, func, args, order_by, g);
+                return self.ordered_set_call(name, func, args, order_by, filter.as_deref(), g);
             }
             let from = g.from.clone();
             let mut order = Vec::new();
@@ -1968,6 +1998,11 @@ impl<'a> Binder<'a> {
                     )));
                 }
             };
+            let cond = match filter {
+                Some(c) => Some(self.filter_condition(c, |me| me.expr(c, &from))?),
+                None => None,
+            };
+            let (func, args) = with_filter(func, args, cond);
             let agg = Agg {
                 func,
                 args,
@@ -2107,6 +2142,7 @@ impl<'a> Binder<'a> {
             star,
             order_by,
             within_group,
+            filter,
         } = func
         else {
             return Err(Error::syntax("OVER follows a function call"));
@@ -2257,6 +2293,11 @@ impl<'a> Binder<'a> {
                     )));
                 }
             };
+            let cond = match filter {
+                Some(c) => Some(self.filter_condition(c, |me| me.base_expr(c, scope, g))?),
+                None => None,
+            };
+            let (agg, args) = with_filter(agg, args, cond);
             (WinFunc::Agg(agg), args, ty)
         } else {
             return Err(Error::wrong_object_type(format!(
@@ -2461,6 +2502,7 @@ impl<'a> Binder<'a> {
                 star,
                 order_by,
                 within_group,
+                filter,
             },
             ast::Expr::Column { table, name: col },
         ) = (call, other)
@@ -2496,6 +2538,7 @@ impl<'a> Binder<'a> {
             star: *star,
             order_by: order_by.clone(),
             within_group: *within_group,
+            filter: filter.clone(),
         }))
     }
 
@@ -2774,6 +2817,14 @@ impl<'a> Binder<'a> {
                         expect(t, DataType::Bool, "NOT")?;
                         (Expr::Unary(UnaryOp::Not, Box::new(x)), Some(DataType::Bool))
                     }
+                    UnaryOp::BitNot => {
+                        if let Some(t) = t.filter(|t| !t.is_integer()) {
+                            return Err(Error::undefined_function(format!(
+                                "operator does not exist: ~ {t}"
+                            )));
+                        }
+                        (Expr::Unary(UnaryOp::BitNot, Box::new(x)), t)
+                    }
                     _ => {
                         if t.is_some_and(|t| !t.is_number() && t != DataType::Interval) {
                             return Err(Error::undefined_function(format!(
@@ -3027,8 +3078,14 @@ impl<'a> Binder<'a> {
                 star,
                 order_by,
                 within_group,
+                filter,
             } => {
                 let f = match self.registry.function(name) {
+                    Some(_) if filter.is_some() => {
+                        return Err(Error::wrong_object_type(format!(
+                            "FILTER specified, but {name} is not an aggregate function"
+                        )));
+                    }
                     Some(_) if *within_group => {
                         return Err(Error::wrong_object_type(format!(
                             "WITHIN GROUP specified, but {name} is not an aggregate function"
@@ -3764,6 +3821,22 @@ fn rename_columns(scope: &mut Scope, alias: &str, names: &[String]) -> Result<()
 
 fn name(t: Option<DataType>) -> &'static str {
     t.map_or("unknown", DataType::name)
+}
+
+/// An aggregate call with its `FILTER`'s condition, if any: the call
+/// wrapped to be fed the condition first ([`crate::agg_filter`]).
+fn with_filter(
+    func: crate::ext::AggRef,
+    args: Vec<Expr>,
+    cond: Option<Expr>,
+) -> (crate::ext::AggRef, Vec<Expr>) {
+    match cond {
+        Some(c) => (
+            crate::agg_filter::filtered(func),
+            std::iter::once(c).chain(args).collect(),
+        ),
+        None => (func, args),
+    }
 }
 
 fn expect(t: Option<DataType>, want: DataType, what: &str) -> Result<()> {

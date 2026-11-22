@@ -249,7 +249,8 @@ to learn what the data means.
 
 **Writes:** `INSERT INTO t [(cols)] VALUES (…), (…) | SELECT … | DEFAULT
 VALUES [RETURNING …]`; `UPDATE t SET a = … [WHERE …] [RETURNING …]`;
-`DELETE FROM t [WHERE …] [RETURNING …]`; bulk: `COPY t [(cols)] FROM
+`DELETE FROM t [WHERE …] [RETURNING …]`; `TRUNCATE t [CASCADE]`;
+`SELECT … INTO new_table FROM …`; bulk: `COPY t [(cols)] FROM
 STDIN [WITH (FORMAT csv, HEADER)]` with the data sent by the client.
 
 **Queries:** `WITH [RECURSIVE] …`, `SELECT [DISTINCT]`, `FROM` with comma
@@ -260,7 +261,7 @@ INTERSECT [ALL]`, `ORDER BY … [ASC|DESC] [NULLS FIRST|LAST]`, `LIMIT`,
 `OFFSET`.  Expressions: `IS [NOT] DISTINCT FROM`, `BETWEEN`, `IN (list |
 subquery)`, `EXISTS`, `= ANY (array | subquery)`, `LIKE`, `ILIKE`, `~`
 (regular expressions), `CASE`, `CAST(x AS t)` / `x::t`, `ARRAY[…]`,
-`a[i]` (1-based).
+`a[i]` (1-based), integer bitwise `& | # ~ << >>`.
 
 **Functions:** `lower upper length trim substr replace strpos concat
 lpad rpad ltrim rtrim btrim split_part concat_ws translate reverse initcap
@@ -272,7 +273,8 @@ array_length array_append array_to_string cardinality gen_random_uuid
 uuidv7 encode decode sha256 md5 host network masklen current_user
 current_setting`; aggregates `count sum avg min max string_agg array_agg
 bool_and bool_or` (with `DISTINCT`, and `ORDER BY` inside the call:
-`string_agg(x, ',' ORDER BY x)`); statistics `variance` / `var_samp`,
+`string_agg(x, ',' ORDER BY x)`, and `FILTER`: `count(*) FILTER (WHERE
+x > 0)`); statistics `variance` / `var_samp`,
 `var_pop`, `stddev` / `stddev_samp`, `stddev_pop` (`numeric` for integers
 and decimals, as PostgreSQL's; `double precision` otherwise), `skewness`,
 `kurtosis` (sample-corrected, as DuckDB's and Excel's), `corr(y, x)`,
@@ -386,10 +388,8 @@ before a generation's queries records what each returned
 | `SERIAL`, `GENERATED … AS IDENTITY`, sequences | `id uuid DEFAULT uuidv7() PRIMARY KEY` (increasing), or ids from the application |
 | `INSERT … ON CONFLICT` (upsert) | `UPDATE … WHERE key = …`, then `INSERT` if it changed 0 rows, in one transaction |
 | `CREATE VIEW` | a `WITH` query |
-| `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
 | `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
-| `TRUNCATE` | `DELETE FROM t` |
 | `SELECT … FOR UPDATE` | a `SERIALIZABLE` transaction |
 | `COPY … TO`, `COPY … FROM 'file'` | a query (`batches` in the drivers); `COPY t FROM STDIN` with the data from the client (a driver's copy, `ncsql \copy`) |
 | `$$` strings, user-defined functions, `TABLESAMPLE`, time zones other than UTC | — |
