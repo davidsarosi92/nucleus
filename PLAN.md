@@ -12860,8 +12860,10 @@ Found and fixed:
   `a_join_its_partitions_cannot_split_gives_its_rows_as_found` (inner,
   left, full, semi, anti, NULL keys, against 64 MB; a `LIMIT 3` tries 3
   pairs — 360,000 when gathered: it fails with the old loop back).
-  Left for the performance pass: the vectorized hash join keeps its
-  hash table in memory past `work_mem` (64 kB did not spill it).
+  Left for the performance pass: past `work_mem` a hash join leaves the
+  vectorized executor for the row-at-a-time grace join, ten times
+  slower on this join (21.3 s at 64 kB, 2.1 s at 64 MB, 75 million rows
+  counted).
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
