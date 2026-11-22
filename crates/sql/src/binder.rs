@@ -2832,8 +2832,18 @@ impl<'a> Binder<'a> {
                 query,
                 negated,
             } => {
-                if matches!(**expr, A::Row(_)) {
-                    return Err(crate::rows::unsupported());
+                if let A::Row(fields) = &**expr {
+                    // As many columns as fields (bound here to count them).
+                    let (_, s, _) = self.subquery(query, scope)?;
+                    if s.cols.len() != fields.len() {
+                        return Err(Error::syntax(if s.cols.len() > fields.len() {
+                            "subquery has too many columns"
+                        } else {
+                            "subquery has too few columns"
+                        }));
+                    }
+                    let x = crate::rows::in_subquery(fields, query, *negated);
+                    return Ok(Some(self.expr(&x, scope)?));
                 }
                 let (x, xt) = self.expr(expr, scope)?;
                 let (plan, s, correlated) = self.subquery(query, scope)?;

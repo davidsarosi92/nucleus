@@ -115,17 +115,81 @@ pub(crate) fn expand(e: &Expr) -> Result<Option<Expr>> {
             let found = any(equal);
             if *negated { not(found) } else { found }
         }
-        Expr::InSubquery { expr, .. } | Expr::AnyAll { left: expr, .. } if is_row(expr) => {
+        Expr::AnyAll { left: expr, .. } if is_row(expr) => {
             return Err(unsupported());
         }
         _ => return Ok(None),
     }))
 }
 
+/// `row [NOT] IN (query)`, `query` of as many columns as `row` has
+/// fields: with the row comparison's meaning — true if a row of it is
+/// equal, else `NULL` if one might be (a comparison `NULL`), else false:
+///
+/// `CASE WHEN EXISTS (SELECT 1 FROM (query) __in(c…) WHERE row = (c…))
+/// THEN true WHEN EXISTS (… WHERE (row = (c…)) IS NULL) THEN NULL ELSE
+/// false END` — the second looked at only when the first finds nothing.
+pub(crate) fn in_subquery(row: &[Expr], query: &crate::ast::Query, negated: bool) -> Expr {
+    use crate::ast::{Query, Select, SelectItem, SetExpr, TableRef};
+    const ALIAS: &str = "__in";
+    let columns: Vec<String> = (1..=row.len()).map(|i| format!("__in{i}")).collect();
+    let theirs = Expr::Row(
+        columns
+            .iter()
+            .map(|c| Expr::Column {
+                table: Some(ALIAS.into()),
+                name: c.clone(),
+            })
+            .collect(),
+    );
+    let equal = binary(BinaryOp::Eq, Expr::Row(row.to_vec()), theirs);
+    let exists = |filter: Expr| Expr::Exists {
+        query: Box::new(Query {
+            with: None,
+            body: SetExpr::Select(Box::new(Select {
+                distinct: false,
+                items: vec![SelectItem::Expr {
+                    expr: Expr::Literal(Value::Int(1)),
+                    alias: None,
+                }],
+                from: vec![TableRef::Subquery {
+                    query: Box::new(query.clone()),
+                    alias: ALIAS.into(),
+                    columns: columns.clone(),
+                }],
+                filter: Some(filter),
+                group_by: vec![],
+                grouping_sets: None,
+                having: None,
+                windows: vec![],
+            })),
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        }),
+        negated: false,
+    };
+    let found = Expr::Case {
+        operand: None,
+        whens: vec![
+            (exists(equal.clone()), Expr::Literal(Value::Bool(true))),
+            (
+                exists(Expr::IsNull {
+                    expr: Box::new(equal),
+                    negated: false,
+                }),
+                Expr::Literal(Value::Null),
+            ),
+        ],
+        otherwise: Some(Box::new(Expr::Literal(Value::Bool(false)))),
+    };
+    if negated { not(found) } else { found }
+}
+
 /// The error for a row compared with what is not a row constructor.
 pub(crate) fn unsupported() -> Error {
     Error::feature(
-        "a row is compared with another row constructor (=, <>, <, <=, >, >=, IS [NOT] DISTINCT FROM, IN), or tested with IS [NOT] NULL; not with a subquery yet",
+        "a row is compared with another row constructor (=, <>, <, <=, >, >=, IS [NOT] DISTINCT FROM, IN), with IN (subquery), or tested with IS [NOT] NULL; not with = ANY / ALL (subquery) yet",
     )
 }
 

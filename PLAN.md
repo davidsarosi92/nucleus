@@ -13111,6 +13111,16 @@ Found and fixed:
   record but two nucleus-only ones as PostgreSQL 18's (three mutations —
   the spill's decoding, the quoting of a space, a `NULL` field's place —
   each failing).
+- Issue #16, tenth step — a row `[NOT] IN (subquery)`: rewritten to
+  `CASE WHEN EXISTS (… WHERE row = (cols)) THEN true WHEN EXISTS (…
+  WHERE (row = (cols)) IS NULL) THEN NULL ELSE false END`
+  (`rows::in_subquery`), the row comparison's `NULL` meaning (`NOT IN`
+  leaves out a row a `NULL` might equal), the column count checked
+  (`42601`).  For the performance pass: one semi-join reading the
+  subquery once (its `NULL` case as a flag) instead of up to two
+  `EXISTS`.  `= ANY` / `ALL (subquery)` with a row stays `0A000`.
+  Tested in `82_row_comparisons.slt`, PostgreSQL 18's results (two
+  mutations — the `NULL` case, the column count — each failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and

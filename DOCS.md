@@ -2400,8 +2400,12 @@ fields with PostgreSQL's meaning: `=` every pair equal, `<>` one
 unequal, the ordering ones decided by the first pair not equal (`a1 < b1
 OR (a1 = b1 AND …)`, a `NULL` pair before it making the result `NULL`),
 with the first pair's bound (`a1 <= b1`, implied) before it, so an index
-on the first column bounds the scan.  Unequal lengths are `42601`; a row
-against a subquery `0A000`.  Anywhere else a row is a value of its own,
+on the first column bounds the scan.  Unequal lengths are `42601`.  A
+row `[NOT] IN (subquery)` (as many columns as fields, else `42601`) is
+`CASE WHEN EXISTS (… WHERE row = (cols)) THEN true WHEN EXISTS (… WHERE
+(row = (cols)) IS NULL) THEN NULL ELSE false END` — the row comparison's
+meaning, so `NOT IN` leaves out a row a `NULL` might equal; `= ANY` /
+`ALL (subquery)` with a row is `0A000`.  Anywhere else a row is a value of its own,
 a `record` (`DataType::Record`, `Value::Record`): compared field by
 field, a `NULL` field after the others and equal to a `NULL` (PostgreSQL's
 record values; so `DISTINCT (a, b)`, `GROUP BY (a, b)` and `ORDER BY
