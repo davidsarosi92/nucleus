@@ -12805,6 +12805,33 @@ Found and fixed:
   later part; the row-at-a-time join's rows, order and error; fails
   with either limit undone).
 
+- A recovery replayed a vacuum's batches slowly: a batch logs a
+  covered range per key it removes versions of (the versions a commit
+  dropped without logging come back on replay), and replay
+  removed each range's entries one at a time, each a descent from the
+  root, an LSM tree's range tombstones each spliced into the middle of
+  a sorted vector.  Found by a fifth searcher, a bank: 600 accounts in
+  row, column and LSM tables (two indexes each), eight clients
+  transferring at snapshot and serializable isolation, deleting and
+  inserting accounts again, `VACUUM` every second; the totals and every
+  index checked in one snapshot every two seconds, after, and after a
+  restart — 507,000 commits, all held.  The restart took 10–13 s: 163
+  MB of WAL (the checkpoint is due at 1 GiB, PostgreSQL's
+  `max_wal_size`) replayed at ~13 MB/s.  Now all of a batch's ranges go
+  at once — the B+tree's entries in one sorted pass
+  (`Tables::remove_ranges` through `apply_sorted_owned`, as replay's
+  puts already went), an LSM tree's tombstones merged in one
+  (`Ranges::add_all`).  Measured on a copy of that database, both
+  orders, the fuzzers running: 11.9 s → 3.47 (the B+tree pass) → 2.96
+  (the tombstones; six runs each, 2.85–3.22 against 3.30–3.73), ~55
+  MB/s.  Tested by `covered_ranges_go_whole_on_replay_in_every_engine`
+  (four ranges, one across a route's start, in the map engine and the
+  LSM tree: what they hold goes, what lies between and what a later
+  commit writes into them stays) and
+  `ranges_added_at_once_are_as_added_one_by_one`; each fails with its
+  part undone.  Left: `SIGTERM` stops the server as a crash does (no
+  checkpoint, so a restart replays the WAL; issue #17).
+
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
 `GROUPING SETS` / `ROLLUP` / `CUBE`, a row constructor in `SELECT

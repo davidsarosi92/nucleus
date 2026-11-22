@@ -73,6 +73,14 @@ pub trait Engine: Send + Sync {
     }
     /// Removes every entry in `[start, end)`.
     fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()>;
+    /// [`remove_range`](Self::remove_range) of each of `ranges` (ascending
+    /// by start), which an engine may do at once.
+    fn remove_ranges(&mut self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        for (start, end) in ranges {
+            self.remove_range(start, end)?;
+        }
+        Ok(())
+    }
     /// Up to `parts - 1` keys inside `(start, end)` cutting it into parts
     /// of about equal size, each of at least `min_blocks` of the engine's
     /// blocks; ascending ([`BTree::split_keys`]'s, for a parallel scan's
@@ -909,28 +917,42 @@ impl Tables {
         }
     }
 
-    /// Removes every entry in `[start, end)`, from whichever engines hold
-    /// part of it.
-    pub(crate) fn remove_range(&mut self, start: &[u8], end: &[u8]) -> Result<()> {
-        for p in self.pieces(Bound::Included(start), Bound::Excluded(end)) {
-            match p.engine {
-                Some(i) => {
-                    let (s, e) = (bound_key(&p.start, start), bound_key(&p.end, end));
-                    self.engines[i].remove_range(s, e)?;
-                }
-                None => {
-                    let keys = self
-                        .tree
-                        .range(borrow(&p.start), borrow(&p.end))?
-                        .map(|e| e.map(|(k, _)| k))
-                        .collect::<Result<Vec<_>>>()?;
-                    for k in keys {
-                        self.tree.remove(&k)?;
+    /// [`remove_range`](Self::remove_range) of each of `ranges`: the
+    /// B+tree's entries in all of them removed in one sorted pass (a
+    /// replayed sweep's covered ranges, one or a few entries each — a
+    /// descent per entry from the root made a crash's recovery replay
+    /// at ~13 MB/s), the engines' each by its own.
+    pub(crate) fn remove_ranges(&mut self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        let mut keys = Vec::new();
+        let mut engine_ranges: Vec<Vec<(Vec<u8>, Vec<u8>)>> = vec![Vec::new(); self.engines.len()];
+        for (start, end) in ranges {
+            if start >= end {
+                continue;
+            }
+            for p in self.pieces(Bound::Included(start), Bound::Excluded(end)) {
+                match p.engine {
+                    Some(i) => {
+                        let (s, e) = (bound_key(&p.start, start), bound_key(&p.end, end));
+                        engine_ranges[i].push((s.to_vec(), e.to_vec()));
+                    }
+                    None => {
+                        for e in self.tree.range(borrow(&p.start), borrow(&p.end))? {
+                            keys.push((e?.0, None));
+                        }
                     }
                 }
             }
         }
-        Ok(())
+        if !keys.windows(2).all(|w| w[0].0 < w[1].0) {
+            keys.sort_by(|a, b| a.0.cmp(&b.0));
+            keys.dedup_by(|a, b| a.0 == b.0);
+        }
+        for (e, r) in self.engines.iter_mut().zip(engine_ranges) {
+            if !r.is_empty() {
+                e.remove_ranges(&r)?;
+            }
+        }
+        self.tree.apply_sorted_owned(keys, None)
     }
 
     /// Each engine's [`Engine::prepare`], under the branch's write lock.
@@ -1314,8 +1336,15 @@ mod tests {
         assert!(c.next_within(&mut k, &mut v, &|_| true).unwrap());
         assert_eq!(k, b"f");
         drop(c);
-        // A range removed across them.
-        t.remove_range(b"b", b"n").unwrap();
+        // Ranges removed across them, at once (unsorted, one empty).
+        t.remove_ranges(&[
+            (b"m".to_vec(), b"n".to_vec()),
+            (b"b".to_vec(), b"g".to_vec()),
+            (b"x".to_vec(), b"x".to_vec()),
+            (b"f".to_vec(), b"m".to_vec()),
+            (b"q".to_vec(), b"s".to_vec()),
+        ])
+        .unwrap();
         let left: Vec<u8> = t
             .range(Bound::Unbounded, Bound::Unbounded)
             .unwrap()
@@ -1323,7 +1352,7 @@ mod tests {
             .collect();
         assert_eq!(
             left,
-            [b"a".as_slice(), &(b'n'..=b'z').collect::<Vec<u8>>()].concat()
+            [b"ano".as_slice(), b"p", &(b's'..=b'z').collect::<Vec<u8>>()].concat()
         );
     }
 

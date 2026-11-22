@@ -227,6 +227,41 @@ impl Ranges {
         self.0.splice(first..last, [(s, e)]);
     }
 
+    /// [`add`](Self::add) of each of `new` at once: both lists merged in
+    /// one pass, those that meet joined — as many adds would leave them,
+    /// without moving the rest for each (a replayed vacuum's thousands of
+    /// ranges, each into the middle).
+    fn add_all(&mut self, new: &[(Vec<u8>, Vec<u8>)]) {
+        let mut new: Vec<&(Vec<u8>, Vec<u8>)> = new.iter().filter(|r| r.0 < r.1).collect();
+        if new.is_empty() {
+            return;
+        }
+        if !new.windows(2).all(|w| w[0].0 <= w[1].0) {
+            new.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        let old = std::mem::take(&mut self.0);
+        let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(old.len() + new.len());
+        let mut old = old.into_iter().peekable();
+        let mut new = new.into_iter().peekable();
+        loop {
+            let next = match (old.peek(), new.peek()) {
+                (Some(o), Some(n)) if o.0 <= n.0 => old.next().expect("peeked"),
+                (_, Some(_)) => new.next().expect("peeked").clone(),
+                (Some(_), None) => old.next().expect("peeked"),
+                (None, None) => break,
+            };
+            match out.last_mut() {
+                Some(last) if next.0 <= last.1 => {
+                    if next.1 > last.1 {
+                        last.1 = next.1;
+                    }
+                }
+                _ => out.push(next),
+            }
+        }
+        self.0 = out;
+    }
+
     fn covers(&self, key: &[u8]) -> bool {
         let i = self.0.partition_point(|r| r.0.as_slice() <= key);
         i > 0 && key < self.0[i - 1].1.as_slice()
@@ -577,6 +612,33 @@ impl Memtable {
             self.tail_bytes -= gone;
         }
         self.ranges.add(start, end);
+    }
+
+    /// [`remove_range`](Self::remove_range) of each of `ranges`, their
+    /// tombstones added at once.
+    fn remove_ranges(&mut self, ranges: &[(Vec<u8>, Vec<u8>)]) {
+        for (start, end) in ranges {
+            if start >= end {
+                continue;
+            }
+            let keys: Vec<Vec<u8>> = self
+                .points
+                .range::<[u8], _>((Bound::Included(&start[..]), Bound::Excluded(&end[..])))
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in keys {
+                self.points.remove(&k);
+            }
+            let span = self.tail_span(Bound::Included(start), Bound::Excluded(end));
+            if !span.is_empty() {
+                let gone: usize = Arc::make_mut(&mut self.tail)
+                    .drain(span)
+                    .map(|(k, v)| entry_bytes(&k, &v))
+                    .sum();
+                self.tail_bytes -= gone;
+            }
+        }
+        self.ranges.add_all(ranges);
     }
 
     /// Every point, ascending.
@@ -2300,6 +2362,12 @@ impl Engine for LsmEngine {
         Ok(())
     }
 
+    fn remove_ranges(&mut self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        self.settle();
+        self.mem.remove_ranges(ranges);
+        Ok(())
+    }
+
     fn is_empty(&self) -> bool {
         self.mems().all(Memtable::is_empty) && self.current().is_empty()
     }
@@ -2943,6 +3011,28 @@ mod tests {
         assert_eq!(prefix(b"ab\0\0\x07\0\0"), b"ab\0\0");
         assert_eq!(prefix(b"a\0\xffb\0\0x"), b"a\0\xffb\0\0");
         assert_eq!(prefix(b"abc"), b"abc");
+    }
+
+    #[test]
+    fn ranges_added_at_once_are_as_added_one_by_one() {
+        let rng = nucleus_platform::SplitMix64::new(5);
+        let key = |rng: &nucleus_platform::SplitMix64| vec![b'a' + rng.below(26) as u8];
+        for _ in 0..500 {
+            let mut one = Ranges::default();
+            for _ in 0..rng.below(6) {
+                let (s, e) = (key(&rng), key(&rng));
+                one.add(&s, &e);
+            }
+            let mut all = one.clone();
+            // Unsorted, overlapping, touching and empty ones among them.
+            let new: Vec<(Vec<u8>, Vec<u8>)> =
+                (0..rng.below(8)).map(|_| (key(&rng), key(&rng))).collect();
+            for (s, e) in &new {
+                one.add(s, e);
+            }
+            all.add_all(&new);
+            assert_eq!(all, one, "{new:?}");
+        }
     }
 
     #[test]

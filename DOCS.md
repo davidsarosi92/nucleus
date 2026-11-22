@@ -675,8 +675,13 @@ find again after a crash.  `write_covering(&Batch, covered)` logs a
 batch of deletes with key ranges it *covers* — ranges whose entries, in
 the tree as it is, are all among its deletes: replay deletes everything
 left in them, what a filtered write dropped there and replay brought
-back too (WAL batch version 2: version 1's layout, then the ranges;
-version 1 is still written and read for a batch without).
+back too, all of a batch's ranges at once (`Tables::remove_ranges`: the
+B+tree's entries in one sorted pass, an LSM tree's range tombstones
+merged into its memtable's in one — a vacuum's batch covers a range
+per key, and a descent from the root for each entry made a recovery
+replay ~13 MB of WAL a second, now ~55) (WAL batch version 2: version
+1's layout, then the ranges; version 1 is still written and read for a
+batch without).
 `write_deferring(&Batch, deferred, filter)` logs puts with a batch but
 keeps them out of the tree (WAL batch version 3: version 2's layout,
 its ranges maybe none, then the puts): they wait in memory

@@ -133,6 +133,73 @@ fn a_routed_range_reads_as_one_map_in(kind: EngineKind) {
     assert_eq!((routes[0].id, &routes[0].start[..]), (id, &b"k20"[..]));
 }
 
+/// A replayed batch's covered ranges go whole (a vacuum's: the versions a
+/// commit dropped unlogged come back on replay), in the B+tree and in a
+/// routed engine — one crossing the route's start too — all of one batch
+/// at once; what lies between them, and what a later commit writes into
+/// them, stays.
+#[test]
+fn covered_ranges_go_whole_on_replay_in_every_engine() {
+    for kind in KINDS {
+        covered_ranges_go_whole_on_replay_in(kind);
+    }
+}
+
+fn covered_ranges_go_whole_on_replay_in(kind: EngineKind) {
+    let p = Arc::new(SimPlatform::new(7));
+    let (store, _) = open(&p).unwrap();
+    store.add_engine(b"k20", b"k30", kind).unwrap();
+    let key = |i: u32| format!("k{i:02}").into_bytes();
+    let put = |k: Vec<u8>, v: &[u8]| (k, Some(v.to_vec()));
+    store
+        .commit(&Batch {
+            meta: 1,
+            ops: (0..40).map(|i| put(key(i), b"one")).collect(),
+        })
+        .unwrap();
+    // Some in the engine's runs, some written over in its memtable.
+    store.checkpoint().unwrap();
+    store.compact(&mut || true).unwrap();
+    store
+        .commit(&Batch {
+            meta: 2,
+            ops: vec![put(key(4), b"two"), put(key(25), b"two")],
+        })
+        .unwrap();
+    let covered: Vec<(Vec<u8>, Vec<u8>)> = [(3, 5), (18, 22), (24, 26), (33, 34)]
+        .iter()
+        .map(|&(a, b)| (key(a), key(b)))
+        .collect();
+    store
+        .write_covering(
+            &Batch {
+                meta: 3,
+                ops: vec![(key(21), None)],
+            },
+            &covered,
+        )
+        .unwrap();
+    store
+        .commit(&Batch {
+            meta: 4,
+            ops: vec![put(key(19), b"after"), put(key(25), b"after")],
+        })
+        .unwrap();
+    drop(store);
+    p.sim_fs().crash();
+    let (store, rec) = open(&p).unwrap();
+    assert_eq!(rec.meta, 4, "{kind:?}");
+    let mut want = Model::new();
+    for i in 0..40 {
+        if !covered.iter().any(|(a, b)| key(i) >= *a && key(i) < *b) {
+            want.insert(key(i), b"one".to_vec());
+        }
+    }
+    want.insert(key(19), b"after".to_vec());
+    want.insert(key(25), b"after".to_vec());
+    assert_eq!(contents(&store), want, "{kind:?}");
+}
+
 /// The refusals: an empty range, one meeting another route, one holding
 /// entries already.
 #[test]

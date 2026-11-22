@@ -2832,10 +2832,7 @@ fn remove_stale_engine_files<'a>(
 /// Replay's half of [`Store::write_covering`]: every entry left in the
 /// covered ranges deleted.
 fn remove_covered(tree: &mut Tables, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-    for (start, end) in covered {
-        tree.remove_range(start, end)?;
-    }
-    Ok(())
+    tree.remove_ranges(covered)
 }
 
 /// [`apply`] of ops borrowed or handed over: these moved into the tree.
