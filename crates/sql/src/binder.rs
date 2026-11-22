@@ -204,7 +204,7 @@ fn next_cte_id() -> usize {
 }
 
 /// Whether `plan` reads a work table of a recursive CTE it is not itself.
-fn reads_work_table(plan: &Plan) -> bool {
+pub(crate) fn reads_work_table(plan: &Plan) -> bool {
     fn open(plan: &Plan, closed: &mut Vec<usize>) -> bool {
         match plan {
             Plan::WorkTable { id, .. } => !closed.contains(id),

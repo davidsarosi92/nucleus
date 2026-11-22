@@ -4170,8 +4170,20 @@ pub fn adaptive_lookups() -> u64 {
     ADAPTIVE_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+thread_local! {
+    /// [`ADAPTIVE_LOOKUPS`] of the statements this thread ran.
+    static ADAPTIVE_LOOKUPS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`adaptive_lookups`] of the statements run on this thread (a test's,
+/// not counting the tests beside it).
+pub fn adaptive_lookups_here() -> u64 {
+    ADAPTIVE_LOOKUPS_HERE.with(std::cell::Cell::get)
+}
+
 pub(crate) fn note_adaptive_lookups() {
     ADAPTIVE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ADAPTIVE_LOOKUPS_HERE.with(|n| n.set(n.get() + 1));
 }
 
 static PROBE_CUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -6597,14 +6609,31 @@ fn make<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, joins: &mut Vec<usize>) -> Result<
                 Some(false) => return Ok(()),
                 None => {}
             }
+            // A recursive query's round (PLAN.md §M14.34 G1): its rows at
+            // hand, counted before a table is made of them.
+            let mut round = None;
+            if let Some(a) = adaptive
+                && crate::exec::is_round(right)
+            {
+                let rows = crate::exec::build(right, ctx, None)?.collect::<Result<Vec<Row>>>()?;
+                if rows.len() <= a.below {
+                    let rows = crate::spill::Stored::Memory(rows);
+                    ctx.join_tables.borrow_mut().insert(at, Built::Stored(rows));
+                    return Ok(());
+                }
+                round = Some(rows);
+            }
             let mut table = None;
-            if probes(right) {
+            if round.is_none() && probes(right) {
                 table = JoinTable::parallel(right, right_keys, ctx, None)?;
             }
             let table = match table {
                 Some(t) => t,
                 None => match JoinTable::gather(
-                    crate::exec::build(right, ctx, None)?,
+                    match round {
+                        Some(rows) => Box::new(rows.into_iter().map(Ok)),
+                        None => crate::exec::build(right, ctx, None)?,
+                    },
                     right.width(),
                     right_keys,
                     ctx,

@@ -1890,10 +1890,16 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
             let semi_as_inner = kind == JoinType::Semi && unique_keys(&right, &right_keys);
             // An inner join may look the left side up instead (the larger,
             // which the reordering made the probe side), the columns put
-            // back in order above.
-            let swapped = ((kind == JoinType::Inner || semi_as_inner) && lookup.is_none())
-                .then(|| lookup_side(&right, &left, &right_keys, &left_keys, false, st))
-                .flatten();
+            // back in order above — unless the right side is a recursive
+            // query's last round, whose rows are known only as it runs:
+            // the hash join stays, made adaptive (`adaptive`), so each
+            // round looks up where its rows are few and hashes them where
+            // they are many (PLAN.md §M14.34 G1).
+            let swapped = ((kind == JoinType::Inner || semi_as_inner)
+                && lookup.is_none()
+                && !crate::binder::reads_work_table(&right))
+            .then(|| lookup_side(&right, &left, &right_keys, &left_keys, false, st))
+            .flatten();
             match (lookup, swapped) {
                 (Some(right), _) => Plan::Join {
                     left,

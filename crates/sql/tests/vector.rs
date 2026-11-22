@@ -1227,9 +1227,11 @@ fn few_lookups_start_no_threads() {
         "SELECT few.k, 100 / (e.v - 3) FROM few JOIN e ON e.parent = few.k",
     ];
     for q in small {
+        // (A recursive query's rounds: an adaptive join's lookups.)
         let plan = outcome(&mut many, &format!("EXPLAIN {q}")).unwrap();
         assert!(
-            plan.iter().any(|l| l[0].contains("Index Nested Loop")),
+            plan.iter()
+                .any(|l| l[0].contains("Index Nested Loop") || l[0].contains("or lookups up to")),
             "{q}: {plan:?}"
         );
         let before = nucleus_sql::vector::parallel_runs_here();

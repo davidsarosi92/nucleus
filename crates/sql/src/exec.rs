@@ -2173,15 +2173,36 @@ fn join<'a>(
             let (built, fresh) = match made {
                 Some(b) => (b, false),
                 None => {
+                    // A recursive query's round (PLAN.md §M14.34 G1): its
+                    // rows at hand, counted before a table is made of them.
+                    let round = match right {
+                        p if is_round(p) => {
+                            let rows = build(right, ctx, outer)?.collect::<Result<Vec<Row>>>()?;
+                            if rows.len() <= a.below {
+                                return adaptive_lookups(rows, a, spec);
+                            }
+                            Some(rows)
+                        }
+                        _ => None,
+                    };
+                    let source = |round: Option<Vec<Row>>| -> Result<Rows<'a>> {
+                        match round {
+                            Some(rows) => Ok(Box::new(rows.into_iter().map(Ok))),
+                            None => build(right, ctx, outer),
+                        }
+                    };
                     let mut table = None;
-                    if crate::vector::probe_side(left) && crate::vector::probes(right) {
+                    if round.is_none()
+                        && crate::vector::probe_side(left)
+                        && crate::vector::probes(right)
+                    {
                         table = JoinTable::parallel(right, right_keys, ctx, outer)?;
                     }
                     let built = match table {
                         Some(t) => Built::Table(std::sync::Arc::new(t)),
                         None if crate::vector::probe_side(left) => {
                             match JoinTable::gather(
-                                build(right, ctx, outer)?,
+                                source(round)?,
                                 right.width(),
                                 right_keys,
                                 ctx,
@@ -2191,7 +2212,7 @@ fn join<'a>(
                                 Gathered::Stored(rows) => Built::Stored(rows),
                             }
                         }
-                        None => Built::Stored(stash(build(right, ctx, outer)?)?),
+                        None => Built::Stored(stash(source(round)?)?),
                     };
                     (built, true)
                 }
@@ -2476,6 +2497,17 @@ fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Resul
         Ok(l) => lookup_one(l, right, &spec),
         Err(e) => vec![Err(e)],
     })))
+}
+
+/// Whether `plan` gives a recursive query's last round, as it is or
+/// through projections and filters: rows at hand, cheap to count before a
+/// join's table is made of them (PLAN.md §M14.34 G1).
+pub(crate) fn is_round(plan: &Plan) -> bool {
+    match plan {
+        Plan::WorkTable { .. } => true,
+        Plan::Project { input, .. } | Plan::Filter { input, .. } => is_round(input),
+        _ => false,
+    }
 }
 
 /// An adaptive hash join's lookups ([`crate::plan::Adaptive`]): each of

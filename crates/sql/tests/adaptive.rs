@@ -110,9 +110,9 @@ fn adaptive_joins_give_the_hash_joins_rows() {
             assert!(rows > 0, "{table} {having}{more}");
             let mut first = None;
             for (setting, session) in settings.iter().zip(&mut sessions) {
-                let before = nucleus_sql::vector::adaptive_lookups();
+                let before = nucleus_sql::vector::adaptive_lookups_here();
                 let got = outcome(session, &adaptive);
-                let looked_up = nucleus_sql::vector::adaptive_lookups() > before;
+                let looked_up = nucleus_sql::vector::adaptive_lookups_here() > before;
                 assert_eq!(looked_up, few, "{table} {having}{more}: {setting}");
                 assert_eq!(
                     sorted(got.clone()),
@@ -128,5 +128,94 @@ fn adaptive_joins_give_the_hash_joins_rows() {
                 }
             }
         }
+    }
+}
+
+/// A recursive query's step joining its last round to a table (PLAN.md
+/// §M14.34 G1): an adaptive hash join, not index lookups fixed by the
+/// round's constant estimate — each round looks up where its rows are
+/// few and hashes them where they are many, with the rows of the hash
+/// join alone (no index), in every executor.
+#[test]
+fn recursive_rounds_choose_lookups_or_the_hash_join() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(23)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, "SET batch_size = 1024");
+    s.execute(
+        "CREATE TABLE e (id INT PRIMARY KEY, parent INT, v INT);
+         INSERT INTO e SELECT i, i / 2, i % 7 FROM generate_series(1, 30000) AS t(i);
+         CREATE INDEX e_parent ON e (parent);
+         ANALYZE",
+    )
+    .unwrap();
+    let settings = [
+        "SET batch_size = 0",
+        "SET batch_size = 1024",
+        "SET parallel_workers = 4",
+    ];
+    let mut sessions: Vec<Session> = settings.iter().map(|q| session(&db, q)).collect();
+    // (walk, every round few): a node's descendants, the whole tree's,
+    // with UNION and a depth, a node's ancestors (by the primary key).
+    let walks = [
+        (
+            "WITH RECURSIVE d (id) AS (SELECT 1000 UNION ALL \
+             SELECT e.id FROM e JOIN d ON {key} = d.id) SELECT id FROM d",
+            true,
+        ),
+        (
+            "WITH RECURSIVE d (id) AS (SELECT 1 UNION ALL \
+             SELECT e.id FROM e JOIN d ON {key} = d.id) SELECT id FROM d",
+            false,
+        ),
+        (
+            "WITH RECURSIVE d (id, depth) AS (SELECT 1, 0 UNION \
+             SELECT e.id, d.depth + 1 FROM e JOIN d ON {key} = d.id AND e.v <> 3) \
+             SELECT id, depth FROM d",
+            false,
+        ),
+    ];
+    for (walk, few) in walks {
+        let adaptive = walk.replace("{key}", "e.parent");
+        let reference = sorted(outcome(&mut s, &walk.replace("{key}", "e.parent + 0")));
+        assert!(reference.as_ref().unwrap().len() > 10, "{walk}");
+        let p = plan(&mut s, &adaptive);
+        assert!(p.contains("or lookups up to"), "{walk}: {p}");
+        // Which rounds hashed: the table's scan ran for none of them, or
+        // for the large ones — in the pipelines and row at a time.
+        for session in [&mut s, &mut sessions[0]] {
+            let analyzed = plan(session, &format!("ANALYZE {adaptive}"));
+            let scan = analyzed
+                .lines()
+                .find(|l| l.contains("Seq Scan on e"))
+                .unwrap_or_else(|| panic!("{walk}: {analyzed}"));
+            assert_eq!(scan.contains("never executed"), few, "{walk}: {analyzed}");
+        }
+        // The same rounds looked up in every executor.
+        let mut rounds = None;
+        for (setting, session) in settings.iter().zip(&mut sessions) {
+            let before = nucleus_sql::vector::adaptive_lookups_here();
+            assert_eq!(
+                sorted(outcome(session, &adaptive)),
+                reference,
+                "{walk}: {setting}"
+            );
+            let looked_up = nucleus_sql::vector::adaptive_lookups_here() - before;
+            assert!(looked_up > 0, "{walk}: {setting}");
+            match rounds {
+                None => rounds = Some(looked_up),
+                Some(r) => assert_eq!(looked_up, r, "{walk}: {setting}"),
+            }
+        }
+    }
+    let ancestors = "WITH RECURSIVE a (id, p) AS (SELECT id, parent FROM e WHERE id = 29999 \
+                     UNION ALL SELECT e.id, e.parent FROM e JOIN a ON e.id = a.p) SELECT id FROM a";
+    let p = plan(&mut s, ancestors);
+    assert!(p.contains("or lookups up to"), "{p}");
+    for session in &mut sessions {
+        assert_eq!(outcome(session, ancestors).unwrap().len(), 15);
     }
 }

@@ -13202,6 +13202,25 @@ Still held whole: a recursive `UNION`'s rows seen.
      `key_range_exact`, `Access::rest` cloning expressions), allocation
      throughout (malloc and free a third of the samples).  The same
      row/point-read work as 2.
+  4. **Each round chooses ✅** — without the index the whole tree took
+     0.93 s (PostgreSQL 2.8 s): the round hashed, the table scanned once
+     a round, three times faster than 2,000,000 lookups.  So the step's
+     join is no longer turned into lookups for a round estimated at a
+     constant (`optimizer::lookups` leaves a hash join whose right side
+     reads the work table): it is an adaptive join (`plan::Adaptive`,
+     §M14.12's), each run of the step — each round — looking up while its
+     rows are at most the break-even (22,807 here) and hashing past it;
+     the round's rows, already in memory, counted before a table is made
+     of them (`exec::is_round`, in `vector::make` and `exec`'s join: the
+     ancestors' 21 one-row rounds had gained 11 µs building tables).
+     ABBA: whole tree 3.02 → 0.68 s (0.52× PostgreSQL's 1.30 s); 2,047
+     descendants, the `UNION` walk and 21 ancestors unchanged within
+     noise (5.1–5.6 ms, 5.4–5.5 ms, 0.075 ms).  Loop-invariant hoisting
+     (the table's hash built once for every round) not taken: a round
+     past the break-even scans the table once, as many rounds as are
+     large (6 of 21 here); a table kept across rounds pays its build and
+     its memory once a query reaches that size, which only many large
+     rounds would repay — measured when a graph of that shape shows it.
 - **G2 — `SEARCH` and `CYCLE`** (SQL:1999, PostgreSQL 14): `SEARCH DEPTH
   | BREADTH FIRST BY … SET col` for the order of a tree's rows, `CYCLE …
   SET flag USING path` for graphs with cycles under `UNION ALL`; beside

@@ -3264,6 +3264,15 @@ adaptive plans, SQL Server 2017's adaptive joins).  The rows are the hash
 join's, in the right rows' order; the choice is the same in every
 executor (`vector::prepare` makes it for a pipeline, `exec`'s join
 otherwise).  Not where the left side reads an enclosing row.
+A recursive query's step joining its last round to a table is made one
+(PLAN.md §M14.34 G1): `lookups` leaves the hash join whose right side
+reads the round (`binder::reads_work_table`) rather than looking the
+table up for a round estimated at a constant, so each round chooses —
+few rows look the table up, many hash the round and scan the table
+once — and a round's rows, at hand (`exec::is_round`), are counted
+before a table is made of them.  A 2,000,000-row tree walked whole:
+3.0 s → 0.68 s (PostgreSQL 18's index nested loop: 1.30 s); its small
+walks still by lookups, as fast as before.
 
 **Parallel aggregates in key order**: grouped by (at least) the leading
 column of the primary key a scan reads in order, the morsels' groups meet
