@@ -819,6 +819,18 @@ pub trait KvTxn: Send {
     /// over the part of the range consumed.
     fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
 
+    /// Validates `[start, end)` as a [`scan_validated`](Self::scan_validated)
+    /// read to its end would: the commit fails with a conflict if a commit
+    /// after this transaction's snapshot wrote inside it — for what is made
+    /// from a whole range (an index built from a table's rows).  By default
+    /// the range is read; a transaction that can, notes it unread.
+    fn validate_range(&self, start: &[u8], end: &[u8]) -> Result<()> {
+        for r in self.scan_validated(Bound::Included(start), Bound::Excluded(end))? {
+            r?;
+        }
+        Ok(())
+    }
+
     /// [`scan`](Self::scan) a chunk of entries at a time, packed into one
     /// buffer the caller reuses — nothing allocated per entry: what large
     /// reads use.
@@ -1675,6 +1687,11 @@ impl KvRead for LocalTxn {
 impl KvTxn for LocalTxn {
     fn read_ts(&self) -> Timestamp {
         self.0.read_ts()
+    }
+
+    fn validate_range(&self, start: &[u8], end: &[u8]) -> Result<()> {
+        self.0.validate_range(start, end);
+        Ok(())
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

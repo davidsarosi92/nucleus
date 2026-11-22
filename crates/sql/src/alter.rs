@@ -546,6 +546,7 @@ fn drop_column(
     cascade: bool,
 ) -> Result<()> {
     let old = catalog::table(&*txn, table)?;
+    crate::dml::rows_are_premise(&*txn, &old)?;
     let c = column_of(&old, column)?;
     refuse_kept(&old, c, "drop")?;
     let depends = |what: String| -> Result<()> {
@@ -795,6 +796,7 @@ fn set_not_null(
     }
     refuse_kept(&t, c, "change")?;
     if not_null && t.columns[c].nullable && t.partition_by.is_none() {
+        crate::dml::rows_are_premise(&*txn, &t)?;
         let ctx = Ctx::new(&*txn, reg, &[]);
         for r in crate::exec::matching(&t, &crate::plan::Access::Full, None, &ctx)? {
             if r?.1.get(c).is_none_or(|v| v.is_null()) {

@@ -12876,6 +12876,32 @@ Found and fixed:
   705/708 → 685/688 ms, 8 threads 446/402 → 393/435 ms (noise).  Tested
   by `an_index_build_stops_at_the_statement_timeout` (1 and 4 workers;
   fails without the charge).
+- DDL over a table's rows did not see a write committed under it:
+  transfers between accounts (8 clients) against a maintenance client
+  building and dropping an index on `note`, adding, dropping and
+  retyping columns, left the index holding entries for notes the rows no
+  longer had — on row, column and LSM tables, past `VACUUM` and a
+  restart.  A writer validates the table's definition, but the new one
+  commits with the DDL; the DDL read the rows at its snapshot unvalidated
+  (validated only under `SERIALIZABLE`).  Two sessions at a time showed
+  the family: a `CHECK`, `NOT NULL` or foreign key a concurrent write
+  broke, a new column's default (even `NOT NULL`) or stored generated
+  value missing from a row inserted meanwhile, and — worst — a
+  `DROP COLUMN` or `ALTER COLUMN … TYPE` whose concurrent insert kept the
+  old layout (its text read as the next column's integer; queries on the
+  column failing `42804` / `42883`).  Now such DDL makes the table's rows
+  a premise of its commit (`dml::rows_are_premise`, over
+  `KvTxn::validate_range`, a range validated unread — the read set
+  already checked ranges against later commits' keys): it fails `40001`,
+  and run again sees the write.  Tested by
+  `ddl_fails_over_a_write_committed_under_it` (11 cases × 3 storages,
+  each failing without the premise); the transfers with DDL, three runs
+  of 120 s, one with a kill, now find nothing.  The cost: on a table
+  written without pause the DDL may fail even after ten tries (29 and 40
+  of about 100 DDL statements; `CREATE INDEX` succeeded 8 and 1 times) —
+  an online build (PostgreSQL's `CREATE INDEX CONCURRENTLY`, F1's
+  write-only state) is issue #18.  `ALTER … TYPE … CONCURRENTLY` and
+  storage conversions, in parts of their own, are unchanged.
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,

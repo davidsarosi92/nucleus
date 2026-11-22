@@ -3333,6 +3333,7 @@ fn add_column(
     column: &crate::ast::ColumnSpec,
 ) -> Result<()> {
     let mut t = catalog::table(&*txn, table)?;
+    dml::rows_are_premise(&*txn, &t)?;
     if t.column(&column.name).is_some() {
         return Err(Error::duplicate_column(format!(
             "column \"{}\" of relation \"{table}\" already exists",
@@ -4227,6 +4228,7 @@ fn alter_column_type(
     using: Option<&crate::ast::Expr>,
 ) -> Result<()> {
     let old = catalog::table(&*txn, table)?;
+    dml::rows_are_premise(&*txn, &old)?;
     let c = old.column(column).ok_or_else(|| {
         Error::undefined_column(format!(
             "column \"{column}\" of relation \"{table}\" does not exist"
@@ -4478,6 +4480,7 @@ fn add_constraint(
     c: &TableConstraint,
 ) -> Result<()> {
     let mut t = catalog::table(&*txn, table)?;
+    dml::rows_are_premise(&*txn, &t)?;
     match c {
         TableConstraint::ForeignKey {
             name,

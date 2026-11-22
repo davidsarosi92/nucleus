@@ -2778,6 +2778,16 @@ impl Transaction {
         Ok(scan)
     }
 
+    /// Validates `[start, end)` as a [`scan_validated`](Self::scan_validated)
+    /// read to its end would, without reading it: the commit fails if a
+    /// later commit wrote inside the range.
+    pub fn validate_range(&self, start: &[u8], end: &[u8]) {
+        lock(&self.reads).ranges.push((
+            Bound::Included(start.to_vec()),
+            Bound::Excluded(end.to_vec()),
+        ));
+    }
+
     /// Sets `key` to `value`.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.write(key, Some(value))

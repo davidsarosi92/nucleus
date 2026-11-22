@@ -1306,7 +1306,9 @@ answer — stays the guarantee.
 the key or consumed range in the same read set at *any* isolation level, so
 a snapshot-isolation transaction can make one decision safe without
 becoming serializable: its commit fails if a newer commit wrote what it
-read.  Foreign key checks use them (§8.10).
+read.  Foreign key checks use them (§8.10).  `validate_range(start, end)`
+records a range unread, as a `scan_validated` read to its end would: DDL
+that depends on a table's rows validates the whole table (§8.7).
 
 **Garbage collection.**  Watermark = the oldest running snapshot (or
 *visible*) minus `history` commits.  Garbage is every version but the
@@ -1554,7 +1556,8 @@ distributed implementation will provide (§F3).
   statements (an index build, `ANALYZE`) or queries slowed them more.
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
-  at commit at any isolation level, §5.2), `scan_chunks` /
+  at commit at any isolation level, §5.2), `validate_range` (a range
+  checked so, unread — by default it is read), `scan_chunks` /
   `scan_chunks_validated` (the same entries a `Chunk` at a time — up to
   `CHUNK_ENTRIES` keys and values packed into one buffer the caller
   reuses, so a large read allocates nothing per entry — the first chunk,
@@ -3236,6 +3239,21 @@ wrong assignment type (assignment converts within numbers, within dates
 and timestamps, and from or to text).
 `CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`);
 `ADD COLUMN` with a default rewrites existing rows.
+
+**DDL over a table's rows** — an index built, `ADD COLUMN`, `DROP
+COLUMN`, `ALTER COLUMN … TYPE`, `SET NOT NULL`, `ADD CONSTRAINT` — makes
+the rows as its snapshot has them a premise of its commit
+(`dml::rows_are_premise`: the table's whole key range validated, at any
+isolation level).  A write the table's validated definition does not
+stop — one that commits before the DDL, under the old definition — would
+otherwise keep no entries in a new index, break a new check, `NOT NULL`
+or foreign key, miss a new column's default, or keep a dropped column;
+instead the DDL's commit fails (`40001`), an autocommit DDL running again
+(up to ten times) and then seeing the write.  On a table written without
+pause a DDL can so fail every time; an online build (the index written by
+writers before it is read, PostgreSQL's `CREATE INDEX CONCURRENTLY`) is
+not yet there.  `ALTER COLUMN … TYPE … CONCURRENTLY` and storage
+conversions work in parts of their own (§M14.20).
 
 **Index builds** (`dml::IndexBuild`, §M14.20 W2) — a new index's
 entries, and every index's when `ALTER … TYPE` or a key change rewrites

@@ -2234,12 +2234,32 @@ fn take_key(r: &mut Row, at: usize) -> Result<Vec<u8>> {
     }
 }
 
+/// Makes table `t`'s rows, as this transaction's snapshot has them, a
+/// premise of its commit: the commit fails (`40001`; an autocommit
+/// statement is run again) if another wrote to the table after the
+/// snapshot — at any isolation level.  For DDL that depends on the rows or
+/// changes their layout (an index built, a check or `NOT NULL` checked,
+/// rows rewritten for a column added, dropped or retyped): a write
+/// committed meanwhile was made under the old definition, which the
+/// table's validated definition did not stop (the new one commits with the
+/// DDL), and would keep no index entries, break the constraint, or hold a
+/// row of the old layout.
+pub fn rows_are_premise(txn: &dyn KvTxn, t: &Table) -> Result<()> {
+    let mut start = t.index_prefix(0);
+    start.truncate(start.len() - 4); // every key of the table's
+    if let Some(end) = nucleus_kv::prefix_end(&start) {
+        txn.validate_range(&start, &end)?;
+    }
+    Ok(())
+}
+
 /// Writes the entries of a new index for every existing row: the rows
 /// read with only the index's columns decoded — in parts of the table on
 /// the statement's workers, a round of parts at a time (so memory stays
 /// within a round's entries and the sort's `work_mem`) — and its entries
 /// sorted and written in key order ([`IndexBuild`]).
 pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usize) -> Result<()> {
+    rows_are_premise(&*txn, table)?;
     // The new index's keys: none yet, and no other transaction sees the
     // index before this one commits.
     let prefix = table.index_prefix(table.indexes[i].id);
