@@ -107,7 +107,7 @@ fn a_module_s_storage_holds_tables() {
     let mut plain = Session::with_registry(Arc::clone(&db), reg);
     for (sess, storage) in [(&mut s, "counted"), (&mut plain, "row")] {
         sess.execute(&format!(
-            "CREATE TABLE p_{storage} (id INT PRIMARY KEY, name TEXT UNIQUE) WITH (storage = {storage}); \
+            "CREATE TABLE p_{storage} (id INT PRIMARY KEY, name TEXT UNIQUE, w INT) WITH (storage = {storage}); \
              CREATE TABLE c_{storage} (id INT PRIMARY KEY, p INT REFERENCES p_{storage} (id), x BIGINT) \
                WITH (storage = {storage}); \
              CREATE INDEX ON c_{storage} (x); \
@@ -127,10 +127,11 @@ fn a_module_s_storage_holds_tables() {
     for q in [
         "SELECT count(*), sum(x), min(p), max(x) FROM c_T",
         "SELECT p, count(*) FROM c_T WHERE x > 500 GROUP BY p ORDER BY p LIMIT 5",
-        "SELECT id, x FROM c_T WHERE x = 77 ORDER BY id",
+        // (`p` past the index's entries: its rows fetched through it.)
+        "SELECT id, x, p FROM c_T WHERE x = 77 ORDER BY id",
         "SELECT * FROM c_T WHERE id BETWEEN 100 AND 110",
         "SELECT p.name, count(*) FROM c_T c JOIN p_T p ON p.id = c.p WHERE p.id < 4 GROUP BY p.name ORDER BY 1",
-        "SELECT name FROM p_T WHERE name = 'n1!'",
+        "SELECT name, w FROM p_T WHERE name = 'n1!'",
     ] {
         let reads = READS.load(Ordering::Relaxed);
         assert_eq!(

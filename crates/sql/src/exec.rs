@@ -1424,6 +1424,18 @@ pub fn scan_some<'a>(
     } else {
         ctx.txn.scan(Bound::Included(&start), end_bound)?
     };
+    // A sealed row whose key is destroyed reads as absent: its entries
+    // are passed over, and its rows are always fetched (the fetch tells
+    // the destroyed).
+    let sealed = table.storage == crate::sealed::SEALED;
+    // (No columns marked: all of them wanted.)
+    let from_entries = match index {
+        Some(i) if !sealed => match wanted {
+            Some(w) => FromEntries::of(table, &table.indexes[i], w),
+            None => FromEntries::of(table, &table.indexes[i], &vec![true; table.columns.len()]),
+        },
+        _ => None,
+    };
     Ok(Box::new(IndexRows {
         entries,
         storage,
@@ -1432,16 +1444,8 @@ pub fn scan_some<'a>(
         wanted,
         base: table.index_prefix(0),
         labels: crate::enums::Labels::default(),
-        // A sealed row whose key is destroyed reads as absent: its
-        // entries are passed over.
-        sealed: table.storage == crate::sealed::SEALED,
-        // No column wanted (a count of an index's range): the entries
-        // alone, no row fetched — a sealed table's excepted, whose
-        // destroyed rows are told by their fetch.
-        keys_only: table.storage != crate::sealed::SEALED
-            && wanted.is_some_and(|w| !w.contains(&true)),
-        pk_only: table.storage != crate::sealed::SEALED
-            && wanted.is_some_and(|w| w.contains(&true) && in_primary_key(table, w)),
+        sealed,
+        from_entries,
         keys: Vec::new(),
         rows: Vec::new(),
         ready: std::collections::VecDeque::new(),
@@ -1450,29 +1454,91 @@ pub fn scan_some<'a>(
     }))
 }
 
-/// Whether every column `wanted` marks is one of `table`'s primary key's
-/// and of a type its key encoding gives back as it was — an integer, a
-/// boolean, text, bytes, a date or a time (not a `real`, read back as a
-/// `double`; a `numeric`, its scale lost; a `char`, unpadded; an enum,
-/// its label not kept): an index entry, which holds the primary key,
-/// then serves them with no row fetched.
-fn in_primary_key(table: &Table, wanted: &[bool]) -> bool {
-    wanted.iter().enumerate().all(|(c, &w)| {
-        !w || (table.primary_key.contains(&c)
-            && matches!(
-                table.columns[c].ty,
-                DataType::Bool
-                    | DataType::SmallInt
-                    | DataType::Integer
-                    | DataType::BigInt
-                    | DataType::Text
-                    | DataType::Bytea
-                    | DataType::Date
-                    | DataType::Time
-                    | DataType::Timestamp
-                    | DataType::TimestampTz
-            ))
-    })
+/// The columns a secondary index's entries give a scan, no row fetched:
+/// each column wanted is one of the primary key's, which every entry
+/// holds, or one the index holds by its value (not an expression's, nor
+/// in a taught ordering) — of a type its key encoding gives back as it
+/// was: an integer, a boolean, text, bytes, a date or a time (not a
+/// `real`, read back as a `double`; a `numeric`, its scale lost; a
+/// `char`, unpadded; an enum, its label not kept).  No column wanted (a
+/// count of an index's range): the entries alone.  PostgreSQL's
+/// index-only scan, without its visibility map: nucleus's entries are
+/// versioned as its rows are.
+struct FromEntries<'a> {
+    /// The index's columns, decoded from the entry's key when one is
+    /// wanted that the primary key does not give.
+    index: Option<&'a crate::catalog::Index>,
+    /// The primary key's, decoded from the entry's value when one is
+    /// wanted.
+    pk: bool,
+}
+
+impl<'a> FromEntries<'a> {
+    fn of(table: &Table, index: &'a crate::catalog::Index, wanted: &[bool]) -> Option<Self> {
+        let exact = |c: usize| {
+            matches!(
+                table.columns.get(c).map(|col| &col.ty),
+                Some(
+                    DataType::Bool
+                        | DataType::SmallInt
+                        | DataType::Integer
+                        | DataType::BigInt
+                        | DataType::Text
+                        | DataType::Bytea
+                        | DataType::Date
+                        | DataType::Time
+                        | DataType::Timestamp
+                        | DataType::TimestampTz
+                )
+            )
+        };
+        let held = |c: usize| {
+            index.method.is_none()
+                && (0..index.columns.len()).any(|j| {
+                    index.columns[j] == c
+                        && index.exprs[j].is_none()
+                        && index.orderings[j].is_none()
+                })
+        };
+        let (mut pk, mut by_index) = (false, false);
+        for (c, _) in wanted.iter().enumerate().filter(|(_, w)| **w) {
+            if !exact(c) {
+                return None;
+            }
+            if table.primary_key.contains(&c) {
+                pk = true;
+            } else if held(c) {
+                by_index = true;
+            } else {
+                return None;
+            }
+        }
+        Some(Self {
+            index: by_index.then_some(index),
+            pk,
+        })
+    }
+
+    /// The row an entry gives: its columns wanted, the others NULL.
+    fn row(&self, table: &Table, key: &[u8], pk: &[u8]) -> Result<Row> {
+        let mut row = vec![Value::Null; table.columns.len()];
+        if let Some(index) = self.index {
+            let at = crate::catalog::INDEX_PREFIX_LEN.min(key.len());
+            let (values, _) = crate::encoding::decode_key(&key[at..], index.columns.len())?;
+            for (j, v) in values.into_iter().enumerate() {
+                if index.exprs[j].is_none() && index.orderings[j].is_none() {
+                    row[index.columns[j]] = v;
+                }
+            }
+        }
+        if self.pk {
+            let (values, _) = crate::encoding::decode_key(pk, table.primary_key.len())?;
+            for (&c, v) in table.primary_key.iter().zip(values) {
+                row[c] = v;
+            }
+        }
+        Ok(row)
+    }
 }
 
 /// The rows a secondary index's first entries fetch together: one — a
@@ -1495,10 +1561,9 @@ struct IndexRows<'a> {
     base: Vec<u8>,
     labels: crate::enums::Labels,
     sealed: bool,
-    keys_only: bool,
-    /// The columns wanted are the primary key's ([`in_primary_key`]):
-    /// read from the entries, no row fetched.
-    pk_only: bool,
+    /// The columns wanted are the entries' ([`FromEntries`]): no row
+    /// fetched.
+    from_entries: Option<FromEntries<'a>>,
     keys: Vec<Vec<u8>>,
     rows: Vec<Option<Row>>,
     ready: std::collections::VecDeque<(Vec<u8>, Row)>,
@@ -1510,34 +1575,26 @@ impl IndexRows<'_> {
     /// The next group's rows into `ready`.
     fn fill(&mut self) -> Result<()> {
         self.keys.clear();
-        while self.keys.len() < self.group {
+        for _ in 0..self.group {
             let Some(e) = self.entries.next() else {
                 self.done = true;
                 break;
             };
             crate::budget::charge_scan()?;
-            let (_, pk) = e?;
+            let (entry, pk) = e?;
             let mut k = Vec::with_capacity(self.base.len() + pk.len());
             k.extend_from_slice(&self.base);
             k.extend_from_slice(&pk);
-            self.keys.push(k);
+            match &self.from_entries {
+                Some(f) => {
+                    let row = f.row(self.table, &entry, &pk)?;
+                    self.ready.push_back((k, row));
+                }
+                None => self.keys.push(k),
+            }
         }
         self.group = nucleus_kv::GET_MANY;
         if self.keys.is_empty() {
-            return Ok(());
-        }
-        if self.keys_only || self.pk_only {
-            let (width, pk) = (self.table.columns.len(), &self.table.primary_key);
-            for k in self.keys.drain(..) {
-                let mut row = vec![Value::Null; width];
-                if self.pk_only {
-                    let (values, _) = crate::encoding::decode_key(&k[self.base.len()..], pk.len())?;
-                    for (&c, v) in pk.iter().zip(values) {
-                        row[c] = v;
-                    }
-                }
-                self.ready.push_back((k, row));
-            }
             return Ok(());
         }
         if let [k] = self.keys.as_slice() {

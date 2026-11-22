@@ -3254,10 +3254,13 @@ checked on each row where the range cannot apply them (`Access::rest`),
 so a join wanting no other column of the right rows reads none — a count
 of matches by a secondary index reads its entries alone, no row fetched
 (as PostgreSQL's index-only scan).  A scan by a secondary index wanting
-only primary key columns reads them from the entries too, where their
-key encoding gives them back as they were — integers, booleans, text,
-bytes, dates and times, not a `real`, a `numeric`'s scale, a `char`'s
-padding or an enum's label (`exec::in_primary_key`); an adaptive join's
+only columns its entries hold — the primary key's, and the index's own
+held by their values (not an expression's, nor in a taught ordering) —
+reads them from the entries too, where their key encoding gives them
+back as they were: integers, booleans, text, bytes, dates and times, not
+a `real`, a `numeric`'s scale, a `char`'s padding or an enum's label
+(`exec::FromEntries`; no visibility map needed: the entries are
+versioned as the rows are).  An adaptive join's
 lookups want the left columns read above the join and by their own
 condition, not its hash keys (`prune`).
 
@@ -3795,7 +3798,7 @@ value at run time is `NULL` or would not convert exactly
 (`exec::key_range_exact`), all are checked on whole rows.  A range
 below a bound only starts past the part's `NULL` keys.  An index scan
 that wants no column — `count(*)` over the range — reads the entries
-alone (`IndexRows::keys_only`; not a sealed table's, whose destroyed
+alone (`exec::FromEntries`; not a sealed table's, whose destroyed
 rows its fetch tells): an entry is visible exactly when its row version
 is, so the count needs no visibility map.
 

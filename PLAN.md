@@ -13214,7 +13214,7 @@ Still held whole: a recursive `UNION`'s rows seen.
      *Primary key columns from the entries ✅*: a lookup wanting only
      primary key columns, of types their key encoding gives back exactly
      (integers, booleans, text, bytes, dates, times), reads them from its
-     entries (`exec::in_primary_key`; PostgreSQL's index-only scans need
+     entries (`exec::FromEntries`; PostgreSQL's index-only scans need
      the visibility map, nucleus's entries are versioned as the rows
      are); and an adaptive join's lookups want the columns read above the
      join and by their own condition, not the hash keys (`prune`: the
@@ -13222,9 +13222,18 @@ Still held whole: a recursive `UNION`'s rows seen.
      ABBA: `sum(e.id)` over the 20,000 keys 133 → 52 ms on one worker,
      63 → 31 on ten; 2,047 descendants 5.0–5.4 → 3.6–4.0 ms
      (PostgreSQL 1.25), the `UNION` walk 5.5–6.0 → 4.1–4.4 ms, whole tree
-     0.67 → 0.64 s.  Left: the index's own columns from its entries
-     (plain columns only: an expression's or a taught ordering's entry
-     holds another value).
+     0.67 → 0.64 s.
+     *The index's own columns from its entries ✅*: those it holds by
+     their values (not an expression's or a taught ordering's, whose
+     entries hold another value), of the same exact types, with the
+     primary key's (`exec::FromEntries`); a scan wanting every column
+     (`prune` marks none) is one too.  ABBA (one worker): the 20,000
+     keys' `sum(e.id + e.parent)` 128 → 49 ms (PostgreSQL 18, a hash
+     join: 87); a 20,000-entry range `sum(parent)` 21 → 4.4 ms, with
+     `id` 21 → 5.3 (PostgreSQL's index-only and index scans 0.9 and
+     1.3 ms — nucleus's ~220 ns an entry is item 3's allocation and the
+     row-at-a-time path: a batch source over an index's entries is
+     left).
   4. **Each round chooses ✅** — without the index the whole tree took
      0.93 s (PostgreSQL 2.8 s): the round hashed, the table scanned once
      a round, three times faster than 2,000,000 lookups.  So the step's

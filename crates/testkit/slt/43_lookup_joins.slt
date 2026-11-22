@@ -287,6 +287,116 @@ SELECT pn.n, octet_length(pn.ch) FROM kl JOIN pn ON pn.p = kl.k WHERE pn.n < 110
 501.25 3
 502.25 3
 
+# An index's own columns too, where it holds their values: not an
+# expression's (`upper(u)` holds 'U5', not 'u5'), nor of a type its key
+# encoding changes.  A unique index's entries are keyed by its values
+# alone, NULL's by the primary key too.
+statement ok
+CREATE TABLE qx (id int PRIMARY KEY, m numeric, ch char(3), r real, u text UNIQUE, v int)
+
+statement ok
+INSERT INTO qx SELECT i, i * 0.25 + 0.50, substr('abc', 1 + i % 3, 1 + i % 2), i * 0.1, CASE WHEN i % 1000 = 0 THEN NULL ELSE 'u' || i END, i % 3 FROM generate_series(1, 20000) i
+
+statement ok
+CREATE INDEX qx_m ON qx (m, ch, r)
+
+statement ok
+CREATE INDEX qx_up ON qx ((upper(u)))
+
+statement ok
+ANALYZE
+
+query III rowsort
+SELECT px.p, px.a, px.g FROM kl JOIN px ON px.p = kl.k WHERE px.a < 4100
+----
+1 1 1
+1 2001 6
+1 4001 4
+2 2 2
+2 2 2
+2 2002 0
+2 2002 0
+2 4002 5
+2 4002 5
+3 2003 1
+3 3 3
+3 4003 6
+7 2007 5
+7 4007 3
+7 7 0
+
+query I
+SELECT sum(p) FROM px WHERE p BETWEEN 1500 AND 1510
+----
+165550
+
+query IT rowsort
+SELECT p, b FROM px WHERE p BETWEEN 5 AND 6 AND a < 2100
+----
+5 x2005
+5 x5
+6 x2006
+6 x6
+
+query TI
+SELECT u, id FROM qx WHERE upper(u) = 'U5'
+----
+u5 5
+
+query TIR rowsort
+SELECT m, octet_length(ch), r FROM qx WHERE m BETWEEN 10 AND 11
+----
+10.00 3 3.800
+10.25 3 3.900
+10.50 3 4.000
+10.75 3 4.100
+11.00 3 4.200
+
+query IT rowsort
+SELECT id, u FROM qx WHERE u BETWEEN 'u100' AND 'u1003'
+----
+100 u100
+10001 u10001
+10002 u10002
+10003 u10003
+10004 u10004
+10005 u10005
+10006 u10006
+10007 u10007
+10008 u10008
+10009 u10009
+1001 u1001
+10010 u10010
+10011 u10011
+10012 u10012
+10013 u10013
+10014 u10014
+10015 u10015
+10016 u10016
+10017 u10017
+10018 u10018
+10019 u10019
+1002 u1002
+10020 u10020
+10021 u10021
+10022 u10022
+10023 u10023
+10024 u10024
+10025 u10025
+10026 u10026
+10027 u10027
+10028 u10028
+10029 u10029
+1003 u1003
+
+query IT rowsort
+SELECT id, u FROM qx WHERE u IS NULL AND id < 5000
+----
+1000 NULL
+2000 NULL
+3000 NULL
+4000 NULL
+
 # A recursive step's lookups give the columns read above the join and by
 # their own condition (`tr.w`, past the keys).
 statement ok
