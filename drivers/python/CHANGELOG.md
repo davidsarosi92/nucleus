@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A date or timestamp Python cannot hold (before year 1, past 9999;
+  the database has them) raised `OverflowError` in the middle of the
+  replies, which stayed unread: the next query read the rest of this
+  one's (`SELECT 42` came back empty, and the query after it got 42).
+  Now it is a `DataError` (`22008`) once the replies are read — in a
+  pipeline the statement's place holds it; a stream fails that row and
+  goes on.
 - `load` sends a `vector` column of float32 numpy arrays (a 2-D array,
   or a list of 1-D arrays of one dimension, without NULLs) as one block
   a batch: 900,000 SIFT vectors encoded in 0.4 s, not 2.2.

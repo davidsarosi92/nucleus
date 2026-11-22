@@ -12928,6 +12928,17 @@ Found and fixed:
   addresses a later copy reuses; probes with `LIMIT`s and joins inside
   subqueries over partitions found nothing, so they stay as they are,
   noted here.
+- The Python driver lost its place on a date Python cannot hold: a
+  fuzzer's `date + n` past year 9999 raised `OverflowError` while a row
+  was decoded, and the rest of the replies stayed unread — the next
+  query read them (`SELECT 42` returned no rows, the one after it 42):
+  wrong answers on a live connection.  Now a row's value Python cannot
+  hold is a `DataError` (`22008`, psycopg's way) raised once the replies
+  are read up to Ready (a pipeline's statement holds it; a stream fails
+  that row only).  Tested by `test_a_value_python_cannot_hold` (server
+  and embedded editions; fails with the old reader).  The other drivers
+  are not yet checked for the same (a value their date types cannot hold,
+  thrown mid-reply).
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,

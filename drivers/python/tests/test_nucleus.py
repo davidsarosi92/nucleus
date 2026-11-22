@@ -307,6 +307,29 @@ class Conformance(unittest.TestCase):
             self.assertEqual(len(c.query("SELECT 1; SELECT 2")), 2)
             self.assertEqual(c.execute("SELECT 3").rows, [(3,)])
 
+    def test_a_value_python_cannot_hold(self):
+        # A date past year 9999 (the database has them; Python does not):
+        # a DataError, and the connection keeps its place — the next
+        # query reads its own replies, not the rest of this one's.
+        with connect() as c:
+            far = "SELECT 1, DATE '9999-12-31' + 10 UNION ALL SELECT 2, DATE '2020-01-01'"
+            for q in [far, "SELECT TIMESTAMP '9999-12-31 23:00' + INTERVAL '2 days'",
+                      "SELECT DATE '0001-01-01' - 1"]:
+                with self.assertRaises(nucleus.DataError) as e:
+                    c.execute(q)
+                self.assertEqual(e.exception.code, "22008")
+                self.assertEqual(c.execute("SELECT 42").rows, [(42,)])
+            out = c.pipeline([far, "SELECT 43"])
+            self.assertIsInstance(out[0], nucleus.DataError)
+            self.assertEqual(out[1].rows, [(43,)])
+            # A stream: that row fails, the rest come.
+            s = c.stream(far)
+            with self.assertRaises(nucleus.DataError):
+                next(s)
+            self.assertEqual(next(s), (2, dt.date(2020, 1, 1)))
+            self.assertEqual(list(s), [])
+            self.assertEqual(c.execute("SELECT 44").rows, [(44,)])
+
     def test_transactions(self):
         t = table()
         with connect() as c:

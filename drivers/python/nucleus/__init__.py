@@ -797,14 +797,22 @@ class Connection:
                 columns = _columns(r)
                 rows = []
             elif kind == b"D":
-                rows.append(tuple(r.value() for _ in columns))
+                # A value Python cannot hold fails the query, its replies
+                # read to the end all the same (else the next query would
+                # read this one's).
+                try:
+                    rows.append(_row(r, columns))
+                except DataError as e:
+                    if error is None:
+                        error = e
             elif kind == b"K":
                 command = r.str()
                 (count,) = r.unpack("<Q")
                 results.append(Result(columns or [], rows if columns is not None else [], command, count))
                 columns, rows = None, []
             elif kind == b"E":
-                error = _server_error(r)
+                if error is None:
+                    error = _server_error(r)
             elif kind == b"I":
                 self._refuse_copy()
             elif kind == b"R":
@@ -1176,6 +1184,16 @@ def _columns(r):
     return columns
 
 
+def _row(r, columns):
+    """A row's values.  One Python cannot hold — a date or timestamp
+    before year 1 or past 9999, which the database has — is a
+    ``DataError`` (``22008``), as psycopg has it."""
+    try:
+        return tuple(r.value() for _ in columns)
+    except (OverflowError, ValueError) as e:
+        raise DataError(f"a value Python cannot hold: {e}", "22008") from e
+
+
 class Stream:
     """One statement's rows as they arrive (``Connection.stream``): iterate
     it; ``columns``, and once every row is read ``command`` and ``count``.
@@ -1220,7 +1238,7 @@ class Stream:
 
     def __next__(self):
         r = _Reader(self._next_body())
-        return tuple(r.value() for _ in self.columns)
+        return _row(r, self.columns)
 
     def _next_body(self):
         """The body of the next row (or batch)."""
