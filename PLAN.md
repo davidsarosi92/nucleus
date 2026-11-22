@@ -13067,6 +13067,20 @@ Found and fixed:
   PostgreSQL 18's (three mutations — a reference without `RETURNING`,
   the `RETURNING` rows dropped, `UPDATE` not given the CTEs — each
   failing).
+- Issue #16, seventh step — `COPY t [(columns)] | (query) TO STDOUT
+  [options]`: the rows as lines in PostgreSQL's text format or CSV
+  (`copy::copy_to`, the escaping and quoting PostgreSQL's
+  `CopyAttributeOut*`), `HEADER` too; to the front end through
+  `Sink::copy_out` / `copy_line` — pg-compat sends `CopyOutResponse`,
+  `CopyData`, `CopyDone`; other front ends get the lines as rows of one
+  text column, so every client and driver has it unchanged.  Found on
+  the way: `(…, NULL 'x')` in `COPY`'s newer option syntax was a syntax
+  error (`NULL` is reserved) — fixed for `FROM` too.  Tested by
+  `81_copy_to.slt` (each line PostgreSQL 18's; over pg-compat's wire
+  too, as `CopyOut`), the copy tests, and a real driver's copy-out
+  through pg-compat (three mutations — the
+  delimiter's escape, CSV's quoting of the `NULL` string, `CopyDone` —
+  each failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and

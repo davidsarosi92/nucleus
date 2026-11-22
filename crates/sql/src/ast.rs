@@ -657,6 +657,14 @@ pub enum Statement {
         /// How the data is written.
         options: CopyOptions,
     },
+    /// `COPY t [(columns)] | (query) TO STDOUT [options]`: the rows as
+    /// text or CSV, to the client.
+    CopyTo {
+        /// What is copied.
+        source: CopySource,
+        /// How the data is written.
+        options: CopyOptions,
+    },
     /// `COMMENT ON TABLE t | COLUMN t.c IS 'text' | NULL`.
     Comment {
         /// The table.
@@ -668,13 +676,28 @@ pub enum Statement {
     },
 }
 
+/// What `COPY … TO` copies.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CopySource {
+    /// A table's columns (`None`: every column, in order).
+    Table {
+        /// The table.
+        table: String,
+        /// The columns.
+        columns: Option<Vec<String>>,
+    },
+    /// A query's rows.
+    Query(Box<Query>),
+}
+
 /// How `COPY`'s data is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CopyOptions {
     /// `text` (PostgreSQL's: tab-separated, `\N` for NULL, backslash
     /// escapes) or `csv`.
     pub csv: bool,
-    /// The first line names the columns (skipped).
+    /// The first line names the columns (skipped by `FROM`, written by
+    /// `TO`).
     pub header: bool,
     /// Between fields (a tab for text, `,` for CSV).
     pub delimiter: u8,

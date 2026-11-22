@@ -395,7 +395,7 @@ before a generation's queries records what each returned
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
 | `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
 | `SELECT … FOR UPDATE` | a `SERIALIZABLE` transaction |
-| `COPY … TO`, `COPY … FROM 'file'` | a query (`batches` in the drivers); `COPY t FROM STDIN` with the data from the client (a driver's copy, `ncsql \copy`) |
+| `COPY … TO 'file'`, `COPY … FROM 'file'` | `COPY t TO STDOUT` / `COPY (query) TO STDOUT [(FORMAT csv, HEADER)]` (the lines as rows of one column, `copy`, or a pg driver's copy-out), or a query (`batches` in the drivers); `COPY t FROM STDIN` with the data from the client (a driver's copy, `ncsql \copy`) |
 | `$$` strings, user-defined functions, `TABLESAMPLE`, time zones other than UTC | — |
 
 ## Finding your way

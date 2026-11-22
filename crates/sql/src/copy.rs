@@ -7,7 +7,7 @@
 
 use nucleus_kv::KvTxn;
 
-use crate::ast::CopyOptions;
+use crate::ast::{CopyOptions, CopySource};
 use crate::catalog::{self, Table};
 use crate::dml::{Built, RowBuilder, Writer, insert_batch};
 use crate::error::{Error, Result};
@@ -644,6 +644,177 @@ const LOAD_BATCH: usize = 4 << 20;
 
 /// Records a worker parses at a turn.
 const PART_RECORDS: usize = 2048;
+
+/// `COPY t [(columns)] | (query) TO STDOUT`: the rows, a line each, in
+/// PostgreSQL's text format or CSV, to `sink`; how many.
+pub fn copy_to(
+    txn: &dyn KvTxn,
+    reg: &Registry,
+    source: &CopySource,
+    options: &CopyOptions,
+    params: &[crate::types::Value],
+    sink: &mut dyn Sink,
+) -> Result<u64> {
+    let query;
+    let q = match source {
+        CopySource::Query(q) => &**q,
+        CopySource::Table { table, columns } => {
+            query = table_query(table, columns);
+            &query
+        }
+    };
+    let bound = crate::binder::Binder::new(txn, reg).checked().query(q)?;
+    let plan = crate::optimizer::optimize(bound.plan, txn);
+    let columns: Vec<OutColumn> = bound
+        .scope
+        .cols
+        .into_iter()
+        .map(|c| OutColumn {
+            name: c.name,
+            ty: c.ty.unwrap_or(crate::types::DataType::Text),
+            not_null: c.not_null,
+        })
+        .collect();
+    let mut ctx = Ctx::new(txn, reg, params);
+    ctx.needed = crate::prune::needed(&plan);
+    sink.copy_out(&columns)?;
+    let mut line = String::new();
+    if options.header {
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        write_line(&mut line, names.iter().map(|n| Some(*n)), options);
+        if sink.copy_line(std::mem::take(&mut line))?.is_break() {
+            return Ok(0);
+        }
+    }
+    let mut n = 0;
+    for row in crate::exec::build(&plan, &ctx, None)? {
+        let row = row?;
+        crate::budget::charge_rows(n as usize + 1)?;
+        let texts: Vec<Option<String>> = row
+            .iter()
+            .map(|v| (!v.is_null()).then(|| v.render()))
+            .collect();
+        write_line(&mut line, texts.iter().map(|t| t.as_deref()), options);
+        if sink.copy_line(std::mem::take(&mut line))?.is_break() {
+            break;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// `SELECT columns FROM table` (every column without a list).
+fn table_query(table: &str, columns: &Option<Vec<String>>) -> crate::ast::Query {
+    use crate::ast::{Expr, Query, Select, SelectItem, SetExpr, TableRef};
+    let items = match columns {
+        None => vec![SelectItem::Wildcard],
+        Some(cols) => cols
+            .iter()
+            .map(|c| SelectItem::Expr {
+                expr: Expr::Column {
+                    table: None,
+                    name: c.clone(),
+                },
+                alias: None,
+            })
+            .collect(),
+    };
+    Query {
+        with: None,
+        body: SetExpr::Select(Box::new(Select {
+            distinct: false,
+            items,
+            from: vec![TableRef::Table {
+                schema: None,
+                name: table.to_string(),
+                alias: None,
+                columns: vec![],
+                sample: None,
+                as_of: None,
+            }],
+            filter: None,
+            group_by: vec![],
+            grouping_sets: None,
+            having: None,
+            windows: vec![],
+        })),
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    }
+}
+
+/// A line of `fields` (`None`: `NULL`) as `options` write them, with its
+/// end of line, into `out`.
+fn write_line<'a>(
+    out: &mut String,
+    fields: impl Iterator<Item = Option<&'a str>>,
+    options: &CopyOptions,
+) {
+    let single = {
+        let (lo, hi) = fields.size_hint();
+        lo == 1 && hi == Some(1)
+    };
+    for (i, f) in fields.enumerate() {
+        if i > 0 {
+            out.push(options.delimiter as char);
+        }
+        match f {
+            None => out.push_str(&options.null),
+            Some(s) if options.csv => csv_field(out, s, single, options),
+            Some(s) => text_field(out, s, options.delimiter as char),
+        }
+    }
+    out.push('\n');
+}
+
+/// PostgreSQL's text format: a backslash before itself and the
+/// delimiter, control characters as their escapes.
+fn text_field(out: &mut String, s: &str, delimiter: char) {
+    for c in s.chars() {
+        match c {
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            '\\' => out.push_str("\\\\"),
+            c if c == delimiter => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+}
+
+/// CSV: quoted when it holds the delimiter, the quote or an end of line,
+/// reads as the `NULL` string, or (alone on its line) is `\.`; within
+/// quotes the quote and the escape follow the escape.
+fn csv_field(out: &mut String, s: &str, single: bool, options: &CopyOptions) {
+    let (delimiter, quote, escape) = (
+        options.delimiter as char,
+        options.quote as char,
+        options.escape as char,
+    );
+    let quoted = s == options.null
+        || (single && s == "\\.")
+        || s.chars()
+            .any(|c| c == delimiter || c == quote || c == '\n' || c == '\r');
+    if !quoted {
+        out.push_str(s);
+        return;
+    }
+    out.push(quote);
+    for c in s.chars() {
+        if c == quote || c == escape {
+            out.push(escape);
+        }
+        out.push(c);
+    }
+    out.push(quote);
+}
 
 #[cfg(test)]
 mod tests {

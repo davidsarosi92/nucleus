@@ -1,0 +1,78 @@
+# COPY … TO STDOUT (issue #16).  Here the data's lines come as rows of
+# one text column (a front end without PostgreSQL's CopyOut), so the
+# records are nucleus-only; each line is PostgreSQL 18's.
+
+statement ok
+CREATE TABLE c (id int PRIMARY KEY, t text, n numeric, b bool, a int[])
+
+statement ok
+INSERT INTO c VALUES (1, 'plain', 1.50, true, '{1,2}'), (2, E'tab\there|pipe', NULL, false, NULL), (3, E'line\nbreak\\back', 0, NULL, '{}'), (4, '', -2.25, true, '{3}'), (5, 'say "hi", ok', 7, false, '{NULL,4}')
+
+# nucleus-only: the text format, its escapes and \N.
+query T
+COPY c (id, t) TO STDOUT WITH (DELIMITER '|')
+----
+1|plain
+2|tab\there\|pipe
+3|line\nbreak\\back
+4|
+5|say "hi", ok
+
+query T
+COPY c (n) TO STDOUT
+----
+1.50
+\N
+0
+-2.25
+7
+
+# nucleus-only: CSV, quoting what needs it; the old option syntax.
+query T
+COPY (SELECT * FROM c WHERE id <> 3) TO STDOUT WITH (FORMAT csv, HEADER)
+----
+id,t,n,b,a
+1,plain,1.50,t,"{1,2}"
+2,tab	here|pipe,,f,
+4,"",-2.25,t,{3}
+5,"say ""hi"", ok",7,f,"{NULL,4}"
+
+query T
+COPY (SELECT id * 10 AS ten, upper(t) FROM c WHERE id < 3 ORDER BY id DESC) TO STDOUT (FORMAT csv, NULL 'NULL', QUOTE '''', DELIMITER ';')
+----
+20;TAB	HERE|PIPE
+10;PLAIN
+
+query T
+COPY (SELECT '\.' AS x) TO STDOUT CSV
+----
+"\."
+
+query T
+COPY (SELECT 1 AS "a b", 2 AS "c,d") TO STDOUT CSV HEADER
+----
+a b,"c,d"
+1,2
+
+query T
+COPY (SELECT 1 AS "a b", 2 AS "c|d") TO STDOUT WITH (HEADER, DELIMITER '|')
+----
+a b|c\|d
+1|2
+
+query T
+COPY (SELECT 1 WHERE false) TO STDOUT
+----
+
+statement error 0A000
+COPY c TO '/tmp/x'
+
+statement error 42P01
+COPY nope TO STDOUT
+
+statement error 42703
+COPY c (nope) TO STDOUT
+
+# A query's own errors stay its own.
+statement error 22012
+COPY (SELECT 1 / 0) TO STDOUT

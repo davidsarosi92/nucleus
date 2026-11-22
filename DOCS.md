@@ -2296,7 +2296,8 @@ kept in the table's record, shown in `nc_catalog.tables` and `.columns`,
 `ncsql \d` and pg-compat's `obj_description` / `col_description` /
 `pg_description`), `COPY t [(columns)] FROM STDIN [[WITH] (FORMAT text |
 csv, HEADER [bool], DELIMITER 'c', NULL 'n', QUOTE 'q', ESCAPE 'e')]` (or
-the older `WITH CSV HEADER DELIMITER ';' …`; §8.7).  Table names may
+the older `WITH CSV HEADER DELIMITER ';' …`; §8.7), `COPY t [(columns)]
+| (query) TO STDOUT [options]` (§8.7).  Table names may
 be qualified with `public.` (and, to read, `nc_catalog.`, `pg_catalog.`,
 `information_schema.`).
 
@@ -2352,7 +2353,7 @@ OVER name | ([name] [PARTITION BY …] [ORDER BY …] [ROWS | RANGE | GROUPS
 OTHERS]])`, a bound `UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n
 FOLLOWING | UNBOUNDED FOLLOWING` (§8.5).
 
-Not yet: `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
+Not yet: `COPY … TO` or `FROM` a server-side file, `TIMETZ`, time zones other than
 UTC, multi-dimensional arrays, user functions,
 the rest of issue #16's forms.
 
@@ -3394,8 +3395,21 @@ missing parent (PostgreSQL's order).  A column table (§8.15) takes an
 ascending batch into its gathered rows at once when nothing stored lies
 between its first and last key.  A front end without a client to read from refuses it
 (`0A000`); `Session::run_copy(stmt, params, reader)` reads it from any
-`Read`.  `COPY … TO` and from a server-side file are not supported (a
-query reads; the client sends files).
+`Read`.  From a server-side file is not supported (the client sends
+files).
+
+`COPY t [(columns)] | (query) TO STDOUT [options]` (`copy::copy_to`)
+runs the query (`SELECT columns FROM t` for a table) and writes each row
+as a line in PostgreSQL's text format (a backslash before itself and the
+delimiter, control characters escaped, `\N` for `NULL`) or CSV (a field
+quoted when it holds the delimiter, the quote or an end of line, reads
+as the `NULL` string, or is `\.` alone), `HEADER` naming the columns
+first; the same options as `FROM`.  The lines go to the front end
+through `Sink::copy_out` / `copy_line`: pg-compat sends them as
+PostgreSQL's `CopyOutResponse`, `CopyData` and `CopyDone` (psql's
+`\copy … to`, drivers' copy-out); any other front end gets them, by
+default, as rows of one text column, `copy`.  To a server-side file:
+`0A000`.
 
 Sessions: outside `BEGIN` every statement is its own transaction, retried
 up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the

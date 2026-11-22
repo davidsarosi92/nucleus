@@ -162,6 +162,14 @@ impl Connection for Client {
                     }
                     rows.get_or_insert_with(Vec::new).push(row);
                 }
+                // COPY … TO STDOUT: its lines as rows of one column, as
+                // the core's front ends give them.
+                b'H' => rows = Some(Vec::new()),
+                b'd' => {
+                    let line = String::from_utf8(body.to_vec()).unwrap();
+                    let line = line.strip_suffix('\n').unwrap_or(&line).to_string();
+                    rows.get_or_insert_with(Vec::new).push(vec![Some(line)]);
+                }
                 b'E' => err = Some(error_fields(&body)),
                 b'Z' => return err.map_or(Ok(rows), Err),
                 _ => {}
@@ -740,6 +748,48 @@ fn copy_from_stdin_with_a_real_driver() {
         got,
         vec![(1, Some("one".into())), (2, None), (3, Some("a, b".into()))]
     );
+}
+
+/// `COPY … TO STDOUT` through a real PostgreSQL driver: the data as
+/// `CopyOut`, text and CSV, then `CopyDone`; an error during it, and the
+/// connection going on after it.
+#[test]
+fn copy_to_stdout_with_a_real_driver() {
+    use postgres::{Client as Pg, NoTls};
+    let addr = start(Config::default());
+    let mut db = Pg::connect(
+        &format!(
+            "host=127.0.0.1 port={} user=nucleus password=nucleus",
+            addr.port()
+        ),
+        NoTls,
+    )
+    .unwrap();
+    db.batch_execute(
+        "CREATE TABLE co (id INT PRIMARY KEY, name TEXT); \
+         INSERT INTO co VALUES (1, 'one'), (2, NULL), (3, 'a, b')",
+    )
+    .unwrap();
+    let mut out = String::new();
+    db.copy_out("COPY co TO STDOUT")
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(out, "1\tone\n2\t\\N\n3\ta, b\n");
+    out.clear();
+    db.copy_out("COPY (SELECT name, id FROM co WHERE id > 1) TO STDOUT (FORMAT csv, HEADER)")
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(out, "name,id\n,2\n\"a, b\",3\n");
+    // A row sent, then the error.
+    let failed = match db.copy_out("COPY (SELECT 1 / (id - 2) FROM co) TO STDOUT") {
+        Err(_) => true,
+        Ok(mut r) => r.read_to_string(&mut String::new()).is_err(),
+    };
+    assert!(failed);
+    let n: i64 = db.query_one("SELECT count(*) FROM co", &[]).unwrap().get(0);
+    assert_eq!(n, 3);
 }
 
 /// A client's bytes, and what the server wrote back.

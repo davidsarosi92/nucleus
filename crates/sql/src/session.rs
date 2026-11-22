@@ -101,6 +101,25 @@ pub trait Sink {
     fn copy_data(&mut self) -> Result<Option<crate::copy::Chunk>> {
         Ok(None)
     }
+
+    /// `COPY … TO STDOUT` begins: the columns of the data it sends.  By
+    /// default its lines come as rows of one text column, `copy`; a front
+    /// end that passes data to its client as it is (PostgreSQL's
+    /// `CopyOut`) takes them so instead.
+    fn copy_out(&mut self, _columns: &[OutColumn]) -> Result<()> {
+        self.columns(&[OutColumn {
+            name: "copy".into(),
+            ty: DataType::Text,
+            not_null: true,
+        }])
+    }
+
+    /// A line of `COPY … TO`'s data, its end of line (`\n`) included.
+    /// `Break`: no more is wanted.
+    fn copy_line(&mut self, mut line: String) -> Result<ControlFlow<()>> {
+        line.pop();
+        self.row(vec![Value::Text(line)])
+    }
 }
 
 /// A sink keeping the whole result: what [`Session::run`] returns.
@@ -161,6 +180,17 @@ impl Sink for Counted<'_> {
     }
     fn copy_data(&mut self) -> Result<Option<crate::copy::Chunk>> {
         self.sink.copy_data()
+    }
+    fn copy_out(&mut self, columns: &[OutColumn]) -> Result<()> {
+        self.started = true;
+        self.sink.copy_out(columns)
+    }
+    fn copy_line(&mut self, line: String) -> Result<ControlFlow<()>> {
+        let flow = self.sink.copy_line(line)?;
+        if flow.is_continue() {
+            self.rows += 1;
+        }
+        Ok(flow)
     }
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>> {
         if self.cited.is_some() {
@@ -412,6 +442,7 @@ pub fn read_only(stmt: &Statement) -> bool {
     matches!(
         stmt,
         Statement::Query(_)
+            | Statement::CopyTo { .. }
             | Statement::Explain(..)
             | Statement::Show(_)
             | Statement::Lint(_)
@@ -1588,6 +1619,7 @@ impl Session {
                 | Statement::WithStatement { .. }
                 | Statement::Truncate { .. }
                 | Statement::Copy { .. }
+                | Statement::CopyTo { .. }
                 | Statement::Remember(_)
                 | Statement::Explain(..)
                 | Statement::Lint(_)
@@ -2380,6 +2412,10 @@ pub(crate) fn execute_statement(
         } => Output::Command(format!(
             "COPY {}",
             crate::copy::copy_from(txn, reg, table, columns, options, sink)?
+        )),
+        Statement::CopyTo { source, options } => Output::Command(format!(
+            "COPY {}",
+            crate::copy::copy_to(&*txn, reg, source, options, params, sink)?
         )),
         Statement::Comment {
             table,

@@ -137,7 +137,7 @@ fn copy_without_data_is_refused_and_options_are_checked() {
     let e = s.execute("COPY t FROM STDIN").unwrap_err();
     assert_eq!(e.code, "0A000");
     for (sql, code) in [
-        ("COPY t TO STDOUT", "0A000"),
+        ("COPY t TO '/tmp/t'", "0A000"),
         ("COPY t FROM '/etc/passwd'", "0A000"),
         ("COPY t FROM STDIN WITH (FORMAT binary)", "0A000"),
         ("COPY t FROM STDIN WITH (DELIMITER 'ab')", "0A000"),
@@ -160,6 +160,17 @@ fn copy_without_data_is_refused_and_options_are_checked() {
             vec![Value::Int(1), Value::Null],
             vec![Value::Int(2), Value::Text("x;y".into())],
         ]
+    );
+    // The newer syntax's `NULL` (a reserved word as the option's name).
+    copy(
+        &mut s,
+        "COPY t FROM STDIN WITH (FORMAT csv, NULL 'NA')",
+        "3,NA\n",
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT b IS NULL FROM t WHERE a = 3"),
+        vec![vec![Value::Bool(true)]]
     );
 }
 

@@ -1096,6 +1096,8 @@ struct Rows<'a, W: Write> {
     columns: Vec<OutColumn>,
     /// The connection failed: the statement stopped on it.
     broken: Option<io::Error>,
+    /// `COPY … TO STDOUT` sent `CopyOutResponse`: `CopyDone` is due.
+    copying_out: bool,
 }
 
 impl<W: Write> Rows<'_, W> {
@@ -1110,6 +1112,24 @@ impl<W: Write> Rows<'_, W> {
 }
 
 impl<W: Write> Sink for Rows<'_, W> {
+    fn copy_out(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
+        // CopyOutResponse: text, every column text.
+        let mut m = Msg::new(b'H').u8(0).i16(columns.len() as i16);
+        for _ in columns {
+            m = m.i16(0);
+        }
+        self.out.write_all(&m.finish()).map_err(|e| self.broke(e))?;
+        self.copying_out = true;
+        Ok(())
+    }
+
+    fn copy_line(&mut self, line: String) -> Result<ControlFlow<()>, Error> {
+        let mut m = Msg::new(b'd');
+        m.buf.extend_from_slice(line.as_bytes());
+        self.out.write_all(&m.finish()).map_err(|e| self.broke(e))?;
+        Ok(ControlFlow::Continue(()))
+    }
+
     fn copy_in(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
         // CopyInResponse: text, every column text.
         let mut m = Msg::new(b'G').u8(0).i16(columns.len() as i16);
@@ -1227,13 +1247,20 @@ impl Conn {
                 formats: &[],
                 columns: Vec::new(),
                 broken: None,
+                copying_out: false,
             };
             let r = self.session.run_into(stmt, &[], &mut rows);
             if let Some(e) = rows.broken {
                 return Err(e);
             }
+            let copied = rows.copying_out;
             match r {
-                Ok(tag) => self.out.write_all(&Msg::new(b'C').str(&tag).finish())?,
+                Ok(tag) => {
+                    if copied {
+                        self.out.write_all(&Msg::new(b'c').finish())?;
+                    }
+                    self.out.write_all(&Msg::new(b'C').str(&tag).finish())?
+                }
                 Err(e) => {
                     self.log_error(&e);
                     return send_error(&mut self.out, &e);
@@ -1405,12 +1432,19 @@ impl Conn {
                 formats: &portal.result_formats,
                 columns: Vec::new(),
                 broken: None,
+                copying_out: false,
             };
             let r = self.session.run_into(&stmt, &portal.params, &mut rows);
             if let Some(e) = rows.broken {
                 return Err(proto(e));
             }
+            let copied = rows.copying_out;
             let tag = r?;
+            if copied {
+                self.out
+                    .write_all(&Msg::new(b'c').finish())
+                    .map_err(proto)?;
+            }
             self.out
                 .write_all(&Msg::new(b'C').str(&tag).finish())
                 .map_err(proto)?;

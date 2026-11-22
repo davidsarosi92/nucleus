@@ -849,6 +849,12 @@ impl<'a> Parser<'a> {
     /// 'n'] [QUOTE [AS] 'q'] [ESCAPE [AS] 'e']`.
     fn copy(&mut self) -> Result<Statement> {
         self.pos += 1;
+        if self.eat_op("(") {
+            let query = self.query()?;
+            self.expect_op(")")?;
+            self.expect_kw("to")?;
+            return self.copy_to(CopySource::Query(Box::new(query)));
+        }
         let table = self.relation()?;
         let columns = if self.peek_op("(") {
             Some(self.ident_list()?)
@@ -856,9 +862,7 @@ impl<'a> Parser<'a> {
             None
         };
         if self.eat_kw("to") {
-            return Err(Error::feature(
-                "COPY TO is not supported: read the result with a query (a cursor, or columnar batches)",
-            ));
+            return self.copy_to(CopySource::Table { table, columns });
         }
         self.expect_kw("from")?;
         if !self.eat_kw("stdin") {
@@ -866,6 +870,28 @@ impl<'a> Parser<'a> {
                 "COPY FROM supports STDIN: the client sends the data",
             ));
         }
+        let options = self.copy_options()?;
+        Ok(Statement::Copy {
+            table,
+            columns,
+            options,
+        })
+    }
+
+    /// After `COPY … TO`.
+    fn copy_to(&mut self, source: CopySource) -> Result<Statement> {
+        if !self.eat_kw("stdout") {
+            return Err(Error::feature(
+                "COPY TO supports STDOUT: the client receives the data",
+            ));
+        }
+        let options = self.copy_options()?;
+        Ok(Statement::CopyTo { source, options })
+    }
+
+    /// `COPY`'s options, new (`[WITH] (FORMAT csv, …)`) or old (`[WITH]
+    /// CSV HEADER …`).
+    fn copy_options(&mut self) -> Result<CopyOptions> {
         let mut options = crate::ast::CopyOptions::default();
         let (mut delimiter, mut null) = (None, None);
         let byte = |p: &mut Self, what: &str| -> Result<u8> {
@@ -880,7 +906,14 @@ impl<'a> Parser<'a> {
         let with = self.eat_kw("with");
         if self.eat_op("(") {
             loop {
-                let name = self.ident()?;
+                // An option's name may be a reserved word (`NULL`).
+                let name = match self.peek() {
+                    Some(Token::Word(w)) if w == "null" => {
+                        self.pos += 1;
+                        "null".to_string()
+                    }
+                    _ => self.ident()?,
+                };
                 match name.as_str() {
                     "format" => {
                         let f = self.ident()?;
@@ -947,11 +980,7 @@ impl<'a> Parser<'a> {
         if let Some(n) = null {
             options.null = n;
         }
-        Ok(Statement::Copy {
-            table,
-            columns,
-            options,
-        })
+        Ok(options)
     }
 
     /// A statement of the input: `SELECT … INTO` only where it makes the
