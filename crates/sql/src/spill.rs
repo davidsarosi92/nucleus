@@ -33,6 +33,8 @@ const BLOCK: usize = 64 << 10;
 const ENUM: u8 = 0xF0;
 /// Its array tag (the row encoding's), so arrays of enums keep labels.
 const ARRAY: u8 = 10;
+/// A record (the row encoding's tag).
+const RECORD: u8 = 28;
 
 fn storage(e: nucleus_kv::Error) -> Error {
     Error::internal(format!("scratch space: {e}"))
@@ -60,6 +62,7 @@ pub(crate) fn value_bytes(v: &Value) -> usize {
         Value::Text(s) | Value::Char(s) => s.len(),
         Value::Bytea(b) | Value::Ext(_, b) => b.len(),
         Value::Array(items) => items.iter().map(value_bytes).sum(),
+        Value::Record(fields) => fields.iter().map(value_bytes).sum(),
         Value::Enum(e) => e.key.len() + e.label.len(),
         _ => 0,
     }
@@ -92,6 +95,14 @@ pub(crate) fn encode(out: &mut Vec<u8>, v: &Value, enums: &mut Enums) {
                 encode(out, item, enums);
             }
         }
+        // Its fields as this encoding's (an enum's label kept).
+        Value::Record(fields) => {
+            out.push(RECORD);
+            out.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            for f in fields.iter() {
+                encode(out, f, enums);
+            }
+        }
         v => encode_value(out, v),
     }
 }
@@ -115,6 +126,15 @@ pub(crate) fn decode(r: &mut Reader, enums: &[Value]) -> Result<Value> {
                 items.push(decode(r, enums)?);
             }
             Ok(Value::Array(items))
+        }
+        Some(RECORD) => {
+            r.u8().map_err(bad)?;
+            let n = r.u32().map_err(bad)? as usize;
+            let mut fields = Vec::with_capacity(n.min(1024));
+            for _ in 0..n {
+                fields.push(decode(r, enums)?);
+            }
+            Ok(Value::Record(fields.into()))
         }
         _ => decode_value(r),
     }

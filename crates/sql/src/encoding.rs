@@ -151,11 +151,21 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
             out.push(0x09);
             out.extend_from_slice(&((i.span() ^ i128::MIN) as u128).to_be_bytes());
         }
-        Value::Array(items) => {
+        Value::Array(_) | Value::Record(_) => {
             // Each element after a 01, a NULL element as 02, then 00:
             // element order (a NULL element after the others, as in
             // comparisons), then the shorter first.
-            out.push(0x0A);
+            let items: &[Value] = match v {
+                Value::Array(items) => {
+                    out.push(0x0A);
+                    items
+                }
+                Value::Record(fields) => {
+                    out.push(0x11);
+                    fields
+                }
+                _ => unreachable!(),
+            };
             for item in items {
                 if item.is_null() {
                     out.push(0x02);
@@ -303,7 +313,7 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
         }
         0x07 => (Value::Timestamp((eight(b)? as i64) ^ i64::MIN), 9),
         0x08 => (Value::TimestampTz((eight(b)? as i64) ^ i64::MIN), 9),
-        0x0A => {
+        tag @ (0x0A | 0x11) => {
             let mut items = Vec::new();
             let mut at = 1;
             loop {
@@ -321,7 +331,12 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
                     _ => return Err(bad_key()),
                 }
             }
-            (Value::Array(items), at + 1)
+            let v = if *tag == 0x11 {
+                Value::Record(items.into())
+            } else {
+                Value::Array(items)
+            };
+            (v, at + 1)
         }
         0x09 => {
             let x = u128::from_be_bytes(b.get(1..17).ok_or_else(bad_key)?.try_into().unwrap());
@@ -567,6 +582,14 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
                 encode_value(out, item);
             }
         }
+        // (A query's value: never stored, only spilled.)
+        Value::Record(fields) => {
+            out.push(28);
+            out.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            for f in fields.iter() {
+                encode_value(out, f);
+            }
+        }
         Value::Ext(t, bytes) => {
             out.push(11);
             out.extend_from_slice(&t.id().to_le_bytes());
@@ -658,6 +681,14 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
                 items.push(decode_value(r)?);
             }
             Value::Array(items)
+        }
+        28 => {
+            let n = r.u32().map_err(bad)? as usize;
+            let mut fields = Vec::with_capacity(n.min(1024));
+            for _ in 0..n {
+                fields.push(decode_value(r)?);
+            }
+            Value::Record(fields.into())
         }
         11 => {
             let t = crate::ext::TypeRef::by_id(r.u32().map_err(bad)?);

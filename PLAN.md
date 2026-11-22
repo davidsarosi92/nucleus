@@ -13095,6 +13095,22 @@ Found and fixed:
   but three nucleus-only ones as PostgreSQL 18's (three mutations — the
   equal prefix, the first pair's bound, `IS NULL` over every field —
   each failing).
+- Issue #16, ninth step — a row as a value of its own, `record`
+  (`DataType::Record`, `Value::Record(Arc<[Value]>)`, its `Type`
+  descriptor `RecordType`): `SELECT DISTINCT (a, d)` (the issue's last
+  form), `GROUP BY (a, d)`, `ORDER BY (a, d)`, `count(DISTINCT (a,
+  d))`, a record compared with a row constructor.  Compared field by
+  field, a `NULL` field after the others and equal to a `NULL` (as
+  PostgreSQL's record values; checked); written as `record_out`
+  (`(1,"a b",)`); key, row and spill encodings (spill tag 28 — a sort
+  and a grouping past `work_mem` tested); pg-compat oid 2249 with
+  `record_send`'s binary form; `ncp` as text; never a column's type
+  (`CREATE TABLE … AS`: `42P16`).  Still `0A000`: a row against a
+  subquery (`(a, b) IN (SELECT …)`; its `NULL` meaning is the row
+  comparison's, not the record's).  Tested by `83_records.slt`, every
+  record but two nucleus-only ones as PostgreSQL 18's (three mutations —
+  the spill's decoding, the quoting of a space, a `NULL` field's place —
+  each failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and

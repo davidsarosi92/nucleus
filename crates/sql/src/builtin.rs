@@ -1753,6 +1753,7 @@ fn examples(ty: DataType) -> Vec<Value> {
     use crate::datetime::Interval;
     use crate::decimal::Decimal;
     match ty {
+        DataType::Record => vec![],
         DataType::Bool => vec![Value::Bool(false), Value::Bool(true)],
         DataType::SmallInt | DataType::Integer | DataType::BigInt => {
             let (lo, hi) = ty.int_range().expect("an integer type");
@@ -1889,6 +1890,40 @@ impl Type for EnumType {
     }
 }
 
+/// `record`'s [`Type`]: a row value of a query's (`ROW(…)`), compared
+/// field by field; it reads no text (PostgreSQL's anonymous `record`
+/// does not either).
+struct RecordType;
+
+impl Type for RecordType {
+    fn name(&self) -> &str {
+        "record"
+    }
+    fn category(&self) -> &str {
+        "record"
+    }
+    fn input(&self, _: &str) -> Result<Value> {
+        Err(Error::feature(
+            "input of anonymous composite types is not implemented",
+        ))
+    }
+    fn output(&self, v: &Value) -> String {
+        v.render()
+    }
+    fn equality(&self) -> Option<&dyn Equality> {
+        Some(&Native)
+    }
+    fn hashing(&self) -> Option<&dyn Hashing> {
+        Some(&Native)
+    }
+    fn ordering(&self) -> Option<&dyn TotalOrder> {
+        Some(&Native)
+    }
+    fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
+        Some(&Native)
+    }
+}
+
 /// The [`Type`] behind any type: a built-in one's descriptor (and its
 /// array's), or a registered type's own.
 pub fn type_of(ty: DataType) -> &'static dyn Type {
@@ -1898,6 +1933,9 @@ pub fn type_of(ty: DataType) -> &'static dyn Type {
     }
     if let DataType::Enum(_) = ty {
         return &EnumType;
+    }
+    if let DataType::Record = ty {
+        return &RecordType;
     }
     let all = ALL.get_or_init(|| {
         let mut all: Vec<BuiltinType> = TYPES

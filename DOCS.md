@@ -2401,7 +2401,13 @@ unequal, the ordering ones decided by the first pair not equal (`a1 < b1
 OR (a1 = b1 AND …)`, a `NULL` pair before it making the result `NULL`),
 with the first pair's bound (`a1 <= b1`, implied) before it, so an index
 on the first column bounds the scan.  Unequal lengths are `42601`; a row
-as a value of its own (a record type) or against a subquery `0A000`.
+against a subquery `0A000`.  Anywhere else a row is a value of its own,
+a `record` (`DataType::Record`, `Value::Record`): compared field by
+field, a `NULL` field after the others and equal to a `NULL` (PostgreSQL's
+record values; so `DISTINCT (a, b)`, `GROUP BY (a, b)` and `ORDER BY
+(a, b)` work, also vectorized, in parallel and spilled), written as
+`record_out` does (`(1,"a b",)`); it has key, row and spill encodings
+but is never a column's type (`CREATE TABLE … AS` of one: `42P16`).
 
 A statement's own `WITH` with a data-modifying CTE, or before `INSERT`,
 `UPDATE` or `DELETE`, is a `Statement::WithStatement`: the session runs
@@ -7855,10 +7861,15 @@ with pgvector's `register_vector` works both ways), `sparsevec` 13203
 (listed likewise; text `{1:0.5}/10` as pgvector's, binary pgvector's:
 the dimensions, the non-zero count and an unused `int32`, then the
 0-based positions and the `float4` values, big-endian — positions out of
-order are put in order); other registered types as `text`; text and binary formats for all of them (binary numeric
-and dates checked against PostgreSQL's `*_send`).
+order are put in order); other registered types as `text`; `record`
+2249 (text `(1,"a b",)` as `record_out`, binary `record_send`'s: the
+field count, then each field's type oid, length and binary form); text
+and binary formats for all of them (binary numeric and dates checked
+against PostgreSQL's `*_send`).  `COPY … FROM STDIN` takes `CopyData`
+after `CopyInResponse`; `COPY … TO STDOUT` sends `CopyOutResponse`,
+`CopyData` per line, `CopyDone` (§8.7).
 
-Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
+Not supported: cancellation.  `psql`'s `\d` family works through
 the compatibility catalog (§8.11).
 
 Tests: `crates/client/tests/client.rs` runs every slt script over the
@@ -8044,7 +8055,8 @@ and `COPY FROM STDIN` (`I`, `d`, `e`, `f`).  An older client gets what
 its version knows — registered types as text before 2; before 3,
 `smallint` and `integer` as `bigint` (tag 2), `real` as a double (tag 3),
 `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums as text — so older
-drivers keep working.
+drivers keep working.  A `record` (a row value, `ROW(…)`) is text in
+every version, as PostgreSQL writes it: `(1,"a b",)`.
 
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 bigint, 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp, 8

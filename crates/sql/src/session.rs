@@ -2627,6 +2627,17 @@ pub(crate) fn execute_statement(
             if columns.len() > cols.len() {
                 return Err(Error::syntax("too many column names were specified"));
             }
+            // A record is a query's value, not a column's.
+            if let Some((i, c)) = cols
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.ty == Some(DataType::Record))
+            {
+                return Err(Error::invalid_table_definition(format!(
+                    "column \"{}\" has pseudo-type record",
+                    columns.get(i).unwrap_or(&c.name)
+                )));
+            }
             let specs: Vec<_> = cols
                 .into_iter()
                 .enumerate()

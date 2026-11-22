@@ -720,6 +720,7 @@ pub fn type_oid(t: DataType) -> i64 {
         // Registered types PostgreSQL has no oid for are shown as text.
         // Enums too: PostgreSQL gives each its own oid, nucleus sends labels.
         DataType::Ext(_) | DataType::Enum(_) => 25,
+        DataType::Record => 2249,
         DataType::Array(e) => match e {
             DataType::Bool => 1000,
             DataType::SmallInt => 1005,
@@ -738,7 +739,7 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Interval => 1187,
             DataType::Inet => 1041,
             DataType::Cidr => 651,
-            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => 0,
+            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) | DataType::Record => 0,
         },
     }
 }
@@ -758,6 +759,7 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (700, "float4", 4, "N", 0, 1021, 0),
     (701, "float8", 8, "N", 0, 1022, 0),
     (1042, "bpchar", -1, "S", 0, 1014, 100),
+    (2249, "record", -1, "P", 0, 2287, 0),
     (1043, "varchar", -1, "S", 0, 1015, 100),
     (1082, "date", 4, "D", 0, 1182, 0),
     (1083, "time", 8, "D", 0, 1183, 0),

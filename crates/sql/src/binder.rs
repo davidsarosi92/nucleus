@@ -2832,6 +2832,9 @@ impl<'a> Binder<'a> {
                 query,
                 negated,
             } => {
+                if matches!(**expr, A::Row(_)) {
+                    return Err(crate::rows::unsupported());
+                }
                 let (x, xt) = self.expr(expr, scope)?;
                 let (plan, s, correlated) = self.subquery(query, scope)?;
                 if s.cols.len() != 1 {
@@ -2864,7 +2867,13 @@ impl<'a> Binder<'a> {
         }
         Ok(match e {
             A::Literal(v) => (Expr::Literal(v.clone()), literal_type(v)),
-            A::Row(_) => return Err(crate::rows::unsupported()),
+            A::Row(fields) => {
+                let mut bound = Vec::with_capacity(fields.len());
+                for f in fields {
+                    bound.push(sub(f, self)?.0);
+                }
+                (crate::rows::record(bound), Some(DataType::Record))
+            }
             A::Column { .. }
             | A::Exists { .. }
             | A::Subquery(_)

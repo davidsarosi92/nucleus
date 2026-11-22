@@ -14,16 +14,58 @@
 //! - `IS [NOT] DISTINCT FROM`: a pair distinct; `[NOT] IN (rows…)`: equal
 //!   to one; `IS NULL`: every field `NULL`, `IS NOT NULL`: none.
 //!
-//! A row is not a value of its own yet (a record type): one anywhere else
-//! is `0A000`.
+//! Anywhere else a row is a value of its own, a `record` ([`record`]): its
+//! fields, compared field by field (a `NULL` after the others and equal to
+//! a `NULL`, as PostgreSQL's record values are — and as `DISTINCT`,
+//! grouping and `ORDER BY` want), written as PostgreSQL's `(a,b)`; so is a
+//! row constructor compared with a record that is not one.
+
+use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use crate::ast::{BinaryOp, Expr, UnaryOp};
 use crate::error::{Error, Result};
+use crate::ext::{ArgInfo, CallContext, FnRef, ScalarFunction, Signature, Volatility};
+use crate::types::Value;
+
+/// The `record` of `fields` (bound).
+pub(crate) fn record(fields: Vec<crate::expr::Expr>) -> crate::expr::Expr {
+    crate::expr::Expr::Call(FnRef::new(Arc::new(Record)), fields)
+}
+
+struct Record;
+
+impl ScalarFunction for Record {
+    fn name(&self) -> &str {
+        "row"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        0..=usize::MAX
+    }
+
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        Err(Error::internal("ROW(…) is bound by the binder"))
+    }
+
+    /// `ROW(NULL, NULL)` is a record, not `NULL`.
+    fn strict(&self) -> bool {
+        false
+    }
+
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        Ok(Value::Record(args.into()))
+    }
+}
 
 /// `e` with its row comparison rewritten, if it is one.
 pub(crate) fn expand(e: &Expr) -> Result<Option<Expr>> {
     Ok(Some(match e {
-        Expr::Binary { op, left, right } if is_row(left) || is_row(right) => {
+        Expr::Binary { op, left, right } if is_row(left) && is_row(right) => {
             if !matches!(
                 op,
                 BinaryOp::Eq
@@ -39,7 +81,7 @@ pub(crate) fn expand(e: &Expr) -> Result<Option<Expr>> {
             compare(*op, &l, &r)
         }
         Expr::Function { name, args, .. }
-            if name == "__is_distinct_from" && args.iter().any(is_row) =>
+            if name == "__is_distinct_from" && args.iter().all(is_row) =>
         {
             let (l, r) = pairs(&args[0], &args[1])?;
             any(l
@@ -64,7 +106,7 @@ pub(crate) fn expand(e: &Expr) -> Result<Option<Expr>> {
             expr,
             list,
             negated,
-        } if is_row(expr) || list.iter().any(is_row) => {
+        } if is_row(expr) && list.iter().all(is_row) => {
             let mut equal = Vec::with_capacity(list.len());
             for item in list {
                 let (l, r) = pairs(expr, item)?;
@@ -80,10 +122,10 @@ pub(crate) fn expand(e: &Expr) -> Result<Option<Expr>> {
     }))
 }
 
-/// The error for a row anywhere but in a comparison of rows.
+/// The error for a row compared with what is not a row constructor.
 pub(crate) fn unsupported() -> Error {
     Error::feature(
-        "a row value is supported compared with another row (=, <>, <, <=, >, >=, IS [NOT] DISTINCT FROM, IN), or tested with IS [NOT] NULL; not as a value of its own (a record type) or against a subquery yet",
+        "a row is compared with another row constructor (=, <>, <, <=, >, >=, IS [NOT] DISTINCT FROM, IN), or tested with IS [NOT] NULL; not with a subquery yet",
     )
 }
 

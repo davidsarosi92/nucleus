@@ -1,0 +1,97 @@
+# A row as a value of its own: a record (issue #16).
+
+statement ok
+CREATE TABLE t (id int PRIMARY KEY, a int, d text)
+
+statement ok
+INSERT INTO t VALUES (1, 1, 'x'), (2, 1, 'x'), (3, 2, NULL), (4, 1, 'y z'), (5, NULL, ''), (6, 2, NULL), (7, 1, 'q"b\c')
+
+query T
+SELECT DISTINCT (a, d) FROM t ORDER BY 1
+----
+(1,"q""b\\c")
+(1,x)
+(1,"y z")
+(2,)
+(,"")
+
+query TI
+SELECT (a, d), count(*) FROM t GROUP BY (a, d) ORDER BY 2 DESC, 1
+----
+(1,x) 2
+(2,) 2
+(1,"q""b\\c") 1
+(1,"y z") 1
+(,"") 1
+
+query T
+SELECT ROW(1, 'a,b', NULL, true, ARRAY[1, 2], 1.50, ROW(2, 'c'))::text
+----
+(1,"a,b",,t,"{1,2}",1.50,"(2,c)")
+
+query TT
+SELECT ROW(), ROW(NULL, NULL)
+----
+() (,)
+
+query I
+SELECT count(DISTINCT (a, d)) FROM t
+----
+5
+
+query T
+SELECT r FROM (SELECT (a, d) AS r FROM t) s WHERE r = ROW(1, 'x'::text) ORDER BY 1
+----
+(1,x)
+(1,x)
+
+query IT
+SELECT id, (a, d) FROM t ORDER BY (a, d) DESC, id LIMIT 3
+----
+5 (,"")
+3 (2,)
+6 (2,)
+
+statement error 42P16
+CREATE TABLE x AS SELECT (1, 2) AS r
+
+# Over enough rows for the vectorized, parallel paths, a column table,
+# and a grouping and a sort past their memory.
+statement ok
+CREATE TABLE big (id int PRIMARY KEY, k int, s text)
+
+statement ok
+INSERT INTO big SELECT i, i % 5, 'v' || (i % 3) FROM generate_series(1, 60000) i
+
+# nucleus-only: a column table.
+statement ok
+ALTER TABLE big SET STORAGE column
+
+query TI
+SELECT (k, s), count(*) FROM big GROUP BY 1 ORDER BY 1 LIMIT 4
+----
+(0,v0) 4000
+(0,v1) 4000
+(0,v2) 4000
+(1,v0) 4000
+
+query I
+SELECT count(DISTINCT (k, s)) FROM big
+----
+15
+
+# nucleus-only: little memory, so the grouping and the sort spill.
+statement ok
+SET work_mem = '64kB'
+
+query TI
+SELECT (id % 7000, s), count(*) FROM big GROUP BY 1 ORDER BY 1 DESC LIMIT 2
+----
+(6999,v2) 2
+(6999,v1) 3
+
+query T
+SELECT (id, s) FROM big ORDER BY (s, id) DESC LIMIT 2
+----
+(59999,v2)
+(59996,v2)

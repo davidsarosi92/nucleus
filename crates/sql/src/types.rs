@@ -54,6 +54,9 @@ pub enum DataType {
     Ext(TypeRef),
     /// An enum of the database's ([`crate::enums`]).
     Enum(crate::enums::EnumRef),
+    /// `record`: a row value of its own (`(a, b)`, `ROW(…)`), its fields'
+    /// types its own — a query's value, never a column's.
+    Record,
 }
 
 impl DataType {
@@ -77,8 +80,10 @@ impl DataType {
             DataType::Interval => &DataType::Interval,
             DataType::Inet => &DataType::Inet,
             DataType::Cidr => &DataType::Cidr,
-            // Arrays of registered types and enums: not yet.
-            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => return None,
+            // Arrays of registered types, enums and records: not yet.
+            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) | DataType::Record => {
+                return None;
+            }
         }))
     }
 
@@ -128,10 +133,13 @@ impl DataType {
                 DataType::Interval => "interval[]",
                 DataType::Inet => "inet[]",
                 DataType::Cidr => "cidr[]",
-                DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => "array",
+                DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) | DataType::Record => {
+                    "array"
+                }
             },
             DataType::Ext(t) => t.name(),
             DataType::Enum(e) => e.name(),
+            DataType::Record => "record",
         }
     }
 
@@ -287,6 +295,8 @@ pub enum Value {
     /// An enum's value (behind a pointer: it is 48 bytes, and a
     /// [`Value`] 32 — §M14.20 W5).
     Enum(Arc<crate::enums::EnumValue>),
+    /// A `record`: a row's fields.
+    Record(Arc<[Value]>),
 }
 
 // A value is 32 bytes on 64-bit targets: a tag and 24 (a string, a
@@ -329,6 +339,7 @@ impl Value {
             Value::Interval(_) => Some(DataType::Interval),
             Value::Inet(_) => Some(DataType::Inet),
             Value::Cidr(_) => Some(DataType::Cidr),
+            Value::Record(_) => Some(DataType::Record),
             Value::Array(items) => items
                 .iter()
                 .find_map(Value::data_type)
@@ -400,6 +411,27 @@ impl Value {
             (Value::Numeric(a), Value::Float(b)) => total_cmp(a.to_f64(), *b),
             (Value::Float(a), Value::Numeric(b)) => total_cmp(*a, b.to_f64()),
             (Value::Interval(a), Value::Interval(b)) => a.cmp(b),
+            (Value::Record(a), Value::Record(b)) => {
+                // Field by field, a NULL after the others (PostgreSQL's
+                // record order, its `DISTINCT` and `ORDER BY`).
+                if a.len() != b.len() {
+                    return Err(Error::type_mismatch(
+                        "cannot compare record types with different numbers of columns",
+                    ));
+                }
+                for (x, y) in a.iter().zip(b.iter()) {
+                    let o = match (x.is_null(), y.is_null()) {
+                        (true, true) => Ordering::Equal,
+                        (true, false) => Ordering::Greater,
+                        (false, true) => Ordering::Less,
+                        _ => x.sql_cmp(y)?.expect("not null"),
+                    };
+                    if o != Ordering::Equal {
+                        return Ok(Some(o));
+                    }
+                }
+                Ordering::Equal
+            }
             (Value::Array(a), Value::Array(b)) => {
                 // Element by element (a NULL element after the others),
                 // then the shorter first: PostgreSQL's array order.
@@ -685,6 +717,7 @@ impl Value {
                     .collect();
                 format!("{{{}}}", parts.join(","))
             }
+            Value::Record(fields) => render_record(fields),
         }
     }
 
@@ -715,7 +748,41 @@ fn rank(v: &Value) -> u8 {
         Value::Interval(_) => 4,
         Value::Array(_) => 6,
         Value::Ext(..) => 7,
+        Value::Record(_) => 12,
     }
+}
+
+/// A record as PostgreSQL's `record_out` writes it: `(a,b)`, a `NULL`
+/// field empty, a field quoted (`"`, its `"` and `\` doubled) when empty
+/// or holding a quote, a backslash, a parenthesis, a comma or a space.
+fn render_record(fields: &[Value]) -> String {
+    let mut out = String::from("(");
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        if f.is_null() {
+            continue;
+        }
+        let s = f.render();
+        let quote = s.is_empty()
+            || s.chars()
+                .any(|c| matches!(c, '"' | '\\' | '(' | ')' | ',') || c.is_ascii_whitespace());
+        if !quote {
+            out.push_str(&s);
+            continue;
+        }
+        out.push('"');
+        for c in s.chars() {
+            if c == '"' || c == '\\' {
+                out.push(c);
+            }
+            out.push(c);
+        }
+        out.push('"');
+    }
+    out.push(')');
+    out
 }
 
 /// An array element as PostgreSQL prints it: quoted when it is empty,
@@ -1092,6 +1159,10 @@ impl Hash for Value {
                 7u8.hash(state);
                 t.hash(state);
                 b.hash(state);
+            }
+            Value::Record(fields) => {
+                12u8.hash(state);
+                fields.hash(state);
             }
         }
     }

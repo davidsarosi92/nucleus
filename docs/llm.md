@@ -268,8 +268,8 @@ subquery)`, `EXISTS`, `= ANY (array | subquery)`, `LIKE`, `ILIKE`, `~`
 `a[i]` (1-based), integer bitwise `& | # ~ << >>`; rows compared —
 `(a, b) > ($1, $2)` (keyset paging: an index on `(a, b)` bounds the
 scan), `=`, `<>`, `IN ((1, 2), (3, 4))`, `IS [NOT] DISTINCT FROM`,
-`IS [NOT] NULL` (not a row as a value of its own, nor against a
-subquery).
+`IS [NOT] NULL` (not against a subquery); a row as a value:
+`SELECT DISTINCT (a, b)`, `ROW(1, 'x')` → `(1,x)` (type `record`).
 
 **Functions:** `lower upper length trim substr replace strpos concat
 lpad rpad ltrim rtrim btrim split_part concat_ws translate reverse initcap

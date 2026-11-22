@@ -416,6 +416,6 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
             }
             Value::ext(t, s.to_bytes())
         }),
-        DataType::Ext(_) | DataType::Enum(_) => return None,
+        DataType::Ext(_) | DataType::Enum(_) | DataType::Record => return None,
     })
 }

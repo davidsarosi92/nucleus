@@ -792,6 +792,29 @@ fn copy_to_stdout_with_a_real_driver() {
     assert_eq!(n, 3);
 }
 
+/// A row value through a real PostgreSQL driver: typed `record` (2249),
+/// as text `record_out`'s.
+#[test]
+fn a_record_with_a_real_driver() {
+    use postgres::{Client as Pg, NoTls, SimpleQueryMessage};
+    let addr = start(Config::default());
+    let mut db = Pg::connect(
+        &format!(
+            "host=127.0.0.1 port={} user=nucleus password=nucleus",
+            addr.port()
+        ),
+        NoTls,
+    )
+    .unwrap();
+    let st = db.prepare("SELECT ROW(1, 'a b', NULL)").unwrap();
+    assert_eq!(st.columns()[0].type_(), &postgres::types::Type::RECORD);
+    let msgs = db.simple_query("SELECT ROW(1, 'a b', NULL)").unwrap();
+    let SimpleQueryMessage::Row(row) = &msgs[1] else {
+        panic!("a row: {:?}", msgs.len())
+    };
+    assert_eq!(row.get(0), Some("(1,\"a b\",)"));
+}
+
 /// A client's bytes, and what the server wrote back.
 struct Bytes {
     input: std::io::Cursor<Vec<u8>>,

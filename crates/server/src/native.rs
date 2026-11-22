@@ -118,8 +118,8 @@ pub(crate) fn type_tag(t: DataType, version: u16) -> u8 {
         DataType::Interval => tag::INTERVAL,
         DataType::Array(_) => tag::ARRAY,
         // Registered types (to version-1 clients) and enums (before
-        // version 3) travel as text.
-        DataType::Ext(_) | DataType::Enum(_) => tag::TEXT,
+        // version 3) travel as text; records always.
+        DataType::Ext(_) | DataType::Enum(_) | DataType::Record => tag::TEXT,
     }
 }
 
@@ -157,7 +157,8 @@ pub(crate) fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, ver
         | Value::Char(_)
         | Value::Inet(_)
         | Value::Cidr(_)
-        | Value::Enum(_) => put::text(buf, &v.render()),
+        | Value::Enum(_)
+        | Value::Record(_) => put::text(buf, &v.render()),
         Value::Array(items) => {
             put::array(buf, items.len());
             let elem = ty.and_then(DataType::element);

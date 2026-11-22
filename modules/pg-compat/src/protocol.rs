@@ -167,7 +167,8 @@ fn type_size(t: DataType) -> i16 {
         | DataType::Numeric
         | DataType::Array(_)
         | DataType::Ext(_)
-        | DataType::Enum(_) => -1,
+        | DataType::Enum(_)
+        | DataType::Record => -1,
     }
 }
 
@@ -863,6 +864,24 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
                     b.extend_from_slice(&(-1i32).to_be_bytes());
                 } else {
                     let e = binary_value(v, elem);
+                    b.extend_from_slice(&(e.len() as i32).to_be_bytes());
+                    b.extend_from_slice(&e);
+                }
+            }
+            b
+        }
+        (Value::Record(fields), _) => {
+            // `record_send`: the field count, then each field's type oid,
+            // its length (-1: NULL) and its binary form.
+            let mut b = Vec::new();
+            b.extend_from_slice(&(fields.len() as i32).to_be_bytes());
+            for v in fields.iter() {
+                let ty = v.data_type().unwrap_or(DataType::Text);
+                b.extend_from_slice(&oid(ty).to_be_bytes());
+                if v.is_null() {
+                    b.extend_from_slice(&(-1i32).to_be_bytes());
+                } else {
+                    let e = binary_value(v, ty);
                     b.extend_from_slice(&(e.len() as i32).to_be_bytes());
                     b.extend_from_slice(&e);
                 }

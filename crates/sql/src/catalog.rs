@@ -1173,6 +1173,7 @@ fn action_of_tag(t: u8) -> Result<FkAction> {
 
 /// A registered type's column tag; its name follows.
 const EXT_TAG: u8 = 0x7F;
+const RECORD_TAG: u8 = 0x7D;
 /// An enum's column tag; its name follows.
 const ENUM_TAG: u8 = 0x7E;
 
@@ -1201,6 +1202,9 @@ fn type_tag(t: DataType) -> u8 {
     match t {
         DataType::Ext(_) => EXT_TAG,
         DataType::Enum(_) => ENUM_TAG,
+        // A query's value, refused for a column (`CREATE TABLE … AS`);
+        // a tag all the same.
+        DataType::Record => RECORD_TAG,
         DataType::Array(e) => 0x80 | type_tag(*e),
         DataType::Bool => 1,
         DataType::BigInt => 2,
@@ -1246,6 +1250,7 @@ fn type_of_tag(t: u8) -> Result<DataType> {
         15 => DataType::Char,
         16 => DataType::Inet,
         17 => DataType::Cidr,
+        RECORD_TAG => DataType::Record,
         _ => return Err(Error::internal("unknown column type tag")),
     })
 }
