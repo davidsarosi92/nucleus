@@ -26,11 +26,11 @@ query T
 EXPLAIN SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref
 ----
 Project: #1, #0
-  Project: #3, #0
-    Index Nested Loop on (#2 = #1)
+  Project: #2, #0
+    Index Nested Loop
       Project: #0, #1
         Seq Scan on ls (rows=5)
-      Project: #0, #2
+      Project: #2
         Index Scan using primary key on lb (id = outer1.#1) filter: (#0 = outer1.#1) (rows=1)
 
 query II
@@ -101,9 +101,9 @@ EXPLAIN SELECT count(*) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND lb.v
 ----
 Aggregate: count(*)
   Project: #0
-    Index Nested Loop on ((#3 = #1) AND (((#2 = 10) AND (#4 > 0)) OR ((#2 = 50) AND (#4 < 2000))))
+    Index Nested Loop on (((#2 = 10) AND (#3 > 0)) OR ((#2 = 50) AND (#3 < 2000)))
       Seq Scan on ls filter: ((#2 = 10) OR (#2 = 50)) (rows=2)
-      Project: #0, #2
+      Project: #2
         Index Scan using primary key on lb (id = outer1.#1) filter: (((#2 > 0) OR (#2 < 2000)) AND (#0 = outer1.#1)) (rows=1)
 
 # Semi and anti joins by lookup stop at a key's first match.
@@ -116,3 +116,80 @@ query I
 SELECT count(*) FROM ls WHERE EXISTS (SELECT 1 FROM lb WHERE lb.g = ls.k AND lb.v > 990)
 ----
 3
+
+# A lookup's key equalities are its scan's (its range, or its filter where
+# the range cannot apply them): the join does not check them again, and a
+# count of matches by a secondary index reads its entries alone.  NULL
+# keys, keys not of the index's type (1.5 finds no integer), text keys.
+statement ok
+CREATE TABLE kl (k int, n numeric, t text)
+
+statement ok
+INSERT INTO kl VALUES (1, 1, 'a'), (2, 2.0, 'b'), (NULL, NULL, NULL), (3, 1.5, 'B'), (7, 7, 'zz'), (2, 2, 'b')
+
+statement ok
+CREATE TABLE kr (id int PRIMARY KEY, p int, s text)
+
+statement ok
+INSERT INTO kr SELECT i, CASE WHEN i % 50 = 0 THEN NULL ELSE i % 400 END, substr('abcdefghijklmnopqrstuvwxyz', 1 + i % 26, 1) FROM generate_series(1, 4000) i
+
+statement ok
+CREATE INDEX kr_p ON kr (p)
+
+statement ok
+CREATE INDEX kr_s ON kr (s)
+
+statement ok
+ANALYZE
+
+# nucleus-only: plans
+query T
+EXPLAIN SELECT count(*) FROM kl JOIN kr ON kr.p = kl.k
+----
+Aggregate: count(*)
+  Project: #0
+    Index Nested Loop
+      Project: #0
+        Seq Scan on kl (rows=6)
+      Index Scan using kr_p on kr (p = outer1.#0) (rows=10)
+
+query II
+SELECT count(*), sum(kr.id) FROM kl JOIN kr ON kr.p = kl.k
+----
+50 90150
+
+query II
+SELECT count(*), sum(kr.id) FROM kl JOIN kr ON kr.p = kl.n
+----
+40 72120
+
+query II
+SELECT count(*), count(kr.id) FROM kl LEFT JOIN kr ON kr.p = kl.k
+----
+51 50
+
+query II
+SELECT count(*), sum(kr.id) FROM kl JOIN kr ON kr.p = kl.k AND kr.id > 2000
+----
+25 70075
+
+# A condition beyond the keys, on both sides: still the join's.
+query II
+SELECT count(*), sum(kr.id) FROM kl JOIN kr ON kr.p = kl.k AND kr.id > kl.k * 900
+----
+20 54436
+
+query I
+SELECT count(*) FROM kl WHERE EXISTS (SELECT 1 FROM kr WHERE kr.p = kl.n)
+----
+4
+
+query I
+SELECT count(*) FROM kl WHERE NOT EXISTS (SELECT 1 FROM kr WHERE kr.p = kl.n)
+----
+2
+
+query II
+SELECT count(*), count(DISTINCT kr.s) FROM kl JOIN kr ON kr.s = kl.t
+----
+461 2

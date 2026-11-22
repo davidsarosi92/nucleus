@@ -3248,6 +3248,12 @@ columns kept (PostgreSQL turns such a semi join into an inner one, its
 inner side unique).  TPC-H Q20's subquery looks `partsupp` up by its
 parts.
 A lookup join's rows are estimated as the left side's times a lookup's.
+Its condition drops its key equalities (`optimizer::without_keys`): the
+right side's scan holds them in its filter, applied by its range or
+checked on each row where the range cannot apply them (`Access::rest`),
+so a join wanting no other column of the right rows reads none — a count
+of matches by a secondary index reads its entries alone, no row fetched
+(as PostgreSQL's index-only scan).
 
 **Adaptive joins** (`adaptive`, last, after narrowing): an inner hash
 join whose left side such an index could look up keeps that plan beside

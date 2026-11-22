@@ -13202,6 +13202,18 @@ Still held whole: a recursive `UNION`'s rows seen.
      `key_range_exact`, `Access::rest` cloning expressions), allocation
      throughout (malloc and free a third of the samples).  The same
      row/point-read work as 2.
+     *Key equalities not checked twice ✅* (found on a join of 20,000
+     keys spread over the tree, against PostgreSQL 18 on one worker: a
+     secondary index's lookups 132 ms to 17, PostgreSQL's an index-only
+     scan): a lookup join checked its keys' equality again on each row,
+     so it wanted the right row's key column and fetched every row —
+     though its scan's filter holds the equalities (`Access::rest`).
+     The condition now drops them (`optimizer::without_keys`); a count of
+     matches reads the index's entries alone.  ABBA: 132 → 49 ms on one
+     worker, 63 → 31 on ten; by the primary key 38.6 → 33.9 ms.  Left:
+     the columns the index's entries hold (its own and the primary key's)
+     read from them, not the row (PostgreSQL's index-only scans need the
+     visibility map; nucleus's entries are versioned as the rows are).
   4. **Each round chooses ✅** — without the index the whole tree took
      0.93 s (PostgreSQL 2.8 s): the round hashed, the table scanned once
      a round, three times faster than 2,000,000 lookups.  So the step's

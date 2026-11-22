@@ -730,7 +730,12 @@ fn adaptive(plan: Plan, st: &Stats) -> Plan {
                     (below > 0).then(|| {
                         Box::new(crate::plan::Adaptive {
                             lookup,
-                            on: on.as_ref().map(|e| e.map_columns(&flip)),
+                            on: without_keys(
+                                on.as_ref().map(|e| e.map_columns(&flip)),
+                                &right_keys,
+                                &left_keys,
+                                rw,
+                            ),
                             below,
                         })
                     })
@@ -1902,10 +1907,10 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
             .flatten();
             match (lookup, swapped) {
                 (Some(right), _) => Plan::Join {
+                    on: without_keys(on, &left_keys, &right_keys, left.width()),
                     left,
                     right: Box::new(right),
                     kind,
-                    on,
                     algo: JoinAlgo::Lookup,
                 },
                 (None, Some(looked_up)) => {
@@ -1918,7 +1923,12 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
                             left: right,
                             right: Box::new(looked_up),
                             kind: JoinType::Inner,
-                            on: on.map(|e| e.map_columns(&back)),
+                            on: without_keys(
+                                on.map(|e| e.map_columns(&back)),
+                                &right_keys,
+                                &left_keys,
+                                rw,
+                            ),
                             algo: JoinAlgo::Lookup,
                         }),
                         exprs: (0..width).map(back).collect(),
@@ -1947,6 +1957,32 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
         }
         other => other,
     }
+}
+
+/// A lookup join's condition `on` (over its left row, then its right
+/// one past `lw` columns) without the equalities of its keys: its right
+/// side — a scan by an index of the left row's key values — gives only
+/// rows whose keys are equal, its filter holding the equalities (applied
+/// by the range where it can, checked on each row where it cannot,
+/// [`crate::plan::Access::rest`]).  Then a join wanting no other column
+/// of the right rows reads none: a secondary index's entries alone, no
+/// row fetched (PostgreSQL's index-only scan, for a count of matches).
+fn without_keys(
+    on: Option<Expr>,
+    left_keys: &[Expr],
+    right_keys: &[Expr],
+    lw: usize,
+) -> Option<Expr> {
+    let mut parts = Vec::new();
+    conjuncts(on?, &mut parts);
+    parts.retain(|p| {
+        !left_keys.iter().zip(right_keys).any(|(l, r)| {
+            let r = r.map_columns(&|c| Expr::Column(c + lw));
+            matches!(p, Expr::Binary(BinaryOp::Eq, a, b)
+                if (**a == *l && **b == r) || (**a == r && **b == *l))
+        })
+    });
+    conjunction(parts)
 }
 
 /// Whether `keys` (columns) of `plan`'s rows are each row's alone: they
