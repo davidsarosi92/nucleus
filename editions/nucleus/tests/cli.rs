@@ -927,17 +927,23 @@ fn scheduled_restore_tests_catch_a_corrupted_backup() {
     let (ok, text) = nucleus(&["restore", r, "--test"], "");
     assert!(ok && text.contains("it holds"), "{text}");
     // A byte of the chain's first part flipped (the first backup, of an
-    // empty database, may have none): the next test fails.
-    let mut backups: Vec<_> = std::fs::read_dir(&repo)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    backups.sort();
-    let part = backups
-        .iter()
-        .map(|b| b.join("part-000000"))
-        .find(|p| p.exists())
-        .unwrap();
+    // empty database, may have none, and the one after the rows may still
+    // be being written — waited for, a finished one's): the next test
+    // fails.
+    let first_part = || {
+        let mut backups: Vec<_> = std::fs::read_dir(&repo)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        backups.sort();
+        backups
+            .iter()
+            .filter(|b| b.join("manifest").exists())
+            .map(|b| b.join("part-000000"))
+            .find(|p| p.exists())
+    };
+    wait_for("a finished backup with a part", &|| first_part().is_some());
+    let part = first_part().unwrap();
     let mut b = std::fs::read(&part).unwrap();
     let mid = b.len() / 2;
     b[mid] ^= 0x40;
