@@ -12832,6 +12832,20 @@ Found and fixed:
   part undone.  Left: `SIGTERM` stops the server as a crash does (no
   checkpoint, so a restart replays the WAL; issue #17).
 
+- A parameter's type changed under it: `date ± $1` and `timestamp +
+  $1` typed the parameter a number of days and an interval, then the
+  binder's general step coerced it to the other side's type again
+  (`Binder::coerce` gave a parameter the target's type, though the
+  parameter kept its first) — `date + $1` was refused as `date + date`,
+  `date - $1` described as an integer (a date less a date) while it ran
+  as a date less days ("cannot cast 2025-12-29 to integer"), `timestamp
+  + '1 day'` as a parameter refused.  Now a parameter typed keeps its
+  type.  Found by a sixth searcher: each query run again with its
+  integer literals as parameters (a value's every place the same `$n`),
+  through the same text with two sets of values, against the literal
+  query.  Tested by `a_parameter_keeps_the_type_its_place_gave_it`
+  (fails with the fix undone).
+
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
 `GROUPING SETS` / `ROLLUP` / `CUBE`, a row constructor in `SELECT

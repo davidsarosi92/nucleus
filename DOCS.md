@@ -2325,7 +2325,10 @@ Resolves names through nested scopes — a subquery sees enclosing rows as
 (`42702`) and unknown (`42703`, `42P01`) names, infers types (an untyped
 string literal or `NULL` takes the other side's type in comparisons and
 arithmetic, never in `||`; a `$n` takes its context's type — including
-`INSERT`/`UPDATE` target columns, for `describe`), lifts aggregates into an
+`INSERT`/`UPDATE` target columns, for `describe` — one for the statement,
+its first place's: `date ± $1` a number of days, `timestamp + $1` an
+interval, `interval * $1` a float, a later coercion to the other side's
+type not changing it), lifts aggregates into an
 `Aggregate` node (grouped expressions matched structurally; other column
 references are `42803`), and places `ORDER BY` keys (output name or
 position, else a hidden extra column, refused under `DISTINCT`).  A

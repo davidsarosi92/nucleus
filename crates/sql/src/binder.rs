@@ -3537,8 +3537,13 @@ impl<'a> Binder<'a> {
                 (e.clone(), (e, Some(target)))
             }
             Expr::Param(n) => {
+                // One type for the statement: a parameter's first place
+                // gave it (`date - $1`: a number of days), a later
+                // coercion does not change it (it made `date - $1` a date
+                // less a date, an integer, while it ran as days).
                 self.note_param(*n, Some(target));
-                (x.clone(), (x, Some(target)))
+                let t = self.params[*n].or(Some(target));
+                (x.clone(), (x, t))
             }
             Expr::Literal(Value::Text(_)) if target != DataType::Text => {
                 let v = match &x {
