@@ -323,6 +323,7 @@ pub(crate) fn clauses(r: &ast::Remember) -> ast::Query {
             from: vec![],
             filter: None,
             group_by: vec![],
+            grouping_sets: None,
             having: None,
             windows: vec![],
         })),

@@ -2914,6 +2914,200 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `GROUP BY [ALL | DISTINCT] item, …`: the keys, and — when an item is
+    /// `GROUPING SETS (…)`, `ROLLUP (…)`, `CUBE (…)` or `()` — the sets,
+    /// each its keys' positions (the items' sets crossed, as SQL's).
+    fn group_by_clause(&mut self) -> Result<(Vec<Expr>, Option<Vec<Vec<usize>>>)> {
+        use crate::grouping_sets::{MOST_KEYS, MOST_SETS};
+        let distinct = self.eat_kw("distinct");
+        if !distinct {
+            self.eat_kw("all");
+        }
+        let mut items = vec![self.group_item()?];
+        while self.eat_op(",") {
+            items.push(self.group_item()?);
+        }
+        if items.iter().all(|i| matches!(i, GroupItem::Key(_))) {
+            let keys = items
+                .into_iter()
+                .map(|i| match i {
+                    GroupItem::Key(e) => e,
+                    GroupItem::Sets(_) => unreachable!("all keys"),
+                })
+                .collect();
+            return Ok((keys, None));
+        }
+        let mut keys: Vec<Expr> = Vec::new();
+        let mut sets: Vec<Vec<usize>> = vec![vec![]];
+        for item in items {
+            let item_sets = match item {
+                GroupItem::Key(e) => vec![vec![e]],
+                GroupItem::Sets(s) => s,
+            };
+            let mut next = Vec::new();
+            for s in &sets {
+                for t in &item_sets {
+                    let mut u = s.clone();
+                    for e in t {
+                        let k = match keys.iter().position(|x| x == e) {
+                            Some(k) => k,
+                            None => {
+                                keys.push(e.clone());
+                                keys.len() - 1
+                            }
+                        };
+                        if !u.contains(&k) {
+                            u.push(k);
+                        }
+                    }
+                    next.push(u);
+                    if next.len() > MOST_SETS {
+                        return Err(Error::statement_too_complex(format!(
+                            "too many grouping sets present (more than {MOST_SETS})"
+                        )));
+                    }
+                }
+            }
+            sets = next;
+        }
+        if keys.len() > MOST_KEYS {
+            return Err(Error::program_limit(format!(
+                "GROUP BY with grouping sets names at most {MOST_KEYS} keys"
+            )));
+        }
+        if distinct {
+            let mut seen: Vec<Vec<usize>> = Vec::new();
+            sets.retain(|s| {
+                let mut k = s.clone();
+                k.sort_unstable();
+                let new = !seen.contains(&k);
+                if new {
+                    seen.push(k);
+                }
+                new
+            });
+        }
+        Ok((keys, Some(sets)))
+    }
+
+    /// One item of `GROUP BY`: a key, or the sets of `()`, `ROLLUP`,
+    /// `CUBE` or `GROUPING SETS`.
+    fn group_item(&mut self) -> Result<GroupItem> {
+        let call = |p: &Self, kw: &str| p.peek_kw(kw) && p.peek_at(1) == Some(&Token::Op("("));
+        if self.peek_op("(") && self.peek_at(1) == Some(&Token::Op(")")) {
+            self.pos += 2;
+            return Ok(GroupItem::Sets(vec![vec![]]));
+        }
+        if call(self, "rollup") {
+            self.pos += 1;
+            let elems = self.group_elements()?;
+            // (a, b, c): (a, b, c), (a, b), (a), ().
+            let sets = (0..=elems.len())
+                .rev()
+                .map(|n| elems[..n].concat())
+                .collect();
+            return Ok(GroupItem::Sets(sets));
+        }
+        if call(self, "cube") {
+            self.pos += 1;
+            let elems = self.group_elements()?;
+            if elems.len() > 12 {
+                return Err(Error::program_limit("CUBE is limited to 12 elements"));
+            }
+            // Every subset, the whole first.
+            let n = elems.len();
+            let sets = (0..1usize << n)
+                .rev()
+                .map(|m| {
+                    (0..n)
+                        .filter(|i| m & (1 << (n - 1 - i)) != 0)
+                        .flat_map(|i| elems[i].clone())
+                        .collect()
+                })
+                .collect();
+            return Ok(GroupItem::Sets(sets));
+        }
+        if self.peek_kws(&["grouping", "sets"]) && self.peek_at(2) == Some(&Token::Op("(")) {
+            self.pos += 3;
+            let mut sets = Vec::new();
+            loop {
+                // A set of its own in parentheses is a list of keys.
+                let item = if self.peek_op("(") {
+                    match self.group_element()? {
+                        Some(keys) => GroupItem::Sets(vec![keys]),
+                        None => self.group_item()?,
+                    }
+                } else {
+                    self.group_item()?
+                };
+                match item {
+                    GroupItem::Key(e) => sets.push(vec![e]),
+                    GroupItem::Sets(s) => sets.extend(s),
+                }
+                if sets.len() > crate::grouping_sets::MOST_SETS {
+                    return Err(Error::statement_too_complex(
+                        "too many grouping sets present",
+                    ));
+                }
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op(")")?;
+            return Ok(GroupItem::Sets(sets));
+        }
+        Ok(GroupItem::Key(self.expr()?))
+    }
+
+    /// `ROLLUP`'s or `CUBE`'s `(element, …)`: each a key or a
+    /// parenthesized list of keys.
+    fn group_elements(&mut self) -> Result<Vec<Vec<Expr>>> {
+        self.expect_op("(")?;
+        let mut elems = Vec::new();
+        loop {
+            elems.push(match self.group_element()? {
+                Some(keys) => keys,
+                None => vec![self.expr()?],
+            });
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        Ok(elems)
+    }
+
+    /// At `(`: a parenthesized list of keys (`()` none), when it is one —
+    /// followed by `,` or `)` —, else `None` with nothing read (it is an
+    /// expression in parentheses, `(a + b) * 2`).
+    fn group_element(&mut self) -> Result<Option<Vec<Expr>>> {
+        if !self.peek_op("(") {
+            return Ok(None);
+        }
+        let save = self.pos;
+        self.pos += 1;
+        let mut keys = Vec::new();
+        if !self.eat_op(")") {
+            let listed = (|| -> Result<()> {
+                keys.push(self.expr()?);
+                while self.eat_op(",") {
+                    keys.push(self.expr()?);
+                }
+                self.expect_op(")")
+            })();
+            if listed.is_err() {
+                self.pos = save;
+                return Ok(None);
+            }
+        }
+        if self.peek_op(",") || self.peek_op(")") {
+            Ok(Some(keys))
+        } else {
+            self.pos = save;
+            Ok(None)
+        }
+    }
+
     /// `TRUNCATE [TABLE] [ONLY] name [*], … [CONTINUE | RESTART IDENTITY]
     /// [CASCADE | RESTRICT]`.  `RESTART IDENTITY` has nothing to restart:
     /// no column owns a sequence.
@@ -3141,13 +3335,11 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let mut group_by = Vec::new();
-        if self.eat_kws(&["group", "by"]) {
-            group_by.push(self.expr()?);
-            while self.eat_op(",") {
-                group_by.push(self.expr()?);
-            }
-        }
+        let (group_by, grouping_sets) = if self.eat_kws(&["group", "by"]) {
+            self.group_by_clause()?
+        } else {
+            (Vec::new(), None)
+        };
         let having = if self.eat_kw("having") {
             Some(self.expr()?)
         } else {
@@ -3171,6 +3363,7 @@ impl<'a> Parser<'a> {
             from,
             filter,
             group_by,
+            grouping_sets,
             having,
             windows,
         })))
@@ -4527,6 +4720,7 @@ impl<'a> Parser<'a> {
                 }],
                 filter: None,
                 group_by: vec![],
+                grouping_sets: None,
                 having: None,
                 windows: vec![],
             };
@@ -4873,6 +5067,14 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// An item of `GROUP BY`.
+enum GroupItem {
+    /// A key.
+    Key(Expr),
+    /// Sets of keys.
+    Sets(Vec<Vec<Expr>>),
+}
+
 /// A binary operator token: its precedence and operator.
 fn binary_operator(op: &str) -> Option<(u8, BinaryOp)> {
     Some(match op {
@@ -5215,6 +5417,7 @@ fn select_body(items: Vec<JtItem>, from: TableRef) -> SetExpr {
         from: vec![from],
         filter: None,
         group_by: vec![],
+        grouping_sets: None,
         having: None,
         windows: vec![],
     }))
@@ -5385,6 +5588,7 @@ mod tests {
                     from: vec![],
                     filter: None,
                     group_by: vec![],
+                    grouping_sets: None,
                     having: None,
                     windows: vec![],
                 })),

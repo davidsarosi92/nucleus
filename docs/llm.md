@@ -256,7 +256,8 @@ STDIN [WITH (FORMAT csv, HEADER)]` with the data sent by the client.
 **Queries:** `WITH [RECURSIVE] …`, `SELECT [DISTINCT]`, `FROM` with comma
 joins and `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`, subqueries in
 `FROM`, `generate_series(a, b [, step])` and `unnest(array) [WITH
-ORDINALITY]` in `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `UNION | EXCEPT |
+ORDINALITY]` in `FROM`, `WHERE`, `GROUP BY` (also `ROLLUP (…)`, `CUBE (…)`,
+`GROUPING SETS (…)`, `GROUPING(…)`), `HAVING`, `UNION | EXCEPT |
 INTERSECT [ALL]`, `ORDER BY … [ASC|DESC] [NULLS FIRST|LAST]`, `LIMIT`,
 `OFFSET`.  Expressions: `IS [NOT] DISTINCT FROM`, `BETWEEN`, `IN (list |
 subquery)`, `EXISTS`, `= ANY (array | subquery)`, `LIKE`, `ILIKE`, `~`

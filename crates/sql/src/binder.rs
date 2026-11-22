@@ -112,6 +112,9 @@ struct Grouping {
     group_types: Vec<Option<DataType>>,
     aggs: Vec<Agg>,
     agg_types: Vec<Option<DataType>>,
+    /// Grouping sets: each its keys' positions in `group`, whose last key
+    /// is then the sets' mask ([`crate::grouping_sets`]).
+    sets: Option<Vec<Vec<usize>>>,
 }
 
 /// The binder.
@@ -195,8 +198,14 @@ type Typed = (Expr, Option<DataType>);
 fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
     any_node(
         e,
-        &|n| matches!(n, ast::Expr::Function { name, .. } if r.aggregate(name).is_some()),
+        &|n| matches!(n, ast::Expr::Function { name, .. } if r.aggregate(name).is_some() || is_grouping(r, name)),
     )
+}
+
+/// Whether a call of `name` is SQL's `GROUPING(…)` (a grouping's, as an
+/// aggregate is) — unless a function of that name was registered.
+fn is_grouping(r: &Registry, name: &str) -> bool {
+    name == "grouping" && r.function(name).is_none()
 }
 
 /// Whether `e` holds a window function call (not looking into
@@ -1456,6 +1465,7 @@ impl<'a> Binder<'a> {
         }
 
         let grouped = !s.group_by.is_empty()
+            || s.grouping_sets.is_some()
             || s.having.is_some()
             || s.items.iter().any(
                 |i| matches!(i, SelectItem::Expr { expr, .. } if contains_agg(self.registry, expr)),
@@ -1471,6 +1481,7 @@ impl<'a> Binder<'a> {
                 group_types: vec![],
                 aggs: vec![],
                 agg_types: vec![],
+                sets: None,
             };
             for e in &s.group_by {
                 // GROUP BY 1 / GROUP BY alias: select-list items.
@@ -1479,6 +1490,11 @@ impl<'a> Binder<'a> {
                 require(t, &[Need::Equality, Need::Hashing], "GROUP BY")?;
                 g.group.push(x);
                 g.group_types.push(t);
+            }
+            if let Some(sets) = &s.grouping_sets {
+                g.group.push(crate::grouping_sets::MASK);
+                g.group_types.push(Some(DataType::BigInt));
+                g.sets = Some(sets.clone());
             }
             grouping = Some(g);
         }
@@ -1556,10 +1572,13 @@ impl<'a> Binder<'a> {
                             (Expr::Column(i), None) => {
                                 scope.cols.get(*i).is_some_and(|c| c.not_null)
                             }
-                            (Expr::Column(i), Some(g)) => matches!(
-                                g.group.get(*i),
-                                Some(Expr::Column(j)) if g.from.cols.get(*j).is_some_and(|c| c.not_null)
-                            ),
+                            (Expr::Column(i), Some(g)) => {
+                                g.sets.is_none()
+                                    && matches!(
+                                        g.group.get(*i),
+                                        Some(Expr::Column(j)) if g.from.cols.get(*j).is_some_and(|c| c.not_null)
+                                    )
+                            }
                             (Expr::Literal(v), _) => !v.is_null(),
                             _ => false,
                         };
@@ -1640,10 +1659,13 @@ impl<'a> Binder<'a> {
         }
 
         if let Some(g) = grouping {
-            plan = Plan::Aggregate {
-                input: Box::new(plan),
-                group: g.group,
-                aggs: g.aggs,
+            plan = match &g.sets {
+                Some(sets) => crate::grouping_sets::plan(plan, g.group, g.aggs, sets),
+                None => Plan::Aggregate {
+                    input: Box::new(plan),
+                    group: g.group,
+                    aggs: g.aggs,
+                },
             };
             if let Some(h) = having {
                 plan = Plan::Filter {
@@ -1798,6 +1820,42 @@ impl<'a> Binder<'a> {
     /// An ordered-set aggregate's call, `name(args) WITHIN GROUP (ORDER BY
     /// x)`: the aggregate called with `[x, args…, descending]`
     /// ([`crate::ext::Aggregate::ordered_set`]).
+    /// `GROUPING(k, …)`: a bit per argument, set when the row's grouping
+    /// set leaves that key out (0 without grouping sets).
+    fn grouping_call(&mut self, args: &[ast::Expr], g: &mut Grouping) -> Result<Typed> {
+        let n = g.group.len() - usize::from(g.sets.is_some());
+        if args.is_empty() || args.len() > 31 {
+            return Err(Error::undefined_function(
+                "GROUPING takes 1 to 31 grouping expressions",
+            ));
+        }
+        let from = g.from.clone();
+        let mut keys = Vec::new();
+        for a in args {
+            if contains_agg(self.registry, a) {
+                return Err(Error::grouping(
+                    "arguments to GROUPING must be grouping expressions of the associated query level",
+                ));
+            }
+            let (x, _) = self.expr(a, &from)?;
+            match g.group[..n].iter().position(|y| *y == x) {
+                Some(k) => keys.push(k),
+                None => {
+                    return Err(Error::grouping(
+                        "arguments to GROUPING must be grouping expressions of the associated query level",
+                    ));
+                }
+            }
+        }
+        Ok(match g.sets {
+            Some(_) => (
+                crate::grouping_sets::grouping_call(g.group.len() - 1, &keys),
+                Some(DataType::Integer),
+            ),
+            None => (Expr::Literal(Value::Int(0)), Some(DataType::Integer)),
+        })
+    }
+
     /// An aggregate's `FILTER (WHERE c)`: `c` bound by `bind`, a boolean
     /// with no aggregate or window call in it (as PostgreSQL's).
     fn filter_condition(
@@ -1911,6 +1969,11 @@ impl<'a> Binder<'a> {
         use ast::Expr as A;
         if let A::Window { .. } = e {
             return Err(Error::windowing("window functions are not allowed here"));
+        }
+        if let A::Function { name, args, .. } = e
+            && is_grouping(self.registry, name)
+        {
+            return self.grouping_call(args, g);
         }
         if let A::Function {
             name,

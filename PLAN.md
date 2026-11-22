@@ -13034,6 +13034,22 @@ Found and fixed:
   by `78_filter.slt`, checked against PostgreSQL 18 (three mutations —
   the batch path, the row path, the `NULL`s and the type — each
   failing).
+- Issue #16, fifth step — `GROUPING SETS`, `ROLLUP`, `CUBE`, `()` and
+  `GROUP BY DISTINCT` (PostgreSQL 14's), with `GROUPING(…)`: the parser
+  makes the clause the list of sets (the items' sets crossed, as SQL's;
+  4,096 at most, as PostgreSQL's); the binder binds the keys once with
+  one more key after them, the set's mask, and the rest of the query
+  over that layout as over one grouping; the plan is a `UNION ALL` of a
+  grouping per set, each giving the layout — its keys, `NULL` for those
+  it leaves out, its mask a constant, the aggregates
+  (`grouping_sets.rs`).  So executors and optimizer see ordinary
+  groupings (vectorized, parallel, `FILTER`, windows above); a key a set
+  leaves out is nullable in the result's description.  Each set reads
+  the input again — PostgreSQL's sorted rollup computes a chain of sets
+  in one pass, and a hash grouping could feed every set from one read:
+  for the performance pass.  Tested by `79_grouping_sets.slt`, every
+  record as PostgreSQL 18's (four mutations — the mask, `ROLLUP`'s empty
+  set, the keys' nullability, `DISTINCT` — each failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and

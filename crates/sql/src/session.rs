@@ -1874,6 +1874,7 @@ impl Session {
                         from: vec![],
                         filter: None,
                         group_by: vec![],
+                        grouping_sets: None,
                         having: None,
                         windows: vec![],
                     })),

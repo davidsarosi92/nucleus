@@ -2306,7 +2306,9 @@ subqueries and functions in `FROM` (`generate_series`, `unnest`, any
 scalar function; `WITH ORDINALITY`), `LATERAL` before a subquery or a
 function (functions are lateral without it, as PostgreSQL's), alias
 column lists (`AS t (a, b)`),
-`WHERE`, `GROUP BY` (expressions, positions, aliases), `HAVING`, `WINDOW
+`WHERE`, `GROUP BY` (expressions, positions, aliases; `GROUPING SETS`,
+`ROLLUP`, `CUBE`, `()`, `GROUP BY DISTINCT`, with `GROUPING(…)` — a
+grouping per set, their rows together, §8.4), `HAVING`, `WINDOW
 name AS (…)`, `UNION |
 EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
 (`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases, expressions), `LIMIT`,
@@ -2369,6 +2371,20 @@ for each left row (`binder::lateral_join`: an index nested loop's
 item cannot be the side a `RIGHT` or `FULL` join keeps whole (`42P10`,
 PostgreSQL's rule); a subquery not marked `LATERAL` that names an item
 before it is `42P01` with a hint to mark it.
+
+Grouping sets (`grouping_sets`): the parser turns `GROUPING SETS`,
+`ROLLUP`, `CUBE` and `()` into the list of sets (the items' sets
+crossed; `GROUP BY DISTINCT` drops repeated sets), each its keys'
+positions among all the keys named.  The binder binds the keys once, and
+one more key after them, the set's mask (a bit per key the set leaves
+out); the select list, `HAVING` and `ORDER BY` are bound over that layout
+as over one grouping, `GROUPING(k, …)` a call over the mask.  The plan is
+a `UNION ALL` of an `Aggregate` per set over the same input, each
+projected to the layout — its keys, `NULL` for the others, its mask a
+constant, the aggregates — so every executor runs it as ordinary
+groupings.  An aggregate's `FILTER (WHERE c)` (`agg_filter`) is bound as
+an aggregate of its own wrapping the inner one, fed `c` first and passing
+on the rows it holds for.
 
 ### 8.5 Plans and the executor (`plan`, `exec`, `expr`)
 

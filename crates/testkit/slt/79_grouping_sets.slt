@@ -1,0 +1,166 @@
+# GROUPING SETS, ROLLUP, CUBE and GROUPING() (issue #16).
+
+statement ok
+CREATE TABLE sales (id int PRIMARY KEY, region text, product text, yr int, amount int)
+
+statement ok
+INSERT INTO sales VALUES (1, 'n', 'a', 2024, 10), (2, 'n', 'b', 2024, 20), (3, 's', 'a', 2024, 30), (4, 's', 'a', 2025, 40), (5, 'n', 'a', 2025, 50), (6, 's', NULL, 2025, 60)
+
+query TTI rowsort
+SELECT region, product, sum(amount) FROM sales GROUP BY ROLLUP (region, product)
+----
+NULL NULL 210
+n NULL 80
+n a 60
+n b 20
+s NULL 130
+s NULL 60
+s a 70
+
+query TTII rowsort
+SELECT region, product, sum(amount), GROUPING(region, product) FROM sales GROUP BY CUBE (region, product)
+----
+NULL NULL 210 3
+NULL NULL 60 2
+NULL a 130 2
+NULL b 20 2
+n NULL 80 1
+n a 60 0
+n b 20 0
+s NULL 130 1
+s NULL 60 0
+s a 70 0
+
+query TIII rowsort
+SELECT region, yr, count(*), GROUPING(yr) FROM sales GROUP BY GROUPING SETS ((region, yr), (region), ())
+----
+NULL NULL 6 1
+n 2024 2 0
+n 2025 1 0
+n NULL 3 1
+s 2024 1 0
+s 2025 2 0
+s NULL 3 1
+
+# A set crossed with a key: (yr, region), (yr).
+query ITI rowsort
+SELECT yr, region, sum(amount) FROM sales GROUP BY yr, ROLLUP (region)
+----
+2024 NULL 60
+2024 n 30
+2024 s 30
+2025 NULL 150
+2025 n 50
+2025 s 100
+
+# A NULL key of the data beside the NULL of a set that leaves it out.
+query TIII rowsort
+SELECT product, sum(amount), GROUPING(product), count(*) FROM sales GROUP BY GROUPING SETS (product, ())
+----
+NULL 210 1 6
+NULL 60 0 1
+a 130 0 4
+b 20 0 1
+
+query TI rowsort
+SELECT region, sum(amount) FROM sales GROUP BY ROLLUP (region) HAVING GROUPING(region) = 1 OR sum(amount) > 100
+----
+NULL 210
+s 130
+
+query TTI
+SELECT region, product, sum(amount) FROM sales GROUP BY ROLLUP (region, product) ORDER BY GROUPING(region, product), region, product NULLS FIRST LIMIT 3
+----
+n a 60
+n b 20
+s NULL 60
+
+query I
+SELECT count(*) FROM (SELECT 1 FROM sales GROUP BY GROUPING SETS ((), (), ())) s
+----
+3
+
+query I
+SELECT count(*) FROM (SELECT 1 FROM sales GROUP BY DISTINCT ROLLUP (region), ROLLUP (region)) s
+----
+3
+
+query TI rowsort
+SELECT region, sum(amount) FROM sales GROUP BY (), region
+----
+n 80
+s 130
+
+# Over no rows: the empty set's grand total is still a row.
+query TI
+SELECT region, count(*) FROM sales WHERE amount > 1000 GROUP BY ROLLUP (region)
+----
+NULL 0
+
+query I
+SELECT GROUPING(region) FROM sales GROUP BY region ORDER BY 1 LIMIT 1
+----
+0
+
+query TIR rowsort
+SELECT region, sum(amount), avg(amount) FILTER (WHERE yr = 2025) FROM sales GROUP BY CUBE (region)
+----
+NULL 210 50.000
+n 80 50.000
+s 130 50.000
+
+query TII rowsort
+SELECT region, yr, rank() OVER (PARTITION BY GROUPING(region, yr) ORDER BY sum(amount) DESC) FROM sales GROUP BY GROUPING SETS ((region), (yr))
+----
+NULL 2024 2
+NULL 2025 1
+n NULL 2
+s NULL 1
+
+# A key a set leaves out is NULL there, though the column is not.
+query I
+SELECT count(*) FROM (SELECT id FROM sales GROUP BY ROLLUP (id)) s WHERE id IS NULL
+----
+1
+
+# nucleus-only: so it may be NULL in the result.
+query TITTT
+DESCRIBE SELECT id, count(*) FROM sales GROUP BY ROLLUP (id)
+----
+column 1 id integer t
+column 2 count bigint f
+
+statement ok
+CREATE TABLE gbig (id int PRIMARY KEY, a int, b int, v int)
+
+statement ok
+INSERT INTO gbig SELECT i, i % 3, i % 2, i FROM generate_series(1, 60000) i
+
+# nucleus-only: a column table.
+statement ok
+ALTER TABLE gbig SET STORAGE column
+
+query IIII rowsort
+SELECT a, b, count(*), sum(v) FROM gbig GROUP BY CUBE (a, b)
+----
+0 0 10000 300030000
+0 1 10000 300000000
+0 NULL 20000 600030000
+1 0 10000 300010000
+1 1 10000 299980000
+1 NULL 20000 599990000
+2 0 10000 299990000
+2 1 10000 300020000
+2 NULL 20000 600010000
+NULL 0 30000 900030000
+NULL 1 30000 900000000
+NULL NULL 60000 1800030000
+
+statement error 42803
+SELECT GROUPING(amount) FROM sales GROUP BY ROLLUP (region)
+
+statement error 42803
+SELECT region, product FROM sales GROUP BY ROLLUP (region)
+
+statement error 42803
+SELECT 1 FROM sales WHERE GROUPING(region) = 0 GROUP BY region

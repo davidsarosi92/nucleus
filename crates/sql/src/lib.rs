@@ -49,6 +49,7 @@ pub mod fasthash;
 pub mod fk;
 pub mod forget;
 pub mod fsum;
+mod grouping_sets;
 pub mod hint;
 pub mod hll;
 pub mod hnsw;

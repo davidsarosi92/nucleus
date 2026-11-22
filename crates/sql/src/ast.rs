@@ -972,8 +972,11 @@ pub struct Select {
     pub from: Vec<TableRef>,
     /// `WHERE`.
     pub filter: Option<Expr>,
-    /// `GROUP BY`.
+    /// `GROUP BY`: its keys (with grouping sets, every key any set has).
     pub group_by: Vec<Expr>,
+    /// `GROUPING SETS`, `ROLLUP`, `CUBE`, `()`: the sets, each its keys'
+    /// positions in `group_by` (`None`: one grouping by all of them).
+    pub grouping_sets: Option<Vec<Vec<usize>>>,
     /// `HAVING`.
     pub having: Option<Expr>,
     /// `WINDOW name AS (…)`, in order.
