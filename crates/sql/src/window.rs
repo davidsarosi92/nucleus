@@ -375,6 +375,9 @@ impl Partitions<'_> {
                     continue;
                 }
                 prev = Some(r);
+                // A frame's work: its rows (a sliding frame's, a deadline
+                // to look at — they are not rows read).
+                crate::budget::charge_work(1 + r.iter().map(|(a, b)| b - a).sum::<usize>() as u64)?;
                 let mut acc = agg.start();
                 for &(a, b) in r.iter() {
                     for j in (a..b).filter(|&j| fed[j]) {
@@ -406,6 +409,7 @@ impl Partitions<'_> {
                     continue;
                 }
                 prev = Some(r);
+                crate::budget::charge_work(1 + end.saturating_sub(fed_to) as u64)?;
                 if end > fed_to {
                     rows.clear();
                     rows.extend((fed_to..end).filter(|&j| fed[j]).map(|j| j as u32));
@@ -449,6 +453,7 @@ impl Partitions<'_> {
                 for &(a, b) in r.iter() {
                     rows.extend((a..b).filter(|&j| fed[j]).map(|j| j as u32));
                 }
+                crate::budget::charge_work(1 + rows.len() as u64)?;
                 groups.clear();
                 groups.resize(rows.len(), g as u32);
                 acc.update(&rows, &groups, &refs)?;
@@ -484,6 +489,7 @@ impl Partitions<'_> {
                     l >>= 1;
                     r >>= 1;
                 }
+                crate::budget::charge_work(1 + (left.len() + right.len()) as u64)?;
                 for node in left.into_iter().chain(right.into_iter().rev()) {
                     let p = match &partials[node] {
                         Some(p) => p.clone(),

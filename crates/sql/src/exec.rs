@@ -2893,6 +2893,11 @@ fn memory_join<'a>(left: Rows<'a>, right: Vec<Row>, spec: JoinSpec<'a>) -> Resul
             }
             _ => Box::new(0..r.len()),
         };
+        // The pairs this left row tries: work no row read pays for (a
+        // nested loop's are its sides' product), counted per left row.
+        if let Err(e) = crate::budget::charge_work(candidates.size_hint().0 as u64) {
+            return vec![Err(e)];
+        }
         let mut out = Vec::new();
         for i in candidates {
             let mut combined = l.clone();
@@ -3104,6 +3109,10 @@ impl BlockJoin<'_> {
                     }
                 }
                 let r = self.row.as_ref().expect("a right row");
+                if self.j == 0 {
+                    // The pairs this right row tries against the block.
+                    crate::budget::charge_work(self.block.len() as u64)?;
+                }
                 while self.j < self.block.len() {
                     let j = self.j;
                     self.j += 1;

@@ -399,7 +399,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("otlp: {e}"))?;
     }
     // Under its data key when it is encrypted (PLAN.md §M14.30 K2e).
+    let opening = std::time::Instant::now();
     let db = crate::keys::open_database(dir, &key_options.settings(dir), opts)?;
+    if db.replayed() > 0 {
+        nucleus_platform::log!(
+            "nucleus: recovered: {} batch(es) of the WAL replayed in {:.2} s (the last stop \
+             took no checkpoint)",
+            db.replayed(),
+            opening.elapsed().as_secs_f64()
+        );
+    }
+    // The handle a stop request checkpoints (issue #17).
+    let to_stop = db.clone();
     let kv: Arc<dyn Kv> = Arc::new(db);
     // The key hierarchy (PLAN.md §M14.30 K1): the keyring, the secrets'
     // key in it.
@@ -501,6 +512,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // `nucleus_ready`) — before the line saying so, which whoever started
     // the server may act on at once.
     nucleus_platform::metrics::set_ready(true);
+    // A stop request (SIGTERM, Ctrl-C) ends the sessions and checkpoints.
+    {
+        let kv = Arc::clone(&kv);
+        nucleus_signals::on_stop(move || shut_down(&to_stop, kv.as_ref()))?;
+    }
     nucleus_platform::log!(
         "nucleus {} listening on {} (database {dir}; index cache {} MB; {}{})",
         env!("CARGO_PKG_VERSION"),
@@ -610,6 +626,51 @@ pub fn run(args: &[String]) -> Result<(), String> {
         });
     }
     serve_front_end(first, first_listener, kv, config).map_err(|e| e.to_string())
+}
+
+/// A stop request (issue #17), as PostgreSQL's fast shutdown: not ready
+/// any more; every statement refused and the running ones stopped
+/// (`57P01`, [`nucleus_sql::budget::stop_all`]); the commits under way
+/// waited for (as long as the transactions running keep ending, 2 s at
+/// most — one left open by an idle session never commits now); then a
+/// checkpoint, so the next start replays nothing, and the process ends.
+/// Without the checkpoint nothing would be lost either — every
+/// acknowledged commit is in the WAL — only the next start would be
+/// slower.
+fn shut_down(db: &nucleus_kv::Database, kv: &dyn Kv) {
+    use std::time::{Duration, Instant};
+    let started = Instant::now();
+    nucleus_platform::metrics::set_ready(false);
+    nucleus_sql::budget::stop_all();
+    nucleus_platform::log!(
+        "nucleus: asked to stop: statements refused, a checkpoint next (ask again to stop at once)"
+    );
+    let (mut left, mut since) = (kv.running(), Instant::now());
+    while left > 0
+        && started.elapsed() < Duration::from_secs(2)
+        && since.elapsed() < Duration::from_millis(100)
+    {
+        std::thread::sleep(Duration::from_millis(5));
+        let now = kv.running();
+        if now != left {
+            (left, since) = (now, Instant::now());
+        }
+    }
+    match db.checkpoint() {
+        Ok(()) => {
+            nucleus_platform::log!(
+                "nucleus: stopped: checkpoint taken in {} ms",
+                started.elapsed().as_millis()
+            );
+            std::process::exit(0)
+        }
+        Err(e) => {
+            nucleus_platform::log!(
+                "nucleus: stopped without a checkpoint ({e}): the next start replays the WAL"
+            );
+            std::process::exit(1)
+        }
+    }
 }
 
 /// A Unix socket listening at `path`: a socket file left by a server no

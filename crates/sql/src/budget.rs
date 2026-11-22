@@ -6,6 +6,7 @@
 //! reads, not after.
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
@@ -109,6 +110,8 @@ pub fn work_mem() -> usize {
 struct Spent {
     budget: Budget,
     scanned: Cell<u64>,
+    /// Work done that reads no rows ([`charge_work`]).
+    work: Cell<u64>,
     /// µs spent waiting for the client ([`paused`]).
     waited: Cell<i64>,
     /// Its calls to models: shared with its workers, which call too.
@@ -206,6 +209,7 @@ pub(crate) fn with_budget_sharing<T>(
         s.replace(Some(Spent {
             budget,
             scanned: Cell::new(0),
+            work: Cell::new(0),
             waited: Cell::new(0),
             models: models.unwrap_or_default(),
         }))
@@ -213,6 +217,32 @@ pub(crate) fn with_budget_sharing<T>(
     let out = f();
     SPENT.with(|s| *s.borrow_mut() = before);
     out
+}
+
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// The process is shutting down (a server asked to stop, issue #17): from
+/// now on every statement is refused before it starts and a running one
+/// stops where it would look at its deadline (every 64 rows), both with
+/// `57P01` — so the checkpoint the server takes next holds every commit,
+/// and none comes after it.  Not undone.
+pub fn stop_all() {
+    STOPPING.store(true, Ordering::Release);
+}
+
+/// Whether [`stop_all`] was called.
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::Acquire)
+}
+
+/// `57P01` while the process shuts down ([`stop_all`]).
+pub fn refuse_if_stopping() -> Result<()> {
+    if stopping() {
+        return Err(Error::admin_shutdown(
+            "terminating the statement: the server is shutting down",
+        ));
+    }
+    Ok(())
 }
 
 /// `57014`: the statement ran out of time.
@@ -260,6 +290,28 @@ pub fn charge_scans(n: u64) -> Result<()> {
             )));
         }
         if after / 64 != before / 64 {
+            check_time(&s.budget)?;
+        }
+        Ok(())
+    })
+}
+
+/// `n` steps of work that read no rows — the pairs of rows a nested loop
+/// tries, whose number is the product of its sides': past the deadline
+/// (looked at every 4,096) `57014`, or `57P01` while the process shuts
+/// down.  Without it a statement's rows read were all its deadline saw: a
+/// nested loop of 3,000 rows against 200,000 under a 100 ms
+/// `statement_timeout` ran for 100 s, its left side read in three batches.
+pub fn charge_work(n: u64) -> Result<()> {
+    SPENT.with(|s| {
+        let s = s.borrow();
+        let Some(s) = s.as_ref() else {
+            return Ok(());
+        };
+        let before = s.work.get();
+        let after = before + n;
+        s.work.set(after);
+        if after / 4096 != before / 4096 {
             check_time(&s.budget)?;
         }
         Ok(())
@@ -322,6 +374,7 @@ pub fn check_deadline() -> Result<()> {
 }
 
 fn check_time(b: &Budget) -> Result<()> {
+    refuse_if_stopping()?;
     if let Some(d) = b.deadline
         && crate::datetime::clock()? > d
     {

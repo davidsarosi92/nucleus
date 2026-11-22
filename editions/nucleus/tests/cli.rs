@@ -2005,3 +2005,95 @@ fn a_unix_socket() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = d;
 }
+
+/// A stop request (issue #17): `SIGTERM` — what `docker stop`, systemd
+/// and Kubernetes send — ends the sessions and takes a checkpoint, so the
+/// next start replays nothing; `kill -9` leaves the WAL to replay, as a
+/// crash does (and says so).  Nothing committed is lost either way.
+#[cfg(unix)]
+#[test]
+fn a_stop_request_checkpoints() {
+    use std::io::BufRead;
+    let dir = temp_dir("stop");
+    let d = dir.to_str().unwrap();
+    // The server, its stderr's lines up to the one saying where it
+    // listens, and the reader for the rest.
+    /// The server killed even when an assertion fails.
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let start = || {
+        let mut server = Kill(
+            Command::new(env!("CARGO_BIN_EXE_nucleus"))
+                .args(["server", d, "--listen", "127.0.0.1:0"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut r = std::io::BufReader::new(server.0.stderr.take().unwrap());
+        let mut before = String::new();
+        loop {
+            let mut line = String::new();
+            assert_ne!(r.read_line(&mut line).unwrap(), 0, "{before}");
+            before += &line;
+            if line.contains(" listening on ") {
+                let addr = line
+                    .split_whitespace()
+                    .find(|w| w.starts_with("127.0.0.1:"))
+                    .unwrap()
+                    .to_string();
+                return (server, r, before, addr);
+            }
+        }
+    };
+    let signal = |server: &Kill, sig: &str| {
+        let ok = Command::new("kill")
+            .args([sig, &server.0.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    };
+    let write = |addr: &str, from: u32| {
+        let (ok, out) = ncsql(
+            &["-h", addr],
+            &format!(
+                "CREATE TABLE IF NOT EXISTS t (id INT PRIMARY KEY, v TEXT);\n\
+                 INSERT INTO t SELECT i, 'v' || i FROM generate_series({from}, {}) i;\n\
+                 UPDATE t SET v = v || '!' WHERE id % 3 = 0;\n",
+                from + 19_999
+            ),
+        );
+        assert!(ok, "{out}");
+    };
+    let count = |addr: &str| {
+        let (ok, out) = ncsql(&["-h", addr, "-c", "SELECT count(*) FROM t"], "");
+        assert!(ok, "{out}");
+        out
+    };
+    // SIGTERM: exit 0 after a checkpoint; the next start replays nothing.
+    let (mut server, mut r, _, addr) = start();
+    write(&addr, 1);
+    signal(&server, "-TERM");
+    let status = server.0.wait().unwrap();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut r, &mut rest).unwrap();
+    assert!(status.success(), "{status:?}: {rest}");
+    assert!(rest.contains("stopped: checkpoint taken"), "{rest}");
+    let (mut server, _r, before, addr) = start();
+    assert!(!before.contains("recovered:"), "{before}");
+    assert!(count(&addr).contains(" 20000"));
+    // kill -9: the WAL replayed at the next start, every commit there.
+    write(&addr, 20_001);
+    signal(&server, "-KILL");
+    server.0.wait().unwrap();
+    let (server, _r, before, addr) = start();
+    assert!(before.contains("recovered:"), "{before}");
+    assert!(count(&addr).contains(" 40000"));
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}

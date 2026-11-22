@@ -285,6 +285,8 @@ nucleus server ./mydb --root-kms aws-kms:alias/db   # the root key kept in AWS K
                                         # (or vault-transit:<key>, gcp-kms:…, azure-kv:<vault>/<key>,
                                         #  'pkcs11:token=…;object=…?module-path=…' for an HSM)
 nucleus status                          # a running server's health, for people
+kill -TERM <pid>                        # a stop (docker stop, systemd too): sessions ended,
+                                        # a checkpoint, the next start replays nothing
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down
 nucleus migrate up ./mydb               # the pending ones, each in one transaction

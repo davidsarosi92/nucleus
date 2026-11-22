@@ -94,6 +94,7 @@ codes! {
     object_in_use => "55006",
     prerequisite => "55000",
     query_canceled => "57014",
+    admin_shutdown => "57P01",
     program_limit => "54000",
     statement_too_complex => "54001",
     configuration_limit => "53400",

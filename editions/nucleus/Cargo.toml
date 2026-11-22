@@ -29,6 +29,7 @@ nucleus-ldap.workspace = true
 nucleus-mcp.workspace = true
 nucleus-console.workspace = true
 nucleus-prometheus.workspace = true
+nucleus-signals.workspace = true
 nucleus-otlp.workspace = true
 nucleus-s3.workspace = true
 nucleus-aws-kms.workspace = true

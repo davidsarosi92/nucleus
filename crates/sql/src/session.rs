@@ -892,6 +892,7 @@ impl Session {
         params: &[Value],
         sink: &mut dyn Sink,
     ) -> Result<String> {
+        crate::budget::refuse_if_stopping()?;
         self.with_catalog(|s| {
             s.run_statement(stmt, params, sink)
                 .and_then(|out| deliver(stmt, out, sink))

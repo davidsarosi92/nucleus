@@ -48,6 +48,7 @@
 | `modules/console` | `nucleus-console` | the web console: a front end serving a page to browse tables, run SQL, see plans drawn and the linter's findings (§9) | §M14.17 |
 | `modules/prometheus` | `nucleus-prometheus` | Prometheus: the metrics as `GET /metrics` (text format, OpenMetrics) and the health checks `/health/live`, `/health/ready` (§8.38) | §M14.18 |
 | `modules/otlp` | `nucleus-otlp` | OpenTelemetry: the metrics pushed to a collector over OTLP/HTTP (§8.38) | §M14.18 |
+| `modules/signals` | `nucleus-signals` | stop requests: `SIGTERM`, `SIGINT`, `SIGHUP` (Ctrl-C, Ctrl-Break, a console closing on Windows) handed to the server as a call, through the `ctrlc` crate — the core has no signal handling (§9) | issue #17 |
 | `modules/aws` | `nucleus-aws` | what the AWS modules share: Signature Version 4, credentials, region and endpoint from the AWS SDKs' variables | §M14.18, §M14.30 |
 | `modules/s3` | `nucleus-s3` | Backups in S3-compatible object storage (`s3://bucket/prefix`), AWS Signature Version 4 (§8.30) | §M14.18 |
 | `modules/pkcs11` | `nucleus-pkcs11` | the keyring's root key in an HSM or any PKCS#11 token (`--root-kms 'pkcs11:token=<t>;object=<k>?module-path=<lib>&pin-source=<file>'`, RFC 7512): data keys encrypted in the token by an AES-256 key with AES-GCM, the purpose as additional authenticated data; through `cryptoki`; tests against SoftHSM2 | §M14.30 |
@@ -7033,6 +7034,26 @@ backup (default 7) a full one, the last `--backup-keep` full ones kept;
 `/health/live`, `/health/ready` (default `127.0.0.1:20037`), `--otlp`
 pushes the metrics to an OpenTelemetry collector (§8.38).
 
+**Stopping** (issue #17; `modules/signals`).  `SIGTERM` — what `docker
+stop`, systemd, launchd and Kubernetes send —, `SIGINT` (Ctrl-C) and
+`SIGHUP` stop the server as PostgreSQL's fast shutdown does: not ready
+any more (`/health/ready` 503); every statement refused and the running
+ones stopped where they look at their deadline (`57P01`,
+`nucleus_sql::budget::stop_all`), so a transaction left open never
+commits; the commits under way waited for (2 s at most); a checkpoint;
+exit code 0 (`nucleus: stopped: checkpoint taken in … ms`).  The next
+start replays nothing.  A second request ends the process at once (exit
+code 130).  Without a checkpoint — `kill -9`, a crash, a failed one —
+nothing committed is lost either (every acknowledged commit is in the
+WAL); the next start replays it and says so (`nucleus: recovered: N
+batch(es) of the WAL replayed in … s`, `Database::replayed`).  In the
+container image `nucleus` is PID 1, which the kernel sends no signal
+without a handler: before, `docker stop` waited its 10 s and killed it.
+Measured: six sessions committing, one in a long join and one with an
+open transaction — stopped in 0.15 s (the checkpoint 0.14 s), the
+restart replaying nothing; after `kill -9` the same load replayed 39,726
+batches.
+
 `--history` keeps every snapshot of that long ago readable — `7d`,
 `12h`, `90min`, `'30 minutes'` (the units of `statement_timeout`) — for
 `AS OF TIMESTAMP` (§8.7): each commit records its time, and the vacuum
@@ -7557,7 +7578,12 @@ statement_timeout = …` (or the database's) ends a statement that runs
 longer (`57014`), checked as rows are read or made — scans, table
 functions, recursive rounds, an index build's rows (on its workers too;
 a cancelled `CREATE INDEX` leaves no index), a JSON path's items (every 4,096 — a
-path's items can grow exponentially with its length); a token's `ROWS n` (the most rows a
+path's items can grow exponentially with its length) — and as work is
+done that reads no rows (`budget::charge_work`, every 4,096 steps): a
+nested loop's pairs (counted per left row, or per right row of a block),
+a sliding window's frames (a 3,000 × 200,000 nested loop over a column
+table ran 100 s under a 100 ms timeout before, its left side read in
+three batches; now any statement tried stops within 0.1–0.2 s); a token's `ROWS n` (the most rows a
 statement returns), `SCAN n` (the most it reads) — `54000` — `TIMEOUT
 '…'` and `RATE n PER MINUTE` (statements, `53400`): `CREATE TOKEN … ROWS
 1000 SCAN 100000 TIMEOUT '5s' RATE 60 PER MINUTE`.  *An insecure start*:

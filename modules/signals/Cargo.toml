@@ -1,0 +1,22 @@
+[package]
+name = "nucleus-signals"
+description = "Stop requests for nucleus: SIGTERM, SIGINT and SIGHUP (Ctrl-C, Ctrl-Break and a console closing on Windows) handed to the server as a call, for a shutdown with a checkpoint"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+# The signal handler behind a safe API, on Unix and Windows: the unsafe
+# code is ctrlc's, not ours.  `termination` adds SIGTERM and SIGHUP to
+# SIGINT.
+ctrlc = { version = "3.4", features = ["termination"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

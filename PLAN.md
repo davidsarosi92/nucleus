@@ -12943,6 +12943,48 @@ Found and fixed:
   `LocalDate` reaches far enough, Swift's `Date` is a double; JavaScript's
   `Date` ends at year 275,760 — past it a date arrives as an invalid
   `Date` (the database's last, 5,874,897, is past it), left as is.
+- A stop was a crash (issue #17): no handler for `SIGTERM`, so `docker
+  stop`, systemd and Kubernetes ended the server without a checkpoint
+  and its next start replayed the WAL (10–13 s after a minute of small
+  transactions); as the container's PID 1 it was not even ended — the
+  kernel sends PID 1 no signal it has no handler for, so `docker stop`
+  waited 10 s and killed it.  Now `modules/signals` (the `ctrlc` crate:
+  the core stays dependency-free and without `unsafe`; `signal-hook`
+  was the other choice, Unix only) hands `SIGTERM`, `SIGINT`, `SIGHUP`
+  (Ctrl-C, Ctrl-Break, a console closing on Windows) to the server,
+  which stops as PostgreSQL's fast shutdown: not ready, every statement
+  refused and the running ones stopped at their next look at the
+  deadline (`57P01`, `budget::stop_all`), the commits under way waited
+  for (2 s at most), a checkpoint, exit 0; a second request exits at
+  once (130).  A start that replays the WAL now says so (`recovered: N
+  batch(es) … replayed`, `Database::replayed`).  Measured: six sessions
+  committing, a long join and an open transaction — stopped in 0.15 s,
+  nothing replayed; after `kill -9`, 39,726 batches replayed.  Tested
+  end to end (`a_stop_request_checkpoints`: `SIGTERM` then `kill -9`;
+  fails without the handler) and in the SQL layer
+  (`statements_stop_when_the_server_stops`).
+- The statement budget saw only rows read: a nested loop's pairs and a
+  sliding window's frames are work no row pays for — found while the
+  stop above did not end a running nested loop.  Under a 100 ms
+  `statement_timeout`, a 3,000 × 200,000 nested loop over a column
+  table ran 100 s (182 s with a sort above it; its left side read in
+  three batches, the only times the deadline was looked at), over a row
+  table 2–3 s, and a `string_agg` over a 50,000-row sliding frame did
+  not stop in 10 minutes.  Now `budget::charge_work` counts such work
+  and looks at the deadline every 4,096 steps (a nested loop's pairs
+  per left row, or per right row of a block; a frame's rows or tree
+  nodes): 20 statements tried — joins of every kind, subqueries,
+  recursive CTEs, windows, `generate_series`, aggregates — all stop
+  within 0.1–0.22 s.  Cost, measured ABBA (median of 5): a nested loop
+  of 30 M pairs 5,000 → 5,025 ms (+0.5 %; charged per pair it was
+  +2 %), windows unchanged.  Tested by
+  `a_nested_loop_and_a_sliding_window_stop_at_the_statement_timeout`
+  (fails without either half: 274 s and 12 s).  For the performance
+  pass: a nested loop pair costs ~166 ns — a combined row is built per
+  pair, where the predicate could read the two sides in place; and a
+  sliding window keeps every row's result of a partition at once (a
+  `string_agg` over a wide frame: the frames' strings together, past
+  any `work_mem`), where PostgreSQL gives each as it is made.
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,

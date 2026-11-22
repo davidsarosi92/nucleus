@@ -1367,6 +1367,12 @@ impl Database {
         (pager.page_count(), pager.free_count())
     }
 
+    /// How many batches of the WAL opening the database replayed (0: it
+    /// was closed with a checkpoint — or nothing was written since one).
+    pub fn replayed(&self) -> u64 {
+        self.engine.store().recovery().replayed
+    }
+
     /// The newest committed snapshot.
     pub fn latest(&self) -> Timestamp {
         self.engine.visible()
