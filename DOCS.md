@@ -2316,7 +2316,8 @@ OTHERS]])`, a bound `UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n
 FOLLOWING | UNBOUNDED FOLLOWING` (§8.5).
 
 Not yet: `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
-UTC, multi-dimensional arrays, data-modifying CTEs, user functions.
+UTC, multi-dimensional arrays, data-modifying CTEs, user functions,
+`TRUNCATE`, `SELECT … INTO`, `ADD COLUMN IF NOT EXISTS` (issue #16).
 
 ### 8.4 Binder (`binder`)
 
