@@ -12752,6 +12752,66 @@ issue #2 (row tables warm 0.57×, cold 0.55×):
     `jsonschema` crate (1.7×): not against PostgreSQL — §M14.15's open
     performance notes.
 
+**The bug hunt after the issues** (2026-11-22; the order agreed
+2026-11-21: the open issues, then bugs, then performance).  Four
+searchers, each against the release build:
+- *Differential, one engine against itself* (SQLancer's idea, Rigger
+  and Su): the same rows in six tables that differ only physically —
+  `row`, `column`, the LSM tree, row with six indexes, column with two,
+  hash-partitioned — the same changes applied to each (updates,
+  deletes, inserts, a vacuum between), and random queries (expressions
+  over every type, `IN` / `EXISTS` subqueries, joins and self-joins,
+  aggregates, `DISTINCT`, windows with frames, set operations, CTEs,
+  `ORDER BY … LIMIT … OFFSET`) on each under `batch_size` 0, 3, 7 and
+  the default, `work_mem` 64 kB, one worker or four.  Any difference in
+  the rows, or an error on one side only, is a bug: no semantics differ.
+- *Metamorphic*: TLP (a query's rows the union of its `WHERE p`, `NOT p`
+  and `p IS NULL` parts) and NoREC (`count(*) … WHERE p` against
+  `sum(CASE WHEN p …)`, which no optimization touches).
+- *PostgreSQL 18 on the same rows*: numbers compared to 7 digits (a
+  `double` sum is exact here and PostgreSQL's is not: they differ in the
+  9th), PostgreSQL's C locale (its `upper('é')` is `é`).
+- *Crash recovery against real files*: `kill -9` mid-statement — bulk
+  inserts of up to 60,000 rows, deletes and updates of up to 200,000,
+  index builds and drops (the writes without the WAL, D16), a table
+  filled in the transaction that creates it, `VACUUM` — while a second
+  connection commits rows one at a time; after each restart, the rows
+  acknowledged are there and those of the statement killed all or none,
+  every index finds what the table holds (by `k = x` against `k + 0 =
+  x`), and none of the one-row commits is lost.  270 kills, row, column
+  and LSM tables: nothing found.
+
+Found and fixed:
+- `NULL IN (an empty subquery)` was `NULL`, and `NOT IN` too: false and
+  true (SQL's `<in predicate>`: no comparison, so none unknown; the
+  `= ANY` / `<> ALL` forms were right).  `expr::in_values` and the
+  vectorized `in_consts`; `05_subqueries.slt` (fails with either
+  undone).  Found by PostgreSQL's answer, in `CASE WHEN a NOT IN (SELECT
+  … WHERE false)`.
+- A hash join that multiplies its rows held them all: a batch's
+  matches at once (1,024 left rows × 5,000 matches: 5 million rows), a
+  parallel morsel's whole output, row by row.  A self-join of 60,000
+  rows on 12 values held 1.5–1.8 GB (the fuzzer's servers were killed
+  by the memory cap).  Now a probe gives at most four batches' rows at a
+  time and keeps its place (DuckDB's probe a vector and its scan
+  structure; PostgreSQL's a tuple), and a parallel run whose morsel's
+  rows pass its share of `work_mem` and eight times the rows it read
+  goes on on the statement's thread, as they come — a filter or a
+  one-to-one join never does.  Measured (60,000 rows, one worker / all):
+  peak memory 1,553 / 1,847 MB → 25 / 32 MB; 9.23 / 2.28 s → 8.64 /
+  1.95 (the rows stay in cache).  Tested by
+  `joins_that_multiply_their_rows_give_them_a_part_at_a_time` (inner,
+  left with a condition, semi, anti, a window over a join, an error in a
+  later part; the row-at-a-time join's rows, order and error; fails
+  with either limit undone).
+
+Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
+aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
+`GROUPING SETS` / `ROLLUP` / `CUBE`, a row constructor in `SELECT
+DISTINCT (a, b)`.  For the performance pass: the row-at-a-time join
+of that self-join takes 76 s (the vectorized 2 s), and its aggregate
+did not run on the workers without statistics (`rows=1000` estimated).
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer

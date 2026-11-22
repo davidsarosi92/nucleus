@@ -183,6 +183,78 @@ fn groups_past_work_mem_agree() {
     }
 }
 
+/// A join that multiplies its rows (many to many) gives them a part of a
+/// batch at a time — a batch's left rows whose matches pass a few batches
+/// wait for the next step — and a parallel one whose morsel's rows pass
+/// its share of work_mem goes on as they are read: the rows, their order
+/// and the first error of the row-at-a-time join, never a batch's or a
+/// morsel's matches held at once (a self-join of 60,000 rows on 12 values
+/// held 1.8 GB).
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn joins_that_multiply_their_rows_give_them_a_part_at_a_time() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(41)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE m (id INT PRIMARY KEY, k INT, v TEXT); \
+         INSERT INTO m SELECT i, CASE WHEN i % 97 = 0 THEN NULL ELSE i % 6 END, 'v' || i \
+           FROM generate_series(1, 40000) i; \
+         CREATE TABLE few (k INT, w INT); \
+         INSERT INTO few SELECT i % 4, i FROM generate_series(1, 200) i",
+    )
+    .unwrap();
+    let queries = [
+        // Inner, the rows themselves: their order is the probe's.
+        "SELECT m.id, few.w FROM m JOIN few ON m.k = few.k WHERE m.id % 50 = 1",
+        "SELECT count(*), sum(few.w), min(m.v) FROM m JOIN few ON m.k = few.k",
+        "SELECT m.k, count(*) FROM m JOIN m m2 ON m.k = m2.k AND m2.id < 300 GROUP BY m.k",
+        // Left, with a condition beyond the keys.
+        "SELECT count(*), count(few.w) FROM m LEFT JOIN few ON m.k = few.k AND few.w % 7 > m.id % 5",
+        "SELECT m.id, m.v, few.w FROM m JOIN few ON m.k = few.k",
+        // A window over the join: the join's own rows handed over.
+        "SELECT count(*), max(rn), sum(rn * w) FROM (SELECT few.w, \
+           row_number() OVER (PARTITION BY m.k ORDER BY m.id, few.w) AS rn \
+           FROM m JOIN few ON m.k = few.k) q",
+        "SELECT m.id, few.w FROM m LEFT JOIN few ON m.k = few.k AND few.w < 9 WHERE m.id < 400",
+        // Semi and anti: never more rows than the left side.
+        "SELECT count(*) FROM m WHERE k IN (SELECT k FROM few)",
+        "SELECT count(*) FROM m WHERE NOT EXISTS (SELECT 1 FROM few WHERE few.k = m.k)",
+        // An error in a part after the first: the first error, the rows before it.
+        "SELECT count(*) FROM m JOIN few ON m.k = few.k AND 1 / (m.id - 30000) > -5",
+    ];
+    let mut row = session(&db, 0);
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4; SET work_mem = '256kB'")
+        .unwrap();
+    let mut tiny = session(&db, 3);
+    tiny.execute("SET parallel_workers = 4").unwrap();
+    let (cuts, serial) = (
+        nucleus_sql::vector::probe_cuts(),
+        nucleus_sql::vector::serial_tails(),
+    );
+    for q in queries {
+        let want = outcome(&mut row, q);
+        assert_eq!(outcome(&mut one, q), want, "one worker: {q}");
+        assert_eq!(outcome(&mut many, q), want, "workers: {q}");
+        assert_eq!(outcome(&mut tiny, q), want, "batches of 3: {q}");
+    }
+    assert!(
+        nucleus_sql::vector::probe_cuts() > cuts,
+        "a batch's matches past the limit were left for the next step"
+    );
+    assert!(
+        nucleus_sql::vector::serial_tails() > serial,
+        "a morsel's rows past its share of work_mem were probed as read"
+    );
+}
+
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn many_groups_past_work_mem_spill_on_the_workers() {

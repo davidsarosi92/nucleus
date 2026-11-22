@@ -2763,6 +2763,13 @@ pub struct Pipeline<'a> {
     /// others too: those are decoded for the rows it keeps only (late
     /// materialization, [`crate::storage::BatchSource::next_batch_tested`]).
     late: Option<Late>,
+    /// A hash join's left rows not probed yet, each with the step that
+    /// probes them: a batch whose matches pass [`probe_limit`] gives them
+    /// a part at a time, before the next batch is read (the last part
+    /// left first: the rows in order).
+    pending: std::cell::RefCell<Vec<(Batch, usize)>>,
+    /// Rows read from the scan so far.
+    read: u64,
 }
 
 /// A pipeline's filter run on the columns it reads before the others are
@@ -3051,12 +3058,20 @@ impl<'a> Pipeline<'a> {
             max,
             dict,
             late,
+            pending: std::cell::RefCell::new(Vec::new()),
+            read: 0,
         }))
     }
 
     fn next(&mut self) -> Result<Option<Out>> {
         loop {
             let started = self.cx.ctx.profile.and_then(|p| p.clock());
+            if let Some((input, from)) = self.pending.get_mut().pop() {
+                return Ok(Some(match self.ran(&input, started, from) {
+                    Some(out) => out,
+                    None => continue,
+                }));
+            }
             let Some(source) = &mut self.source else {
                 return Ok(None);
             };
@@ -3091,15 +3106,29 @@ impl<'a> Pipeline<'a> {
                 return Ok(None);
             };
             crate::budget::charge_scans(read as u64)?;
+            self.read += read as u64;
             self.batch = (self.batch * 2).min(self.max);
             // A batch tested by its first step goes on from the next.
             let from = usize::from(tested);
-            let out = match self.run(&input, started, from) {
-                Ok(b) if b.sel.is_empty() => continue,
-                Ok(b) => Out::Batch(b),
-                Err(_) => self.redo(&input, from),
-            };
-            return Ok(Some(out));
+            match self.ran(&input, started, from) {
+                Some(out) => return Ok(Some(out)),
+                None => continue,
+            }
+        }
+    }
+
+    /// `input` through the steps from `from` on: a batch, or the rows of
+    /// [`Pipeline::redo`] after an error (the parts it left pending
+    /// dropped: the redo makes them), `None` when no row is left.
+    fn ran(&self, input: &Batch, started: Option<Duration>, from: usize) -> Option<Out> {
+        let mark = self.pending.borrow().len();
+        match self.run(input, started, from) {
+            Ok(b) if b.sel.is_empty() => None,
+            Ok(b) => Some(Out::Batch(b)),
+            Err(_) => {
+                self.pending.borrow_mut().truncate(mark);
+                Some(self.redo(input, from))
+            }
         }
     }
 
@@ -3144,7 +3173,13 @@ impl<'a> Pipeline<'a> {
                 (Step::Filter(p), None) => filter(p, b, self.cx)?,
                 (Step::Project(exprs), _) => project(exprs, b, self.cx)?,
                 (Step::Keys(filters), _) => keep_keys(filters, b),
-                (Step::Probe(p), _) => p.apply(b, self.cx)?,
+                (Step::Probe(p), _) => {
+                    let (joined, rest) = p.apply(b, self.cx, probe_limit())?;
+                    if let Some(rest) = rest {
+                        self.pending.borrow_mut().push((rest, i));
+                    }
+                    joined
+                }
                 (Step::Lookup(l), _) => l.apply(b, self.cx)?,
             };
             if steps
@@ -3275,6 +3310,7 @@ pub fn rows_spare<'a>(
             rows: std::collections::VecDeque::new(),
             err: None,
             done: false,
+            serial: None,
         })));
     }
     let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, true, None)? else {
@@ -3338,6 +3374,7 @@ pub fn batches<'a>(
             batches: std::collections::VecDeque::new(),
             err: None,
             done: false,
+            serial: None,
         })));
     }
     let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, false, None)? else {
@@ -4121,6 +4158,14 @@ pub(crate) fn note_adaptive_lookups() {
     ADAPTIVE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+static PROBE_CUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times a hash join's probe left a batch's rows for later, its
+/// matches past [`probe_limit`] (for tests and diagnostics).
+pub fn probe_cuts() -> u64 {
+    PROBE_CUTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 static SPILLED_GROUPINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many parallel aggregates this process has run with groups written
@@ -4289,6 +4334,36 @@ impl<'a> Morsels<'a> {
             workers,
             tables: snapshot(&ctx.join_tables.borrow()),
         }))
+    }
+
+    /// The pipeline of `plan` over the morsel `m`, here (a parallel run's
+    /// serial tail, [`MorselOut`]): the join tables the workers probe are
+    /// put in this context while it is made — the steps take them — and
+    /// those it did not hold taken out again.
+    fn serial(&self, plan: &'a Plan, rows: bool, m: usize) -> Result<Pipeline<'a>> {
+        let mut added = Vec::new();
+        {
+            let mut held = self.ctx.join_tables.borrow_mut();
+            for (j, t) in &self.tables {
+                if !held.contains_key(j) {
+                    held.insert(*j, Built::Table(t.clone()));
+                    added.push(*j);
+                }
+            }
+        }
+        let made = Pipeline::new(
+            plan,
+            plan,
+            self.ctx,
+            None,
+            rows,
+            Some(self.ranges[m].clone()),
+        );
+        let mut held = self.ctx.join_tables.borrow_mut();
+        for j in added {
+            held.remove(&j);
+        }
+        made?.ok_or_else(|| Error::internal("a morsel's pipeline"))
     }
 
     /// `f` over the morsels `which`, on up to `workers` threads, each with
@@ -5211,6 +5286,9 @@ struct ParallelRows<'a> {
     rows: std::collections::VecDeque<Row>,
     err: Option<Error>,
     done: bool,
+    /// Run here from this morsel on, its rows as they come (a morsel's
+    /// past [`MorselOut`]'s mark).
+    serial: Option<(usize, Option<BatchRows<'a>>)>,
 }
 
 impl Iterator for ParallelRows<'_> {
@@ -5225,19 +5303,61 @@ impl Iterator for ParallelRows<'_> {
                 self.done = true;
                 return Some(Err(e));
             }
+            if self.done {
+                return None;
+            }
             let total = self.work.ranges.len();
-            if self.done || self.next >= total {
+            if let Some((morsel, run)) = &mut self.serial {
+                if let Some(rows) = run {
+                    match rows.next() {
+                        Some(Ok(r)) => return Some(Ok(r)),
+                        Some(Err(e)) => {
+                            self.done = true;
+                            return Some(Err(e));
+                        }
+                        None => *run = None,
+                    }
+                    continue;
+                }
+                if *morsel >= total {
+                    return None;
+                }
+                *morsel += 1;
+                match self.work.serial(self.plan, true, *morsel - 1) {
+                    Ok(pipe) => {
+                        *run = Some(BatchRows {
+                            pipe,
+                            spare: self.spare,
+                            batch: None,
+                            pos: 0,
+                            pending: std::collections::VecDeque::new(),
+                            err: None,
+                            done: false,
+                        })
+                    }
+                    Err(e) => self.err = Some(e),
+                }
+                continue;
+            }
+            if self.next >= total {
                 return None;
             }
             let end = (self.next + self.work.workers).min(total);
-            let (plan, spare) = (self.plan, self.spare);
+            let (plan, spare, workers) = (self.plan, self.spare, self.work.workers);
             let results = self.work.run(self.next..end, false, &|wctx, range| {
-                morsel_rows(plan, wctx, range, spare)
+                morsel_rows(plan, wctx, range, spare, MorselOut::new(workers))
             });
+            let first = self.next;
             self.next = end;
-            for r in results {
+            for (m, r) in results.into_iter().enumerate() {
                 let (rows, err) = match r {
-                    Some(Ok(x)) => x,
+                    Some(Ok(Some(x))) => x,
+                    Some(Ok(None)) => {
+                        self.serial = Some((first + m, None));
+                        self.next = total;
+                        note_serial_tail();
+                        break;
+                    }
                     Some(Err(e)) => (Vec::new(), Some(e)),
                     None => (Vec::new(), Some(Error::internal("a morsel not run"))),
                 };
@@ -5271,6 +5391,8 @@ struct ParallelBatches<'a> {
     batches: std::collections::VecDeque<Dense>,
     err: Option<Error>,
     done: bool,
+    /// As [`ParallelRows`]'s.
+    serial: Option<(usize, Option<PipeBatches<'a>>)>,
 }
 
 impl Iterator for ParallelBatches<'_> {
@@ -5289,19 +5411,57 @@ impl Iterator for ParallelBatches<'_> {
                 self.done = true;
                 return Some(Err(e));
             }
+            if self.done {
+                return None;
+            }
             let total = self.work.ranges.len();
-            if self.done || self.next >= total {
+            if let Some((morsel, run)) = &mut self.serial {
+                if let Some(batches) = run {
+                    match batches.next() {
+                        Some(Ok(b)) => return Some(Ok(b)),
+                        Some(Err(e)) => {
+                            self.done = true;
+                            return Some(Err(e));
+                        }
+                        None => *run = None,
+                    }
+                    continue;
+                }
+                if *morsel >= total {
+                    return None;
+                }
+                *morsel += 1;
+                match self.work.serial(self.plan, false, *morsel - 1) {
+                    Ok(pipe) => {
+                        *run = Some(PipeBatches {
+                            pipe,
+                            err: None,
+                            done: false,
+                        })
+                    }
+                    Err(e) => self.err = Some(e),
+                }
+                continue;
+            }
+            if self.next >= total {
                 return None;
             }
             let end = (self.next + self.work.workers).min(total);
-            let plan = self.plan;
+            let (plan, workers) = (self.plan, self.work.workers);
             let results = self.work.run(self.next..end, false, &|wctx, range| {
-                morsel_batches(plan, wctx, range)
+                morsel_batches(plan, wctx, range, MorselOut::new(workers))
             });
+            let first = self.next;
             self.next = end;
-            for r in results {
+            for (m, r) in results.into_iter().enumerate() {
                 let (batches, err) = match r {
-                    Some(Ok(x)) => x,
+                    Some(Ok(Some(x))) => x,
+                    Some(Ok(None)) => {
+                        self.serial = Some((first + m, None));
+                        self.next = total;
+                        note_serial_tail();
+                        break;
+                    }
                     Some(Err(e)) => (Vec::new(), Some(e)),
                     None => (Vec::new(), Some(Error::internal("a morsel not run"))),
                 };
@@ -5318,52 +5478,71 @@ impl Iterator for ParallelBatches<'_> {
 
 /// One morsel's batches, on a worker: the batches, and the error that
 /// ended them (if one did).
-fn morsel_batches(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Dense>, Option<Error>)> {
+/// `None` once they are past `held`'s mark.
+fn morsel_batches(
+    plan: &Plan,
+    ctx: &Ctx,
+    range: KeyRange,
+    held: MorselOut,
+) -> Result<Option<(Vec<Dense>, Option<Error>)>> {
     let Some(mut pipe) = Pipeline::new(plan, plan, ctx, None, false, Some(range))? else {
         return Err(Error::internal("a morsel's pipeline"));
     };
     let mut out = Vec::new();
+    let mut rows = 0;
     loop {
         match pipe.next() {
-            Ok(None) => return Ok((out, None)),
+            Ok(None) => return Ok(Some((out, None))),
             Ok(Some(Out::Batch(b))) if b.sel.is_empty() => {}
-            Ok(Some(Out::Batch(b))) => out.push(dense(&b)),
-            Ok(Some(Out::Rows(rows, err))) => {
-                if let Some(b) = batch_of_rows(rows) {
+            Ok(Some(Out::Batch(b))) => {
+                rows += b.sel.len();
+                out.push(dense(&b));
+            }
+            Ok(Some(Out::Rows(got, err))) => {
+                if let Some(b) = batch_of_rows(got) {
+                    rows += b.sel.len();
                     out.push(dense(&b));
                 }
                 if err.is_some() {
-                    return Ok((out, err));
+                    return Ok(Some((out, err)));
                 }
             }
-            Err(e) => return Ok((out, Some(e))),
+            Err(e) => return Ok(Some((out, Some(e)))),
+        }
+        if held.over_dense(&out, rows, pipe.read) {
+            return Ok(None);
         }
     }
 }
 
 /// One morsel's rows, on a worker: the rows, and the error that ended
 /// them (if one did).
+/// `None` once they are past `held`'s mark.
 fn morsel_rows(
     plan: &Plan,
     ctx: &Ctx,
     range: KeyRange,
     spare: usize,
-) -> Result<(Vec<Row>, Option<Error>)> {
+    mut held: MorselOut,
+) -> Result<Option<(Vec<Row>, Option<Error>)>> {
     let Some(mut pipe) = Pipeline::new(plan, plan, ctx, None, true, Some(range))? else {
         return Err(Error::internal("a morsel's pipeline"));
     };
     let mut out = Vec::new();
     loop {
         match pipe.next() {
-            Ok(None) => return Ok((out, None)),
+            Ok(None) => return Ok(Some((out, None))),
             Ok(Some(Out::Batch(b))) => out.extend(b.sel.iter().map(|i| b.row_spare(i, spare))),
             Ok(Some(Out::Rows(rows, err))) => {
                 out.extend(rows);
                 if err.is_some() {
-                    return Ok((out, err));
+                    return Ok(Some((out, err)));
                 }
             }
-            Err(e) => return Ok((out, Some(e))),
+            Err(e) => return Ok(Some((out, Some(e)))),
+        }
+        if held.over(&out, pipe.read) {
+            return Ok(None);
         }
     }
 }
@@ -5792,17 +5971,56 @@ impl<'a> Probe<'a> {
     /// `NULL`s, a semi or anti join's rows as they were.  `on` beyond the
     /// keys is evaluated over every candidate pair at once (an error there
     /// sends the batch a row at a time, as a pipeline's errors do).
-    fn apply(&self, b: Batch, cx: Cx) -> Result<Batch> {
+    ///
+    /// The left rows whose matches pass `limit` are left for the next step
+    /// (returned: `b` with them selected), at least one row probed.
+    fn apply(&self, b: Batch, cx: Cx, limit: usize) -> Result<(Batch, Option<Batch>)> {
         let keys = self
             .left_keys
             .iter()
             .map(|k| eval(k, &b, &b.sel, cx))
             .collect::<Result<Vec<_>>>()?;
-        let found: Vec<(u32, &[u32])> = b
+        let mut found: Vec<(u32, &[u32])> = b
             .sel
             .iter()
             .map(|i| (i as u32, self.candidates(KeyRef::Batch(&keys, i))))
             .collect();
+        let rest = self.cut(&mut found, limit).map(|sel| Batch {
+            len: b.len,
+            cols: b.cols.clone(),
+            sel,
+        });
+        Ok((self.matched(b, &found, cx)?, rest))
+    }
+
+    /// The left rows of `found` whose matches fit in `limit` rows (at least
+    /// one); the others, cut off, returned as a selection — a semi or anti
+    /// join gives at most a row for each, and keeps all.
+    fn cut(&self, found: &mut Vec<(u32, &[u32])>, limit: usize) -> Option<Sel> {
+        if matches!(self.kind, JoinType::Semi | JoinType::Anti) || found.len() <= 1 {
+            return None;
+        }
+        let outer = self.kind == JoinType::Left;
+        let mut total = 0;
+        let mut take = found.len();
+        for (k, (_, c)) in found.iter().enumerate() {
+            total += if outer { c.len().max(1) } else { c.len() };
+            if total > limit {
+                take = k.max(1);
+                break;
+            }
+        }
+        if take == found.len() {
+            return None;
+        }
+        let rest = Sel::Rows(found[take..].iter().map(|&(i, _)| i).collect());
+        found.truncate(take);
+        PROBE_CUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(rest)
+    }
+
+    /// [`Probe::apply`]'s output for the left rows `found` of `b`.
+    fn matched(&self, b: Batch, found: &[(u32, &[u32])], cx: Cx) -> Result<Batch> {
         let semi = self.kind == JoinType::Semi;
         let existence = matches!(self.kind, JoinType::Semi | JoinType::Anti);
         if !self.check {
@@ -5819,7 +6037,7 @@ impl<'a> Probe<'a> {
             }
             let outer = self.kind == JoinType::Left;
             let (mut l, mut r) = (Vec::new(), Vec::new());
-            for &(i, c) in &found {
+            for &(i, c) in found {
                 if c.is_empty() && outer {
                     l.push(i);
                     r.push(None);
@@ -5833,7 +6051,7 @@ impl<'a> Probe<'a> {
         }
         // Every candidate pair, `on` over them all.
         let (mut l, mut r) = (Vec::new(), Vec::new());
-        for &(i, c) in &found {
+        for &(i, c) in found {
             for &x in c {
                 l.push(i);
                 r.push(Some(x));
@@ -5852,7 +6070,7 @@ impl<'a> Probe<'a> {
         let mut at = 0;
         if existence {
             let mut rows = Vec::new();
-            for &(i, c) in &found {
+            for &(i, c) in found {
                 let matched = held[at..at + c.len()].contains(&true);
                 at += c.len();
                 if matched == semi {
@@ -5865,7 +6083,7 @@ impl<'a> Probe<'a> {
             });
         }
         let (mut l2, mut r2) = (Vec::new(), Vec::new());
-        for &(i, c) in &found {
+        for &(i, c) in found {
             let mut matched = false;
             for k in at..at + c.len() {
                 if held[k] {
@@ -5966,8 +6184,9 @@ impl<'a> Probe<'a> {
         Ok(())
     }
 
-    /// A batch of left rows.
-    fn batch(&self, b: &Batch, cx: Cx, out: &mut Vec<Row>) -> Result<()> {
+    /// A batch of left rows: those whose matches fit in `limit` rows (at
+    /// least one), the rest returned for the next call ([`Probe::cut`]).
+    fn batch(&self, b: &Batch, cx: Cx, out: &mut Vec<Row>, limit: usize) -> Result<Option<Batch>> {
         let keys = self
             .left_keys
             .iter()
@@ -5976,12 +6195,18 @@ impl<'a> Probe<'a> {
         // The whole batch's lookups first, then its output: lookups that
         // depend on nothing but their keys, back to back, overlap their
         // cache misses (what prefetching in a hash probe is for).
-        let found: Vec<&[u32]> = b
+        let mut found: Vec<(u32, &[u32])> = b
             .sel
             .iter()
-            .map(|i| self.candidates(KeyRef::Batch(&keys, i)))
+            .map(|i| (i as u32, self.candidates(KeyRef::Batch(&keys, i))))
             .collect();
-        for (i, c) in b.sel.iter().zip(found) {
+        let rest = self.cut(&mut found, limit).map(|sel| Batch {
+            len: b.len,
+            cols: b.cols.clone(),
+            sel,
+        });
+        for (i, c) in found {
+            let i = i as usize;
             if c.is_empty()
                 && matches!(
                     self.kind,
@@ -5992,7 +6217,7 @@ impl<'a> Probe<'a> {
             }
             self.emit(&|| b.row(i), c, cx, out)?;
         }
-        Ok(())
+        Ok(rest)
     }
 
     /// Left rows one at a time (a batch run again row by row).
@@ -6010,21 +6235,43 @@ impl<'a> Probe<'a> {
         Ok(())
     }
 
-    /// A pipeline's rows probed: the output, and the error that ended it.
-    fn run(&self, pipe: &mut Pipeline, cx: Cx) -> (Vec<Row>, Option<Error>) {
+    /// A pipeline's rows probed (a morsel's, on a worker): the output, and
+    /// the error that ended it — or `None` once the output is past `held`'s
+    /// mark (a join that multiplies its rows: the morsel is probed again
+    /// where its rows are taken as they come, [`ParallelJoin`]'s serial
+    /// part).
+    fn run(
+        &self,
+        pipe: &mut Pipeline,
+        cx: Cx,
+        mut held: MorselOut,
+    ) -> Option<(Vec<Row>, Option<Error>)> {
         let mut out = Vec::new();
+        let limit = probe_limit();
         loop {
             let step = match pipe.next() {
-                Ok(None) => return (out, None),
-                Ok(Some(Out::Batch(b))) => self.batch(&b, cx, &mut out),
+                Ok(None) => return Some((out, None)),
+                Ok(Some(Out::Batch(mut b))) => loop {
+                    match self.batch(&b, cx, &mut out, limit) {
+                        Ok(Some(rest)) => b = rest,
+                        Ok(None) => break Ok(()),
+                        Err(e) => break Err(e),
+                    }
+                    if held.over(&out, pipe.read) {
+                        return None;
+                    }
+                },
                 Ok(Some(Out::Rows(rows, err))) => match self.rows(rows, cx, &mut out) {
-                    Ok(()) if err.is_some() => return (out, err),
+                    Ok(()) if err.is_some() => return Some((out, err)),
                     r => r,
                 },
                 Err(e) => Err(e),
             };
             if let Err(e) = step {
-                return (out, Some(e));
+                return Some((out, Some(e)));
+            }
+            if held.over(&out, pipe.read) {
+                return None;
             }
         }
     }
@@ -6114,6 +6361,7 @@ pub(crate) fn hash_join_table<'a>(
             rows: std::collections::VecDeque::new(),
             err: None,
             done: false,
+            serial: None,
         })));
     }
     let Some(pipe) = Pipeline::new(left, left, ctx, outer, false, None)? else {
@@ -6121,6 +6369,7 @@ pub(crate) fn hash_join_table<'a>(
     };
     Ok(Ok(Box::new(JoinRows {
         pipe: Some(pipe),
+        pending: None,
         left,
         probe,
         cx: Cx { ctx, outer },
@@ -6157,6 +6406,78 @@ fn snapshot(tables: &Tables) -> Shared {
 
 fn address(plan: &Plan) -> usize {
     plan as *const Plan as usize
+}
+
+/// The most rows a hash join's probe gives at a time: a batch's left rows
+/// whose matches pass it wait for the next step ([`Probe::cut`]) — a join
+/// that multiplies its rows (many to many) gives them a few batches at a
+/// time, as the row-at-a-time join gives them a row at a time, never a
+/// batch's matches all at once (DuckDB's probe gives a vector at a time
+/// and keeps its place; PostgreSQL's a tuple).  A batch of 1,024 left
+/// rows with 5,000 matches each held 5 million rows.
+fn probe_limit() -> usize {
+    (crate::budget::batch_size() * 4).max(4096)
+}
+
+/// A morsel's output, held for its round, many times the rows it read —
+/// the mark of a join that multiplies them (a filter's rows, or a
+/// one-to-one join's, are at most the morsel's own, which its size bounds).
+const MULTIPLIED: u64 = 8;
+
+/// What a worker's morsel has given so far, against its share of
+/// work_mem: past it, and [`MULTIPLIED`] times the rows the morsel read,
+/// the morsel is dropped and probed again where its rows are taken as
+/// they come ([`ParallelRows`], [`ParallelBatches`], [`ParallelJoin`]).
+struct MorselOut {
+    budget: usize,
+    bytes: usize,
+    counted: usize,
+}
+
+impl MorselOut {
+    fn new(workers: usize) -> Self {
+        MorselOut {
+            budget: crate::budget::work_mem() / workers.max(1),
+            bytes: 0,
+            counted: 0,
+        }
+    }
+
+    /// Whether `out` (from `read` rows) is past it; its bytes counted only
+    /// once its rows are past the multiple.
+    fn over(&mut self, out: &[Row], read: u64) -> bool {
+        if out.len() as u64 <= MULTIPLIED * read.max(1) {
+            return false;
+        }
+        self.bytes += out[self.counted..]
+            .iter()
+            .map(|r| crate::spill::row_bytes(r))
+            .sum::<usize>();
+        self.counted = out.len();
+        self.bytes > self.budget
+    }
+
+    /// [`MorselOut::over`] for dense batches (`rows` in all, a value ~16 bytes).
+    fn over_dense(&self, out: &[Dense], rows: usize, read: u64) -> bool {
+        rows as u64 > MULTIPLIED * read.max(1)
+            && out
+                .iter()
+                .map(|(n, cols)| n * cols.len() * 16)
+                .sum::<usize>()
+                > self.budget
+    }
+}
+
+static SERIAL_TAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many parallel runs this process has gone on with on one thread, a
+/// morsel's rows past [`MorselOut`]'s mark (for tests and diagnostics).
+pub fn serial_tails() -> u64 {
+    SERIAL_TAILS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn note_serial_tail() {
+    SERIAL_TAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Whether a hash join of `kind` probes in a pipeline.
@@ -6493,6 +6814,9 @@ pub(crate) fn existence_by_left<'a>(
 /// [`hash_join`] on one thread.
 struct JoinRows<'a> {
     pipe: Option<Pipeline<'a>>,
+    /// The left rows of the last batch not probed yet ([`Probe::batch`]'s
+    /// rest).
+    pending: Option<Batch>,
     /// The probe side's plan, measured for `EXPLAIN ANALYZE`: its time and
     /// rows so far.
     left: &'a Plan,
@@ -6517,6 +6841,14 @@ impl Iterator for JoinRows<'_> {
             }
             let pipe = self.pipe.as_mut()?;
             let mut out = Vec::new();
+            if let Some(b) = self.pending.take() {
+                match self.probe.batch(&b, self.cx, &mut out, probe_limit()) {
+                    Ok(rest) => self.pending = rest,
+                    Err(e) => self.err = Some(e),
+                }
+                self.rows.extend(out);
+                continue;
+            }
             let profile = self.cx.ctx.profile;
             let started = profile.and_then(|p| p.clock());
             let next = pipe.next();
@@ -6538,7 +6870,10 @@ impl Iterator for JoinRows<'_> {
                     self.pipe = None;
                     return None;
                 }
-                Ok(Some(Out::Batch(b))) => self.probe.batch(&b, self.cx, &mut out),
+                Ok(Some(Out::Batch(b))) => self
+                    .probe
+                    .batch(&b, self.cx, &mut out, probe_limit())
+                    .map(|rest| self.pending = rest),
                 Ok(Some(Out::Rows(rows, err))) => {
                     let r = self.probe.rows(rows, self.cx, &mut out);
                     if r.is_ok() {
@@ -6557,7 +6892,9 @@ impl Iterator for JoinRows<'_> {
 }
 
 /// [`hash_join`] on worker threads: rounds of a morsel per worker, each
-/// round's rows in morsel order.
+/// round's rows in morsel order.  A morsel whose rows pass [`MorselOut`]'s mark
+/// (a join that multiplies them) and the morsels after it are probed here,
+/// their rows taken as they come, a part of a batch at a time.
 struct ParallelJoin<'a> {
     work: Morsels<'a>,
     plan: &'a Plan,
@@ -6566,6 +6903,68 @@ struct ParallelJoin<'a> {
     rows: std::collections::VecDeque<Row>,
     err: Option<Error>,
     done: bool,
+    /// Probing here, from this morsel on: its pipeline, and the left rows
+    /// of its last batch not probed yet.
+    serial: Option<(usize, Option<Pipeline<'a>>, Option<Batch>)>,
+}
+
+impl ParallelJoin<'_> {
+    /// The serial part's next rows into `self.rows` (or its error into
+    /// `self.err`); false when it has none left.
+    fn serial_step(&mut self) -> bool {
+        let Some((morsel, pipe, pending)) = &mut self.serial else {
+            return false;
+        };
+        let cx = Cx {
+            ctx: self.work.ctx,
+            outer: None,
+        };
+        let mut out = Vec::new();
+        let step = if let Some(b) = pending.take() {
+            self.probe
+                .batch(&b, cx, &mut out, probe_limit())
+                .map(|rest| *pending = rest)
+        } else {
+            if pipe.is_none() {
+                if *morsel >= self.work.ranges.len() {
+                    self.serial = None;
+                    return false;
+                }
+                *morsel += 1;
+                match self.work.serial(self.plan, false, *morsel - 1) {
+                    Ok(p) => *pipe = Some(p),
+                    Err(e) => {
+                        self.err = Some(e);
+                        return true;
+                    }
+                }
+            }
+            let p = pipe.as_mut().expect("made above");
+            match p.next() {
+                Ok(None) => {
+                    *pipe = None;
+                    Ok(())
+                }
+                Ok(Some(Out::Batch(b))) => self
+                    .probe
+                    .batch(&b, cx, &mut out, probe_limit())
+                    .map(|rest| *pending = rest),
+                Ok(Some(Out::Rows(rows, err))) => {
+                    let r = self.probe.rows(rows, cx, &mut out);
+                    match (r, err) {
+                        (Ok(()), Some(e)) => Err(e),
+                        (r, _) => r,
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        };
+        self.rows.extend(out);
+        if let Err(e) = step {
+            self.err = Some(e);
+        }
+        true
+    }
 }
 
 impl Iterator for ParallelJoin<'_> {
@@ -6580,12 +6979,22 @@ impl Iterator for ParallelJoin<'_> {
                 self.done = true;
                 return Some(Err(e));
             }
+            if self.done {
+                return None;
+            }
+            if self.serial.is_some() {
+                if self.serial_step() {
+                    continue;
+                }
+                return None;
+            }
             let total = self.work.ranges.len();
-            if self.done || self.next >= total {
+            if self.next >= total {
                 return None;
             }
             let end = (self.next + self.work.workers).min(total);
             let (plan, probe) = (self.plan, &self.probe);
+            let workers = self.work.workers;
             let results = self.work.run(self.next..end, false, &|wctx, range| {
                 let Some(mut pipe) = Pipeline::new(plan, plan, wctx, None, false, Some(range))?
                 else {
@@ -6597,12 +7006,22 @@ impl Iterator for ParallelJoin<'_> {
                         ctx: wctx,
                         outer: None,
                     },
+                    MorselOut::new(workers),
                 ))
             });
+            let first = self.next;
             self.next = end;
-            for r in results {
+            for (m, r) in results.into_iter().enumerate() {
                 let (rows, err) = match r {
-                    Some(Ok(x)) => x,
+                    Some(Ok(Some(x))) => x,
+                    Some(Ok(None)) => {
+                        // Past its share of work_mem: this morsel and the
+                        // rest probed here, as they are read.
+                        self.serial = Some((first + m, None, None));
+                        self.next = total;
+                        note_serial_tail();
+                        break;
+                    }
                     Some(Err(e)) => (Vec::new(), Some(e)),
                     None => (Vec::new(), Some(Error::internal("a morsel not run"))),
                 };

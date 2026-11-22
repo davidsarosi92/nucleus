@@ -2770,7 +2770,10 @@ sum, 32 for a value, 8 for a count); a group's accumulators grow by half again, 
 a group at a time, and a single integer key is found and placed in one
 probe.  A pipeline whose output becomes rows
 runs in rounds of a morsel per worker, each round's rows given in morsel
-order — one that only projects, too, unless a `LIMIT` stops it within
+order (a morsel's rows held for its round: once they pass its share of
+`work_mem` and are eight times the rows it read — a join that multiplies
+them — it and the morsels after it run on the statement's thread, their
+rows given as they come) — one that only projects, too, unless a `LIMIT` stops it within
 65 536 rows (`vector::SERIAL_ROWS`: then it streams on the statement's
 thread, a round's morsels would read more; the limit marks the chain
 below it) — a filter counts there only if it drops rows: one whose
@@ -3041,7 +3044,14 @@ side is the smaller by estimate (half the right's or less) a hash join
 hashes it instead (`EXPLAIN`: `Hash Join (left hashed)`): the right
 pipeline probes the left rows' table a batch at a time, on worker threads
 when large, marking the rows it matches; then the left rows in order,
-those marked (semi) or not (anti).  Expressions use three-valued logic,
+those marked (semi) or not (anti).  A probe gives at most four batches'
+rows at a time (`vector::probe_limit`, 4,096 at least): a batch's left
+rows whose matches pass it wait for the next step (a pipeline keeps them,
+the last part first, before it reads on) — a join that multiplies its
+rows gives them as the row-at-a-time join does, never a batch's matches
+all at once (DuckDB's probe gives a vector and keeps its place;
+PostgreSQL's a tuple): a self-join of 60,000 rows on 12 values held 1.8
+GB, now 32 MB, and runs 10 % faster.  Expressions use three-valued logic,
 checked integer arithmetic (`22003`), division by zero (`22012`).
 
 ### 8.6 Optimizer (`optimizer`)
