@@ -7531,7 +7531,8 @@ and the server's `--max-connections` (`Config::max_connections`) — past
 either, `53300`.  *Statement budgets* (`budget.rs`): `SET
 statement_timeout = …` (or the database's) ends a statement that runs
 longer (`57014`), checked as rows are read or made — scans, table
-functions, recursive rounds, a JSON path's items (every 4,096 — a
+functions, recursive rounds, an index build's rows (on its workers too;
+a cancelled `CREATE INDEX` leaves no index), a JSON path's items (every 4,096 — a
 path's items can grow exponentially with its length); a token's `ROWS n` (the most rows a
 statement returns), `SCAN n` (the most it reads) — `54000` — `TIMEOUT
 '…'` and `RATE n PER MINUTE` (statements, `53400`): `CREATE TOKEN … ROWS

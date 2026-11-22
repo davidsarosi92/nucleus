@@ -2263,6 +2263,10 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
                 end: Option<Vec<u8>>,
                 to: &mut dyn FnMut(&[u8], &[u8], bool) -> Result<()>|
      -> Result<()> {
+        // Each row read charges the statement's budget, 64 at a time: a
+        // build stops at its `statement_timeout` (on the workers too) as a
+        // scan does.
+        let mut uncharged = 0;
         for r in storage.rows(crate::storage::Scan {
             txn: ro,
             table,
@@ -2274,11 +2278,16 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
             dicts: Vec::new(),
         })? {
             let (key, row) = r?;
+            uncharged += 1;
+            if uncharged == 64 {
+                crate::budget::charge_scans(64)?;
+                uncharged = 0;
+            }
             let pk = pk_suffix(table, &key);
             let (k, unique) = keys.entry(ro, table, &row, pk, i)?;
             to(&k, pk, unique)?;
         }
-        Ok(())
+        crate::budget::charge_scans(uncharged)
     };
     let mut build = IndexBuild::new(vec![i]);
     {

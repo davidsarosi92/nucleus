@@ -12864,6 +12864,18 @@ Found and fixed:
   vectorized executor for the row-at-a-time grace join, ten times
   slower on this join (21.3 s at 64 kB, 2.1 s at 64 MB, 75 million rows
   counted).
+- An index build ran past its statement's deadline: `CREATE INDEX`
+  read its table's rows outside the executor's scans, which charge the
+  statement's budget, so a `statement_timeout` stopped `UPDATE`,
+  `DELETE` and `INSERT … SELECT` within milliseconds but not a build
+  (found by cancelling writes at random timeouts on row, column and LSM
+  tables, in and out of blocks, checking each index against its table
+  after: 320 writes at timeouts of 5 ms to 1 s, nothing left behind).  The build's rows now
+  charge the budget, 64 at a time, on its workers too; a token's `SCAN`
+  limit counts them as well.  A million-row build, both orders: 1 thread
+  705/708 → 685/688 ms, 8 threads 446/402 → 393/435 ms (noise).  Tested
+  by `an_index_build_stops_at_the_statement_timeout` (1 and 4 workers;
+  fails without the charge).
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
