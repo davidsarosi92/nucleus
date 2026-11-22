@@ -292,6 +292,7 @@ are marked ✅.
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
+| | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ⬜ agreed 2026-11-22 (G1–G4) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ study written, D1–D4 agreed (2026-11-20) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -12949,6 +12950,54 @@ aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
 DISTINCT (a, b)`.  For the performance pass: the row-at-a-time join
 of that self-join takes 76 s (the vectorized 2 s), and its aggregate
 did not run on the workers without statistics (`rows=1000` estimated).
+
+### §M14.34 — Recursive queries and graphs ⬜ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap)
+
+Parent and child rows — categories, org charts, comment threads, bills of
+materials, file trees — and graphs — a knowledge graph an agent keeps
+(§M14.24), dependencies, routes — are read by recursion.  `WITH
+RECURSIVE` runs today (`UNION [ALL]`, the step re-run over the previous
+round's new rows until it gives none; `UNION` ends cycles; the
+statement's timeout ends a runaway one).  Measured on a tree of 2,000,000
+rows (`parent = id / 2`, an index on `parent`), 2026-11-22: a node's 21
+ancestors 0.6 ms; a subtree's 2,047 descendants in 11 rounds 5 ms (index
+lookups, 2.5 µs a row); the whole tree, 2,000,000 rows in 21 rounds,
+3.0 s — the estimate of the recursive CTE is a constant (`rows=10`
+where 2,047 came), so the planner keeps an index lookup per row where a
+hash join would read the edges once; and a step's hash tables are built
+again every round (DOCS §8.7), the edges' though they do not change.
+Still held whole: a recursive `UNION`'s rows seen.
+
+- **G1 — adaptive rounds** (performance; with the perf phase): each
+  round chooses by the rows the last one gave — few: index lookups; many:
+  a hash join — and the step's sides that do not read the work table
+  (the edges) are built once and kept for every round (loop-invariant
+  hoisting; HyPer / Umbra's iterations, Datalog engines' indexes on
+  their static relations, Soufflé); the estimate taken from the rounds
+  run, not a constant; `UNION`'s rows seen spilled past `work_mem`.
+  Done when: the whole-tree traversal is several times faster than
+  3.0 s, small traversals stay at their index lookups' speed, and
+  each is measured against PostgreSQL (§M14.31's method).
+- **G2 — `SEARCH` and `CYCLE`** (SQL:1999, PostgreSQL 14): `SEARCH DEPTH
+  | BREADTH FIRST BY … SET col` for the order of a tree's rows, `CYCLE …
+  SET flag USING path` for graphs with cycles under `UNION ALL`; beside
+  the SQL forms of issue #16.
+- **G3 — `USING KEY`** (DuckDB's, from Hirn and Grust, "A Fix for the
+  Fixation on Fixpoints", CIDR 2023): the work table keyed, a round's row
+  replacing the one with its key instead of adding to it — shortest
+  paths, reachability with the best distance, iterative algorithms
+  (PageRank-like) in SQL, in memory bounded by the keys, not the rounds.
+- **G4 — graph patterns, SQL/PGQ** (SQL:2023 part 16, `CREATE PROPERTY
+  GRAPH` over tables, `GRAPH_TABLE (g MATCH (a)-[e]->{1,5}(b) …)`): a
+  study first — what to take from SQL/PGQ, Cypher / GQL (ISO 39075),
+  DuckPGQ — compiled to the same recursive plans (G1–G3), the property
+  graph a view in `nc_catalog` (principle 8), one transaction with the
+  tables (principle 11).  The documents of §M15–§M16 as its nodes where
+  the study finds it useful.
+
+The planner chooses among them where they overlap (a fixed-depth pattern
+as joins, a variable one as rounds, by key when a key is given), so a
+query states what it wants, not how it is walked.
 
 ## §F2 — NoSQL layer
 
