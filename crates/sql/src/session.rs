@@ -17,7 +17,7 @@ use std::sync::Arc;
 use nucleus_kv::{Isolation, Kv, KvTxn, TxnOptions};
 
 use crate::ast::{AsOf, IsolationLevel, Statement, TableConstraint, TxnMode};
-use crate::binder::{Binder, Scope};
+use crate::binder::{Binder, GivenCte, Scope};
 use crate::catalog::{self, Column, Index, Table};
 use crate::dml;
 use crate::error::{Error, Result};
@@ -240,6 +240,7 @@ pub fn command_tag(stmt: &Statement, out: &Output) -> String {
     match out {
         Output::Command(tag) => tag.clone(),
         Output::Rows { rows, .. } => match stmt {
+            Statement::WithStatement { body, .. } => command_tag(body, out),
             Statement::Insert { .. } => format!("INSERT 0 {}", rows.len()),
             Statement::Update { .. } => format!("UPDATE {}", rows.len()),
             Statement::Delete { .. } => format!("DELETE {}", rows.len()),
@@ -1584,6 +1585,7 @@ impl Session {
                 | Statement::Insert { .. }
                 | Statement::Update { .. }
                 | Statement::Delete { .. }
+                | Statement::WithStatement { .. }
                 | Statement::Truncate { .. }
                 | Statement::Copy { .. }
                 | Statement::Remember(_)
@@ -1818,7 +1820,48 @@ impl Session {
     /// [`Session::describe`] in `txn`.
     fn describe_in(txn: &dyn KvTxn, reg: &Registry, stmt: &Statement) -> Result<Described> {
         let mut binder = Binder::new(txn, reg).checked();
-        let columns = match stmt {
+        let columns = Self::columns_in(&mut binder, txn, stmt)?;
+        Ok((binder.params, columns))
+    }
+
+    /// The columns of `stmt`'s rows, if it has rows, bound by `binder`
+    /// (its parameters' types noted there).
+    fn columns_in(
+        binder: &mut Binder,
+        txn: &dyn KvTxn,
+        stmt: &Statement,
+    ) -> Result<Option<Vec<OutColumn>>> {
+        Ok(match stmt {
+            Statement::WithStatement {
+                recursive,
+                ctes,
+                body,
+            } => {
+                // Each data-modifying CTE given as its columns, no rows.
+                for cte in ctes {
+                    let given = match cte {
+                        crate::ast::StatementCte::Query(cte) => GivenCte::Query {
+                            cte: cte.clone(),
+                            recursive: *recursive,
+                        },
+                        crate::ast::StatementCte::Modifying {
+                            name,
+                            columns,
+                            statement,
+                        } => match Self::columns_in(binder, txn, statement)? {
+                            Some(cols) => GivenCte::Rows {
+                                name: name.clone(),
+                                aliases: columns.clone(),
+                                columns: cols.into_iter().map(|c| (c.name, Some(c.ty))).collect(),
+                                rows: vec![],
+                            },
+                            None => GivenCte::Unreturning(name.clone()),
+                        },
+                    };
+                    binder.give_ctes(std::slice::from_ref(&given))?;
+                }
+                Self::columns_in(binder, txn, body)?
+            }
             Statement::Query(q) => {
                 let b = binder.query(q)?;
                 Some(
@@ -1918,7 +1961,7 @@ impl Session {
                 }
                 let types = targets.iter().map(|&c| t.columns[c].ty).collect();
                 let _ = binder.insert_source(source, types)?;
-                returning_columns(&mut binder, txn, table, returning)?
+                returning_columns(binder, txn, table, returning)?
             }
             Statement::Update {
                 table,
@@ -1938,7 +1981,7 @@ impl Session {
                 if let Some(f) = filter {
                     binder.condition(f, &scope)?;
                 }
-                returning_columns(&mut binder, txn, table, returning)?
+                returning_columns(binder, txn, table, returning)?
             }
             Statement::Delete {
                 table,
@@ -1949,11 +1992,10 @@ impl Session {
                 if let Some(f) = filter {
                     binder.condition(f, &dml::table_scope(&t))?;
                 }
-                returning_columns(&mut binder, txn, table, returning)?
+                returning_columns(binder, txn, table, returning)?
             }
             _ => None,
-        };
-        Ok((binder.params, columns))
+        })
     }
 }
 
@@ -1996,6 +2038,112 @@ fn returning_columns(
         }
     }
     Ok(Some(cols))
+}
+
+/// An `INSERT`, `UPDATE` or `DELETE` run, `given` its statement's CTEs.
+fn modify(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    stmt: &Statement,
+    params: &[Value],
+    given: &[GivenCte],
+) -> Result<dml::Written> {
+    match stmt {
+        Statement::Insert {
+            table,
+            columns,
+            source,
+            returning,
+        } => dml::insert(txn, reg, table, columns, source, returning, params, given),
+        Statement::Update {
+            table,
+            assignments,
+            filter,
+            returning,
+        } => dml::update(
+            txn,
+            reg,
+            table,
+            assignments,
+            filter.as_ref(),
+            returning,
+            params,
+            given,
+        ),
+        Statement::Delete {
+            table,
+            filter,
+            returning,
+        } => dml::delete(txn, reg, table, filter.as_ref(), returning, params, given),
+        _ => Err(Error::internal("not an INSERT, UPDATE or DELETE")),
+    }
+}
+
+/// `WITH … statement` with data-modifying CTEs or before `INSERT`,
+/// `UPDATE` or `DELETE`: the CTEs' statements run first, in order, each
+/// given the CTEs before it — their `RETURNING` rows kept —, then the
+/// statement, given them all.  Each sees the writes of those before it
+/// (PostgreSQL's all read the statement's snapshot).
+fn with_statement(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    recursive: bool,
+    ctes: &[crate::ast::StatementCte],
+    body: &Statement,
+    params: &[Value],
+    sink: &mut dyn Sink,
+) -> Result<Output> {
+    let mut given = Vec::with_capacity(ctes.len());
+    for cte in ctes {
+        given.push(match cte {
+            crate::ast::StatementCte::Query(cte) => GivenCte::Query {
+                cte: cte.clone(),
+                recursive,
+            },
+            crate::ast::StatementCte::Modifying {
+                name,
+                columns,
+                statement,
+            } => match modify(txn, reg, statement, params, &given)?.returning {
+                Some((cols, rows)) => GivenCte::Rows {
+                    name: name.clone(),
+                    aliases: columns.clone(),
+                    columns: cols,
+                    rows,
+                },
+                None => GivenCte::Unreturning(name.clone()),
+            },
+        });
+    }
+    let tag = match body {
+        Statement::Insert { .. } => "INSERT 0",
+        Statement::Update { .. } => "UPDATE",
+        Statement::Delete { .. } => "DELETE",
+        Statement::Query(q) => {
+            let ro: &dyn KvTxn = &*txn;
+            let mut binder = Binder::new(ro, reg).checked();
+            binder.give_ctes(&given)?;
+            let bound = binder.query(q)?;
+            let plan = optimize(bound.plan, ro);
+            let mut ctx = Ctx::new(ro, reg, params);
+            ctx.needed = crate::prune::needed(&plan);
+            sink.columns(&columns_of(
+                bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
+            ))?;
+            let mut n = 0;
+            for row in exec::build(&plan, &ctx, None)? {
+                let row = row?;
+                crate::budget::charge_rows(n + 1)?;
+                if sink.row(row)?.is_break() {
+                    break;
+                }
+                n += 1;
+            }
+            return Ok(Output::Command(format!("SELECT {n}")));
+        }
+        _ => return Err(Error::internal("a WITH statement's body")),
+    };
+    Ok(written(tag, modify(txn, reg, body, params, &given)?))
 }
 
 fn written(tag: &str, w: dml::Written) -> Output {
@@ -2464,7 +2612,7 @@ pub(crate) fn execute_statement(
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             let n = if *with_data {
-                dml::insert(txn, reg, name, &None, query, &[], params)?.count
+                dml::insert(txn, reg, name, &None, query, &[], params, &[])?.count
             } else {
                 0
             };
@@ -3283,43 +3431,14 @@ pub(crate) fn execute_statement(
             drop_constraint(txn, table, name, *if_exists)?;
             Output::Command("ALTER TABLE".into())
         }
-        Statement::Insert {
-            table,
-            columns,
-            source,
-            returning,
-        } => {
-            let w = dml::insert(txn, reg, table, columns, source, returning, params)?;
-            match w.returning {
-                Some(_) => written("INSERT 0", w),
-                None => Output::Command(format!("INSERT 0 {}", w.count)),
-            }
-        }
-        Statement::Update {
-            table,
-            assignments,
-            filter,
-            returning,
-        } => written(
-            "UPDATE",
-            dml::update(
-                txn,
-                reg,
-                table,
-                assignments,
-                filter.as_ref(),
-                returning,
-                params,
-            )?,
-        ),
-        Statement::Delete {
-            table,
-            filter,
-            returning,
-        } => written(
-            "DELETE",
-            dml::delete(txn, reg, table, filter.as_ref(), returning, params)?,
-        ),
+        Statement::Insert { .. } => written("INSERT 0", modify(txn, reg, stmt, params, &[])?),
+        Statement::Update { .. } => written("UPDATE", modify(txn, reg, stmt, params, &[])?),
+        Statement::Delete { .. } => written("DELETE", modify(txn, reg, stmt, params, &[])?),
+        Statement::WithStatement {
+            recursive,
+            ctes,
+            body,
+        } => with_statement(txn, reg, *recursive, ctes, body, params, sink)?,
         Statement::Truncate {
             tables,
             only,
@@ -3415,7 +3534,7 @@ fn truncate(
         }
     }
     for j in order {
-        dml::delete(txn, reg, &all[j].name, None, &[], params)?;
+        dml::delete(txn, reg, &all[j].name, None, &[], params, &[])?;
     }
     Ok(())
 }

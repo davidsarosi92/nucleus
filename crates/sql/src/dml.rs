@@ -6,7 +6,7 @@ use std::sync::Arc;
 use nucleus_kv::KvTxn;
 
 use crate::ast::{self, SelectItem};
-use crate::binder::{Binder, Scope, ScopeCol, conjunction, conjuncts};
+use crate::binder::{Binder, GivenCte, Scope, ScopeCol, conjunction, conjuncts};
 use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
 use crate::exec::{self, index_key, pk_suffix, row_key_of};
@@ -1425,6 +1425,7 @@ fn project(exprs: &[Expr], row: &Row, ctx: &Ctx) -> Result<Row> {
 }
 
 /// `INSERT`.
+#[allow(clippy::too_many_arguments)]
 pub fn insert(
     txn: &mut dyn KvTxn,
     reg: &Registry,
@@ -1433,6 +1434,7 @@ pub fn insert(
     source: &ast::Query,
     returning_items: &[SelectItem],
     params: &[Value],
+    given: &[GivenCte],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
     crate::chunk_tables::refuse(&t, "insert into")?;
@@ -1440,6 +1442,7 @@ pub fn insert(
     let (rows, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
+        binder.give_ctes(given)?;
         // INSERT on each target column (or the table).
         if let Some(c) = binder.checker() {
             for &col in &targets {
@@ -1520,6 +1523,7 @@ pub fn bind_filter(
 }
 
 /// `UPDATE`.
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     txn: &mut dyn KvTxn,
     reg: &Registry,
@@ -1528,6 +1532,7 @@ pub fn update(
     filter: Option<&ast::Expr>,
     returning_items: &[SelectItem],
     params: &[Value],
+    given: &[GivenCte],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
     for (name, _) in assignments {
@@ -1540,6 +1545,7 @@ pub fn update(
     let (changes, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
+        binder.give_ctes(given)?;
         let scope = table_scope(&t);
         let mut sets = Vec::new();
         for (col, e) in assignments {
@@ -2018,12 +2024,14 @@ pub fn delete(
     filter: Option<&ast::Expr>,
     returning_items: &[SelectItem],
     params: &[Value],
+    given: &[GivenCte],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
     crate::chunk_tables::refuse(&t, "delete from")?;
     let rows = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
+        binder.give_ctes(given)?;
         if let Some(c) = binder.checker() {
             c.require(ro, Kind::Table, &t.name, DELETE, None)?;
         }

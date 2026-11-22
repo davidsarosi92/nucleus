@@ -509,6 +509,17 @@ pub enum Statement {
         /// `IF EXISTS`.
         if_exists: bool,
     },
+    /// `WITH … statement` where a CTE is an `INSERT`, `UPDATE` or
+    /// `DELETE` (a data-modifying CTE), or the statement is one of them.
+    /// (A query with only query CTEs is a [`Statement::Query`].)
+    WithStatement {
+        /// `WITH RECURSIVE`.
+        recursive: bool,
+        /// The CTEs, in order.
+        ctes: Vec<StatementCte>,
+        /// The statement: a query, `INSERT`, `UPDATE` or `DELETE`.
+        body: Box<Statement>,
+    },
     /// `INSERT`.
     Insert {
         /// Table.
@@ -906,6 +917,22 @@ pub struct With {
     pub recursive: bool,
     /// The CTEs, in order (each sees the ones before it).
     pub ctes: Vec<Cte>,
+}
+
+/// A CTE of a [`Statement::WithStatement`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatementCte {
+    /// A query.
+    Query(Cte),
+    /// `name [(columns)] AS (INSERT | UPDATE | DELETE …)`.
+    Modifying {
+        /// Name.
+        name: String,
+        /// Column aliases.
+        columns: Vec<String>,
+        /// The statement.
+        statement: Box<Statement>,
+    },
 }
 
 /// A common table expression: `name [(columns)] AS (query)`.

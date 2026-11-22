@@ -253,7 +253,10 @@ VALUES [RETURNING …]`; `UPDATE t SET a = … [WHERE …] [RETURNING …]`;
 `SELECT … INTO new_table FROM …`; bulk: `COPY t [(cols)] FROM
 STDIN [WITH (FORMAT csv, HEADER)]` with the data sent by the client.
 
-**Queries:** `WITH [RECURSIVE] …`, `SELECT [DISTINCT]`, `FROM` with comma
+**Queries:** `WITH [RECURSIVE] …` (also before `INSERT`/`UPDATE`/`DELETE`,
+and `WITH d AS (DELETE FROM t … RETURNING *) INSERT INTO archive SELECT
+* FROM d`: the CTE runs first, and what follows sees its writes),
+`SELECT [DISTINCT]`, `FROM` with comma
 joins and `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`, subqueries in
 `FROM`, `generate_series(a, b [, step])` and `unnest(array) [WITH
 ORDINALITY]` in `FROM`, `WHERE`, `GROUP BY` (also `ROLLUP (…)`, `CUBE (…)`,

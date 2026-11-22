@@ -13050,6 +13050,23 @@ Found and fixed:
   for the performance pass.  Tested by `79_grouping_sets.slt`, every
   record as PostgreSQL 18's (four mutations — the mask, `ROLLUP`'s empty
   set, the keys' nullability, `DISTINCT` — each failing).
+- Issue #16, sixth step — data-modifying CTEs and `WITH` before
+  `INSERT`, `UPDATE`, `DELETE`: a statement's own `WITH` with an
+  `INSERT`/`UPDATE`/`DELETE` CTE, or before one of them, is
+  `Statement::WithStatement`; the session runs the CTEs' statements in
+  order, once each, and gives every part bound after them the CTEs
+  before it (`binder::GivenCte`: a query CTE bound there, a
+  data-modifying one its `RETURNING` rows as `Values`); `DESCRIBE` gives
+  them as columns without rows and runs nothing.  Inside a subquery
+  `0A000`, a reference to one without `RETURNING` `0A000`, as
+  PostgreSQL's.  One deviation, documented: PostgreSQL runs the parts
+  over one snapshot, so the statement after does not see the CTEs'
+  writes; here each part sees those before it — the transaction has no
+  snapshot within a statement to read instead.  Tested by
+  `80_with_modifying.slt`, every record but two nucleus-only ones as
+  PostgreSQL 18's (three mutations — a reference without `RETURNING`,
+  the `RETURNING` rows dropped, `UPDATE` not given the CTEs — each
+  failing).
 - A leak hunt, no leak found: a server under 40 rounds of six clients'
   mixed work (point reads, column and LSM tables, updates, joins, JSON,
   a recursive CTE, windows, `$n` parameters, transactions committed and

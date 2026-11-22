@@ -1,0 +1,137 @@
+# Data-modifying statements in WITH, and WITH before INSERT, UPDATE and
+# DELETE (issue #16).
+
+statement ok
+CREATE TABLE a (id int PRIMARY KEY, v text)
+
+statement ok
+CREATE TABLE b (id int PRIMARY KEY, v text)
+
+statement ok
+INSERT INTO a VALUES (1, 'x'), (2, 'y'), (3, 'z')
+
+# Rows moved: deleted from one table, inserted into the other.
+statement ok
+WITH d AS (DELETE FROM a WHERE id > 1 RETURNING *) INSERT INTO b SELECT * FROM d
+
+query IT rowsort
+SELECT * FROM b
+----
+2 y
+3 z
+
+query IT
+SELECT * FROM a
+----
+1 x
+
+query IT rowsort
+WITH u AS (UPDATE b SET v = v || '!' RETURNING id, v) SELECT * FROM u
+----
+2 y!
+3 z!
+
+# Column aliases over RETURNING *.
+query IT
+WITH i(k, w) AS (INSERT INTO a VALUES (7, 'q') RETURNING *) SELECT k, w FROM i
+----
+7 q
+
+query IT
+WITH i AS (INSERT INTO a VALUES (8, 'r') RETURNING id * 10 AS ten, upper(v)) SELECT * FROM i
+----
+80 R
+
+# A query CTE read by a data-modifying one, the statement after an UPDATE.
+query IT
+WITH s AS (SELECT 3 AS id), i AS (INSERT INTO a SELECT id + 6, 'n' FROM s RETURNING id) UPDATE b SET v = 'u' WHERE id IN (SELECT id FROM s) OR id IN (SELECT id - 6 FROM i) RETURNING *
+----
+3 u
+
+# Query CTEs before DELETE and INSERT.
+query IT
+WITH s AS (SELECT 2 AS id) DELETE FROM b WHERE id IN (SELECT id FROM s) RETURNING *
+----
+2 y!
+
+statement ok
+WITH s AS (SELECT 20 AS id, 'w' AS v) INSERT INTO b SELECT * FROM s
+
+query IT rowsort
+SELECT * FROM b
+----
+20 w
+3 u
+
+# Run once, whether read once, twice or not at all.
+query I
+WITH d AS (DELETE FROM a WHERE id = 7 RETURNING id) SELECT * FROM d UNION ALL SELECT id + 1 FROM d
+----
+7
+8
+
+statement ok
+WITH i AS (INSERT INTO a VALUES (50, 'p') RETURNING id) SELECT 1
+
+statement ok
+WITH i AS (INSERT INTO a VALUES (51, 'p')) SELECT 1
+
+query IT
+SELECT * FROM a WHERE id >= 50 ORDER BY id
+----
+50 p
+51 p
+
+query I
+WITH d AS (DELETE FROM a WHERE id = 1000 RETURNING id) SELECT count(*) FROM d
+----
+0
+
+# A query CTE over a data-modifying one; WITH RECURSIVE around them.
+query I
+WITH RECURSIVE d AS (DELETE FROM a WHERE id >= 50 RETURNING id), r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 2), e AS (SELECT id * 2 AS x FROM d) SELECT x + n FROM e, r ORDER BY 1
+----
+101
+102
+103
+104
+
+# Failing after: the CTE's writes go with the statement.
+statement error 22012
+WITH d AS (DELETE FROM a RETURNING id) SELECT 1 / 0 FROM d
+
+query I
+SELECT count(*) FROM a
+----
+3
+
+# nucleus-only: DESCRIBE runs nothing.
+query TITTT
+DESCRIBE WITH d AS (DELETE FROM a RETURNING id, v) SELECT * FROM d
+----
+column 1 id integer t
+column 2 v text t
+
+# nucleus-only: what comes after sees the CTEs' writes (PostgreSQL's
+# reads the snapshot before them: 3).
+query I
+WITH d AS (DELETE FROM a WHERE id = 1 RETURNING id) SELECT count(*) FROM a
+----
+2
+
+statement error 0A000
+WITH d AS (DELETE FROM b) SELECT * FROM d
+
+statement error 0A000
+SELECT * FROM (WITH d AS (DELETE FROM b RETURNING *) SELECT * FROM d) s
+
+statement error 0A000
+INSERT INTO b WITH d AS (DELETE FROM a RETURNING *) SELECT * FROM d
+
+statement error 42712
+WITH d AS (DELETE FROM a WHERE id = 1 RETURNING id), d AS (SELECT 1) SELECT * FROM d
+
+query I
+SELECT count(*) FROM b
+----
+2

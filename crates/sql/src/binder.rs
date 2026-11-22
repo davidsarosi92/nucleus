@@ -165,6 +165,35 @@ struct CteDef {
     level: usize,
     /// Whether the recursive term referred to the work table.
     used: bool,
+    /// A data-modifying CTE without `RETURNING`: no rows to read.
+    unreturning: bool,
+}
+
+/// A CTE of a statement's own `WITH` (a [`ast::Statement::WithStatement`]),
+/// given to the binder of each part bound after it: the data-modifying
+/// CTEs' statements and the statement after them.
+#[derive(Clone, Debug)]
+pub enum GivenCte {
+    /// A query, bound where it is given.
+    Query {
+        /// The CTE.
+        cte: ast::Cte,
+        /// Under `WITH RECURSIVE`.
+        recursive: bool,
+    },
+    /// A data-modifying CTE's `RETURNING` rows (none when only described).
+    Rows {
+        /// Its name.
+        name: String,
+        /// Its column aliases.
+        aliases: Vec<String>,
+        /// `RETURNING`'s columns.
+        columns: Vec<(String, Option<DataType>)>,
+        /// The rows.
+        rows: Vec<crate::types::Row>,
+    },
+    /// A data-modifying CTE without `RETURNING`: a reference is an error.
+    Unreturning(String),
 }
 
 /// CTE and work table ids, unique in the process.
@@ -448,6 +477,72 @@ impl<'a> Binder<'a> {
 
     // ---------------------------------------------------------------- queries
 
+    /// Puts `given` in scope for everything bound after.
+    pub fn give_ctes(&mut self, given: &[GivenCte]) -> Result<()> {
+        for g in given {
+            let def = match g {
+                GivenCte::Query { cte, recursive } => {
+                    if *recursive {
+                        self.recursive_cte(cte)?
+                    } else {
+                        self.plain_cte(cte)?
+                    }
+                }
+                GivenCte::Rows {
+                    name,
+                    aliases,
+                    columns,
+                    rows,
+                } => {
+                    let mut scope = Scope {
+                        cols: columns
+                            .iter()
+                            .map(|(n, ty)| ScopeCol {
+                                table: None,
+                                name: n.clone(),
+                                ty: *ty,
+                                hidden: false,
+                                origin: None,
+                                not_null: false,
+                            })
+                            .collect(),
+                    };
+                    rename_columns(&mut scope, name, aliases)?;
+                    let rows = rows
+                        .iter()
+                        .map(|r| r.iter().cloned().map(Expr::Literal).collect())
+                        .collect();
+                    CteDef {
+                        name: name.clone(),
+                        scope,
+                        plan: Some(Plan::Values {
+                            rows,
+                            width: columns.len(),
+                        }),
+                        work: 0,
+                        level: self.outer.len(),
+                        used: false,
+                        unreturning: false,
+                    }
+                }
+                GivenCte::Unreturning(name) => CteDef {
+                    name: name.clone(),
+                    scope: Scope::default(),
+                    plan: Some(Plan::Values {
+                        rows: vec![],
+                        width: 0,
+                    }),
+                    work: 0,
+                    level: self.outer.len(),
+                    used: false,
+                    unreturning: true,
+                },
+            };
+            self.ctes.push(def);
+        }
+        Ok(())
+    }
+
     /// Binds a query.
     pub fn query(&mut self, q: &ast::Query) -> Result<Bound> {
         let mark = self.ctes.len();
@@ -505,6 +600,7 @@ impl<'a> Binder<'a> {
             work: 0,
             level: self.outer.len(),
             used: false,
+            unreturning: false,
         })
     }
 
@@ -542,6 +638,7 @@ impl<'a> Binder<'a> {
             work,
             level: self.outer.len(),
             used: false,
+            unreturning: false,
         });
         let at = self.ctes.len() - 1;
         let step = self.set_expr(right);
@@ -680,6 +777,11 @@ impl<'a> Binder<'a> {
             return Ok(None);
         };
         let def = &self.ctes[i];
+        if def.unreturning {
+            return Err(Error::feature(format!(
+                "WITH query \"{name}\" does not have a RETURNING clause"
+            )));
+        }
         let mut scope = def.scope.clone();
         for c in &mut scope.cols {
             c.table = Some(qual.to_string());

@@ -975,7 +975,8 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected a statement"));
         };
         match w.as_str() {
-            "select" | "values" | "with" => self.query_statement(),
+            "select" | "values" => self.query_statement(),
+            "with" => self.with_statement(),
             "summarize" => {
                 self.pos += 1;
                 let query = self.peek_op("(")
@@ -3150,6 +3151,20 @@ impl<'a> Parser<'a> {
         if !self.eat_kw("with") {
             return Ok(None);
         }
+        let (recursive, ctes) = self.ctes(false)?;
+        let ctes = ctes
+            .into_iter()
+            .map(|c| match c {
+                StatementCte::Query(c) => c,
+                StatementCte::Modifying { .. } => unreachable!("refused by ctes"),
+            })
+            .collect();
+        Ok(Some(With { recursive, ctes }))
+    }
+
+    /// After `WITH`: `[RECURSIVE]` and the CTEs — data-modifying ones only
+    /// when `top` (the statement's own `WITH`, as PostgreSQL's).
+    fn ctes(&mut self, top: bool) -> Result<(bool, Vec<StatementCte>)> {
         let recursive = self.eat_kw("recursive");
         let mut ctes = Vec::new();
         loop {
@@ -3159,17 +3174,87 @@ impl<'a> Parser<'a> {
             // Planner hints; every CTE is materialized here.
             let _ = self.eat_kw("materialized") || self.eat_kws(&["not", "materialized"]);
             self.expect_op("(")?;
-            let query = self.query()?;
-            self.expect_op(")")?;
-            ctes.push(Cte {
-                name,
-                columns,
-                query: Box::new(query),
-            });
+            if ["insert", "update", "delete"]
+                .iter()
+                .any(|k| self.peek_kw(k))
+            {
+                if !top {
+                    return Err(Error::feature(
+                        "WITH clause containing a data-modifying statement must be at the top level",
+                    ));
+                }
+                let statement = Box::new(self.statement()?);
+                self.expect_op(")")?;
+                ctes.push(StatementCte::Modifying {
+                    name,
+                    columns,
+                    statement,
+                });
+            } else {
+                let query = self.query()?;
+                self.expect_op(")")?;
+                ctes.push(StatementCte::Query(Cte {
+                    name,
+                    columns,
+                    query: Box::new(query),
+                }));
+            }
             if !self.eat_op(",") {
-                return Ok(Some(With { recursive, ctes }));
+                return Ok((recursive, ctes));
             }
         }
+    }
+
+    /// A statement beginning with `WITH`: a query — or, with a
+    /// data-modifying CTE or before `INSERT`, `UPDATE` or `DELETE`, a
+    /// [`Statement::WithStatement`].
+    fn with_statement(&mut self) -> Result<Statement> {
+        let start = self.pos;
+        self.expect_kw("with")?;
+        // Its queries are inside the statement's (`SELECT … INTO` is not
+        // theirs).
+        self.queries += 1;
+        let parsed = self.ctes(true);
+        self.queries -= 1;
+        let (recursive, ctes) = parsed?;
+        for (i, c) in ctes.iter().enumerate() {
+            let name = |c: &StatementCte| match c {
+                StatementCte::Query(c) => c.name.clone(),
+                StatementCte::Modifying { name, .. } => name.clone(),
+            };
+            if ctes[..i].iter().any(|d| name(d) == name(c)) {
+                return Err(Error::duplicate_alias(format!(
+                    "WITH query name \"{}\" specified more than once",
+                    name(c)
+                )));
+            }
+        }
+        let modifying = ctes
+            .iter()
+            .any(|c| matches!(c, StatementCte::Modifying { .. }));
+        let dml = ["insert", "update", "delete"]
+            .iter()
+            .any(|k| self.peek_kw(k));
+        if !modifying && !dml {
+            // A query: parsed again, as one.
+            self.pos = start;
+            return self.query_statement();
+        }
+        let body = if dml {
+            self.statement()?
+        } else {
+            match self.query_statement()? {
+                q @ Statement::Query(_) => q,
+                _ => {
+                    return Err(Error::feature("SELECT … INTO after a data-modifying WITH"));
+                }
+            }
+        };
+        Ok(Statement::WithStatement {
+            recursive,
+            ctes,
+            body: Box::new(body),
+        })
     }
 
     /// Whether a query starts here (inside parentheses).

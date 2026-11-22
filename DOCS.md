@@ -2300,7 +2300,15 @@ the older `WITH CSV HEADER DELIMITER ';' …`; §8.7).  Table names may
 be qualified with `public.` (and, to read, `nc_catalog.`, `pg_catalog.`,
 `information_schema.`).
 
-Queries: `WITH [RECURSIVE] name [(cols)] AS (…)`, `SELECT [DISTINCT]`,
+Queries: `WITH [RECURSIVE] name [(cols)] AS (…)` — at the statement's
+top also before `INSERT`, `UPDATE` and `DELETE`, and with a CTE that is
+one of them (`WITH d AS (DELETE … RETURNING *) INSERT INTO t SELECT *
+FROM d`; inside a subquery `0A000`, as PostgreSQL's).  Such a CTE's
+statement runs once, before what comes after it, read or not; its
+`RETURNING` rows are what a reference reads (without `RETURNING` a
+reference is `0A000`).  Unlike PostgreSQL's, which all read the
+statement's snapshot, each part sees the writes of the CTEs before it.
+`SELECT [DISTINCT]`,
 `FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
 subqueries and functions in `FROM` (`generate_series`, `unnest`, any
 scalar function; `WITH ORDINALITY`), `LATERAL` before a subquery or a
@@ -2345,7 +2353,7 @@ OTHERS]])`, a bound `UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n
 FOLLOWING | UNBOUNDED FOLLOWING` (§8.5).
 
 Not yet: `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
-UTC, multi-dimensional arrays, data-modifying CTEs, user functions,
+UTC, multi-dimensional arrays, user functions,
 the rest of issue #16's forms.
 
 ### 8.4 Binder (`binder`)
@@ -2382,7 +2390,15 @@ as over one grouping, `GROUPING(k, …)` a call over the mask.  The plan is
 a `UNION ALL` of an `Aggregate` per set over the same input, each
 projected to the layout — its keys, `NULL` for the others, its mask a
 constant, the aggregates — so every executor runs it as ordinary
-groupings.  An aggregate's `FILTER (WHERE c)` (`agg_filter`) is bound as
+groupings.
+
+A statement's own `WITH` with a data-modifying CTE, or before `INSERT`,
+`UPDATE` or `DELETE`, is a `Statement::WithStatement`: the session runs
+the CTEs' statements in order and gives each part bound after them —
+the next CTE's statement, then the statement itself — the CTEs before
+it (`binder::GivenCte`): a query CTE bound there, a data-modifying one
+as its `RETURNING` rows (a `Values`).  `DESCRIBE` gives them as their
+columns, with no rows, and runs nothing.  An aggregate's `FILTER (WHERE c)` (`agg_filter`) is bound as
 an aggregate of its own wrapping the inner one, fed `c` first and passing
 on the rows it holds for.
 
