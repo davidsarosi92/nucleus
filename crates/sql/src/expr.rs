@@ -1057,6 +1057,12 @@ pub(crate) fn in_values<'v>(
     items: impl Iterator<Item = &'v Value>,
     negated: bool,
 ) -> Result<Value> {
+    let mut items = items.peekable();
+    // Of no items — an empty subquery's — `x IN` is false and `x NOT IN`
+    // true, whatever `x` is: a NULL `x` too (no comparison is unknown).
+    if items.peek().is_none() {
+        return Ok(Value::Bool(negated));
+    }
     if v.is_null() {
         return Ok(Value::Null);
     }

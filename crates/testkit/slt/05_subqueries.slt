@@ -45,6 +45,29 @@ SELECT count(*) FROM t WHERE 99 NOT IN (SELECT v FROM t)
 ----
 0
 
+# Of an empty subquery, IN is false and NOT IN true — for a NULL operand
+# too: there is no comparison to be unknown.
+query BB
+SELECT NULL::int IN (SELECT v FROM t WHERE id < 0), NULL::int NOT IN (SELECT v FROM t WHERE id < 0)
+----
+false true
+
+query I rowsort
+SELECT id FROM t WHERE v NOT IN (SELECT v FROM t WHERE id < 0)
+----
+1
+2
+3
+4
+
+query IB rowsort
+SELECT id, v IN (SELECT grp FROM t WHERE id > 9) FROM t
+----
+1 false
+2 false
+3 false
+4 false
+
 query II
 SELECT g, n FROM (SELECT grp AS g, count(*) AS n FROM t GROUP BY grp) s WHERE n > 1
 ----

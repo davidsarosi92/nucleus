@@ -1373,6 +1373,10 @@ fn in_consts(
     if consts.iter().any(|c| c.is_null()) {
         return None;
     }
+    // An empty subquery's: false (`NOT IN`: true) for every row, NULLs too.
+    if consts.is_empty() {
+        return Some(Vector::Bool(vec![negated; len], None));
+    }
     let mut out = vec![false; len];
     let nulls = if let Some((o, b, n, char)) = text_view(x) {
         let needles: Vec<&[u8]> = consts

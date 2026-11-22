@@ -2285,7 +2285,8 @@ EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
 (`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases, expressions), `LIMIT`,
 `OFFSET`.  Expressions: arithmetic, `||`, comparisons, `AND/OR/NOT`, `IS
 [NOT] NULL|TRUE|FALSE|DISTINCT FROM`, `[NOT] BETWEEN`, `[NOT] IN (list |
-subquery)`, `[NOT] EXISTS`, `op ANY|SOME|ALL (array | subquery)`, scalar
+subquery)` (of an empty subquery, `IN` is false and `NOT IN` true, a
+NULL operand's too), `[NOT] EXISTS`, `op ANY|SOME|ALL (array | subquery)`, scalar
 subqueries, `[NOT] LIKE / ILIKE`, `~ ~* !~ !~*` (regular expressions,
 linear-time), `CASE`, `CAST` / `::`, typed literals (`INTERVAL '90' DAY`,
 `INTERVAL '5' DAY TO HOUR`: a bare number counts the last field, the
