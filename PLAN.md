@@ -13210,10 +13210,21 @@ Still held whole: a recursive `UNION`'s rows seen.
      though its scan's filter holds the equalities (`Access::rest`).
      The condition now drops them (`optimizer::without_keys`); a count of
      matches reads the index's entries alone.  ABBA: 132 → 49 ms on one
-     worker, 63 → 31 on ten; by the primary key 38.6 → 33.9 ms.  Left:
-     the columns the index's entries hold (its own and the primary key's)
-     read from them, not the row (PostgreSQL's index-only scans need the
-     visibility map; nucleus's entries are versioned as the rows are).
+     worker, 63 → 31 on ten; by the primary key 38.6 → 33.9 ms.
+     *Primary key columns from the entries ✅*: a lookup wanting only
+     primary key columns, of types their key encoding gives back exactly
+     (integers, booleans, text, bytes, dates, times), reads them from its
+     entries (`exec::in_primary_key`; PostgreSQL's index-only scans need
+     the visibility map, nucleus's entries are versioned as the rows
+     are); and an adaptive join's lookups want the columns read above the
+     join and by their own condition, not the hash keys (`prune`: the
+     recursive step's lookups had fetched each row for its `parent`).
+     ABBA: `sum(e.id)` over the 20,000 keys 133 → 52 ms on one worker,
+     63 → 31 on ten; 2,047 descendants 5.0–5.4 → 3.6–4.0 ms
+     (PostgreSQL 1.25), the `UNION` walk 5.5–6.0 → 4.1–4.4 ms, whole tree
+     0.67 → 0.64 s.  Left: the index's own columns from its entries
+     (plain columns only: an expression's or a taught ordering's entry
+     holds another value).
   4. **Each round chooses ✅** — without the index the whole tree took
      0.93 s (PostgreSQL 2.8 s): the round hashed, the table scanned once
      a round, three times faster than 2,000,000 lookups.  So the step's

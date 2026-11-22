@@ -193,3 +193,120 @@ query II
 SELECT count(*), count(DISTINCT kr.s) FROM kl JOIN kr ON kr.s = kl.t
 ----
 461 2
+
+# A lookup that wants only primary key columns reads them from its index
+# entries, no row fetched, where their key encoding gives them back as they
+# were: integers, booleans, text, bytes, dates and times.  A numeric's
+# scale, a char's padding and a real are read from the row.
+statement ok
+CREATE TABLE px (a int, b text, c bytea, d date, e timestamp, f bool, g smallint, t time, z timestamptz, p int, PRIMARY KEY (a, b, c, d, e, f, g, t, z))
+
+statement ok
+INSERT INTO px SELECT i, 'x' || i, ('k' || i)::bytea, date '2024-01-01' + i, timestamp '2024-01-01' + i * interval '1 hour', i % 2 = 0, (i % 7)::smallint, time '00:00' + i * interval '1 minute', timestamptz '2024-01-01 00:00:00+00' + i * interval '1 second', i % 2000 FROM generate_series(1, 20000) i
+
+statement ok
+CREATE INDEX px_p ON px (p)
+
+statement ok
+CREATE TABLE pn (n numeric, ch char(3), r real, p int, PRIMARY KEY (n, ch, r))
+
+statement ok
+INSERT INTO pn SELECT i * 0.25 + 0.50, substr('abc', 1 + i % 3, 1 + i % 2), i * 0.1, i % 2000 FROM generate_series(1, 20000) i
+
+statement ok
+CREATE INDEX pn_p ON pn (p)
+
+statement ok
+ANALYZE
+
+# nucleus-only: plans
+query T
+EXPLAIN SELECT px.a, px.b FROM kl JOIN px ON px.p = kl.k
+----
+Project: #1, #2
+  Index Nested Loop
+    Project: #0
+      Seq Scan on kl (rows=6)
+    Project: #0, #1
+      Index Scan using px_p on px (p = outer1.#0) (rows=10)
+
+query ITTTTTITR rowsort
+SELECT px.a, px.b, px.c, px.d, px.e, px.f, px.g, px.t, extract(epoch FROM px.z) FROM kl JOIN px ON px.p = kl.k WHERE px.a < 4100
+----
+1 x1 \x6b31 2024-01-02 2024-01-01 01:00:00 f 1 00:01:00 1704067201.000
+2 x2 \x6b32 2024-01-03 2024-01-01 02:00:00 t 2 00:02:00 1704067202.000
+2 x2 \x6b32 2024-01-03 2024-01-01 02:00:00 t 2 00:02:00 1704067202.000
+2001 x2001 \x6b32303031 2029-06-24 2024-03-24 09:00:00 f 6 09:21:00 1704069201.000
+2002 x2002 \x6b32303032 2029-06-25 2024-03-24 10:00:00 t 0 09:22:00 1704069202.000
+2002 x2002 \x6b32303032 2029-06-25 2024-03-24 10:00:00 t 0 09:22:00 1704069202.000
+2003 x2003 \x6b32303033 2029-06-26 2024-03-24 11:00:00 f 1 09:23:00 1704069203.000
+2007 x2007 \x6b32303037 2029-06-30 2024-03-24 15:00:00 f 5 09:27:00 1704069207.000
+3 x3 \x6b33 2024-01-04 2024-01-01 03:00:00 f 3 00:03:00 1704067203.000
+4001 x4001 \x6b34303031 2034-12-15 2024-06-15 17:00:00 f 4 18:41:00 1704071201.000
+4002 x4002 \x6b34303032 2034-12-16 2024-06-15 18:00:00 t 5 18:42:00 1704071202.000
+4002 x4002 \x6b34303032 2034-12-16 2024-06-15 18:00:00 t 5 18:42:00 1704071202.000
+4003 x4003 \x6b34303033 2034-12-17 2024-06-15 19:00:00 f 6 18:43:00 1704071203.000
+4007 x4007 \x6b34303037 2034-12-21 2024-06-15 23:00:00 f 3 18:47:00 1704071207.000
+7 x7 \x6b37 2024-01-08 2024-01-01 07:00:00 f 0 00:07:00 1704067207.000
+
+query TTR rowsort
+SELECT pn.n, '[' || pn.ch::text || ']', pn.r FROM kl JOIN pn ON pn.p = kl.k WHERE pn.n < 1100
+----
+0.75 [bc] 0.100
+1.00 [c] 0.200
+1.00 [c] 0.200
+1.25 [ab] 0.300
+1000.75 [c] 400.100
+1001.00 [a] 400.200
+1001.00 [a] 400.200
+1001.25 [bc] 400.300
+1002.25 [c] 400.700
+2.25 [bc] 0.700
+500.75 [ab] 200.100
+501.00 [b] 200.200
+501.00 [b] 200.200
+501.25 [c] 200.300
+502.25 [ab] 200.700
+
+query TI rowsort
+SELECT pn.n, octet_length(pn.ch) FROM kl JOIN pn ON pn.p = kl.k WHERE pn.n < 1100
+----
+0.75 3
+1.00 3
+1.00 3
+1.25 3
+1000.75 3
+1001.00 3
+1001.00 3
+1001.25 3
+1002.25 3
+2.25 3
+500.75 3
+501.00 3
+501.00 3
+501.25 3
+502.25 3
+
+# A recursive step's lookups give the columns read above the join and by
+# their own condition (`tr.w`, past the keys).
+statement ok
+CREATE TABLE tr (id int PRIMARY KEY, parent int, w int)
+
+statement ok
+INSERT INTO tr SELECT i, i / 2, i % 5 FROM generate_series(1, 20000) i
+
+statement ok
+CREATE INDEX tr_parent ON tr (parent)
+
+statement ok
+ANALYZE tr
+
+query III
+WITH RECURSIVE d(id, depth) AS (SELECT 10, 0 UNION ALL SELECT tr.id, d.depth + 1 FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(id), max(depth) FROM d
+----
+2047 14679037 10
+
+query III
+WITH RECURSIVE d(id, depth) AS (SELECT 10, 0 UNION ALL SELECT tr.id, d.depth + 1 FROM tr JOIN d ON tr.parent = d.id AND tr.w <> d.depth % 5) SELECT count(*), sum(id), max(depth) FROM d
+----
+174 1002713 10

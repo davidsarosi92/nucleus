@@ -114,6 +114,10 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
             let lw = left.width();
             // (A semi or anti join's condition reads the right row too.)
             wanted.resize(lw + right.width(), false);
+            // The left columns read above the join: an adaptive join's
+            // lookups give these and what their own condition reads (not
+            // the keys, which their index range matches).
+            let mut lookup_need = wanted[..lw.min(wanted.len())].to_vec();
             if let Some(on) = on {
                 read(on, &mut wanted, 0);
             }
@@ -134,9 +138,14 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
                 for k in right_keys {
                     read(k, &mut right_need, 0);
                 }
-                // An adaptive join's lookups give the left side's columns.
+                // An adaptive join's lookups give the left side's columns
+                // (their condition: a right row, then a left one).
                 if let Some(a) = adaptive {
-                    walk(&a.lookup, left_need.clone(), out);
+                    lookup_need.resize(lw, false);
+                    if let Some(on) = &a.on {
+                        read(on, &mut lookup_need, -(right.width() as isize));
+                    }
+                    walk(&a.lookup, lookup_need, out);
                 }
             }
             // The right side of a lookup reads the left row.

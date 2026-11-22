@@ -1440,12 +1440,39 @@ pub fn scan_some<'a>(
         // destroyed rows are told by their fetch.
         keys_only: table.storage != crate::sealed::SEALED
             && wanted.is_some_and(|w| !w.contains(&true)),
+        pk_only: table.storage != crate::sealed::SEALED
+            && wanted.is_some_and(|w| w.contains(&true) && in_primary_key(table, w)),
         keys: Vec::new(),
         rows: Vec::new(),
         ready: std::collections::VecDeque::new(),
         group: INDEX_GROUP_FIRST,
         done: false,
     }))
+}
+
+/// Whether every column `wanted` marks is one of `table`'s primary key's
+/// and of a type its key encoding gives back as it was — an integer, a
+/// boolean, text, bytes, a date or a time (not a `real`, read back as a
+/// `double`; a `numeric`, its scale lost; a `char`, unpadded; an enum,
+/// its label not kept): an index entry, which holds the primary key,
+/// then serves them with no row fetched.
+fn in_primary_key(table: &Table, wanted: &[bool]) -> bool {
+    wanted.iter().enumerate().all(|(c, &w)| {
+        !w || (table.primary_key.contains(&c)
+            && matches!(
+                table.columns[c].ty,
+                DataType::Bool
+                    | DataType::SmallInt
+                    | DataType::Integer
+                    | DataType::BigInt
+                    | DataType::Text
+                    | DataType::Bytea
+                    | DataType::Date
+                    | DataType::Time
+                    | DataType::Timestamp
+                    | DataType::TimestampTz
+            ))
+    })
 }
 
 /// The rows a secondary index's first entries fetch together: one — a
@@ -1469,6 +1496,9 @@ struct IndexRows<'a> {
     labels: crate::enums::Labels,
     sealed: bool,
     keys_only: bool,
+    /// The columns wanted are the primary key's ([`in_primary_key`]):
+    /// read from the entries, no row fetched.
+    pk_only: bool,
     keys: Vec<Vec<u8>>,
     rows: Vec<Option<Row>>,
     ready: std::collections::VecDeque<(Vec<u8>, Row)>,
@@ -1496,10 +1526,17 @@ impl IndexRows<'_> {
         if self.keys.is_empty() {
             return Ok(());
         }
-        if self.keys_only {
-            let width = self.table.columns.len();
+        if self.keys_only || self.pk_only {
+            let (width, pk) = (self.table.columns.len(), &self.table.primary_key);
             for k in self.keys.drain(..) {
-                self.ready.push_back((k, vec![Value::Null; width]));
+                let mut row = vec![Value::Null; width];
+                if self.pk_only {
+                    let (values, _) = crate::encoding::decode_key(&k[self.base.len()..], pk.len())?;
+                    for (&c, v) in pk.iter().zip(values) {
+                        row[c] = v;
+                    }
+                }
+                self.ready.push_back((k, row));
             }
             return Ok(());
         }
