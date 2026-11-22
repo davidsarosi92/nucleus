@@ -63,7 +63,7 @@
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `playground` | — | the console's page on the browser edition, the tutorial as its tour; `build.sh` (a static site), `test.mjs` (headless Chrome) | §M14.17 |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
-| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`, `ci-tools.sh` (CI's tools for running its scripts locally), `s3-test.sh`, `kms-test.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
+| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`, `ci-tools.sh` (CI's tools for running its scripts locally), `precheck.sh` (what CI would find on other platforms, before a push), `s3-test.sh`, `kms-test.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
 | `packaging` | — | the container image's `Dockerfile` (§6.3) | §M14.17 |
 | `monitoring` | — | Prometheus alert rules and their `promtool` tests, a Grafana dashboard, `test.sh` (the real Prometheus and OpenTelemetry Collector against a server; MIT, to copy from) (§8.39) | §M14.18 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
@@ -102,7 +102,19 @@ tests and every example against a server (`scripts/driver-tests.sh`, §11),
 and the `modules` job checks the module boundaries and detaches every
 module (§1):
 
+Before a push, `scripts/precheck.sh` finds what CI would find on the
+platforms the machine does not run — most of CI's failures were code
+that builds on one platform and not another (`std::os::unix` outside
+`cfg(unix)`, a C `unsigned long` taken for 64 bits, a warning only
+another platform's `cfg` shows, under CI's `-D warnings`) or a test
+that starts a thread under WASI: format, clippy, the module boundaries,
+`cargo check` of the workspace for Windows and 32-bit Linux and of the
+core crates and the embedded edition for WASI, Android and iOS (ring's
+C code compiled for the check by LLVM against stand-in headers), then
+the wasm job's tests under Node's WASI (`--quick` leaves them out).
+
 ```sh
+scripts/precheck.sh                              # before a push (~5 min; --quick ~30 s)
 cargo build --release -p nucleus-cli
 scripts/driver-tests.sh target/release/nucleus [rust python js java c cpp]
 scripts/psql-smoke.sh target/release/nucleus     # needs psql

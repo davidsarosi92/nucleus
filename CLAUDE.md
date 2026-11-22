@@ -29,3 +29,10 @@ check it against nucleus's principles and its own design, measure it
 here, and make it better where we can.  Record what was taken, from
 where, and what was measured — or why it was not taken — in `PLAN.md`
 beside the step (as §M14.20 V13 does).
+
+## Before a push
+
+Run `scripts/precheck.sh` (about 5 minutes; `--quick` skips the wasm
+tests): it checks what CI checks on the platforms this Mac does not run
+(Windows, 32-bit Linux, WASI, Android, iOS) and runs the wasm job's
+tests.  Most CI failures were caught by nothing else locally.

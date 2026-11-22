@@ -11,6 +11,7 @@ use nucleus_kv::{Database, Kv};
 use nucleus_sql::Session;
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn statements_stop_when_the_server_stops() {
     let kv: Arc<dyn Kv> =
         Arc::new(Database::open_in_memory(nucleus_kv::Options::in_memory()).unwrap());
