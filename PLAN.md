@@ -12937,8 +12937,10 @@ Found and fixed:
   are read up to Ready (a pipeline's statement holds it; a stream fails
   that row only).  Tested by `test_a_value_python_cannot_hold` (server
   and embedded editions; fails with the old reader).  The other drivers
-  are not yet checked for the same (a value their date types cannot hold,
-  thrown mid-reply).
+  throw nothing mid-reply: Rust, C and C++ keep the day count, Java's
+  `LocalDate` reaches far enough, Swift's `Date` is a double; JavaScript's
+  `Date` ends at year 275,760 — past it a date arrives as an invalid
+  `Date` (the database's last, 5,874,897, is past it), left as is.
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
