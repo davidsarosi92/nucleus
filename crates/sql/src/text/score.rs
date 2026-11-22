@@ -337,9 +337,9 @@ pub(crate) fn bind(
     let q_in = q.lifted(1);
     let parts_in = parts.map(|p| p.lifted(1));
     let correlated = q_in != *q || parts_in.as_ref() != parts;
-    let stats = Expr::Subquery(Box::new(SubPlan {
-        kind: SubKind::Scalar,
-        plan: Plan::Project {
+    let stats = Expr::Subquery(Box::new(SubPlan::new(
+        SubKind::Scalar,
+        Plan::Project {
             input: Box::new(Plan::Values {
                 rows: vec![vec![]],
                 width: 0,
@@ -353,7 +353,7 @@ pub(crate) fn bind(
             )],
         },
         correlated,
-    }));
+    )));
     let score = Expr::Call(
         FnRef::new(Arc::new(TextScore)),
         vec![

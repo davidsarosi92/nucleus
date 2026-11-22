@@ -12902,6 +12902,32 @@ Found and fixed:
   an online build (PostgreSQL's `CREATE INDEX CONCURRENTLY`, F1's
   write-only state) is issue #18.  `ALTER … TYPE … CONCURRENTLY` and
   storage conversions, in parts of their own, are unchanged.
+- A subquery took another's rows: an execution kept uncorrelated
+  subqueries' rows (and correlated ones', by outer values) by the address
+  of the subquery's plan.  The row executor's scan copies its filter for
+  each run — each partition of a partitioned table — and a copy dropped
+  left its addresses to the next, which allocated its two subqueries the
+  other way round: `a IN (SELECT a FROM u WHERE y = 'a') AND a NOT IN
+  (SELECT a FROM u WHERE x < 2)` read the first's rows (`{NULL}`) for the
+  second in one partition (the fuzzer's partitioned-table diff and a TLP
+  sum 1,692 of 2,500 rows; with `batch_size = 0`, depending on the
+  allocator, so a later build seemed fixed).  Confirmed by recording each
+  cached plan and comparing it on a hit.  Now `SubPlan` carries an id,
+  made by the binder (a global counter) and kept by copies, which the
+  cache, the correlated memo and its outer reads are keyed by; equality
+  and `Debug` leave it out.  A copy's subquery now finds the original's
+  rows instead of running again per partition.  Tested by
+  `a_subquery_keeps_its_own_rows_in_every_partition` (partitioned
+  against plain, `IN` / `NOT IN` / `EXISTS` / scalar, both executors;
+  fails 3 of 3 runs keyed by address).  Other maps keyed by a plan
+  node's address are filled from the statement's plan, which lives as
+  long as the execution — except two filled while it runs: a `LIMIT`'s
+  bounds for the sort below it (entries for the chain's other nodes stay
+  until the execution ends) and the hash joins' key filters by scan.  A
+  subquery's plan copied with a filter could leave entries there under
+  addresses a later copy reuses; probes with `LIMIT`s and joins inside
+  subqueries over partitions found nothing, so they stay as they are,
+  noted here.
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,

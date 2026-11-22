@@ -86,7 +86,7 @@ pub enum Expr {
 }
 
 /// A subquery inside an expression.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct SubPlan {
     /// What the subquery computes.
     pub kind: SubKind,
@@ -94,6 +94,43 @@ pub struct SubPlan {
     pub plan: Plan,
     /// Whether it refers to enclosing rows (else it runs once per statement).
     pub correlated: bool,
+    /// Which subquery it is, kept by its copies: what an execution keeps
+    /// its rows by ([`Ctx::cache`], [`Ctx::memo`]).  Not its address —
+    /// an expression is copied while it runs (a scan's filter, once per
+    /// partition), and a copy dropped leaves its address to the next,
+    /// which may hold another subquery: keyed so, `x NOT IN (SELECT …)`
+    /// once found another subquery's rows.
+    pub id: u64,
+}
+
+impl SubPlan {
+    /// A subquery of its own [`id`](Self::id).
+    pub fn new(kind: SubKind, plan: Plan, correlated: bool) -> SubPlan {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        SubPlan {
+            kind,
+            plan,
+            correlated,
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+// What it computes: equal and shown alike whatever its id.
+impl PartialEq for SubPlan {
+    fn eq(&self, other: &SubPlan) -> bool {
+        self.kind == other.kind && self.plan == other.plan && self.correlated == other.correlated
+    }
+}
+
+impl std::fmt::Debug for SubPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubPlan")
+            .field("kind", &self.kind)
+            .field("plan", &self.plan)
+            .field("correlated", &self.correlated)
+            .finish()
+    }
 }
 
 /// The kinds of subquery.
@@ -296,8 +333,8 @@ pub struct Ctx<'a> {
     pub registry: &'a Registry,
     /// Parameter values.
     pub params: &'a [Value],
-    /// Uncorrelated subquery results, by plan address.
-    pub cache: RefCell<HashMap<usize, std::sync::Arc<Vec<Row>>>>,
+    /// Uncorrelated subquery results, by [`SubPlan::id`].
+    pub cache: RefCell<HashMap<u64, std::sync::Arc<Vec<Row>>>>,
     /// CTE results, by CTE id.
     pub ctes: RefCell<HashMap<usize, std::rc::Rc<crate::spill::Stored>>>,
     /// The current round's rows of each recursive CTE being computed.
@@ -312,14 +349,14 @@ pub struct Ctx<'a> {
     /// Correlated subqueries' results are kept by the outer values they
     /// read (a query's: nothing it runs writes).
     pub memoize: bool,
-    /// Those results, by plan address and outer values.
-    pub memo: RefCell<HashMap<(usize, Vec<Value>), std::rc::Rc<Vec<Row>>>>,
+    /// Those results, by [`SubPlan::id`] and outer values.
+    pub memo: RefCell<HashMap<(u64, Vec<Value>), std::rc::Rc<Vec<Row>>>>,
     /// The hash joins' key filters on the scans below them
     /// ([`crate::keyfilter`]), by the scan's address.
     pub(crate) key_filters: RefCell<crate::keyfilter::Registry>,
     /// The outer values each correlated subquery reads (`None`: it is not
-    /// kept — a volatile function, a table function), by plan address.
-    pub memo_reads: RefCell<HashMap<usize, Option<Vec<(usize, usize)>>>>,
+    /// kept — a volatile function, a table function), by [`SubPlan::id`].
+    pub memo_reads: RefCell<HashMap<u64, Option<Vec<(usize, usize)>>>>,
     /// The rows a `LIMIT` takes of the sort right below it (with those it
     /// skips), by the sort's address: the sort keeps only those.
     pub(crate) bounds: RefCell<HashMap<usize, usize>>,
@@ -877,7 +914,7 @@ fn correlated_rows(sub: &SubPlan, env: &Env) -> Result<std::rc::Rc<Vec<Row>>> {
     if !env.ctx.memoize {
         return run();
     }
-    let at = &sub.plan as *const Plan as usize;
+    let at = sub.id;
     let reads = env
         .ctx
         .memo_reads
@@ -939,7 +976,7 @@ fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
 
 /// An uncorrelated subquery's rows: run once a statement, then cached.
 pub(crate) fn uncorrelated_rows(sub: &SubPlan, env: &Env) -> Result<std::sync::Arc<Vec<Row>>> {
-    let key = &sub.plan as *const Plan as usize;
+    let key = sub.id;
     let cached = env.ctx.cache.borrow().get(&key).cloned();
     Ok(match cached {
         Some(rows) => rows,
@@ -995,7 +1032,7 @@ pub(crate) fn ready_subqueries(e: &Expr, ctx: &Ctx) -> bool {
         }
     });
     subs.into_iter().all(|s| {
-        let key = &s.plan as *const Plan as usize;
+        let key = s.id;
         if ctx.cache.borrow().contains_key(&key) {
             return true;
         }

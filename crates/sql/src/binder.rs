@@ -2584,11 +2584,7 @@ impl<'a> Binder<'a> {
         Ok(Some(match e {
             A::Exists { query, negated } => {
                 let (plan, _, correlated) = self.subquery(query, scope)?;
-                let x = Expr::Subquery(Box::new(SubPlan {
-                    kind: SubKind::Exists,
-                    plan,
-                    correlated,
-                }));
+                let x = Expr::Subquery(Box::new(SubPlan::new(SubKind::Exists, plan, correlated)));
                 (
                     if *negated {
                         Expr::Unary(UnaryOp::Not, Box::new(x))
@@ -2609,11 +2605,7 @@ impl<'a> Binder<'a> {
                     .array_of()
                     .ok_or_else(|| Error::feature("arrays of arrays are not supported"))?;
                 (
-                    Expr::Subquery(Box::new(SubPlan {
-                        kind: SubKind::Array,
-                        plan,
-                        correlated,
-                    })),
+                    Expr::Subquery(Box::new(SubPlan::new(SubKind::Array, plan, correlated))),
                     Some(ty),
                 )
             }
@@ -2623,11 +2615,7 @@ impl<'a> Binder<'a> {
                     return Err(Error::syntax("subquery must return only one column"));
                 }
                 (
-                    Expr::Subquery(Box::new(SubPlan {
-                        kind: SubKind::Scalar,
-                        plan,
-                        correlated,
-                    })),
+                    Expr::Subquery(Box::new(SubPlan::new(SubKind::Scalar, plan, correlated))),
                     s.cols[0].ty,
                 )
             }
@@ -2644,11 +2632,11 @@ impl<'a> Binder<'a> {
                 comparable(xt, s.cols[0].ty)?;
                 require(xt.or(s.cols[0].ty), &[Need::Equality], "IN")?;
                 (
-                    Expr::Subquery(Box::new(SubPlan {
-                        kind: SubKind::In(Box::new(x), *negated),
+                    Expr::Subquery(Box::new(SubPlan::new(
+                        SubKind::In(Box::new(x), *negated),
                         plan,
                         correlated,
-                    })),
+                    ))),
                     Some(DataType::Bool),
                 )
             }

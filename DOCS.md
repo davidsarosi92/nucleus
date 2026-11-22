@@ -2924,6 +2924,11 @@ space for its `count(*)`).  Still held whole: a recursive `UNION`'s
 rows seen, and the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).
+Their rows are kept by which subquery it is (`SubPlan::id`, made by the
+binder and kept by copies), a correlated one's by that and the outer
+values it reads — not by the address of its plan: a scan copies its
+filter while it runs (once per partition), and a dropped copy's address
+went to the next, whose subqueries could lie the other way round.
 A **hash join whose left side is a pipeline** (a scan, its filters and
 projections) and whose right side fits in work_mem runs vectorized: the
 right rows hashed once (`vector::JoinTable`, its keys found as a
