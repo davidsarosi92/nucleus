@@ -219,3 +219,63 @@ fn recursive_rounds_choose_lookups_or_the_hash_join() {
         assert_eq!(outcome(session, ancestors).unwrap().len(), 15);
     }
 }
+
+#[test]
+fn joins_over_a_recursive_query_choose_by_its_rows() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(29)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, "SET batch_size = 1024");
+    s.execute(
+        "CREATE TABLE e (id INT PRIMARY KEY, parent INT, v INT);
+         INSERT INTO e SELECT i, i / 2, i % 7 FROM generate_series(1, 30000) AS t(i);
+         CREATE INDEX e_parent ON e (parent);
+         ANALYZE",
+    )
+    .unwrap();
+    let settings = [
+        "SET batch_size = 0",
+        "SET batch_size = 1024",
+        "SET parallel_workers = 4",
+    ];
+    let mut sessions: Vec<Session> = settings.iter().map(|q| session(&db, q)).collect();
+    let walk = "WITH RECURSIVE d (id) AS (SELECT {root} UNION ALL \
+                SELECT e.id FROM e JOIN d ON e.parent = d.id) ";
+    // (root, whether its rows are few: 31 of them, or the whole tree's)
+    for (root, few) in [("1000", true), ("1", false)] {
+        let walk = walk.replace("{root}", root);
+        // The walk's own rounds' lookups, then each join's past them.
+        let mut alone = Vec::new();
+        for session in &mut sessions {
+            let before = nucleus_sql::vector::adaptive_lookups_here();
+            outcome(session, &format!("{walk}SELECT id FROM d")).unwrap();
+            alone.push(nucleus_sql::vector::adaptive_lookups_here() - before);
+        }
+        for join in [
+            "SELECT d.id, e.v FROM d JOIN e ON e.id{plus} = d.id",
+            "SELECT id, v FROM e WHERE id{plus} IN (SELECT id / 2 FROM d)",
+        ] {
+            let query = format!("{walk}{}", join.replace("{plus}", ""));
+            let reference = sorted(outcome(
+                &mut s,
+                &format!("{walk}{}", join.replace("{plus}", " + 0")),
+            ));
+            assert!(reference.as_ref().unwrap().len() > 10, "{query}");
+            let p = plan(&mut s, &query);
+            assert_eq!(p.matches("or lookups up to").count(), 2, "{query}: {p}");
+            for ((setting, session), alone) in settings.iter().zip(&mut sessions).zip(&alone) {
+                let before = nucleus_sql::vector::adaptive_lookups_here();
+                assert_eq!(
+                    sorted(outcome(session, &query)),
+                    reference,
+                    "{query}: {setting}"
+                );
+                let looked_up = nucleus_sql::vector::adaptive_lookups_here() - before;
+                assert_eq!(looked_up, alone + u64::from(few), "{query}: {setting}");
+            }
+        }
+    }
+}

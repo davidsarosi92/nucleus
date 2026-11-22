@@ -420,3 +420,133 @@ query III
 WITH RECURSIVE d(id, depth) AS (SELECT 10, 0 UNION ALL SELECT tr.id, d.depth + 1 FROM tr JOIN d ON tr.parent = d.id AND tr.w <> d.depth % 5) SELECT count(*), sum(id), max(depth) FROM d
 ----
 174 1002713 10
+
+# A recursive query's rows are known only as it runs (its estimate a
+# guess): a join reading them stays a hash join that looks the other side
+# up while they are few (a subtree of 31 rows; one of 2,047 is past the
+# break-even, hashed).  A semi join does too where nothing past its keys
+# tells its right rows apart: each key looked up once (duplicates and
+# NULLs among them), a left row given once.  Other semi joins keep their
+# plans: their estimates stand.
+query II
+WITH RECURSIVE d(id) AS (SELECT 10 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(tr.w) FROM d JOIN tr ON tr.id = d.id
+----
+2047 4067
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 10 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(w) FROM tr WHERE id IN (SELECT id FROM d)
+----
+2047 4067
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(tr.w) FROM d JOIN tr ON tr.id = d.id
+----
+31 50
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(w) FROM tr WHERE id IN (SELECT id FROM d)
+----
+31 50
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(w) FROM tr WHERE id IN (SELECT id / 2 FROM d)
+----
+16 20
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(id) FROM tr WHERE parent IN (SELECT CASE WHEN id % 3 = 0 THEN NULL ELSE id END FROM d)
+----
+20 220090
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(w) FROM tr WHERE EXISTS (SELECT 1 FROM d WHERE d.id / 2 = tr.id AND d.id % 2 + tr.w % 2 = 1)
+----
+15 20
+
+# EXISTS over a CTE's rows is a semi join too (its rows made once a
+# statement), NOT EXISTS an anti join.
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(w) FROM tr WHERE EXISTS (SELECT 1 FROM d WHERE d.id = tr.id)
+----
+31 50
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(w) FROM tr WHERE NOT EXISTS (SELECT 1 FROM d WHERE d.id = tr.id) AND tr.id < 3000
+----
+2996 5999
+
+query II
+WITH c AS (SELECT k FROM kl) SELECT count(*), sum(id) FROM kr WHERE EXISTS (SELECT 1 FROM c WHERE c.k = kr.p)
+----
+40 72130
+
+query II
+WITH c AS (SELECT k FROM kl) SELECT count(*), sum(id) FROM kr WHERE NOT EXISTS (SELECT 1 FROM c WHERE c.k = kr.p)
+----
+3960 7929870
+
+query II
+WITH c AS (SELECT k, n FROM kl) SELECT count(*), sum(id) FROM kr WHERE EXISTS (SELECT 1 FROM c WHERE c.k = kr.p AND c.n < kr.id / 1000)
+----
+12 34824
+
+query II
+WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*), sum(id) FROM kr WHERE p IN (SELECT CASE WHEN id % 3 = 0 THEN NULL ELSE id % 400 END FROM d)
+----
+120 216870
+
+# nucleus-only: plans
+query T
+EXPLAIN WITH c AS (SELECT k FROM kl) SELECT count(*) FROM kr WHERE EXISTS (SELECT 1 FROM c WHERE c.k = kr.p)
+----
+Aggregate: count(*)
+  Semi Hash Join (#0 = #0) on (#1 = #0)
+    Project: #1
+      Seq Scan on kr (rows=4000)
+    CTE c
+      Project: #0
+        Seq Scan on kl (rows=6)
+
+# nucleus-only: plans
+query T
+EXPLAIN SELECT count(*) FROM kr WHERE p IN (SELECT k FROM kl)
+----
+Aggregate: count(*)
+  Semi Hash Join (#0 = #0) on (#0 = #1)
+    Project: #1
+      Seq Scan on kr (rows=4000)
+    Project: #0
+      Seq Scan on kl (rows=6)
+
+query II
+SELECT count(*), sum(id) FROM kr WHERE p IN (SELECT k FROM kl)
+----
+40 72130
+
+query II
+SELECT count(*), sum(id) FROM kr WHERE p IN (SELECT k FROM kl WHERE k > 1)
+----
+30 54120
+
+query II
+SELECT count(*), sum(id) FROM kr WHERE p NOT IN (SELECT k FROM kl WHERE k IS NOT NULL)
+----
+3880 7767870
+
+# nucleus-only: plans
+query T
+EXPLAIN WITH RECURSIVE d(id) AS (SELECT 1000 UNION ALL SELECT tr.id FROM tr JOIN d ON tr.parent = d.id) SELECT count(*) FROM tr WHERE id IN (SELECT id FROM d)
+----
+Aggregate: count(*)
+  Semi Hash Join (#0 = #0) or lookups up to 733 rows on (#0 = #1)
+    Project: #0
+      Seq Scan on tr (rows=20000)
+    CTE d
+      Recursive Union All
+        Project: 1000
+          Values (1 rows)
+        Project: #0
+          Hash Join (#1 = #0) or lookups up to 230 rows on (#1 = #2)
+            Project: #0, #1
+              Seq Scan on tr (rows=20000)
+            WorkTable Scan on d

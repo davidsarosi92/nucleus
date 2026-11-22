@@ -6,10 +6,10 @@
 //!
 //! A subquery unnests when its rows do not depend on the row it runs for
 //! (uncorrelated — `IN` only: an uncorrelated `EXISTS` is one value, run
-//! once), or when it reads one table (under projections, `DISTINCT` and
-//! sorts, which cannot change whether a row exists) and refers to the row
-//! only in its filter's top-level conjuncts: those become the join
-//! condition, the rest stays its filter.  `NOT IN` stays a subquery (its
+//! once), or when it reads one table or a CTE's rows (under projections,
+//! `DISTINCT` and sorts, which cannot change whether a row exists) and
+//! refers to the row only in its filter's top-level conjuncts: those
+//! become the join condition, the rest stays its filter.  `NOT IN` stays a subquery (its
 //! NULLs differ from an anti join's).  The right side keeps only the
 //! columns the condition reads, so a join holds little of each row.
 //!
@@ -492,24 +492,35 @@ fn right_side(s: &SubPlan, lw: usize) -> Option<(Plan, Expr)> {
             _ => break,
         }
     }
-    let (table, mut parts) = match body {
-        Plan::Filter { input, predicate } => match &**input {
-            Plan::Scan { table, filter, .. } => {
-                let mut parts = Vec::new();
-                conjuncts(predicate.clone(), &mut parts);
-                if let Some(f) = filter {
-                    conjuncts(f.clone(), &mut parts);
+    // One table's rows, or a CTE's (a recursive query's walk: `EXISTS
+    // (SELECT 1 FROM d WHERE d.id = t.id)` over 200,000 rows 2.4 s a
+    // subquery per row, 1.3 ms a join), filtered by it — rows made once a
+    // statement however often they are read, so a join of them never
+    // costs more.  (Not a derived table's: a join's run per row may look
+    // its tables up where the join would make all of its rows.)
+    let (source, mut parts) = match body {
+        Plan::Filter { input, predicate } => {
+            let mut parts = Vec::new();
+            conjuncts(predicate.clone(), &mut parts);
+            match &**input {
+                Plan::Scan { table, filter, .. } => {
+                    if let Some(f) = filter {
+                        conjuncts(f.clone(), &mut parts);
+                    }
+                    (Source::Table(table), parts)
                 }
-                (table, parts)
+                rows @ (Plan::Cte { .. } | Plan::Past { .. }) if rows.outer_depth() == 0 => {
+                    (Source::Rows(rows), parts)
+                }
+                _ => return None,
             }
-            _ => return None,
-        },
+        }
         Plan::Scan { table, filter, .. } => {
             let mut parts = Vec::new();
             if let Some(f) = filter {
                 conjuncts(f.clone(), &mut parts);
             }
-            (table, parts)
+            (Source::Table(table), parts)
         }
         _ => return None,
     };
@@ -561,14 +572,32 @@ fn right_side(s: &SubPlan, lw: usize) -> Option<(Plan, Expr)> {
             Expr::Binary(BinaryOp::Eq, Box::new(e.clone()), Box::new(joined(v))),
         );
     }
-    let right = Plan::Project {
-        input: Box::new(Plan::Scan {
+    let input = match source {
+        Source::Table(table) => Plan::Scan {
             table: table.clone(),
             access: Access::Full,
             filter: conjunction(local),
             estimate: None,
-        }),
+        },
+        Source::Rows(rows) => match conjunction(local) {
+            Some(predicate) => Plan::Filter {
+                input: Box::new(rows.clone()),
+                predicate,
+            },
+            None => rows.clone(),
+        },
+    };
+    let right = Plan::Project {
+        input: Box::new(input),
         exprs: cols.iter().map(|&c| Expr::Column(c)).collect(),
     };
     Some((right, conjunction(on)?))
+}
+
+/// What a correlated subquery's filter reads ([`right_side`]).
+enum Source<'a> {
+    /// A table's rows.
+    Table(&'a crate::catalog::Table),
+    /// A CTE's rows (or a past snapshot's), made once a statement.
+    Rows(&'a Plan),
 }

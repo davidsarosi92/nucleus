@@ -708,7 +708,7 @@ fn adaptive(plan: Plan, st: &Stats) -> Plan {
         Plan::Join {
             left,
             right,
-            kind: JoinType::Inner,
+            kind: kind @ (JoinType::Inner | JoinType::Semi),
             on,
             algo:
                 JoinAlgo::Hash {
@@ -727,23 +727,28 @@ fn adaptive(plan: Plan, st: &Stats) -> Plan {
                     let below = costs.below();
                     let (lw, rw) = (left.width(), right.width());
                     let flip = |c: usize| Expr::Column(if c < lw { c + rw } else { c - lw });
-                    (below > 0).then(|| {
-                        Box::new(crate::plan::Adaptive {
-                            lookup,
-                            on: without_keys(
-                                on.as_ref().map(|e| e.map_columns(&flip)),
-                                &right_keys,
-                                &left_keys,
-                                rw,
-                            ),
-                            below,
-                        })
-                    })
+                    let on = without_keys(
+                        on.as_ref().map(|e| e.map_columns(&flip)),
+                        &right_keys,
+                        &left_keys,
+                        rw,
+                    );
+                    // A semi join looks each key of its right rows up
+                    // once, a left row found once: only where nothing
+                    // past the keys tells its right rows apart, and only
+                    // over rows known as it runs (a recursive query's) —
+                    // elsewhere its estimate stands (TPC-H Q18's 51 orders
+                    // looked up, 11.9 → 0.6 ms, left the join above it
+                    // without its pipeline: 146 → 164 ms on column
+                    // tables, PLAN.md §M14.34 G1).
+                    let semi = on.is_none() && rows_unknown(&right);
+                    (below > 0 && (kind == JoinType::Inner || semi))
+                        .then(|| Box::new(crate::plan::Adaptive { lookup, on, below }))
                 });
             Plan::Join {
                 left,
                 right,
-                kind: JoinType::Inner,
+                kind,
                 on,
                 algo: JoinAlgo::Hash {
                     left_keys,
@@ -1895,14 +1900,13 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
             let semi_as_inner = kind == JoinType::Semi && unique_keys(&right, &right_keys);
             // An inner join may look the left side up instead (the larger,
             // which the reordering made the probe side), the columns put
-            // back in order above — unless the right side is a recursive
-            // query's last round, whose rows are known only as it runs:
-            // the hash join stays, made adaptive (`adaptive`), so each
-            // round looks up where its rows are few and hashes them where
-            // they are many (PLAN.md §M14.34 G1).
+            // back in order above — unless the right side's rows are known
+            // only as it runs (`rows_unknown`): the hash join stays, made
+            // adaptive (`adaptive`), so it looks up where they are few and
+            // hashes them where they are many (PLAN.md §M14.34 G1).
             let swapped = ((kind == JoinType::Inner || semi_as_inner)
                 && lookup.is_none()
-                && !crate::binder::reads_work_table(&right))
+                && !rows_unknown(&right))
             .then(|| lookup_side(&right, &left, &right_keys, &left_keys, false, st))
             .flatten();
             match (lookup, swapped) {
@@ -1957,6 +1961,17 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
         }
         other => other,
     }
+}
+
+/// Whether `plan`'s rows are known only as it runs: a recursive query's
+/// last round (its work table), or a recursive query's rows — its
+/// estimate a guess (the base's and the step's: 2,000,000 rows where
+/// it said 10, so 2,000,000 lookups, not a hash join).
+fn rows_unknown(plan: &Plan) -> bool {
+    fn recursive(p: &Plan) -> bool {
+        matches!(p, Plan::Recursive { .. }) || p.children().into_iter().any(recursive)
+    }
+    crate::binder::reads_work_table(plan) || recursive(plan)
 }
 
 /// A lookup join's condition `on` (over its left row, then its right

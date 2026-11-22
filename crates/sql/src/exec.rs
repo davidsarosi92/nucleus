@@ -2606,15 +2606,36 @@ pub(crate) fn is_round(plan: &Plan) -> bool {
 
 /// An adaptive hash join's lookups ([`crate::plan::Adaptive`]): each of
 /// its right rows `rows` looks the left side's table up, the rows put
-/// back as the join gives them (its left columns first).
+/// back as the join gives them (its left columns first).  A semi join's
+/// right rows look up each key once — a `NULL` key matches nothing —, so
+/// a left row is found once, and give the left rows alone.
 fn adaptive_lookups<'a>(
-    rows: Vec<Row>,
+    mut rows: Vec<Row>,
     a: &'a crate::plan::Adaptive,
     spec: JoinSpec<'a>,
 ) -> Result<Rows<'a>> {
     static LOOKUP: JoinAlgo = JoinAlgo::Lookup;
     crate::vector::note_adaptive_lookups();
-    let right_width = spec.right_width;
+    let semi = spec.kind == JoinType::Semi;
+    if semi {
+        let (_, right_keys) = spec
+            .keys()
+            .ok_or_else(|| Error::internal("an adaptive join without keys"))?;
+        let mut seen = HashSet::new();
+        let mut kept = Vec::with_capacity(rows.len());
+        for r in rows {
+            let e = env(&r, spec.ctx, spec.outer);
+            let key = right_keys
+                .iter()
+                .map(|k| k.eval(&e))
+                .collect::<Result<Vec<Value>>>()?;
+            if !key.iter().any(Value::is_null) && seen.insert(key) {
+                kept.push(r);
+            }
+        }
+        rows = kept;
+    }
+    let (right_width, left_width) = (spec.right_width, spec.left_width);
     let swapped = JoinSpec {
         kind: JoinType::Inner,
         on: a.on.as_ref(),
@@ -2628,6 +2649,9 @@ fn adaptive_lookups<'a>(
     Ok(Box::new(joined.map(move |r| {
         r.map(|mut row| {
             row.rotate_left(right_width);
+            if semi {
+                row.truncate(left_width);
+            }
             row
         })
     })))

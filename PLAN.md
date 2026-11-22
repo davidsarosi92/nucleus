@@ -13253,6 +13253,28 @@ Still held whole: a recursive `UNION`'s rows seen.
      large (6 of 21 here); a table kept across rounds pays its build and
      its memory once a query reaches that size, which only many large
      rounds would repay — measured when a graph of that shape shows it.
+  5. **The walk's rows as a join's ✅** — the estimate "taken from the
+     rounds run": a query reading the walk's rows was planned on its
+     constant estimate (`rows=10`), so the whole tree's 2,000,000 rows
+     joined to the table by its key were 2,000,000 lookups (2.4 s;
+     PostgreSQL 18, the same plan, 2.5 s), and a subtree's 2,047 in `IN
+     (SELECT id FROM d)` a semi hash join scanning the table (20 ms).
+     Not an estimate but the rows themselves: such a join stays a hash
+     join made adaptive (`optimizer::rows_unknown`, as for a round), the
+     walk's rows counted before the choice; a semi join adaptive too
+     where nothing past its keys tells its right rows apart (each
+     distinct key looked up once, `exec::adaptive_lookups`).  ABBA: the
+     whole-tree join 2.37–2.41 → 0.74 s, the subtree's `IN` 20 → 7.0 ms
+     (PostgreSQL 2.8 ms), the others unchanged.  Not taken for other
+     semi joins: TPC-H Q18's (51 orders found, estimated 388,369) looked
+     up 11.9 → 0.6 ms but left the join above it without its pipeline,
+     146 → 164 ms on column tables (row tables 229 → 219) — the estimate
+     of a `HAVING` is the matter there.  And `EXISTS (SELECT 1 FROM d
+     WHERE d.id = t.id)` over a CTE ran per row (unnesting took one
+     table's rows only): 2.4 s for 200,000 rows against `IN`'s 1.6 ms;
+     a CTE's rows, made once a statement, now unnest as a table's do
+     (`unnest::right_side`; not a derived table's, whose run per row may
+     look its tables up): 1.4 ms.
 - **G2 — `SEARCH` and `CYCLE`** (SQL:1999, PostgreSQL 14): `SEARCH DEPTH
   | BREADTH FIRST BY … SET col` for the order of a tree's rows, `CYCLE …
   SET flag USING path` for graphs with cycles under `UNION ALL`; beside

@@ -3193,9 +3193,13 @@ a segment's least and greatest, and not computed per row.
 `NOT EXISTS (…)` or `x IN (…)` becomes a semi or anti join with the
 subquery's rows — one pass over each, hashed on the correlation's
 equalities — when the subquery's rows do not depend on the row
-(uncorrelated `IN`), or when it reads one table (under projections,
-`DISTINCT`, sorts) and refers to the row only in its filter's top-level
-conjuncts, which become the join condition.  The right side keeps only
+(uncorrelated `IN`), or when it reads one table or a CTE's rows (under
+projections, `DISTINCT`, sorts) and refers to the row only in its
+filter's top-level conjuncts, which become the join condition — a CTE's
+rows are made once a statement however often they are read, so the join
+never costs more than the subquery run per row (`EXISTS (SELECT 1 FROM d
+WHERE d.id = t.id)` over a walk's rows and 200,000 rows: 2.4 s → 1.4 ms);
+not a derived table's, whose run per row may look its tables up.  The right side keeps only
 the columns the condition reads.  Once the inner joins are ordered, each
 semi and anti join moves down among them, as far as the columns it reads
 allow and while the rows it meets there are no more (a subquery filtering
@@ -3287,7 +3291,15 @@ few rows look the table up, many hash the round and scan the table
 once — and a round's rows, at hand (`exec::is_round`), are counted
 before a table is made of them.  A 2,000,000-row tree walked whole:
 3.0 s → 0.68 s (PostgreSQL 18's index nested loop: 1.30 s); its small
-walks still by lookups, as fast as before.
+walks still by lookups, as fast as before.  A join reading a recursive
+query's rows is one too, for the same reason (`optimizer::rows_unknown`:
+the estimate a guess) — the walk's 2,000,000 rows joined to the table by
+its key hashed, not looked up 2,000,000 times (2.4 → 0.74 s; PostgreSQL
+2.5 s) —, and a semi join over them (`IN`, `EXISTS`) where nothing past
+its keys tells their rows apart: each distinct key looked up once, a
+left row given once (2,047 rows' `IN` 20 → 7 ms).  Other semi joins keep
+their estimated plans: TPC-H Q18's, made lookups, left the join above it
+without its pipeline (146 → 164 ms on column tables).
 
 **Parallel aggregates in key order**: grouped by (at least) the leading
 column of the primary key a scan reads in order, the morsels' groups meet
