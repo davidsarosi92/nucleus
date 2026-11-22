@@ -2912,7 +2912,11 @@ sides partitioned by key, each pair joined in turn — a right side still
 too large splits again; rows with a NULL key match nothing, coming out
 padded for LEFT and FULL) and a nested loop reads the right side once per
 `work_mem`'s worth of left rows (a block nested loop, the matched right
-rows of a full join in a bitmap).  Still held whole: a recursive `UNION`'s
+rows of a full join in a bitmap) — as a grace hash join's partition does
+when four splits leave it too large (one key's rows); its rows are given
+as they are found, never gathered (`BlockJoin`: a `LIMIT` stops it, and
+a join of 30,000 rows on a dozen keys no longer writes 2.4 GB of scratch
+space for its `count(*)`).  Still held whole: a recursive `UNION`'s
 rows seen, and the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).

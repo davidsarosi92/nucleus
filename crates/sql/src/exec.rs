@@ -3004,73 +3004,171 @@ fn grace_join<'a>(
 
 /// A block nested loop: left rows a work_mem's worth at a time, each block
 /// read against every right row; matched right rows remembered for a full
-/// join, whose unmatched right rows come after.
+/// join, whose unmatched right rows come after.  Its rows are given as
+/// they are found, never gathered: a partition a grace hash join cannot
+/// split (one key's rows past work_mem) joins its left and right rows
+/// pairwise, as many rows as their product — gathered, a fuzzer's join
+/// of 30,000 rows on a dozen keys wrote 2.4 GB of scratch space for a
+/// `count(*)`.
 fn block_join<'a>(
-    mut left: Rows<'a>,
+    left: Rows<'a>,
     right: std::sync::Arc<crate::spill::Sealed>,
     spec: JoinSpec<'a>,
 ) -> Result<Rows<'a>> {
-    let limit = crate::budget::work_mem();
     let full = spec.kind == JoinType::Full;
-    let mut matched = vec![
-        0u64;
-        if full {
-            (right.rows() as usize).div_ceil(64)
-        } else {
-            0
-        }
-    ];
-    let mut out = crate::spill::Stash::new();
-    loop {
-        let mut block = Vec::new();
-        let mut bytes = 0;
-        for l in left.by_ref() {
-            let l = l?;
-            bytes += crate::spill::row_bytes(&l);
-            block.push(l);
-            if bytes > limit {
-                break;
-            }
-        }
-        if block.is_empty() {
-            break;
-        }
-        let mut hit = vec![false; block.len()];
-        for (i, r) in right.iter().enumerate() {
-            let r = r?;
-            for (j, l) in block.iter().enumerate() {
-                if hit[j] && spec.existence() {
-                    continue;
-                }
-                let mut combined = l.clone();
-                combined.extend_from_slice(&r);
-                if spec.matches(&combined)? {
-                    hit[j] = true;
-                    if full {
-                        matched[i / 64] |= 1 << (i % 64);
+    let words = if full {
+        (right.rows() as usize).div_ceil(64)
+    } else {
+        0
+    };
+    Ok(Box::new(BlockJoin {
+        left,
+        right,
+        spec,
+        limit: crate::budget::work_mem(),
+        matched: vec![0; words],
+        block: Vec::new(),
+        hit: Vec::new(),
+        scan: None,
+        row: None,
+        i: 0,
+        j: 0,
+        tail: None,
+        rest: None,
+        done: false,
+    }))
+}
+
+/// [`block_join`]'s rows, a step at a time.
+struct BlockJoin<'a> {
+    left: Rows<'a>,
+    right: std::sync::Arc<crate::spill::Sealed>,
+    spec: JoinSpec<'a>,
+    limit: usize,
+    /// A full join's right rows matched, a bit each.
+    matched: Vec<u64>,
+    /// The left rows of the block being read, and which matched.
+    block: Vec<Row>,
+    hit: Vec<bool>,
+    /// The right rows read against the block: the right row at `i`, the
+    /// block's next row to try against it at `j`.
+    scan: Option<crate::spill::RunIter>,
+    row: Option<Row>,
+    i: usize,
+    j: usize,
+    /// The block's rows after its scan: semi's matched, the unmatched.
+    tail: Option<std::iter::Zip<std::vec::IntoIter<Row>, std::vec::IntoIter<bool>>>,
+    /// A full join's right rows after the last block: the unmatched.
+    rest: Option<std::iter::Enumerate<crate::spill::RunIter>>,
+    done: bool,
+}
+
+impl BlockJoin<'_> {
+    fn step(&mut self) -> Result<Option<Row>> {
+        let spec = self.spec;
+        loop {
+            if let Some(tail) = &mut self.tail {
+                for (l, h) in tail.by_ref() {
+                    if h && spec.kind == JoinType::Semi {
+                        return Ok(Some(l));
+                    } else if !h && let Some(row) = spec.unmatched(l) {
+                        return Ok(Some(row));
                     }
-                    if !spec.existence() {
-                        out.push(combined)?;
+                }
+                self.tail = None;
+                continue;
+            }
+            if let Some(rest) = &mut self.rest {
+                for (i, r) in rest.by_ref() {
+                    let r = r?;
+                    if self.matched[i / 64] & (1 << (i % 64)) == 0 {
+                        return Ok(Some(spec.right_padded(&r)));
                     }
                 }
+                return Ok(None);
             }
+            if let Some(scan) = &mut self.scan {
+                if self.row.is_none() {
+                    match scan.next() {
+                        Some(r) => {
+                            self.row = Some(r?);
+                            self.j = 0;
+                        }
+                        None => {
+                            self.scan = None;
+                            let block = std::mem::take(&mut self.block);
+                            let hit = std::mem::take(&mut self.hit);
+                            self.tail = Some(block.into_iter().zip(hit));
+                            continue;
+                        }
+                    }
+                }
+                let r = self.row.as_ref().expect("a right row");
+                while self.j < self.block.len() {
+                    let j = self.j;
+                    self.j += 1;
+                    if self.hit[j] && spec.existence() {
+                        continue;
+                    }
+                    let mut combined = self.block[j].clone();
+                    combined.extend_from_slice(r);
+                    if spec.matches(&combined)? {
+                        self.hit[j] = true;
+                        if spec.kind == JoinType::Full {
+                            self.matched[self.i / 64] |= 1 << (self.i % 64);
+                        }
+                        if !spec.existence() {
+                            return Ok(Some(combined));
+                        }
+                    }
+                }
+                self.row = None;
+                self.i += 1;
+                continue;
+            }
+            // The next block of left rows.
+            let mut bytes = 0;
+            for l in self.left.by_ref() {
+                let l = l?;
+                bytes += crate::spill::row_bytes(&l);
+                self.block.push(l);
+                if bytes > self.limit {
+                    break;
+                }
+            }
+            if self.block.is_empty() {
+                if spec.kind != JoinType::Full {
+                    return Ok(None);
+                }
+                self.rest = Some(self.right.iter().enumerate());
+                continue;
+            }
+            self.hit = vec![false; self.block.len()];
+            self.scan = Some(self.right.iter());
+            self.i = 0;
         }
-        for (l, h) in block.into_iter().zip(hit) {
-            if h && spec.kind == JoinType::Semi {
-                out.push(l)?;
-            } else if !h && let Some(row) = spec.unmatched(l) {
-                out.push(row)?;
+    }
+}
+
+impl Iterator for BlockJoin<'_> {
+    type Item = Result<Row>;
+
+    fn next(&mut self) -> Option<Result<Row>> {
+        if self.done {
+            return None;
+        }
+        match self.step() {
+            Ok(Some(row)) => Some(Ok(row)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
             }
         }
     }
-    if full {
-        for (i, r) in right.iter().enumerate() {
-            if matched[i / 64] & (1 << (i % 64)) == 0 {
-                out.push(spec.right_padded(&r?))?;
-            }
-        }
-    }
-    Ok(Box::new(out.seal()?.into_iter()))
 }
 
 /// One aggregate's state in one group.

@@ -12846,6 +12846,23 @@ Found and fixed:
   query.  Tested by `a_parameter_keeps_the_type_its_place_gave_it`
   (fails with the fix undone).
 
+- A join whose grace partitions cannot split gathered its rows: past
+  `work_mem` a hash join partitions both sides by key, four levels
+  deep, and a partition still too large — one key's rows — goes to a
+  block nested loop, which pushed every row it made into a stash before
+  giving the first (as the vectorized probe did before e10a004, here in
+  the row-at-a-time executor).  A fuzzer's `count(*)` over a self-join
+  of 30,000 rows on a dozen keys (`work_mem` 64 kB) wrote 2.4 GB of
+  scratch space — the disk filled during the hunt.  Now `BlockJoin`
+  gives each row as it is found, the block's and a full join's tails
+  after, in the same order.  15,000 rows on three keys, `RIGHT JOIN`,
+  both orders: scratch space 487 MB → none, 32.0 s → 26.7 s.  Tested by
+  `a_join_its_partitions_cannot_split_gives_its_rows_as_found` (inner,
+  left, full, semi, anti, NULL keys, against 64 MB; a `LIMIT 3` tries 3
+  pairs — 360,000 when gathered: it fails with the old loop back).
+  Left for the performance pass: the vectorized hash join keeps its
+  hash table in memory past `work_mem` (64 kB did not spill it).
+
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
 `GROUPING SETS` / `ROLLUP` / `CUBE`, a row constructor in `SELECT

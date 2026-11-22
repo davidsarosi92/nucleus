@@ -262,3 +262,120 @@ fn index_builds_sort_past_work_mem() {
         );
     }
 }
+
+/// A join whose partitions cannot be split — two keys, each one's rows
+/// past `work_mem` — joins them pairwise (a block nested loop) and gives
+/// the rows as it finds them: the same rows as in memory, and a `LIMIT`
+/// stops it after the pairs it needs (one gathering its rows first tried
+/// them all, and held them in scratch space — a fuzzer's `count(*)` over
+/// such a join wrote 2.4 GB).
+#[test]
+fn a_join_its_partitions_cannot_split_gives_its_rows_as_found() {
+    let db = database();
+    {
+        let kv: Arc<dyn Kv> = Arc::new(db.clone());
+        let mut s = Session::new(kv);
+        s.execute(
+            "CREATE TABLE s (id INT PRIMARY KEY, k INT, pad TEXT); \
+             INSERT INTO s SELECT i, CASE WHEN i % 50 = 0 THEN NULL ELSE i % 2 END, repeat('p', 100) \
+               FROM generate_series(1, 1200) i",
+        )
+        .unwrap();
+    }
+    // (Each joins on `pad` too, all alike: the rows carry it, a key's
+    // past 64 kB.)
+    let queries = [
+        "SELECT count(*), sum(a.id + b.id) FROM s a JOIN s b ON a.k = b.k AND a.pad = b.pad",
+        "SELECT a.id, b.id FROM s a JOIN s b ON a.k = b.k AND a.pad = b.pad AND b.id > a.id + 1190 ORDER BY 1, 2",
+        "SELECT a.id, b.id FROM s a LEFT JOIN s b ON a.k = b.k AND a.pad = b.pad AND b.id > a.id + 1195 ORDER BY 1, 2",
+        "SELECT a.id, b.id FROM s a FULL JOIN s b ON a.k = b.k AND a.pad = b.pad AND b.id > a.id + 1195 \
+           ORDER BY 1 NULLS FIRST, 2 NULLS FIRST",
+        "SELECT count(*), sum(id) FROM s a WHERE EXISTS (SELECT 1 FROM s b WHERE b.k = a.k AND b.pad = a.pad AND b.id > a.id + 1100)",
+        "SELECT count(*), sum(id) FROM s a WHERE NOT EXISTS (SELECT 1 FROM s b WHERE b.k = a.k AND b.pad = a.pad AND b.id > a.id + 1100)",
+    ];
+    let big = results(&db, "SET work_mem = '64MB'", &queries);
+    for set in [
+        "SET work_mem = '64kB'",
+        "SET work_mem = '64kB'; SET batch_size = 0",
+    ] {
+        let small = results(&db, set, &queries);
+        for (q, (a, b)) in queries.iter().zip(big.iter().zip(&small)) {
+            assert_eq!(a, b, "{set}: {q}");
+        }
+    }
+    assert_eq!(big[0][0][0], Value::Int(576 * 576 + 600 * 600));
+    // Its rows come as found: three wanted, a few pairs tried — not every
+    // pair of every partition, as when it gathered them all first.
+    let registry = {
+        let mut r = nucleus_sql::ext::Registry::builtin();
+        r.add(&Ticks).unwrap();
+        Arc::new(r)
+    };
+    let kv: Arc<dyn Kv> = Arc::new(db.clone());
+    let mut s = Session::with_registry(kv, registry);
+    s.execute("SET work_mem = '64kB'; SET batch_size = 0")
+        .unwrap();
+    let before = TICKS.load(std::sync::atomic::Ordering::Relaxed);
+    let got = rows(
+        &mut s,
+        "SELECT a.id, b.id FROM s a LEFT JOIN s b ON a.k = b.k AND a.pad = b.pad AND tick(a.id + b.id) LIMIT 3",
+    );
+    let tried = TICKS.load(std::sync::atomic::Ordering::Relaxed) - before;
+    assert_eq!(got.len(), 3);
+    assert!(tried < 10_000, "{tried} pairs tried for 3 rows");
+    // The partitions spilled: the pairwise join is the one run.
+    let before = db.scratch_files_made();
+    results(
+        &db,
+        "SET work_mem = '64kB'; SET batch_size = 0",
+        &["SELECT count(*) FROM s a LEFT JOIN s b ON a.k = b.k AND a.pad = b.pad"],
+    );
+    assert!(db.scratch_files_made() > before, "the partitions spilled");
+}
+
+/// The calls of `tick(x)` (true): how many pairs a join tried.
+static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct Tick;
+
+impl nucleus_sql::ext::ScalarFunction for Tick {
+    fn name(&self) -> &str {
+        "tick"
+    }
+    fn arity(&self) -> std::ops::RangeInclusive<usize> {
+        1..=1
+    }
+    fn resolve(
+        &self,
+        _: &[nucleus_sql::ext::ArgInfo],
+    ) -> nucleus_sql::Result<nucleus_sql::ext::Signature> {
+        use nucleus_sql::ext::{Arg, Returns, Signature};
+        use nucleus_sql::types::DataType;
+        Ok(Signature::new(
+            vec![Arg::Untyped(DataType::Integer)],
+            Returns::Type(Some(DataType::Bool)),
+        ))
+    }
+    fn volatility(&self) -> nucleus_sql::ext::Volatility {
+        nucleus_sql::ext::Volatility::Volatile
+    }
+    fn call(
+        &self,
+        _: &nucleus_sql::ext::CallContext<'_>,
+        _: &[Value],
+    ) -> nucleus_sql::Result<Value> {
+        TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Value::Bool(true))
+    }
+}
+
+struct Ticks;
+
+impl nucleus_sql::ext::Module for Ticks {
+    fn name(&self) -> &str {
+        "ticks"
+    }
+    fn register(&self, r: &mut nucleus_sql::ext::Registry) -> nucleus_sql::Result<()> {
+        r.add_function(&["tick"], Arc::new(Tick))
+    }
+}
