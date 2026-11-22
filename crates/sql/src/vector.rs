@@ -2682,9 +2682,8 @@ impl Lookup<'_> {
     fn apply(&self, b: Batch, cx: Cx) -> Result<Batch> {
         let left: Vec<Row> = b.sel.iter().map(|i| b.row(i)).collect();
         let mut out = Vec::new();
-        let workers = crate::budget::workers();
+        let workers = crate::exec::threads_for(left.len(), crate::budget::workers());
         let shared = (workers > 1
-            && left.len() > 1
             && cx.outer.is_none()
             && cx.ctx.profile.is_none()
             && crate::exec::lookups_parallel_safe(self.right, self.on, cx.ctx))
@@ -3301,7 +3300,7 @@ pub fn rows_spare<'a>(
         && crate::budget::batch_size() > 0
         && let Some(work) = Morsels::new(plan, &[], ctx, outer, ROW_MORSELS_PER_WORKER)?
     {
-        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_parallel_run();
         return Ok(Some(Box::new(ParallelRows {
             work,
             plan,
@@ -3366,7 +3365,7 @@ pub fn batches<'a>(
     let tables = prepare(plan, ctx, outer)?;
     let filters = filters_or_probes(plan, ctx);
     if filters && let Some(work) = Morsels::new(plan, &[], ctx, outer, ROW_MORSELS_PER_WORKER)? {
-        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_parallel_run();
         return Ok(Some(Box::new(ParallelBatches {
             work,
             plan,
@@ -4140,10 +4139,27 @@ fn merge_parallel(
 
 static PARALLEL_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+thread_local! {
+    /// [`PARALLEL_RUNS`] of the statements this thread ran.
+    static PARALLEL_RUNS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// One more run in parallel.
+fn count_parallel_run() {
+    PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PARALLEL_RUNS_HERE.with(|n| n.set(n.get() + 1));
+}
+
 /// How many aggregates and pipelines this process has run in parallel
 /// (for tests and diagnostics).
 pub fn parallel_runs() -> u64 {
     PARALLEL_RUNS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// [`parallel_runs`] of the statements run on this thread (a test's, not
+/// counting the tests beside it).
+pub fn parallel_runs_here() -> u64 {
+    PARALLEL_RUNS_HERE.with(std::cell::Cell::get)
 }
 
 static ADAPTIVE_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -4176,7 +4192,7 @@ pub fn spilled_groupings() -> u64 {
 
 /// Counts a run on worker threads made outside this module (tests).
 pub(crate) fn note_parallel_run() {
-    PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_parallel_run();
 }
 
 /// What one morsel's aggregation gives the merge.
@@ -4638,7 +4654,7 @@ fn parallel_aggregate<'a>(
     };
     if ordered.is_some() {
         let rows = merge_ordered(results, aggs)?;
-        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_parallel_run();
         return Ok(rows.map(|rows| -> Rows<'a> { Box::new(rows.into_iter().map(Ok)) }));
     }
     // Many groups, in no order of their keys: merged on the workers, a part
@@ -4677,7 +4693,7 @@ fn parallel_aggregate<'a>(
             SPILLED_GROUPINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let rows = merge_parallel(&cells, &spills, group.len(), aggs, &work, spend)?;
-        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_parallel_run();
         return Ok(Some(rows));
     }
     // Few: merged here, in the order of their ranks (a single pass's).
@@ -4722,7 +4738,7 @@ fn parallel_aggregate<'a>(
         }
     }
     let rows = finish(&mut g)?;
-    PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_parallel_run();
     Ok(Some(Box::new(rows.into_iter().map(Ok))))
 }
 
@@ -5705,7 +5721,7 @@ impl JoinTable {
         let Some(work) = Morsels::new(right, &exprs, ctx, outer, ROW_MORSELS_PER_WORKER)? else {
             return Ok(None);
         };
-        PARALLEL_RUNS.fetch_add(1, Relaxed);
+        count_parallel_run();
         let limit = crate::budget::work_mem();
         let bytes = AtomicUsize::new(0);
         let width = right.width();
@@ -6352,7 +6368,7 @@ pub(crate) fn hash_join_table<'a>(
     let mut exprs: Vec<&Expr> = left_keys.iter().collect();
     exprs.extend(on);
     if let Some(work) = Morsels::new(left, &exprs, ctx, outer, ROW_MORSELS_PER_WORKER)? {
-        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_parallel_run();
         return Ok(Ok(Box::new(ParallelJoin {
             work,
             plan: left,
@@ -6759,7 +6775,7 @@ pub(crate) fn existence_by_left<'a>(
     let mut exprs: Vec<&Expr> = right_keys.iter().collect();
     exprs.extend(on);
     if let Some(work) = Morsels::new(right, &exprs, ctx, outer, ROW_MORSELS_PER_WORKER)? {
-        PARALLEL_RUNS.fetch_add(1, Relaxed);
+        count_parallel_run();
         let results = work.run(0..work.ranges.len(), true, &|wctx, range| {
             let Some(mut pipe) = Pipeline::new(right, right, wctx, None, false, Some(range))?
             else {
@@ -7159,7 +7175,7 @@ pub(crate) fn sorted<'a>(
             None => return Err(Error::internal("a morsel not sorted")),
         }
     }
-    PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count_parallel_run();
     if bound.is_some() {
         return Ok(Some(crate::spill::merge_sorted(tops, flags)?));
     }

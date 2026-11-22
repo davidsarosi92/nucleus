@@ -1193,6 +1193,61 @@ fn parallel_lookups_agree() {
     }
 }
 
+/// An index nested loop's blocks of few left rows run on the calling
+/// thread — a recursive query's rounds of a row or two each started
+/// threads — with the rows and the errors they would have on workers.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn few_lookups_start_no_threads() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(17)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE e (id INT PRIMARY KEY, parent INT, v INT); \
+         INSERT INTO e SELECT i, i / 2, i % 50 FROM generate_series(1, 20000) i; \
+         CREATE INDEX e_parent ON e (parent); \
+         CREATE TABLE few (k INT PRIMARY KEY); \
+         INSERT INTO few SELECT i FROM generate_series(1, 12) i; \
+         ANALYZE",
+    )
+    .unwrap();
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let small = [
+        // A node's ancestors: rounds of one row.
+        "WITH RECURSIVE a (id, p) AS (SELECT id, parent FROM e WHERE id = 19999 \
+           UNION ALL SELECT e.id, e.parent FROM e JOIN a ON e.id = a.p) SELECT id FROM a",
+        "SELECT few.k, e.id FROM few JOIN e ON e.parent = few.k ORDER BY 1, 2",
+        "SELECT few.k, 100 / (e.v - 3) FROM few JOIN e ON e.parent = few.k",
+    ];
+    for q in small {
+        let plan = outcome(&mut many, &format!("EXPLAIN {q}")).unwrap();
+        assert!(
+            plan.iter().any(|l| l[0].contains("Index Nested Loop")),
+            "{q}: {plan:?}"
+        );
+        let before = nucleus_sql::vector::parallel_runs_here();
+        assert_eq!(outcome(&mut many, q), outcome(&mut one, q), "{q}");
+        assert_eq!(
+            nucleus_sql::vector::parallel_runs_here(),
+            before,
+            "{q}: few lookups started threads"
+        );
+    }
+    // A node's descendants: the large rounds go to workers.
+    let q = "WITH RECURSIVE d (id) AS (SELECT 1 UNION ALL \
+             SELECT e.id FROM e JOIN d ON e.parent = d.id) SELECT count(*), sum(id) FROM d";
+    let before = nucleus_sql::vector::parallel_runs_here();
+    assert_eq!(outcome(&mut many, q), outcome(&mut one, q));
+    assert!(nucleus_sql::vector::parallel_runs_here() > before);
+}
+
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn columnar_join_tables_agree() {

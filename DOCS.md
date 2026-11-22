@@ -3127,7 +3127,11 @@ left rows read in blocks (256 at first, each next twice the last, up to
 reads, the pieces' rows given in the left rows' order — a single pass's
 rows, and its error where it would stop (`exec::OnWorkers`, which a
 filter's or projection's subqueries share, §8.5 "Subqueries where
-workers evaluate").  Not under `EXPLAIN ANALYZE`, for an enclosing row,
+workers evaluate").  A block starts `√(rows / 5)` threads at most
+(`exec::threads_for`: a thread's start and join cost 10–17 µs, a lookup
+2–2.6 µs, measured), so one of under 20 rows — a recursive query's small
+rounds, each a block — runs on the calling thread; a pipeline's lookup
+step takes its batch the same way.  Not under `EXPLAIN ANALYZE`, for an enclosing row,
 for a lookup or condition with a volatile call or a subquery the workers
 cannot run (`vector::parallel_safe_in`), or while a statement on the
 thread holds rows it inserted into a column table unstored (only that

@@ -13170,6 +13170,38 @@ Still held whole: a recursive `UNION`'s rows seen.
   Done when: the whole-tree traversal is several times faster than
   3.0 s, small traversals stay at their index lookups' speed, and
   each is measured against PostgreSQL (§M14.31's method).
+
+  Against PostgreSQL 18 (same tree, same index, its plan the same index
+  nested loop), 2026-11-22: whole tree 1.30 s (nucleus 3.0 s), 2,047
+  descendants 1.25 ms (5.0 ms), 21 ancestors 0.14 ms (0.58 ms), the
+  `UNION` walk of 2,047 1.5 ms (5.6 ms).  What the profiles showed:
+  1. **Threads per round ✅** — an index nested loop's block started
+     worker threads however few its rows: every round of a recursive
+     query a block, so 21 ancestors started threads 21 times.  A block
+     now starts `√(rows / 5)` threads at most (`exec::threads_for`; the
+     least of `k · start + rows · lookup / k`, a scoped thread's start
+     and join measured 10–17 µs, a lookup 2–2.6 µs), under 20 rows none;
+     the pipelines' lookup step the same.  Ancestors 0.58 → 0.076 ms
+     (PostgreSQL 0.14); the others unchanged (ABBA, A/B/C on the whole
+     tree within noise, 3.02–3.08 s).
+  2. **Lookups do not scale over workers** — the whole tree 5.4 s on one
+     worker, 3.0 s on ten (1.8×): `BufferPool::fetch`'s own time
+     triples with ten threads, no lock waited for — every descent takes
+     its shard's read lock, counts a hit and pins the frame, atomics on
+     the cache lines of the pages every lookup passes (the root and the
+     levels below), bounced between cores.  The known answer is reads
+     that write nothing shared: optimistic, versioned latches (LeanStore,
+     Umbra) or the hot levels' pins kept per thread.  A storage step of
+     its own (with the row/point-read work), not G1's.
+  3. **A lookup costs 2.1 µs on one thread, PostgreSQL's 0.65 µs** —
+     its parts: the secondary index's range scan 0.5 µs (a `BTree::range`
+     cursor built, `refill_where`'s buffers), two `Transaction::get`s
+     0.5 µs each (`Inner::look`: `other_spans` collected into a `Vec`,
+     a range cursor per key; the batched `read_many` not used), the
+     right side's scan built for each left row 0.35 µs (`build_node`,
+     `key_range_exact`, `Access::rest` cloning expressions), allocation
+     throughout (malloc and free a third of the samples).  The same
+     row/point-read work as 2.
 - **G2 — `SEARCH` and `CYCLE`** (SQL:1999, PostgreSQL 14): `SEARCH DEPTH
   | BREADTH FIRST BY … SET col` for the order of a tree's rows, `CYCLE …
   SET flag USING path` for graphs with cycles under `UNION ALL`; beside

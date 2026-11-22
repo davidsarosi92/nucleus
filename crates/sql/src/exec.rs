@@ -2713,16 +2713,29 @@ impl<'a> OnWorkers<'a> {
             }
         }
         self.block = (self.block * 2).min(LOOKUP_BLOCK_MAX);
-        if !rows.is_empty() {
+        let threads = threads_for(rows.len(), self.workers);
+        if threads < 2 {
+            // Too few rows to pay for a thread's start: here.
+            for r in rows {
+                for row in (self.each)(self.ctx, r) {
+                    let failed = row.is_err();
+                    self.out.push_back(row);
+                    if failed {
+                        self.done = true;
+                        return;
+                    }
+                }
+            }
+        } else {
             crate::vector::note_parallel_run();
-            let pieces = (self.workers * 4).min(rows.len());
+            let pieces = (threads * 4).min(rows.len());
             let per = rows.len().div_ceil(pieces);
             let chunks: Vec<&[Row]> = rows.chunks(per).collect();
             let each = &self.each;
             let results = crate::vector::on_workers(
                 self.ctx,
                 self.shared,
-                self.workers,
+                threads,
                 chunks.len(),
                 false,
                 &|wctx, m| {
@@ -2759,6 +2772,20 @@ impl<'a> OnWorkers<'a> {
             self.done = true;
         }
     }
+}
+
+/// The threads worth starting for `rows` rows of per-row work (an index
+/// lookup's, a correlated subquery's) — at most `workers`: `k` threads
+/// cost about `k · START + rows · ROW / k`, least at `k = √(rows · ROW /
+/// START)`.  Measured 2026-11-22 (Apple M-series, macOS): a scoped
+/// thread's start and join 10–17 µs, an index lookup 2–2.6 µs, so `k ≈
+/// √(rows / 5)`: a block of under 20 rows runs on the calling thread (a
+/// recursive query's small rounds, each a block of its own, started
+/// threads for one row each).  The pipelines' lookup step too
+/// (`crate::vector`).
+pub(crate) fn threads_for(rows: usize, workers: usize) -> usize {
+    const ROWS_PER_START: usize = 5;
+    (rows / ROWS_PER_START).isqrt().min(workers)
 }
 
 impl Iterator for OnWorkers<'_> {
@@ -3403,6 +3430,17 @@ pub fn index_key(table: &Table, i: usize, vals: Vec<Value>, pk_bytes: &[u8]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threads_started_by_the_rows_they_share() {
+        // Under 20 rows: none started, the block runs where it is.
+        assert_eq!(threads_for(1, 10), 0);
+        assert_eq!(threads_for(19, 10), 1);
+        assert_eq!(threads_for(20, 10), 2);
+        assert_eq!(threads_for(320, 10), 8);
+        assert_eq!(threads_for(16_384, 10), 10);
+        assert_eq!(threads_for(16_384, 4), 4);
+    }
 
     #[test]
     fn key_bounds_across_integer_widths() {
