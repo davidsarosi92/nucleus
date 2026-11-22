@@ -1954,6 +1954,13 @@ pub fn type_of(ty: DataType) -> &'static dyn Type {
                 category: "array",
             });
         }
+        // `record[]` (a recursive query's `SEARCH` / `CYCLE` path).
+        let array = DataType::Record.array_of().expect("record has an array");
+        all.push(BuiltinType {
+            ty: array,
+            names: vec![array.name()],
+            category: "array",
+        });
         all
     });
     all.iter()

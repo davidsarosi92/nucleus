@@ -967,6 +967,38 @@ pub struct Cte {
     pub columns: Vec<String>,
     /// The query.
     pub query: Box<Query>,
+    /// `SEARCH DEPTH | BREADTH FIRST BY … SET …` (a recursive one).
+    pub search: Option<CteSearch>,
+    /// `CYCLE … SET … [TO … DEFAULT …] USING …` (a recursive one).
+    pub cycle: Option<Box<CteCycle>>,
+}
+
+/// `SEARCH DEPTH | BREADTH FIRST BY columns SET column`: a column ordering
+/// a recursive query's rows depth or breadth first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CteSearch {
+    /// `BREADTH FIRST` (else `DEPTH FIRST`).
+    pub breadth: bool,
+    /// The columns a row is known by.
+    pub by: Vec<String>,
+    /// The column added.
+    pub set: String,
+}
+
+/// `CYCLE columns SET mark [TO value DEFAULT value] USING path`: a row
+/// that repeats one on its path marked, and not followed further.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CteCycle {
+    /// The columns a row is known by.
+    pub columns: Vec<String>,
+    /// The mark column added.
+    pub set: String,
+    /// The mark of a cycle (`TRUE`).
+    pub to: Expr,
+    /// The mark otherwise (`FALSE`).
+    pub default: Expr,
+    /// The path column added.
+    pub using: String,
 }
 
 /// A query body.

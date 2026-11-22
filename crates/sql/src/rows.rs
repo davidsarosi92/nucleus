@@ -115,7 +115,11 @@ pub(crate) fn expand(e: &Expr) -> Result<Option<Expr>> {
             let found = any(equal);
             if *negated { not(found) } else { found }
         }
-        Expr::AnyAll { left: expr, .. } if is_row(expr) => {
+        // `row op ANY (query)`: not yet; `row op ANY (array)` compares
+        // the row as a record, element by element.
+        Expr::AnyAll {
+            left: expr, right, ..
+        } if is_row(expr) && matches!(**right, Expr::Subquery(_)) => {
             return Err(unsupported());
         }
         _ => return Ok(None),

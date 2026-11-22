@@ -2309,6 +2309,17 @@ statement runs once, before what comes after it, read or not; its
 `RETURNING` rows are what a reference reads (without `RETURNING` a
 reference is `0A000`).  Unlike PostgreSQL's, which all read the
 statement's snapshot, each part sees the writes of the CTEs before it.
+A recursive one may end in `SEARCH DEPTH | BREADTH FIRST BY c… SET s`
+and `CYCLE c… SET m [TO v DEFAULT d] USING p` (PostgreSQL 14's, written
+as its rewrite: `crates/sql/src/search_cycle.rs`).  Depth first, `s` is
+the `record[]` path of `ROW(c…)` from the base row; breadth first, `s` is
+`ROW(depth, c…)` (the depth, from 0, carried in a hidden column); `ORDER
+BY s` lists the rows in that order.  `CYCLE` adds `p`, the path of
+`ROW(c…)`, and `m` (`true`/`false` unless given), `v` on the row whose
+`ROW(c…)` is already on its parent's path: that row is given but not
+followed, so `UNION ALL` ends on a graph with cycles.  The recursive term
+must read the query in its own `FROM` (a join there too), not in a
+subquery (`0A000`, as PostgreSQL's).
 `SELECT [DISTINCT]`,
 `FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
 subqueries and functions in `FROM` (`generate_series`, `unnest`, any

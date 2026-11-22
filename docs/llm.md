@@ -255,7 +255,9 @@ STDIN [WITH (FORMAT csv, HEADER)]` with the data sent by the client.
 
 **Queries:** `WITH [RECURSIVE] …` (also before `INSERT`/`UPDATE`/`DELETE`,
 and `WITH d AS (DELETE FROM t … RETURNING *) INSERT INTO archive SELECT
-* FROM d`: the CTE runs first, and what follows sees its writes),
+* FROM d`: the CTE runs first, and what follows sees its writes;
+a recursive one with `SEARCH DEPTH|BREADTH FIRST BY c SET ord` and
+`CYCLE c SET seen USING path`, as PostgreSQL's),
 `SELECT [DISTINCT]`, `FROM` with comma
 joins and `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`, subqueries in
 `FROM`, `generate_series(a, b [, step])` and `unnest(array) [WITH

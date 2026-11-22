@@ -739,7 +739,8 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Interval => 1187,
             DataType::Inet => 1041,
             DataType::Cidr => 651,
-            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) | DataType::Record => 0,
+            DataType::Record => 2287,
+            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => 0,
         },
     }
 }
@@ -809,6 +810,7 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (1187, "_interval", -1, "A", 1186, 0, 0),
     (1231, "_numeric", -1, "A", 1700, 0, 0),
     (2210, "_regclass", -1, "A", 2205, 0, 0),
+    (2287, "_record", -1, "A", 2249, 0, 0),
 ];
 
 /// `to_regtype(name)`: the oid of the type `name` names (as `pg_type`

@@ -13173,7 +13173,18 @@ Still held whole: a recursive `UNION`'s rows seen.
 - **G2 — `SEARCH` and `CYCLE`** (SQL:1999, PostgreSQL 14): `SEARCH DEPTH
   | BREADTH FIRST BY … SET col` for the order of a tree's rows, `CYCLE …
   SET flag USING path` for graphs with cycles under `UNION ALL`; beside
-  the SQL forms of issue #16.
+  the SQL forms of issue #16.  ✅ 2026-11-22: written as the query
+  PostgreSQL's documentation gives as their meaning, checked against
+  PostgreSQL 18's results and errors: the base
+  term's plan projected with the added columns, the recursive term's
+  `SELECT` given them as expressions over the row it read (`ord ||
+  ROW(c…)`, `ROW(depth + 1, c…)`, `CASE WHEN ROW(c…) = ANY (path) …`) and
+  `mark <> TO` added to its `WHERE`; `record[]` made a type for the
+  paths (OID 2287 over the wire).  slt `84_search_cycle.slt`: 24 of 24
+  records as PostgreSQL 18 has them.
+  The paths cost a copy each round (an array grown by one per level, so a
+  depth-`d` walk copies O(d²) fields per branch, as PostgreSQL's does);
+  a shared-prefix path is a G1 matter if traversals show it.
 - **G3 — `USING KEY`** (DuckDB's, from Hirn and Grust, "A Fix for the
   Fixation on Fixpoints", CIDR 2023): the work table keyed, a round's row
   replacing the one with its key instead of adding to it — shortest

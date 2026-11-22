@@ -80,8 +80,9 @@ impl DataType {
             DataType::Interval => &DataType::Interval,
             DataType::Inet => &DataType::Inet,
             DataType::Cidr => &DataType::Cidr,
-            // Arrays of registered types, enums and records: not yet.
-            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) | DataType::Record => {
+            DataType::Record => &DataType::Record,
+            // Arrays of registered types and enums: not yet.
+            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => {
                 return None;
             }
         }))
@@ -133,9 +134,8 @@ impl DataType {
                 DataType::Interval => "interval[]",
                 DataType::Inet => "inet[]",
                 DataType::Cidr => "cidr[]",
-                DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) | DataType::Record => {
-                    "array"
-                }
+                DataType::Record => "record[]",
+                DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => "array",
             },
             DataType::Ext(t) => t.name(),
             DataType::Enum(e) => e.name(),

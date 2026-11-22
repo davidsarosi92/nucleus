@@ -605,6 +605,9 @@ impl<'a> Binder<'a> {
     }
 
     fn plain_cte(&mut self, cte: &ast::Cte) -> Result<CteDef> {
+        if cte.search.is_some() || cte.cycle.is_some() {
+            return Err(Error::syntax("WITH query is not recursive"));
+        }
         let b = self.query(&cte.query)?;
         self.cte_def(cte, b.scope, b.plan)
     }
@@ -630,6 +633,48 @@ impl<'a> Binder<'a> {
             c.table = None;
         }
         rename_columns(&mut scope, &cte.name, &cte.columns)?;
+        // SEARCH / CYCLE: columns added to both terms.
+        let mut right = right;
+        let added;
+        let (base, scope) = if cte.search.is_some() || cte.cycle.is_some() {
+            let mark = match &cte.cycle {
+                Some(c) => {
+                    let empty = Scope::default();
+                    let mut items = [self.expr(&c.to, &empty)?, self.expr(&c.default, &empty)?];
+                    let ty = self.unify_items(&mut items)?;
+                    let [_, (default, _)] = items;
+                    Some((default, ty))
+                }
+                None => None,
+            };
+            let a = crate::search_cycle::apply(cte, base, &scope, right, mark)?;
+            if let Err(e) = crate::search_cycle::check_names(&scope.cols, &a.added) {
+                // An added column named as one of the query's own: as
+                // PostgreSQL's, the term as written is bound first,
+                // seeing both, so its own reference to the name is the
+                // error where it has one.
+                self.ctes.push(CteDef {
+                    name: cte.name.clone(),
+                    scope: a.base.scope.clone(),
+                    plan: None,
+                    work: next_cte_id(),
+                    level: self.outer.len(),
+                    used: false,
+                    unreturning: false,
+                });
+                let at = self.ctes.len() - 1;
+                let written = self.set_expr(right);
+                self.ctes.truncate(at);
+                written?;
+                return Err(e);
+            }
+            added = Box::new(a.step);
+            right = &added;
+            let scope = a.base.scope.clone();
+            (a.base, scope)
+        } else {
+            (base, scope)
+        };
         let work = next_cte_id();
         self.ctes.push(CteDef {
             name: cte.name.clone(),

@@ -3222,16 +3222,78 @@ impl<'a> Parser<'a> {
             } else {
                 let query = self.query()?;
                 self.expect_op(")")?;
+                let search = self.cte_search()?;
+                let cycle = self.cte_cycle()?;
                 ctes.push(StatementCte::Query(Cte {
                     name,
                     columns,
                     query: Box::new(query),
+                    search,
+                    cycle,
                 }));
             }
             if !self.eat_op(",") {
                 return Ok((recursive, ctes));
             }
         }
+    }
+
+    /// After a CTE: `SEARCH DEPTH | BREADTH FIRST BY columns SET column`.
+    fn cte_search(&mut self) -> Result<Option<CteSearch>> {
+        if !self.eat_kw("search") {
+            return Ok(None);
+        }
+        let breadth = if self.eat_kw("breadth") {
+            true
+        } else {
+            self.expect_kw("depth")?;
+            false
+        };
+        self.expect_kw("first")?;
+        self.expect_kw("by")?;
+        let by = self.names()?;
+        self.expect_kw("set")?;
+        let set = self.ident()?;
+        Ok(Some(CteSearch { breadth, by, set }))
+    }
+
+    /// After a CTE (and its `SEARCH`): `CYCLE columns SET mark [TO value
+    /// DEFAULT value] USING path`.
+    fn cte_cycle(&mut self) -> Result<Option<Box<CteCycle>>> {
+        if !self.eat_kw("cycle") {
+            return Ok(None);
+        }
+        let columns = self.names()?;
+        self.expect_kw("set")?;
+        let set = self.ident()?;
+        let (to, default) = if self.eat_kw("to") {
+            let to = self.expr()?;
+            self.expect_kw("default")?;
+            (to, self.expr()?)
+        } else {
+            (
+                Expr::Literal(Value::Bool(true)),
+                Expr::Literal(Value::Bool(false)),
+            )
+        };
+        self.expect_kw("using")?;
+        let using = self.ident()?;
+        Ok(Some(Box::new(CteCycle {
+            columns,
+            set,
+            to,
+            default,
+            using,
+        })))
+    }
+
+    /// `name [, name …]` (no parentheses).
+    fn names(&mut self) -> Result<Vec<String>> {
+        let mut out = vec![self.ident()?];
+        while self.eat_op(",") {
+            out.push(self.ident()?);
+        }
+        Ok(out)
     }
 
     /// A statement beginning with `WITH`: a query — or, with a
