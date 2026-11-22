@@ -3732,6 +3732,49 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// After `trim(`: the function and arguments of SQL's trim forms up to
+    /// the `)`, or `None` for a plain `trim(s)`.
+    fn trim_form(&mut self) -> Result<Option<(&'static str, Vec<Expr>)>> {
+        let (name, keyword) = if self.eat_kw("leading") {
+            ("ltrim", true)
+        } else if self.eat_kw("trailing") {
+            ("rtrim", true)
+        } else {
+            ("btrim", self.eat_kw("both"))
+        };
+        let list = |p: &mut Self| -> Result<Vec<Expr>> {
+            let mut v = vec![p.expr()?];
+            while p.eat_op(",") {
+                v.push(p.expr()?);
+            }
+            Ok(v)
+        };
+        // As PostgreSQL's grammar: `chars FROM s` is (s, chars).
+        let mut from = self.eat_kw("from");
+        let args = if from {
+            list(self)?
+        } else {
+            let first = self.expr()?;
+            from = self.eat_kw("from");
+            if from {
+                let mut args = list(self)?;
+                args.push(first);
+                args
+            } else {
+                let mut args = vec![first];
+                if self.eat_op(",") {
+                    args.extend(list(self)?);
+                }
+                args
+            }
+        };
+        self.expect_op(")")?;
+        if !keyword && !from && args.len() == 1 {
+            return Ok(None);
+        }
+        Ok(Some((name, args)))
+    }
+
     fn name_or_call(&mut self, first: String) -> Result<Expr> {
         if self.peek_op("(")
             && let Some(e) = self.sql_json(&first)?
@@ -3781,6 +3824,34 @@ impl<'a> Parser<'a> {
                 return Ok(call("strpos", vec![s, sub]));
             }
             self.pos = save;
+        }
+        // overlay(s PLACING r FROM start [FOR count]).
+        if first == "overlay" && self.peek_op("(") {
+            let save = self.pos;
+            self.pos += 1;
+            let s = self.expr()?;
+            if self.eat_kw("placing") {
+                let r = self.expr()?;
+                self.expect_kw("from")?;
+                let mut args = vec![s, r, self.expr()?];
+                if self.eat_kw("for") {
+                    args.push(self.expr()?);
+                }
+                self.expect_op(")")?;
+                return Ok(call("overlay", args));
+            }
+            self.pos = save;
+        }
+        // trim([LEADING | TRAILING | BOTH] [chars] FROM s), and
+        // trim([LEADING | TRAILING | BOTH] [FROM] s [, chars]): ltrim,
+        // rtrim or btrim(s [, chars]).  A plain trim(s) is left as it is.
+        if first == "trim" && self.peek_op("(") {
+            let save = self.pos;
+            self.pos += 1;
+            match self.trim_form() {
+                Ok(Some((name, args))) => return Ok(call(name, args)),
+                Ok(None) | Err(_) => self.pos = save,
+            }
         }
         // substring(s FROM start [FOR count]), substring(s FOR count).
         if first == "substring" && self.peek_op("(") {

@@ -263,6 +263,8 @@ subquery)`, `EXISTS`, `= ANY (array | subquery)`, `LIKE`, `ILIKE`, `~`
 `a[i]` (1-based).
 
 **Functions:** `lower upper length trim substr replace strpos concat
+lpad rpad ltrim rtrim btrim split_part concat_ws translate reverse initcap
+overlay cbrt
 regexp_replace coalesce nullif greatest least abs round trunc floor ceil
 sign mod sqrt power now current_date clock_timestamp extract date_part
 date_trunc make_date make_time age to_timestamp justify_days

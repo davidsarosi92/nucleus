@@ -105,6 +105,7 @@ pub mod stablehash;
 pub mod statements;
 pub mod stats;
 pub mod storage;
+pub mod strings;
 pub mod subject_keys;
 pub mod summarize;
 pub mod tokens;

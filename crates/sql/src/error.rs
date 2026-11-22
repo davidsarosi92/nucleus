@@ -90,6 +90,7 @@ codes! {
     invalid_tablesample => "2202H",
     invalid_tablesample_repeat => "2202G",
     invalid_parameter => "22023",
+    substring => "22011",
     array_subscript => "2202E",
     object_in_use => "55006",
     prerequisite => "55000",

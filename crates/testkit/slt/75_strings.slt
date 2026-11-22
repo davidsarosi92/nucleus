@@ -1,0 +1,108 @@
+# String functions (issue #16): padding, trimming with a set of
+# characters and SQL's trim forms, split_part, concat_ws, translate,
+# reverse, initcap, overlay — counted in characters — and cbrt.
+
+query TTTT
+SELECT lpad('hi', 5, 'xy'), rpad('hi', 5, 'xy'), lpad('hello', 2), rpad('7', 3) || ']'
+----
+xyxhi hixyx he 7  ]
+
+query TT
+SELECT lpad('hi', 5, ''), lpad('é', 3, 'ő')
+----
+hi őőé
+
+query TTT
+SELECT lpad('hi', -1, 'x'), lpad(NULL, 3, 'x'), lpad('a', NULL)
+----
+(empty) NULL NULL
+
+statement error 42883
+SELECT lpad(1, 3)
+
+query TTT
+SELECT ltrim('xxhixx', 'x'), rtrim('xxhixx', 'x'), btrim('xyhiyx', 'xy')
+----
+hixx xxhi hi
+
+query TTT
+SELECT '[' || ltrim('  a  ') || ']', '[' || rtrim('  a  ') || ']', '[' || btrim('  a  ') || ']'
+----
+[a  ] [  a] [a]
+
+# trim takes spaces only, not other white space.
+query I
+SELECT length(trim(E'\thi \n '))
+----
+5
+
+query TTTT
+SELECT trim(LEADING 'x' FROM 'xxhixx'), trim(TRAILING 'x' FROM 'xxhixx'), trim(BOTH 'x' FROM 'xxhixx'), trim('x' FROM 'xxhixx')
+----
+hixx xxhi hi hi
+
+query TTTT
+SELECT '[' || trim(LEADING FROM '  a  ') || ']', '[' || trim(BOTH '  a  ') || ']', trim('xax', 'x'), '[' || trim(FROM ' a ') || ']'
+----
+[a  ] [a] a [a]
+
+query TTTT
+SELECT split_part('a,b,,c', ',', 2), split_part('a,b,,c', ',', 3), split_part('a,b,,c', ',', -1), split_part('a,b', ',', 5)
+----
+b (empty) c (empty)
+
+query TT
+SELECT split_part('a~~b~~c', '~~', -2), split_part('ab', '', 1)
+----
+b ab
+
+statement error 22023
+SELECT split_part('a,b', ',', 0)
+
+query TTTT
+SELECT concat_ws(',', 'a', NULL, 'b', 1, true), concat_ws(NULL, 'a', 'b'), concat_ws('-', 'x'), concat_ws(', ', 2.5, NULL)
+----
+a,b,1,t NULL x 2.5
+
+query TT
+SELECT translate('12345', '143', 'ax'), translate('héllo', 'él', 'EL')
+----
+a2x5 hELLo
+
+query TT
+SELECT reverse('abcé'), initcap('hi THOMAS o''neil x2y')
+----
+écba Hi Thomas O'Neil X2y
+
+query TTT
+SELECT overlay('Txxxxas' PLACING 'hom' FROM 2 FOR 4), overlay('abc' PLACING 'XY' FROM 2), overlay('abcdef' PLACING 'X' FROM 3 FOR -1)
+----
+Thomas aXY abXbcdef
+
+query T
+SELECT overlay('abc', 'XY', 5)
+----
+abcXY
+
+statement error 22011
+SELECT overlay('abc' PLACING 'X' FROM 0)
+
+statement error 22011
+SELECT substring('abc' FROM 1 FOR -1)
+
+query RRR
+SELECT cbrt(27), cbrt(-8.0), cbrt(2)
+----
+3.000 -2.000 1.260
+
+statement ok
+CREATE TABLE names (id int PRIMARY KEY, first text, last text, code text)
+
+statement ok
+INSERT INTO names VALUES (1, 'ada', 'LOVELACE', '7'), (2, 'alan', NULL, '42')
+
+query TTT
+SELECT initcap(first || ' ' || coalesce(last, '')), lpad(code, 4, '0'), concat_ws(' ', first, last) FROM names ORDER BY id
+----
+Ada Lovelace 0007 ada LOVELACE
+Alan  0042 alan

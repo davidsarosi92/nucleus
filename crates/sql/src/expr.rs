@@ -1586,7 +1586,7 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             Value::Bytea(b) => Value::Int(b.len() as i64),
             v => Value::Int(text(v)?.chars().count() as i64),
         },
-        Func::Trim => Value::Text(text(&args[0])?.trim().to_string()),
+        Func::Trim => Value::Text(text(&args[0])?.trim_matches(' ').to_string()),
         Func::Abs => match &args[0] {
             Value::Int(i) => Value::Int(
                 i.checked_abs()
@@ -1609,9 +1609,7 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             let start = from.max(1);
             let end = match count {
                 Some(c) if c < 0 => {
-                    return Err(Error::invalid_parameter(
-                        "negative substring length not allowed",
-                    ));
+                    return Err(Error::substring("negative substring length not allowed"));
                 }
                 Some(c) => from.saturating_add(c).max(start),
                 None => i64::MAX,

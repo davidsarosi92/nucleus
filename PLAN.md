@@ -12985,6 +12985,32 @@ Found and fixed:
   sliding window keeps every row's result of a partition at once (a
   `string_agg` over a wide frame: the frames' strings together, past
   any `work_mem`), where PostgreSQL gives each as it is made.
+- Issue #16's SQL forms, first step — PostgreSQL's string functions the
+  fuzzer met: `lpad rpad ltrim rtrim btrim` (with the characters to
+  trim), `split_part` (negative positions from the end), `concat_ws`
+  (its `NULL` values left out), `translate reverse initcap`, `overlay`
+  with its SQL form (`PLACING … FROM … FOR`, a negative count as
+  PostgreSQL's), SQL's `trim([LEADING | TRAILING | BOTH] [chars] FROM
+  s)`, and `cbrt` — a module of their own (`strings.rs`, as `bytea.rs`),
+  counting characters, not bytes.  Two differences from PostgreSQL found
+  on the way: `trim` took every white-space character off, PostgreSQL
+  only spaces (`trim(E'\thi ')` is `\thi`); and a negative substring
+  length was `22023`, PostgreSQL's `22011`.  Tested by the test kit's
+  `75_strings.slt`.
+- A leak hunt, no leak found: a server under 40 rounds of six clients'
+  mixed work (point reads, column and LSM tables, updates, joins, JSON,
+  a recursive CTE, windows, `$n` parameters, transactions committed and
+  rolled back, a fresh connection every 25 statements, `VACUUM` each
+  round): macOS `leaks` found nothing unreferenced, but the live heap
+  (`heap -s`) grew steadily, 22 → 28 MB.  Taken apart by kind of work:
+  queries and parameters keep nothing (16 bytes a round), transactions'
+  growth slows as they go, and each connection kept ~720 bytes — the
+  allocations by call site (`MallocStackLogging`) were the page cache's
+  pages: a login is recorded in the audit chain (§M14.25), so logins
+  grow the database and their pages stay cached.  With `--cache 1MB` the
+  heap stops at ~1.3 MB over 8,000 logins: the cache filling, bounded by
+  its size.  A login with its audit record costs ~270 µs (connect and
+  close over the Unix socket; `SELECT 1` 20 µs).
 
 Not bugs, recorded: SQL the fuzzer met that nucleus does not parse —
 aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,

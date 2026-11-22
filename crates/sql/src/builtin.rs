@@ -40,7 +40,7 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
     (Func::Round, &["round"], 1..=2),
     (Func::Floor, &["floor"], 1..=1),
     (Func::Ceil, &["ceil", "ceiling"], 1..=1),
-    (Func::Trim, &["trim", "btrim"], 1..=1),
+    (Func::Trim, &["trim"], 1..=1),
     (Func::Concat, &["concat"], 1..=usize::MAX),
     (Func::Greatest, &["greatest"], 1..=usize::MAX),
     (Func::Least, &["least"], 1..=usize::MAX),
@@ -146,6 +146,7 @@ impl Module for Builtin {
         crate::drift::register(r)?;
         crate::regression::register(r)?;
         crate::bytea::register(r)?;
+        crate::strings::register(r)?;
         crate::inet::register(r)?;
         crate::statements::register(r)?;
         crate::time_travel::register(r)?;

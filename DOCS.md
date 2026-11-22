@@ -2313,8 +2313,11 @@ linear-time), `CASE`, `CAST` / `::`, typed literals (`INTERVAL '90' DAY`,
 `INTERVAL '5' DAY TO HOUR`: a bare number counts the last field, the
 value cut below it, as in PostgreSQL), `E'…'` strings,
 `COLLATE` (accepted, ignored: text compares bytewise), `OPERATOR(op)`,
-`$n`, `extract(field FROM x)`.  Functions: `lower upper length trim substr
-left right replace repeat strpos concat coalesce nullif greatest least abs round trunc floor
+`$n`, `extract(field FROM x)`, `position(sub IN s)`, `substring(s FROM n
+FOR m)`, `overlay(s PLACING r FROM n [FOR m])`, `trim([LEADING | TRAILING |
+BOTH] [chars] FROM s)`.  Functions: `lower upper length trim substr
+left right replace repeat strpos concat lpad rpad ltrim rtrim btrim
+split_part concat_ws translate reverse initcap overlay cbrt coalesce nullif greatest least abs round trunc floor
 ceil sign mod sqrt power regexp_replace version now current_timestamp
 current_date localtimestamp clock_timestamp extract date_part date_trunc
 make_date age justify_days justify_hours justify_interval to_timestamp
