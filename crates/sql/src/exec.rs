@@ -475,12 +475,16 @@ fn build_node<'a>(
             step,
             all,
         } => {
-            let mut seen = HashSet::new();
+            let mut seen = Seen::new();
             // The rows of a round not seen before (all of them for UNION
             // ALL), into the result and the next round.
             let mut out = crate::spill::Stash::new();
             let mut fresh = |rows: Rows, out: &mut crate::spill::Stash, counted: bool| {
                 let mut round = crate::spill::Stash::new();
+                let mut give = |r: Row| -> Result<()> {
+                    out.push(r.clone())?;
+                    round.push(r)
+                };
                 for r in rows {
                     let r = r?;
                     if counted {
@@ -488,11 +492,13 @@ fn build_node<'a>(
                         // recursion runs into the statement's budget.
                         crate::budget::charge_scan()?;
                     }
-                    if *all || seen.insert(r.clone()) {
-                        out.push(r.clone())?;
-                        round.push(r)?;
+                    if *all {
+                        give(r)?;
+                    } else {
+                        seen.offer(r, &mut give)?;
                     }
                 }
+                seen.end_round(&mut give)?;
                 round.seal()
             };
             let mut round = fresh(build(base, ctx, outer)?, &mut out, false)?;
@@ -560,6 +566,108 @@ fn build_node<'a>(
             0,
         )?,
     })
+}
+
+/// A recursive `UNION`'s rows seen (PLAN.md §M14.34 G1): a hash set up to
+/// `work_mem`, then [`crate::spill::FAN_OUT`] partitions of runs in
+/// scratch space — a round's rows partitioned as they come and, at its
+/// end, each partition's checked against the rows it holds, the new ones
+/// added as a run of its own.  A round's new rows all come out in the
+/// round (in memory as they come, past it at its end).
+struct Seen {
+    memory: HashSet<Row>,
+    bytes: usize,
+    limit: usize,
+    /// Past the limit: each partition's runs of rows seen.
+    parts: Vec<Vec<std::sync::Arc<crate::spill::Sealed>>>,
+    /// Past the limit: the round's rows so far.
+    pending: Option<crate::spill::Partitions>,
+}
+
+impl Seen {
+    fn new() -> Self {
+        Seen {
+            memory: HashSet::new(),
+            bytes: 0,
+            limit: crate::budget::work_mem(),
+            parts: Vec::new(),
+            pending: None,
+        }
+    }
+
+    /// Takes a round's `row`: given to `new` now if not seen before (in
+    /// memory), or kept for the round's end (past it).
+    fn offer(&mut self, row: Row, new: &mut dyn FnMut(Row) -> Result<()>) -> Result<()> {
+        if let Some(p) = &mut self.pending {
+            return p.push(&row, &row);
+        }
+        if self.memory.contains(&row) {
+            return Ok(());
+        }
+        self.bytes += crate::spill::row_bytes(&row);
+        self.memory.insert(row.clone());
+        new(row)?;
+        if self.bytes > self.limit {
+            // Into scratch space: the rows seen, partitioned.
+            let mut parts = crate::spill::Partitions::new(0);
+            for r in std::mem::take(&mut self.memory) {
+                parts.push(&r, &r)?;
+            }
+            self.bytes = 0;
+            self.parts = parts
+                .seal_all()?
+                .into_iter()
+                .map(|r| r.into_iter().collect())
+                .collect();
+            self.pending = Some(crate::spill::Partitions::new(0));
+        }
+        Ok(())
+    }
+
+    /// A round's end: the rows it kept (past the limit), each not seen
+    /// before given to `new` once.
+    fn end_round(&mut self, new: &mut dyn FnMut(Row) -> Result<()>) -> Result<()> {
+        if self.pending.is_none() {
+            return Ok(());
+        }
+        let pending = self
+            .pending
+            .replace(crate::spill::Partitions::new(0))
+            .expect("past the limit");
+        for (i, run) in pending.seal_all()?.into_iter().enumerate() {
+            let Some(run) = run else { continue };
+            // The partition's rows of the round, the first of equals kept
+            // in order, less those it holds.
+            let mut order = Vec::new();
+            let mut left = HashSet::new();
+            for r in run.iter() {
+                let r = r?;
+                if left.insert(r.clone()) {
+                    order.push(r);
+                }
+            }
+            for old in &self.parts[i] {
+                for r in old.iter() {
+                    left.remove(&r?);
+                }
+                if left.is_empty() {
+                    break;
+                }
+            }
+            if left.is_empty() {
+                continue;
+            }
+            let mut added = crate::spill::Run::new()?;
+            for r in order {
+                if left.contains(&r) {
+                    added.push(&r)?;
+                    new(r)?;
+                }
+            }
+            self.parts[i].push(added.seal()?);
+        }
+        Ok(())
+    }
 }
 
 /// Rows without repeats: those seen kept in memory up to work_mem; past

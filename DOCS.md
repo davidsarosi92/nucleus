@@ -3008,8 +3008,14 @@ rows of a full join in a bitmap) — as a grace hash join's partition does
 when four splits leave it too large (one key's rows); its rows are given
 as they are found, never gathered (`BlockJoin`: a `LIMIT` stops it, and
 a join of 30,000 rows on a dozen keys no longer writes 2.4 GB of scratch
-space for its `count(*)`).  Still held whole: a recursive `UNION`'s
-rows seen, and the validated reads of a transaction (§5.2).
+space for its `count(*)`).  A recursive `UNION`'s rows seen are a hash
+set up to the limit; past it the same 32 partitions, each a list of runs:
+a round's rows go to their partitions as they come and, at its end, each
+partition's are checked against the runs it holds, the new ones given
+(to the result and the next round) and added as a run of their own
+(`exec::Seen`) — a 2,000,000-row walk's peak +432 → +225 MB under 4 MB,
+its time unchanged; under the default 64 MB +5 %, 240 MB less.  Still
+held whole: the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).
 Their rows are kept by which subquery it is (`SubPlan::id`, made by the

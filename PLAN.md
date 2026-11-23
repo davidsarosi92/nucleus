@@ -13158,9 +13158,10 @@ lookups, 2.5 µs a row); the whole tree, 2,000,000 rows in 21 rounds,
 where 2,047 came), so the planner keeps an index lookup per row where a
 hash join would read the edges once; and a step's hash tables are built
 again every round (DOCS §8.7), the edges' though they do not change.
-Still held whole: a recursive `UNION`'s rows seen.
+A recursive `UNION`'s rows seen were held whole (G1 item 6: past
+`work_mem` now).
 
-- **G1 — adaptive rounds** (performance; with the perf phase): each
+- **G1 — adaptive rounds** ✅ 2026-11-22 (performance; with the perf phase): each
   round chooses by the rows the last one gave — few: index lookups; many:
   a hash join — and the step's sides that do not read the work table
   (the edges) are built once and kept for every round (loop-invariant
@@ -13170,6 +13171,12 @@ Still held whole: a recursive `UNION`'s rows seen.
   Done when: the whole-tree traversal is several times faster than
   3.0 s, small traversals stay at their index lookups' speed, and
   each is measured against PostgreSQL (§M14.31's method).
+  *Done*: the whole tree 3.0 → 0.64 s (PostgreSQL 18 1.30 s), its small
+  walks by lookups (21 ancestors 0.58 → 0.076 ms, PostgreSQL 0.14; 2,047
+  descendants 5.4 → 3.6–4.0 ms, PostgreSQL 1.25), the walk's rows
+  joined as they turn out, `UNION`'s rows seen within `work_mem`
+  (items 1, 3–6 below).  Left to the storage step of their own: a
+  lookup's cost and its scaling over workers (items 2–3).
 
   Against PostgreSQL 18 (same tree, same index, its plan the same index
   nested loop), 2026-11-22: whole tree 1.30 s (nucleus 3.0 s), 2,047
@@ -13275,6 +13282,19 @@ Still held whole: a recursive `UNION`'s rows seen.
      a CTE's rows, made once a statement, now unnest as a table's do
      (`unnest::right_side`; not a derived table's, whose run per row may
      look its tables up): 1.4 ms.
+  6. **`UNION`'s rows seen past `work_mem` ✅** — a recursive `UNION`
+     kept every row it had seen in a hash set, however many: a 2,000,000-
+     row walk grew the server 432 MB under `work_mem = 4MB`.  Past the
+     limit they now go to 32 hash partitions of runs in scratch space
+     (as hash aggregation's and `DISTINCT`'s do); a round's rows are
+     partitioned as they come and checked at its end against their
+     partition's runs, the new ones added as a run (`exec::Seen`) — each
+     round after the spill reads the partitions its rows fall in once.
+     Measured (2,000,000-row tree, fresh server each): under 4 MB peak
+     +432 → +225 MB (the rest the buffer pool filling), 2.82 → 2.84 s;
+     under the default 64 MB the set spills too, 1.47 → 1.52–1.57 s and
+     about 240 MB less.  A filter per partition (Bloom) to skip the runs
+     of rows never seen is left until a graph shows the reading.
 - **G2 — `SEARCH` and `CYCLE`** (SQL:1999, PostgreSQL 14): `SEARCH DEPTH
   | BREADTH FIRST BY … SET col` for the order of a tree's rows, `CYCLE …
   SET flag USING path` for graphs with cycles under `UNION ALL`; beside
