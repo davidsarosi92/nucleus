@@ -2319,7 +2319,21 @@ BY s` lists the rows in that order.  `CYCLE` adds `p`, the path of
 `ROW(c…)` is already on its parent's path: that row is given but not
 followed, so `UNION ALL` ends on a graph with cycles.  The recursive term
 must read the query in its own `FROM` (a join there too), not in a
-subquery (`0A000`, as PostgreSQL's).
+subquery (`0A000`, as PostgreSQL's).  `WITH RECURSIVE name [(cols)]
+USING KEY (k…, [min(c) | max(c)]…) AS (base UNION [ALL] step)` (DuckDB's,
+from Hirn and Grust's "A Fix for the Fixation on Fixpoints"; not in
+PostgreSQL) keeps the query's rows as a table by key: each round's rows
+(the base's first) are applied to it — a key's row replaced, its columns
+the last row's, or the least / greatest non-NULL value of those named
+with `min` / `max` —, a key's rows in one round combined the same way.
+The next round reads all of the round's rows (`UNION ALL`) or the rows of
+the keys new or changed (`UNION`, so a cycle ends when nothing
+improves); the query's rows are the table's, in the order keys first
+came.  In the step, `recurring.name` reads the table as the round began
+(not in a subquery, `42P19`).  Shortest paths are `USING KEY (node,
+min(dist))` with `UNION`; NULL keys are one key; no `SEARCH` / `CYCLE`
+with it (`0A000`); `min` and `max` only (`0A000`); a key column must
+hash (`42883`).
 `SELECT [DISTINCT]`,
 `FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
 subqueries and functions in `FROM` (`generate_series`, `unnest`, any
@@ -2442,7 +2456,9 @@ Plan nodes: `Scan` (table, access path, filter), `Values`, `Filter`,
 `Cte` (computed once per execution, shared by its references),
 `Recursive` / `WorkTable` (`WITH RECURSIVE`: the step re-runs over the
 previous round until it yields nothing; `UNION` drops repeats, so cycles
-end), `Function` (functions in `FROM`), `Virtual` (catalog tables),
+end; `USING KEY` keeps a table by key, `exec::keyed_rounds`, its
+`recurring.name` a work table lent to each round and taken back, not
+copied), `Function` (functions in `FROM`), `Virtual` (catalog tables),
 `Window` (below).  The executor runs them as iterators; a join
 stashes its right input, sorts and aggregates take their input — each
 within `work_mem`, below.  A `Project` run by the session's thread
@@ -3015,7 +3031,9 @@ partition's are checked against the runs it holds, the new ones given
 (to the result and the next round) and added as a run of their own
 (`exec::Seen`) — a 2,000,000-row walk's peak +432 → +225 MB under 4 MB,
 its time unchanged; under the default 64 MB +5 %, 240 MB less.  Still
-held whole: the validated reads of a transaction (§5.2).
+held whole: the validated reads of a transaction (§5.2), and a recursive
+query's table `USING KEY` (one row a key; a round's rows themselves
+spill).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).
 Their rows are kept by which subquery it is (`SubPlan::id`, made by the

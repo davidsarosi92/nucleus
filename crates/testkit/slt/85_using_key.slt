@@ -1,0 +1,216 @@
+# A recursive query USING KEY (PLAN.md §M14.34 G3, DuckDB's, from Hirn
+# and Grust, "A Fix for the Fixation on Fixpoints"): its rows a table by
+# key, a round's row replacing the one with its key.  PostgreSQL has no
+# USING KEY: each answer on the generated graphs is checked against
+# PostgreSQL 18's answer to the same question without it (every path's
+# rows, then min per node); the small ones are DuckDB's documented ones.
+
+# nucleus-only: a key's row replaced; the rows in the order keys came
+query II
+WITH RECURSIVE tbl (a, b) USING KEY (a) AS (SELECT * FROM (VALUES (1, 3), (2, 4)) t (a, b) UNION ALL SELECT a + 1, b FROM tbl WHERE a < 3) SELECT * FROM tbl
+----
+1 3
+2 3
+3 3
+
+# nucleus-only: a payload column by max
+query II
+WITH RECURSIVE tbl (a, b) USING KEY (a, max(b)) AS (SELECT 1, 5 UNION ALL SELECT a, b - 1 FROM tbl WHERE b > 0) SELECT * FROM tbl
+----
+1 5
+
+# nucleus-only: two keys, each to its last round
+query III
+WITH RECURSIVE power (a, b, c) USING KEY (a) AS (SELECT * FROM (VALUES (2, 0, 1), (3, 0, 1)) v (a, b, c) UNION ALL SELECT a, b + 1, a * c FROM power WHERE a * c < 100) SELECT * FROM power ORDER BY a
+----
+2 6 64
+3 4 81
+
+# nucleus-only: a key of two columns keeps every round's row
+query III
+WITH RECURSIVE power (a, b, c) USING KEY (a, b) AS (SELECT * FROM (VALUES (2, 0, 1), (3, 0, 1)) v (a, b, c) UNION ALL SELECT a, b + 1, a * c FROM power WHERE a * c < 100) SELECT count(*), sum(c), max(b) FROM power
+----
+12 248 6
+
+statement ok
+CREATE TABLE weighted_edges (src int, dst int, weight int)
+
+statement ok
+INSERT INTO weighted_edges VALUES (1, 2, 4), (1, 3, 1), (3, 2, 1), (2, 4, 1), (3, 4, 5), (4, 1, 1)
+
+# nucleus-only: shortest paths — UNION forwards only the keys that
+# changed, so a cycle ends
+query II
+WITH RECURSIVE shortest_paths (node, dist) USING KEY (node, min(dist)) AS (SELECT 1, 0 UNION SELECT e.dst, sp.dist + e.weight FROM shortest_paths AS sp JOIN weighted_edges AS e ON e.src = sp.node) SELECT * FROM shortest_paths ORDER BY node
+----
+1 0
+2 2
+3 1
+4 3
+
+statement ok
+CREATE TABLE edges (a int, b int)
+
+statement ok
+INSERT INTO edges VALUES (1, 2), (2, 3), (3, 7), (7, 8), (4, 5), (5, 6), (2, 1), (3, 2), (7, 3), (8, 7), (5, 4), (6, 5)
+
+# nucleus-only: connected components by the least id reached
+query II
+WITH RECURSIVE cc (id, comp) USING KEY (id, min(comp)) AS (SELECT DISTINCT a, a FROM edges UNION SELECT e.b, c.comp FROM cc c JOIN edges e ON e.a = c.id) SELECT * FROM cc ORDER BY id
+----
+1 1
+2 1
+3 1
+4 4
+5 4
+6 4
+7 1
+8 1
+
+# nucleus-only: recurring.name, the table as the round began — each key
+# takes the other's value, so both move in step (a round's own changes
+# unseen by it)
+query II
+WITH RECURSIVE c (k, v) USING KEY (k) AS (SELECT * FROM (VALUES (1, 0), (2, 0)) t (k, v) UNION ALL SELECT c.k, r.v + 1 FROM c JOIN recurring.c AS r ON r.k = 3 - c.k WHERE c.v < 3) SELECT * FROM c ORDER BY k
+----
+1 3
+2 3
+
+# nucleus-only: a counter read from recurring.name
+query II
+WITH RECURSIVE c (k, i) USING KEY (k) AS (SELECT 1, 1 UNION ALL SELECT c.k, c.i + 1 FROM c JOIN recurring.c AS r ON r.k = c.k WHERE r.i < 5) SELECT * FROM c
+----
+1 5
+
+# nucleus-only: a key's rows in one round — the last one's values; NULL
+# keys are one key
+query IT
+WITH RECURSIVE t (a, b) USING KEY (a) AS (VALUES (1, 'x'), (1, 'y'), (NULL, 'n1'), (NULL, 'n2') UNION SELECT a, b FROM t WHERE false) SELECT * FROM t
+----
+1 y
+NULL n2
+
+# nucleus-only: min and max leave NULLs out; a key's NULL is replaced
+query III
+WITH RECURSIVE t (a, lo, hi) USING KEY (a, min(lo), max(hi)) AS (SELECT 1, NULL::int, NULL::int UNION SELECT a, CASE WHEN lo IS NULL THEN 5 END, CASE WHEN hi IS NULL THEN 5 END FROM t) SELECT * FROM t
+----
+1 5 5
+
+# The generated graphs: 500 nodes, three weighted edges out of each.
+statement ok
+CREATE TABLE wg (src int, dst int, w int)
+
+statement ok
+INSERT INTO wg SELECT i, (i + 1) % 500, 1 + i % 7 FROM generate_series(0, 499) i UNION ALL SELECT i, (i * 3 + 1) % 500, 2 + i % 5 FROM generate_series(0, 499) i UNION ALL SELECT i, (i * 7 + 3) % 500, 3 + i % 4 FROM generate_series(0, 499) i
+
+statement ok
+CREATE TABLE cg (a int, b int)
+
+statement ok
+INSERT INTO cg SELECT i, i + 1 FROM generate_series(0, 498) i WHERE (i + 1) % 50 <> 0 UNION ALL SELECT i + 1, i FROM generate_series(0, 498) i WHERE (i + 1) % 50 <> 0
+
+# nucleus-only: shortest distances from 0 (PostgreSQL: 500 11264 33)
+query III
+WITH RECURSIVE sp (node, dist) USING KEY (node, min(dist)) AS (SELECT 0, 0 UNION SELECT wg.dst, sp.dist + wg.w FROM sp JOIN wg ON wg.src = sp.node) SELECT count(*), sum(dist), max(dist) FROM sp
+----
+500 11264 33
+
+# nucleus-only: UNION ALL forwards every row a round makes — the least
+# over paths of up to 6 edges (PostgreSQL: 185 3369 30)
+query III
+WITH RECURSIVE sp (node, dist, hops) USING KEY (node, min(dist)) AS (SELECT 0, 0, 0 UNION ALL SELECT wg.dst, sp.dist + wg.w, sp.hops + 1 FROM sp JOIN wg ON wg.src = sp.node WHERE sp.hops < 6) SELECT count(*), sum(dist), max(dist) FROM sp
+----
+185 3369 30
+
+# nucleus-only: the fewest edges to each node (PostgreSQL's alike)
+query II
+WITH RECURSIVE r (node, d) USING KEY (node, min(d)) AS (SELECT 0, 0 UNION SELECT wg.dst, r.d + 1 FROM r JOIN wg ON wg.src = r.node) SELECT d, count(*) FROM r GROUP BY d ORDER BY d
+----
+0 1
+1 2
+2 4
+3 9
+4 22
+5 50
+6 97
+7 136
+8 119
+9 53
+10 7
+
+# nucleus-only: ten components of 50 (PostgreSQL: 10 112500 500)
+query III
+WITH RECURSIVE cc (id, comp) USING KEY (id, min(comp)) AS (SELECT DISTINCT a, a FROM cg UNION SELECT cg.b, cc.comp FROM cc JOIN cg ON cg.a = cc.id) SELECT count(DISTINCT comp), sum(comp), count(*) FROM cc
+----
+10 112500 500
+
+# nucleus-only: little memory — a round's rows in scratch space
+statement ok
+SET work_mem = '64kB'
+
+# nucleus-only: the same, its rounds past work_mem
+query III
+WITH RECURSIVE sp (node, dist, hops) USING KEY (node, min(dist)) AS (SELECT 0, 0, 0 UNION ALL SELECT wg.dst, sp.dist + wg.w, sp.hops + 1 FROM sp JOIN wg ON wg.src = sp.node WHERE sp.hops < 6) SELECT count(*), sum(dist), max(dist) FROM sp
+----
+185 3369 30
+
+# nucleus-only: the same, its rounds past work_mem
+query III
+WITH RECURSIVE sp (node, dist) USING KEY (node, min(dist)) AS (SELECT 0, 0 UNION SELECT wg.dst, sp.dist + wg.w FROM sp JOIN wg ON wg.src = sp.node) SELECT count(*), sum(dist), max(dist) FROM sp
+----
+500 11264 33
+
+# nucleus-only: the default again
+statement ok
+SET work_mem = '64MB'
+
+# nucleus-only: the plan
+query T
+EXPLAIN WITH RECURSIVE sp (node, dist) USING KEY (node, min(dist)) AS (SELECT 0, 0 UNION SELECT wg.dst, sp.dist + wg.w FROM sp JOIN wg ON wg.src = sp.node) SELECT * FROM sp
+----
+CTE sp
+  Recursive Union Using Key (#0, min(#1))
+    Project: 0, 0
+      Values (1 rows)
+    Project: #3, (#1 + #4)::integer
+      Hash Join (#0 = #0) on (#2 = #0)
+        WorkTable Scan on sp
+        Seq Scan on wg
+
+# Not a recursive query
+statement error 42601
+WITH t (a) USING KEY (a) AS (SELECT 1) SELECT * FROM t
+
+statement error 42601
+WITH RECURSIVE t (a) USING KEY (a) AS (SELECT 1) SELECT * FROM t
+
+# Not a column
+statement error 42703
+WITH RECURSIVE t (a) USING KEY (b) AS (SELECT 1 UNION SELECT a FROM t) SELECT * FROM t
+
+statement error 42701
+WITH RECURSIVE t (a, b) USING KEY (a, max(a)) AS (SELECT 1, 2 UNION SELECT a, b FROM t) SELECT * FROM t
+
+# No key column
+statement error 42601
+WITH RECURSIVE t (a, b) USING KEY (max(b)) AS (SELECT 1, 2 UNION SELECT a, b FROM t) SELECT * FROM t
+
+statement error 0A000
+WITH RECURSIVE t (a) USING KEY (sum(a)) AS (SELECT 1 UNION SELECT a FROM t) SELECT * FROM t
+
+statement error 0A000
+WITH RECURSIVE t (a) USING KEY (a) AS (SELECT 1 UNION SELECT a FROM t) SEARCH DEPTH FIRST BY a SET o SELECT * FROM t
+
+# recurring.name only with USING KEY, and not in a subquery
+statement error 0A000
+WITH RECURSIVE t (a) AS (SELECT 1 UNION SELECT a + 1 FROM recurring.t WHERE a < 3) SELECT * FROM t
+
+statement error 42P19
+WITH RECURSIVE t (a) USING KEY (a) AS (SELECT 1 UNION SELECT a + 1 FROM t WHERE a < (SELECT max(a) FROM recurring.t)) SELECT * FROM t
+
+# Its key compares
+statement error 42883
+WITH RECURSIVE t (a, p) USING KEY (p) AS (SELECT 1, point(1, 2) UNION SELECT a, p FROM t WHERE false) SELECT * FROM t
+
+statement ok
+DROP TABLE weighted_edges, edges, wg, cg

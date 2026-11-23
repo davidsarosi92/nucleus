@@ -141,6 +141,8 @@ pub enum Plan {
         step: Box<Plan>,
         /// `UNION ALL` (else rows already produced are dropped).
         all: bool,
+        /// `USING KEY (…)`: the rows kept by key (PLAN.md §M14.34 G3).
+        key: Option<Box<RecursiveKey>>,
     },
     /// A function's rows: a table function (`generate_series`, `unnest`)
     /// or a scalar function (one row).
@@ -266,6 +268,34 @@ pub struct Adaptive {
     /// The most right rows the lookups are chosen for: where they cost
     /// what the hash join does.
     pub below: usize,
+}
+
+/// A recursive query's `USING KEY` (PLAN.md §M14.34 G3): its rows a
+/// table by key — each round's rows (the candidates) applied to it, a
+/// key's row replaced, not added to.  The next round reads the candidates
+/// (`UNION ALL`) or the keys' rows that are new or changed (`UNION`); the
+/// query's rows are the table's, a key's in the order it first came.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecursiveKey {
+    /// The key's columns.
+    pub columns: Vec<usize>,
+    /// How each column combines a key's rows: its last value (and a key
+    /// column's), or the least or greatest of them.
+    pub combine: Vec<Combine>,
+    /// The table's work table id (`recurring.name`), when the step reads
+    /// it: the table as it was when the round began.
+    pub recurring: Option<usize>,
+}
+
+/// How a column of a [`RecursiveKey`] table combines a key's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Combine {
+    /// The last row's value.
+    Last,
+    /// The least non-NULL value.
+    Min,
+    /// The greatest non-NULL value.
+    Max,
 }
 
 /// How a scan finds rows: an index (primary = `None`), equal values for a
@@ -1097,8 +1127,21 @@ impl Plan {
             ),
             Plan::Cte { name, .. } => format!("CTE {name}"),
             Plan::Past { at, .. } => format!("As Of commit {at}"),
-            Plan::Recursive { all, .. } => {
-                format!("Recursive Union{}", if *all { " All" } else { "" })
+            Plan::Recursive { all, key, .. } => {
+                let mut s = format!("Recursive Union{}", if *all { " All" } else { "" });
+                if let Some(k) = key {
+                    let mut items: Vec<String> =
+                        k.columns.iter().map(|c| format!("#{c}")).collect();
+                    for (c, how) in k.combine.iter().enumerate() {
+                        match how {
+                            Combine::Min => items.push(format!("min(#{c})")),
+                            Combine::Max => items.push(format!("max(#{c})")),
+                            Combine::Last => {}
+                        }
+                    }
+                    s.push_str(&format!(" Using Key ({})", items.join(", ")));
+                }
+                s
             }
             Plan::WorkTable { name, .. } => format!("WorkTable Scan on {name}"),
             Plan::Function { func, args, .. } => match func {

@@ -165,6 +165,11 @@ struct CteDef {
     level: usize,
     /// Whether the recursive term referred to the work table.
     used: bool,
+    /// `USING KEY`: the keyed table's work table id (`recurring.name`)
+    /// while the recursive term is being bound, else 0.
+    recurring: usize,
+    /// Whether the recursive term referred to `recurring.name`.
+    recurring_used: bool,
     /// A data-modifying CTE without `RETURNING`: no rows to read.
     unreturning: bool,
 }
@@ -203,15 +208,77 @@ fn next_cte_id() -> usize {
     NEXT_CTE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `USING KEY (…)` of the recursive query `name` with columns `scope`.
+fn using_key(
+    name: &str,
+    items: &[ast::CteKey],
+    scope: &Scope,
+) -> Result<crate::plan::RecursiveKey> {
+    use crate::plan::Combine;
+    let width = scope.cols.len();
+    let mut columns = Vec::new();
+    let mut combine = vec![Combine::Last; width];
+    let mut named = vec![false; width];
+    for item in items {
+        let Some(i) = scope.cols.iter().position(|c| c.name == item.column) else {
+            return Err(Error::undefined_column(format!(
+                "column \"{}\" of USING KEY is not a column of \"{name}\"",
+                item.column
+            )));
+        };
+        if std::mem::replace(&mut named[i], true) {
+            return Err(Error::duplicate_column(format!(
+                "column \"{}\" appears more than once in USING KEY",
+                item.column
+            )));
+        }
+        let ty = scope.cols[i].ty;
+        match item.agg.as_deref() {
+            None => {
+                require(ty, &[Need::Equality, Need::Hashing], "USING KEY")?;
+                columns.push(i);
+            }
+            Some(f) => {
+                combine[i] = match f {
+                    "min" => Combine::Min,
+                    "max" => Combine::Max,
+                    _ => {
+                        return Err(Error::feature(format!(
+                            "USING KEY combines a column by min or max, not {f}"
+                        )));
+                    }
+                };
+                require(ty, &[Need::Ordering], f)?;
+            }
+        }
+    }
+    if columns.is_empty() {
+        return Err(Error::syntax("USING KEY needs a key column"));
+    }
+    Ok(crate::plan::RecursiveKey {
+        columns,
+        combine,
+        recurring: None,
+    })
+}
+
 /// Whether `plan` reads a work table of a recursive CTE it is not itself.
 pub(crate) fn reads_work_table(plan: &Plan) -> bool {
     fn open(plan: &Plan, closed: &mut Vec<usize>) -> bool {
         match plan {
             Plan::WorkTable { id, .. } => !closed.contains(id),
-            Plan::Recursive { id, base, step, .. } => {
+            Plan::Recursive {
+                id,
+                base,
+                step,
+                key,
+                ..
+            } => {
+                let mark = closed.len();
                 closed.push(*id);
+                closed.extend(key.as_ref().and_then(|k| k.recurring));
                 let r = open(base, closed) || open(step, closed);
-                closed.pop();
+                closed.truncate(mark);
                 r
             }
             p => p.children().into_iter().any(|c| open(c, closed)),
@@ -520,6 +587,8 @@ impl<'a> Binder<'a> {
                             width: columns.len(),
                         }),
                         work: 0,
+                        recurring: 0,
+                        recurring_used: false,
                         level: self.outer.len(),
                         used: false,
                         unreturning: false,
@@ -533,6 +602,8 @@ impl<'a> Binder<'a> {
                         width: 0,
                     }),
                     work: 0,
+                    recurring: 0,
+                    recurring_used: false,
                     level: self.outer.len(),
                     used: false,
                     unreturning: true,
@@ -598,6 +669,8 @@ impl<'a> Binder<'a> {
             scope,
             plan: Some(plan),
             work: 0,
+            recurring: 0,
+            recurring_used: false,
             level: self.outer.len(),
             used: false,
             unreturning: false,
@@ -607,6 +680,12 @@ impl<'a> Binder<'a> {
     fn plain_cte(&mut self, cte: &ast::Cte) -> Result<CteDef> {
         if cte.search.is_some() || cte.cycle.is_some() {
             return Err(Error::syntax("WITH query is not recursive"));
+        }
+        if cte.key.is_some() {
+            return Err(Error::syntax(format!(
+                "USING KEY needs a recursive query: WITH RECURSIVE {} … AS (base UNION [ALL] step)",
+                cte.name
+            )));
         }
         let b = self.query(&cte.query)?;
         self.cte_def(cte, b.scope, b.plan)
@@ -626,6 +705,11 @@ impl<'a> Binder<'a> {
         };
         if q.with.is_some() || !q.order_by.is_empty() || q.limit.is_some() || q.offset.is_some() {
             return self.plain_cte(cte);
+        }
+        if cte.key.is_some() && (cte.search.is_some() || cte.cycle.is_some()) {
+            return Err(Error::feature(
+                "USING KEY with SEARCH or CYCLE is not supported",
+            ));
         }
         let base = self.set_expr(left)?;
         let mut scope = base.scope.clone();
@@ -658,6 +742,8 @@ impl<'a> Binder<'a> {
                     scope: a.base.scope.clone(),
                     plan: None,
                     work: next_cte_id(),
+                    recurring: 0,
+                    recurring_used: false,
                     level: self.outer.len(),
                     used: false,
                     unreturning: false,
@@ -675,12 +761,19 @@ impl<'a> Binder<'a> {
         } else {
             (base, scope)
         };
+        let key = match &cte.key {
+            Some(items) => Some(using_key(&cte.name, items, &scope)?),
+            None => None,
+        };
         let work = next_cte_id();
+        let recurring = if key.is_some() { next_cte_id() } else { 0 };
         self.ctes.push(CteDef {
             name: cte.name.clone(),
             scope: scope.clone(),
             plan: None,
             work,
+            recurring,
+            recurring_used: false,
             level: self.outer.len(),
             used: false,
             unreturning: false,
@@ -688,6 +781,7 @@ impl<'a> Binder<'a> {
         let at = self.ctes.len() - 1;
         let step = self.set_expr(right);
         let used = self.ctes[at].used;
+        let recurring_used = self.ctes[at].recurring_used;
         self.ctes.truncate(at);
         let step = step?;
         if step.scope.cols.len() != base.scope.cols.len() {
@@ -711,12 +805,18 @@ impl<'a> Binder<'a> {
         for (c, st) in scope.cols.iter_mut().zip(&step.scope.cols) {
             c.not_null &= st.not_null;
         }
-        let plan = if used {
+        // (A keyed one is run by rounds even when its step reads neither
+        // table: its rows are kept by key.)
+        let plan = if used || key.is_some() {
             Plan::Recursive {
                 id: work,
                 base: Box::new(crate::optimizer::optimize(base.plan, self.txn)),
                 step: Box::new(crate::optimizer::optimize(step.plan, self.txn)),
                 all: *all,
+                key: key.map(|mut k| {
+                    k.recurring = recurring_used.then_some(recurring);
+                    Box::new(k)
+                }),
             }
         } else {
             Plan::SetOp {
@@ -849,6 +949,46 @@ impl<'a> Binder<'a> {
                 p
             }
         };
+        Ok(Some(Bound { plan, scope }))
+    }
+
+    /// `recurring.name` inside the recursive term of `name … USING KEY`:
+    /// its table by key as the round began (PLAN.md §M14.34 G3).
+    fn recurring_ref(
+        &mut self,
+        name: &str,
+        qual: &str,
+        columns: &[String],
+    ) -> Result<Option<Bound>> {
+        let Some(i) = self
+            .ctes
+            .iter()
+            .rposition(|c| c.name == name && c.plan.is_none())
+        else {
+            return Ok(None);
+        };
+        let def = &self.ctes[i];
+        if def.recurring == 0 {
+            return Err(Error::feature(format!(
+                "recurring.{name} is only for a recursive query with USING KEY"
+            )));
+        }
+        if self.outer.len() != def.level {
+            return Err(Error::invalid_recursion(format!(
+                "recursive reference to query \"recurring.{name}\" must not appear within a subquery"
+            )));
+        }
+        let mut scope = def.scope.clone();
+        for c in &mut scope.cols {
+            c.table = Some(qual.to_string());
+        }
+        rename_columns(&mut scope, qual, columns)?;
+        let plan = Plan::WorkTable {
+            id: def.recurring,
+            name: format!("recurring.{name}"),
+            width: def.scope.cols.len(),
+        };
+        self.ctes[i].recurring_used = true;
         Ok(Some(Bound { plan, scope }))
     }
 
@@ -1287,6 +1427,14 @@ impl<'a> Binder<'a> {
                 };
                 if schema.is_none()
                     && let Some(b) = self.cte_ref(name, &qual, columns)?
+                {
+                    if sample.is_some() {
+                        return Err(not_a_table());
+                    }
+                    return Ok(b);
+                }
+                if schema.as_deref() == Some("recurring")
+                    && let Some(b) = self.recurring_ref(name, &qual, columns)?
                 {
                     if sample.is_some() {
                         return Err(not_a_table());

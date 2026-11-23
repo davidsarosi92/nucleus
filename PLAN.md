@@ -292,7 +292,7 @@ are marked ✅.
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
-| | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ⬜ agreed 2026-11-22 (G1–G4) |
+| | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ⬜ agreed 2026-11-22 (G1–G4); G1–G3 ✅, G4 next |
 | **F2 — NoSQL** | M15 | Document model | ⬜ study written, D1–D4 agreed (2026-11-20) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -13315,6 +13315,37 @@ A recursive `UNION`'s rows seen were held whole (G1 item 6: past
   replacing the one with its key instead of adding to it — shortest
   paths, reachability with the best distance, iterative algorithms
   (PageRank-like) in SQL, in memory bounded by the keys, not the rounds.
+  ✅ 2026-11-23, DuckDB 2.0's meaning (its documentation and Hirn's
+  2026 note on running it): `USING KEY (k…, min(c), max(c))` — a column
+  not named takes the key's last row's value; a round's rows (the
+  candidates) applied to the table at its end; the next round reads
+  every candidate (`UNION ALL`) or the keys' rows new or changed
+  (`UNION`); `recurring.name` the table as the round began.  Taken as
+  `plan::RecursiveKey` on `Plan::Recursive` and `exec::keyed_rounds`: the
+  table a `Vec` of rows in the order keys came and a hash map key →
+  place; `recurring.name` is a work table holding that `Vec` for the
+  round, taken back after it (no copy a round).  slt
+  `85_using_key.slt`: DuckDB's documented answers, and on generated
+  graphs (500 nodes, 1,500 weighted edges) shortest distances, least
+  distances over paths of up to 6 edges, fewest edges, components —
+  each as PostgreSQL 18 answers the same question without `USING KEY`
+  (every path's rows, then `min` per node); in every executor, and under
+  64 kB of `work_mem`.  Mutations (min taking the greater, `UNION`
+  forwarding unchanged keys, the last value not taken, NULL taken by
+  `min`, `recurring` not read, `UNION ALL` forwarding the changed only)
+  each fail it.  Measured, 100,000 nodes and 300,000 weighted edges
+  (index on the source): shortest distances from a node 179 ms
+  (PostgreSQL 18, every path's distance up to the known greatest, then
+  `min`: 2,789 ms); fewest edges 129 ms (as rows of every depth, then
+  `min`: 437 ms; PostgreSQL 744 ms); plain reachability 82 ms
+  (PostgreSQL 137 ms).
+  Not taken: `avg`, `sum` and other combinations (DuckDB 2.0's; `min`
+  and `max` give the graph algorithms named here, the others wait for a
+  use); `recurring.name` in a subquery (it is cached across rounds; the
+  join form serves); the table by key spilled past `work_mem` (one row a
+  key); DuckDB 2.0's probes of `recurring` by key (an adaptive lookup
+  into the table where a round's rows are few, as G1's) — when a
+  workload shows it.
 - **G4 — graph patterns, SQL/PGQ** (SQL:2023 part 16, `CREATE PROPERTY
   GRAPH` over tables, `GRAPH_TABLE (g MATCH (a)-[e]->{1,5}(b) …)`): a
   study first — what to take from SQL/PGQ, Cypher / GQL (ISO 39075),

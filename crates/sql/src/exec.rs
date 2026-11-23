@@ -474,6 +474,14 @@ fn build_node<'a>(
             base,
             step,
             all,
+            key: Some(key),
+        } => keyed_rounds(*id, base, step, *all, key, ctx, outer)?,
+        Plan::Recursive {
+            id,
+            base,
+            step,
+            all,
+            key: None,
         } => {
             let mut seen = Seen::new();
             // The rows of a round not seen before (all of them for UNION
@@ -566,6 +574,163 @@ fn build_node<'a>(
             0,
         )?,
     })
+}
+
+/// A recursive query `USING KEY` ([`crate::plan::RecursiveKey`], PLAN.md
+/// §M14.34 G3): `base`, then `step` round after round, each round's rows
+/// applied to the table by key; its rows when a round gives the next
+/// none.
+#[allow(clippy::too_many_arguments)]
+fn keyed_rounds<'a>(
+    id: usize,
+    base: &'a Plan,
+    step: &'a Plan,
+    all: bool,
+    key: &crate::plan::RecursiveKey,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Rows<'a>> {
+    let mut table = Keyed::new(key);
+    let first = table.candidates(build(base, ctx, outer)?, all, false)?;
+    let mut round = table.apply(first, all)?;
+    while !round.is_empty() {
+        ctx.work.borrow_mut().insert(id, Rc::new(round));
+        // `recurring.name`: the table as the round begins — lent to the
+        // round and taken back after it, not copied.
+        if let Some(r) = key.recurring {
+            let rows = std::mem::take(&mut table.rows);
+            ctx.work
+                .borrow_mut()
+                .insert(r, Rc::new(crate::spill::Stored::Memory(rows)));
+        }
+        let candidates = table.candidates(build(step, ctx, outer)?, all, true)?;
+        if let Some(r) = key.recurring {
+            let lent = ctx.work.borrow_mut().remove(&r).expect("lent");
+            table.rows = match Rc::try_unwrap(lent) {
+                Ok(crate::spill::Stored::Memory(rows)) => rows,
+                Ok(crate::spill::Stored::Run(_)) => unreachable!("lent from memory"),
+                Err(shared) => match &*shared {
+                    crate::spill::Stored::Memory(rows) => rows.clone(),
+                    crate::spill::Stored::Run(_) => unreachable!("lent from memory"),
+                },
+            };
+        }
+        round = table.apply(candidates, all)?;
+    }
+    ctx.work.borrow_mut().remove(&id);
+    Ok(Box::new(table.rows.into_iter().map(Ok)))
+}
+
+/// A [`keyed_rounds`] table: its rows, a key's in the order it first
+/// came, and where each key's row is.
+struct Keyed<'k> {
+    key: &'k crate::plan::RecursiveKey,
+    rows: Vec<Row>,
+    at: HashMap<Vec<Value>, usize>,
+}
+
+/// A round's rows: by key, combined (in the order each key first came),
+/// and all of them as they came (for `UNION ALL`'s next round).
+struct Candidates {
+    rows: Vec<Row>,
+    at: HashMap<Vec<Value>, usize>,
+    all: Option<crate::spill::Stash>,
+}
+
+impl<'k> Keyed<'k> {
+    fn new(key: &'k crate::plan::RecursiveKey) -> Self {
+        Keyed {
+            key,
+            rows: Vec::new(),
+            at: HashMap::new(),
+        }
+    }
+
+    fn key_of(&self, row: &[Value]) -> Vec<Value> {
+        self.key.columns.iter().map(|&c| row[c].clone()).collect()
+    }
+
+    /// `old` and `new` rows of a key combined: each column's last value,
+    /// or the least or greatest of them (NULLs left out).
+    fn combine(&self, old: &mut Row, new: Row) {
+        use crate::plan::Combine;
+        for ((o, n), how) in old.iter_mut().zip(new).zip(&self.key.combine) {
+            let take = match how {
+                Combine::Last => true,
+                _ if n.is_null() => false,
+                _ if o.is_null() => true,
+                Combine::Min => n.sort_cmp(o) == std::cmp::Ordering::Less,
+                Combine::Max => n.sort_cmp(o) == std::cmp::Ordering::Greater,
+            };
+            if take {
+                *o = n;
+            }
+        }
+    }
+
+    /// A round's rows, gathered by key (`counted`: as read, the step's).
+    fn candidates(&self, rows: Rows, all: bool, counted: bool) -> Result<Candidates> {
+        let mut c = Candidates {
+            rows: Vec::new(),
+            at: HashMap::new(),
+            all: all.then(crate::spill::Stash::new),
+        };
+        for r in rows {
+            let r = r?;
+            if counted {
+                // Each row a round makes counts as read: an endless
+                // recursion runs into the statement's budget.
+                crate::budget::charge_scan()?;
+            }
+            if let Some(all) = &mut c.all {
+                all.push(r.clone())?;
+            }
+            let k = self.key_of(&r);
+            match c.at.get(&k) {
+                Some(&i) => self.combine(&mut c.rows[i], r),
+                None => {
+                    c.at.insert(k, c.rows.len());
+                    c.rows.push(r);
+                }
+            }
+        }
+        Ok(c)
+    }
+
+    /// A round's rows applied to the table; the next round's: all of them
+    /// (`UNION ALL`), or the keys' rows new or changed.
+    fn apply(&mut self, c: Candidates, all: bool) -> Result<crate::spill::Stored> {
+        let mut next = crate::spill::Stash::new();
+        let mut keys: Vec<(Vec<Value>, usize)> = c.at.into_iter().collect();
+        keys.sort_unstable_by_key(|&(_, i)| i);
+        let mut rows = c.rows.into_iter();
+        for (k, _) in keys {
+            let new = rows.next().expect("a row a key");
+            match self.at.get(&k) {
+                Some(&i) => {
+                    let mut row = self.rows[i].clone();
+                    self.combine(&mut row, new);
+                    if row != self.rows[i] {
+                        if !all {
+                            next.push(row.clone())?;
+                        }
+                        self.rows[i] = row;
+                    }
+                }
+                None => {
+                    if !all {
+                        next.push(new.clone())?;
+                    }
+                    self.at.insert(k, self.rows.len());
+                    self.rows.push(new);
+                }
+            }
+        }
+        match c.all {
+            Some(all) => all.seal(),
+            None => next.seal(),
+        }
+    }
 }
 
 /// A recursive `UNION`'s rows seen (PLAN.md §M14.34 G1): a hash set up to

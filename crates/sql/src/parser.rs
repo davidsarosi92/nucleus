@@ -3199,6 +3199,11 @@ impl<'a> Parser<'a> {
         loop {
             let name = self.ident()?;
             let columns = self.column_aliases()?;
+            let key = if self.eat_kws(&["using", "key"]) {
+                Some(self.cte_key()?)
+            } else {
+                None
+            };
             self.expect_kw("as")?;
             // Planner hints; every CTE is materialized here.
             let _ = self.eat_kw("materialized") || self.eat_kws(&["not", "materialized"]);
@@ -3210,6 +3215,11 @@ impl<'a> Parser<'a> {
                 if !top {
                     return Err(Error::feature(
                         "WITH clause containing a data-modifying statement must be at the top level",
+                    ));
+                }
+                if key.is_some() {
+                    return Err(Error::syntax(
+                        "USING KEY is only for a recursive query's CTE",
                     ));
                 }
                 let statement = Box::new(self.statement()?);
@@ -3230,12 +3240,41 @@ impl<'a> Parser<'a> {
                     query: Box::new(query),
                     search,
                     cycle,
+                    key,
                 }));
             }
             if !self.eat_op(",") {
                 return Ok((recursive, ctes));
             }
         }
+    }
+
+    /// After `USING KEY`: `(item [, item …])`, an item a column or
+    /// `min(column)` / `max(column)`.
+    fn cte_key(&mut self) -> Result<Vec<CteKey>> {
+        self.expect_op("(")?;
+        let mut out = Vec::new();
+        loop {
+            let first = self.ident()?;
+            if self.eat_op("(") {
+                let column = self.ident()?;
+                self.expect_op(")")?;
+                out.push(CteKey {
+                    column,
+                    agg: Some(first),
+                });
+            } else {
+                out.push(CteKey {
+                    column: first,
+                    agg: None,
+                });
+            }
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        Ok(out)
     }
 
     /// After a CTE: `SEARCH DEPTH | BREADTH FIRST BY columns SET column`.

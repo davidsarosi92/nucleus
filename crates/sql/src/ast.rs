@@ -971,6 +971,19 @@ pub struct Cte {
     pub search: Option<CteSearch>,
     /// `CYCLE … SET … [TO … DEFAULT …] USING …` (a recursive one).
     pub cycle: Option<Box<CteCycle>>,
+    /// `USING KEY (…)` (a recursive one, PLAN.md §M14.34 G3): its rows
+    /// kept by key, a round's row replacing the one with its key.
+    pub key: Option<Vec<CteKey>>,
+}
+
+/// An item of `USING KEY (…)`: a key column, or a payload column and how
+/// a key's rows combine in it (`min(c)`, `max(c)`; others take the last).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CteKey {
+    /// The column.
+    pub column: String,
+    /// `min` or `max` (a payload column), or none (a key column).
+    pub agg: Option<String>,
 }
 
 /// `SEARCH DEPTH | BREADTH FIRST BY columns SET column`: a column ordering
