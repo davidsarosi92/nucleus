@@ -46,6 +46,17 @@ pub(crate) fn alter_table(
     table: &str,
     change: &TableChange,
 ) -> Result<()> {
+    // A property graph's definition names its tables and columns.
+    match change {
+        TableChange::Rename(_) => crate::graphs::check_unused(&*txn, table, None)?,
+        TableChange::RenameColumn { from, .. } => {
+            crate::graphs::check_unused(&*txn, table, Some(from))?
+        }
+        TableChange::DropColumn {
+            column, cascade, ..
+        } => crate::graphs::cascade(txn, table, Some(column), *cascade)?,
+        _ => {}
+    }
     match change {
         TableChange::Rename(to) => rename_table(txn, reg, table, to),
         TableChange::RenameConstraint { from, to } => rename_constraint(txn, table, from, to),

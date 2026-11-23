@@ -127,6 +127,7 @@ ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages FORCE ROW LEVEL SECURITY;
 CREATE POLICY own ON messages USING (sender = current_user);
 CREATE POLICY no_spam ON messages AS RESTRICTIVE FOR INSERT WITH CHECK (length(body) < 1000);
+CREATE PROPERTY GRAPH "Org Chart" VERTEX TABLES (dept LABEL unit, "Emp Loyees" AS emp LABEL person PROPERTIES (id, "select" AS chosen)) EDGE TABLES ("Emp Loyees" AS member KEY (id) SOURCE KEY (id) REFERENCES emp (id) DESTINATION KEY (dept_id) REFERENCES dept (id) NO PROPERTIES);
 "#;
 
 #[test]
@@ -160,6 +161,7 @@ fn a_schema_of_every_kind_replays() {
         "subject",
         "row security",
         "policy",
+        "property graph",
     ] {
         assert!(kinds.contains(&k), "no {k} in {defs:#?}");
     }

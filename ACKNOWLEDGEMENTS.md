@@ -41,6 +41,9 @@ checked against.
 - **SQL:1999 `SEARCH` / `CYCLE`, as PostgreSQL 14 has them** — written as the rewrite PostgreSQL's documentation gives as their meaning. §M14.34 G2.
 - **DuckDB's `USING KEY` (Hirn & Grust, "A Fix for the Fixation on Fixpoints", CIDR 2023; DuckDB 2.0's meaning)** — a recursive query's rows kept as a table by key. §M14.34 G3.
 - **HyPer / Umbra's iterations; Datalog engines and Soufflé** — each round chooses its join by the rows the last one gave. §M14.34 G1.
+- **SQL/PGQ (ISO/IEC 9075-16:2023)** — `CREATE PROPERTY GRAPH`, `GRAPH_TABLE`, its patterns, labels and defaults, and what they mean. §M14.34 G4.
+- **PostgreSQL 19 beta's SQL/PGQ, as its documentation describes it** — `GRAPH_TABLE` rewritten into joins, one per choice of element tables; matches as joins match. §M14.34 G4.
+- **DuckPGQ (ten Wolde, Singh, Szárnyas & Boncz, CIDR 2023)** — quantified edges, `ANY SHORTEST` and `path_length` over recursive SQL. §M14.34 G4.
 
 ## Executor and vectorization
 

@@ -1474,6 +1474,9 @@ impl<'a> Parser<'a> {
         if unique {
             return Err(self.error("expected INDEX"));
         }
+        if self.eat_kws(&["property", "graph"]) {
+            return self.create_graph();
+        }
         if self.eat_kw("statistics") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.ident()?;
@@ -2258,6 +2261,13 @@ impl<'a> Parser<'a> {
             let if_exists = self.eat_kws(&["if", "exists"]);
             return Ok(Statement::DropIndex {
                 name: self.ident()?,
+                if_exists,
+            });
+        }
+        if self.eat_kws(&["property", "graph"]) {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            return Ok(Statement::DropPropertyGraph {
+                name: self.relation()?,
                 if_exists,
             });
         }
@@ -3781,6 +3791,9 @@ impl<'a> Parser<'a> {
             schema = Some(name);
             name = self.ident()?;
         }
+        if schema.is_none() && name == "graph_table" && self.eat_op("(") {
+            return self.graph_table();
+        }
         if schema.is_none() && name == "json_table" && self.eat_op("(") {
             let query = self.json_table()?;
             let alias = self.alias()?.unwrap_or_else(|| "json_table".into());
@@ -3863,6 +3876,403 @@ impl<'a> Parser<'a> {
             sample,
             as_of,
         })
+    }
+
+    // --------------------------------------------- property graphs (SQL/PGQ)
+
+    /// After `CREATE PROPERTY GRAPH`: `name VERTEX TABLES (…) [EDGE
+    /// TABLES (…)]` (`NODE` and `RELATIONSHIP` too, as the standard has).
+    fn create_graph(&mut self) -> Result<Statement> {
+        let name = self.relation()?;
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        if self.eat_kws(&["vertex", "tables"]) || self.eat_kws(&["node", "tables"]) {
+            vertices = self.graph_elements(false)?;
+        }
+        if self.eat_kws(&["edge", "tables"]) || self.eat_kws(&["relationship", "tables"]) {
+            edges = self.graph_elements(true)?;
+        }
+        if vertices.is_empty() {
+            return Err(self.error("expected VERTEX TABLES"));
+        }
+        Ok(Statement::CreatePropertyGraph(Box::new(CreateGraph {
+            name,
+            vertices,
+            edges,
+        })))
+    }
+
+    fn graph_elements(&mut self, edge: bool) -> Result<Vec<GraphElementDef>> {
+        self.expect_op("(")?;
+        let mut out = Vec::new();
+        loop {
+            out.push(self.graph_element(edge)?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        Ok(out)
+    }
+
+    fn graph_element(&mut self, edge: bool) -> Result<GraphElementDef> {
+        let table = self.relation()?;
+        let alias = if self.eat_kw("as") {
+            Some(self.ident()?)
+        } else {
+            None
+        };
+        let key = if self.eat_kw("key") {
+            Some(self.ident_list()?)
+        } else {
+            None
+        };
+        let (source, destination) = if edge {
+            self.expect_kw("source")?;
+            let s = self.graph_endpoint()?;
+            self.expect_kw("destination")?;
+            (Some(s), Some(self.graph_endpoint()?))
+        } else {
+            (None, None)
+        };
+        let mut labels = Vec::new();
+        loop {
+            let name = if self.eat_kw("label") {
+                Some(self.ident()?)
+            } else if self.eat_kws(&["default", "label"]) {
+                None
+            } else {
+                break;
+            };
+            let properties = self
+                .graph_properties()?
+                .unwrap_or(GraphProperties::All { except: vec![] });
+            labels.push(GraphLabelDef { name, properties });
+        }
+        if labels.is_empty()
+            && let Some(properties) = self.graph_properties()?
+        {
+            labels.push(GraphLabelDef {
+                name: None,
+                properties,
+            });
+        }
+        Ok(GraphElementDef {
+            table,
+            alias,
+            key,
+            source,
+            destination,
+            labels,
+        })
+    }
+
+    /// `[KEY (columns) REFERENCES] vertex [(columns)]`.
+    fn graph_endpoint(&mut self) -> Result<GraphEndpointDef> {
+        let key = if self.eat_kw("key") {
+            let k = self.ident_list()?;
+            self.expect_kw("references")?;
+            Some(k)
+        } else {
+            None
+        };
+        let vertex = self.ident()?;
+        let references = if self.peek_op("(") {
+            Some(self.ident_list()?)
+        } else {
+            None
+        };
+        Ok(GraphEndpointDef {
+            key,
+            vertex,
+            references,
+        })
+    }
+
+    /// `PROPERTIES (expr [AS name], …) | PROPERTIES ALL COLUMNS [EXCEPT
+    /// (columns)] | NO PROPERTIES`, if there.
+    fn graph_properties(&mut self) -> Result<Option<GraphProperties>> {
+        if self.eat_kws(&["no", "properties"]) {
+            return Ok(Some(GraphProperties::None));
+        }
+        if !self.eat_kw("properties") {
+            return Ok(None);
+        }
+        // `PROPERTIES [ARE] ALL COLUMNS [EXCEPT (columns)]`.
+        if self.eat_kws(&["are", "all", "columns"]) || self.eat_kws(&["all", "columns"]) {
+            let except = if self.eat_kw("except") {
+                self.ident_list()?
+            } else {
+                vec![]
+            };
+            return Ok(Some(GraphProperties::All { except }));
+        }
+        self.expect_op("(")?;
+        let mut list = Vec::new();
+        loop {
+            list.push(self.named_expr_text("property")?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        Ok(Some(GraphProperties::List(list)))
+    }
+
+    /// `expr [AS name]`: the expression's text and its name (a column's
+    /// own without `AS`).
+    fn named_expr_text(&mut self, what: &str) -> Result<(String, String)> {
+        let (e, text) = self.text_of(|p| p.expr())?;
+        let name = if self.eat_kw("as") {
+            self.ident()?
+        } else {
+            match e {
+                Expr::Column { name, .. } => name,
+                _ => return Err(self.error(&format!("a {what} expression needs AS name"))),
+            }
+        };
+        Ok((text, name))
+    }
+
+    /// After `GRAPH_TABLE (`: `graph MATCH pattern [, pattern …] [WHERE
+    /// cond] COLUMNS (expr [AS name], …) ) [AS] alias [(columns)]`.
+    fn graph_table(&mut self) -> Result<TableRef> {
+        let graph = self.relation()?;
+        self.expect_kw("match")?;
+        let mut paths = vec![self.graph_path()?];
+        while self.eat_op(",") {
+            paths.push(self.graph_path()?);
+        }
+        let filter = if self.eat_kw("where") {
+            Some(self.text_of(|p| p.expr())?.1)
+        } else {
+            None
+        };
+        self.expect_kw("columns")?;
+        self.expect_op("(")?;
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.named_expr_text("COLUMNS")?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        self.expect_op(")")?;
+        let alias = self.alias()?;
+        let column_aliases = if alias.is_some() {
+            self.column_aliases()?
+        } else {
+            Vec::new()
+        };
+        Ok(TableRef::GraphTable(Box::new(GraphTable {
+            graph,
+            paths,
+            filter,
+            columns,
+            alias,
+            column_aliases,
+        })))
+    }
+
+    fn eat_user_op(&mut self, op: &str) -> bool {
+        if matches!(self.peek(), Some(Token::UserOp(o)) if o == op) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// `[p =] [ANY SHORTEST] (v) edge (w) …`.
+    fn graph_path(&mut self) -> Result<GraphPath> {
+        let var = if matches!(self.peek(), Some(Token::Word(_) | Token::Quoted(_)))
+            && matches!(self.peek_at(1), Some(Token::Op("=")))
+        {
+            let v = self.ident()?;
+            self.pos += 1;
+            Some(v)
+        } else {
+            None
+        };
+        let any_shortest = self.eat_kws(&["any", "shortest"]);
+        let mut elements = vec![self.graph_vertex()?];
+        while let Some(edge) = self.graph_edge()? {
+            elements.push(edge);
+            elements.push(self.graph_vertex()?);
+        }
+        Ok(GraphPath {
+            var,
+            any_shortest,
+            elements,
+        })
+    }
+
+    /// `([v] [IS | : labels] [WHERE cond])`.
+    fn graph_vertex(&mut self) -> Result<GraphPattern> {
+        self.expect_op("(")?;
+        let mut v = self.graph_filler(None)?;
+        self.expect_op(")")?;
+        v.edge = None;
+        Ok(v)
+    }
+
+    /// What is inside a vertex's `( )` or an edge's `[ ]`.
+    fn graph_filler(&mut self, edge: Option<EdgeDirection>) -> Result<GraphPattern> {
+        let var = match self.peek() {
+            Some(Token::Word(w)) if w != "is" && w != "where" => Some(self.ident()?),
+            Some(Token::Quoted(_)) => Some(self.ident()?),
+            _ => None,
+        };
+        let label = if self.eat_kw("is") || self.eat_op(":") {
+            Some(self.label_or()?)
+        } else {
+            None
+        };
+        let filter = if self.eat_kw("where") {
+            Some(self.text_of(|p| p.expr())?.1)
+        } else {
+            None
+        };
+        Ok(GraphPattern {
+            var,
+            label,
+            filter,
+            edge,
+            quantifier: None,
+        })
+    }
+
+    /// An edge pattern — `-[…]->`, `<-[…]-`, `-[…]-`, or `->`, `<-`, `-`,
+    /// `<->` — and its quantifier; `None` where none follows.
+    fn graph_edge(&mut self) -> Result<Option<GraphPattern>> {
+        let left = matches!(self.peek(), Some(Token::Op("<")))
+            && matches!(self.peek_at(1), Some(Token::Op("-")));
+        let mut star = false;
+        let mut e = if left || self.peek_op("-") {
+            self.pos += if left { 2 } else { 1 };
+            let mut e = if self.eat_op("[") {
+                let e = self.graph_filler(None)?;
+                self.expect_op("]")?;
+                e
+            } else {
+                self.graph_filler_empty()
+            };
+            // The end: `-` (or `->` after a `-`, not after `<-`).
+            let right = !left
+                && (self.eat_user_op("->") || {
+                    star = self.eat_user_op("->*");
+                    star
+                });
+            if !right {
+                if self.eat_op("-") {
+                } else if self.eat_user_op("-*") {
+                    star = true;
+                } else if !self.peek_op("(") || left {
+                    // `(a)-(b)` and `(a)<-(b)` have no end of their own.
+                    if !self.peek_op("(") {
+                        return Err(self.error("expected - or -> to end the edge"));
+                    }
+                }
+            }
+            e.edge = Some(match (left, right) {
+                (true, _) => EdgeDirection::Left,
+                (false, true) => EdgeDirection::Right,
+                (false, false) => EdgeDirection::Any,
+            });
+            e
+        } else if self.eat_user_op("->") {
+            let mut e = self.graph_filler_empty();
+            e.edge = Some(EdgeDirection::Right);
+            e
+        } else if self.eat_user_op("<->") {
+            let mut e = self.graph_filler_empty();
+            e.edge = Some(EdgeDirection::Any);
+            e
+        } else {
+            return Ok(None);
+        };
+        e.quantifier = if star || self.eat_op("*") {
+            Some((0, None))
+        } else if self.eat_op("+") {
+            Some((1, None))
+        } else if self.eat_op("{") {
+            let number = |p: &mut Self| -> Result<Option<u32>> {
+                match p.peek() {
+                    Some(Token::Number(n)) => {
+                        let n = n
+                            .parse::<u32>()
+                            .map_err(|_| p.error("expected a whole number"))?;
+                        p.pos += 1;
+                        Ok(Some(n))
+                    }
+                    _ => Ok(None),
+                }
+            };
+            let lo = number(self)?;
+            let q = if self.eat_op(",") {
+                (lo.unwrap_or(0), number(self)?)
+            } else {
+                let n = lo.ok_or_else(|| self.error("expected a number"))?;
+                (n, Some(n))
+            };
+            self.expect_op("}")?;
+            if q.1.is_some_and(|hi| hi < q.0) {
+                return Err(Error::syntax(format!(
+                    "the quantifier's upper bound {} is below its lower bound {}",
+                    q.1.unwrap_or(0),
+                    q.0
+                )));
+            }
+            Some(q)
+        } else {
+            None
+        };
+        Ok(Some(e))
+    }
+
+    fn graph_filler_empty(&self) -> GraphPattern {
+        GraphPattern {
+            var: None,
+            label: None,
+            filter: None,
+            edge: None,
+            quantifier: None,
+        }
+    }
+
+    /// `a | b | …`.
+    fn label_or(&mut self) -> Result<LabelExpr> {
+        let mut e = self.label_and()?;
+        while self.eat_user_op("|") {
+            e = LabelExpr::Or(Box::new(e), Box::new(self.label_and()?));
+        }
+        Ok(e)
+    }
+
+    /// `a & b & …`.
+    fn label_and(&mut self) -> Result<LabelExpr> {
+        let mut e = self.label_unary()?;
+        while self.eat_user_op("&") {
+            e = LabelExpr::And(Box::new(e), Box::new(self.label_unary()?));
+        }
+        Ok(e)
+    }
+
+    /// `!a`, `%`, `(a | b)`, `a`.
+    fn label_unary(&mut self) -> Result<LabelExpr> {
+        if self.eat_user_op("!") {
+            return Ok(LabelExpr::Not(Box::new(self.label_unary()?)));
+        }
+        if self.eat_op("%") {
+            return Ok(LabelExpr::Any);
+        }
+        if self.eat_op("(") {
+            let e = self.label_or()?;
+            self.expect_op(")")?;
+            return Ok(e);
+        }
+        Ok(LabelExpr::Name(self.ident()?))
     }
 
     /// `(a, b, …)` after a table alias, if present.

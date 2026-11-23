@@ -1,0 +1,483 @@
+# Property graphs (PLAN.md §M14.34 G4, SQL/PGQ — ISO/IEC 9075-16):
+# CREATE PROPERTY GRAPH over tables, GRAPH_TABLE's patterns as the joins
+# and recursive queries they mean.  PostgreSQL 18 has no SQL/PGQ: the
+# small graph's answers are checked by hand, the generated graph's
+# against PostgreSQL 18's answers to the same questions as joins and
+# recursive queries (each written out in its record's comment).
+
+statement ok
+CREATE TABLE person (id int PRIMARY KEY, name text, born int)
+
+statement ok
+CREATE TABLE city (id int PRIMARY KEY, name text)
+
+statement ok
+CREATE TABLE knows (a int REFERENCES person, b int REFERENCES person, since int, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE lives (person int REFERENCES person, city int REFERENCES city, PRIMARY KEY (person))
+
+statement ok
+INSERT INTO person VALUES (1, 'ann', 1980), (2, 'bob', 1990), (3, 'cy', 1985), (4, 'dee', 2000)
+
+statement ok
+INSERT INTO city VALUES (10, 'oslo'), (20, 'rome')
+
+statement ok
+INSERT INTO knows VALUES (1, 2, 2010), (2, 3, 2015), (3, 1, 2020), (1, 4, 2021)
+
+statement ok
+INSERT INTO lives VALUES (1, 10), (2, 20), (3, 10)
+
+# nucleus-only: knows has two foreign keys to person: which is its source
+# is not for the graph to guess
+statement error 42P17
+CREATE PROPERTY GRAPH social VERTEX TABLES (person, city) EDGE TABLES (knows SOURCE person DESTINATION person)
+
+# nucleus-only: an edge's ends by its columns; lives's by its foreign keys
+statement ok
+CREATE PROPERTY GRAPH social VERTEX TABLES (person, city) EDGE TABLES (knows SOURCE KEY (a) REFERENCES person (id) DESTINATION KEY (b) REFERENCES person (id), lives SOURCE person DESTINATION city)
+
+# nucleus-only: every default spelled out
+query TBT
+SELECT name, owner = current_user, definition FROM nc_catalog.property_graphs
+----
+social true CREATE PROPERTY GRAPH social VERTEX TABLES (person KEY (id) LABEL person PROPERTIES (id, name, born), city KEY (id) LABEL city PROPERTIES (id, name)) EDGE TABLES (knows KEY (a, b) SOURCE KEY (a) REFERENCES person (id) DESTINATION KEY (b) REFERENCES person (id) LABEL knows PROPERTIES (a, b, since), lives KEY (person) SOURCE KEY (person) REFERENCES person (id) DESTINATION KEY (city) REFERENCES city (id) LABEL lives PROPERTIES (person, city))
+
+# nucleus-only: SQL/PGQ
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (p IS person)-[k IS knows]->(q IS person) COLUMNS (p.name AS p, q.name AS q)) ORDER BY 1, 2
+----
+ann bob
+ann dee
+bob cy
+cy ann
+
+# nucleus-only: a vertex without a label is any table an edge reaches;
+# a column named by its property
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (p:person)-[:lives]->(c) WHERE c.name = 'oslo' COLUMNS (p.name, c.name AS city)) g ORDER BY 1
+----
+ann oslo
+cy oslo
+
+# nucleus-only: against the edge
+query TTI
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)<-[k IS knows]-(b IS person) COLUMNS (a.name AS a, b.name AS b, k.since)) ORDER BY 3
+----
+bob ann 2010
+cy bob 2015
+ann cy 2020
+dee ann 2021
+
+# nucleus-only: two edges may be the same edge (as joins match)
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]->(b IS person)<-[IS knows]-(c IS person) WHERE a.name = 'ann' COLUMNS (b.name AS b, c.name AS c)) ORDER BY 1
+----
+bob ann
+dee ann
+
+# nucleus-only: two paths, joined by their shared variable
+query TTT
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]->(b IS person), (b)-[IS lives]->(c IS city) COLUMNS (a.name AS a, b.name AS b, c.name AS c)) ORDER BY 1
+----
+ann bob rome
+bob cy oslo
+cy ann oslo
+
+# nucleus-only: walks of one to three edges, each a row
+query TTI
+SELECT * FROM GRAPH_TABLE (social MATCH p = (a IS person WHERE a.name = 'ann')-[k IS knows]->{1,3}(b IS person) COLUMNS (a.name AS a, b.name AS b, path_length(p) AS n)) ORDER BY 3, 2
+----
+ann bob 1
+ann dee 1
+ann cy 2
+ann ann 3
+
+# nucleus-only: one walk of the fewest edges per pair (dee knows no one)
+query TTI
+SELECT * FROM GRAPH_TABLE (social MATCH p = ANY SHORTEST (a IS person)-[IS knows]->+(b IS person) COLUMNS (a.name AS a, b.name AS b, path_length(p) AS n)) ORDER BY 1, 2
+----
+ann ann 3
+ann bob 1
+ann cy 2
+ann dee 1
+bob ann 2
+bob bob 3
+bob cy 1
+bob dee 3
+cy ann 1
+cy bob 2
+cy cy 3
+cy dee 2
+
+# nucleus-only: either way
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]-(b IS person) WHERE a.name = 'ann' COLUMNS (a.name AS a, b.name AS b)) ORDER BY 2
+----
+ann bob
+ann cy
+ann dee
+
+statement ok
+INSERT INTO knows VALUES (4, 4, 2022)
+
+# nucleus-only: an edge to itself, either way, is matched once
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]-(b IS person) WHERE a.name = 'dee' COLUMNS (a.name AS a, b.name AS b)) ORDER BY 2
+----
+dee ann
+dee dee
+
+# nucleus-only: zero edges reach the start
+query TI
+SELECT * FROM GRAPH_TABLE (social MATCH p = (a IS person WHERE a.name = 'dee')-[IS knows]->{0,2}(b) COLUMNS (b.name, path_length(p) AS n)) ORDER BY 2, 1
+----
+dee 0
+dee 1
+dee 2
+
+# nucleus-only: no table can be both: no rows
+query T
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS city)-[IS knows]->(b) COLUMNS (a.name))
+----
+
+# Labels shared by tables, label expressions, properties a table lacks.
+
+statement ok
+CREATE TABLE company (id int PRIMARY KEY, name text, founded int)
+
+statement ok
+CREATE TABLE works (person int REFERENCES person, company int REFERENCES company, PRIMARY KEY (person, company))
+
+statement ok
+INSERT INTO company VALUES (100, 'acme', 1950), (200, 'zeta', 2001)
+
+statement ok
+INSERT INTO works VALUES (1, 100), (2, 100), (4, 200)
+
+# nucleus-only: a label means the same properties wherever it is
+statement error 42P17
+CREATE PROPERTY GRAPH world VERTEX TABLES (person LABEL entity PROPERTIES (name), company LABEL entity PROPERTIES (name, founded))
+
+# nucleus-only: SQL/PGQ
+statement ok
+CREATE PROPERTY GRAPH world VERTEX TABLES (person LABEL entity PROPERTIES (name) LABEL human, city LABEL place PROPERTIES (name), company LABEL entity PROPERTIES (name) LABEL firm PROPERTIES (founded, founded / 100 * 100 AS decade)) EDGE TABLES (knows KEY (a, b) SOURCE KEY (a) REFERENCES person (id) DESTINATION KEY (b) REFERENCES person (id) NO PROPERTIES, lives SOURCE person DESTINATION city LABEL located NO PROPERTIES, works SOURCE person DESTINATION company LABEL located NO PROPERTIES)
+
+# nucleus-only: SQL/PGQ
+query T
+SELECT * FROM GRAPH_TABLE (world MATCH (x IS entity) COLUMNS (x.name)) ORDER BY 1
+----
+acme
+ann
+bob
+cy
+dee
+zeta
+
+# nucleus-only: SQL/PGQ
+query T
+SELECT * FROM GRAPH_TABLE (world MATCH (x IS entity & !firm) COLUMNS (x.name)) ORDER BY 1
+----
+ann
+bob
+cy
+dee
+
+# nucleus-only: a property a table lacks is NULL
+query TII
+SELECT * FROM GRAPH_TABLE (world MATCH (x IS place | firm) COLUMNS (x.name, x.founded, x.decade)) ORDER BY 1
+----
+acme 1950 1900
+oslo NULL NULL
+rome NULL NULL
+zeta 2001 2000
+
+# nucleus-only: % is any label
+query I
+SELECT count(*) FROM GRAPH_TABLE (world MATCH (x IS %) COLUMNS (1 AS one))
+----
+8
+
+# nucleus-only: one label, two edge tables
+query TT
+SELECT * FROM GRAPH_TABLE (world MATCH (p IS human)-[IS located]->(x) COLUMNS (p.name, x.name AS at)) ORDER BY 1, 2
+----
+ann acme
+ann oslo
+bob acme
+bob rome
+cy oslo
+dee zeta
+
+# nucleus-only: SQL/PGQ
+query TT
+SELECT * FROM GRAPH_TABLE (world MATCH (a IS human)-[IS knows]->(b IS human)-[IS located]->(c IS firm) COLUMNS (a.name, c.name AS firm)) ORDER BY 1, 2
+----
+ann acme
+ann zeta
+cy acme
+dee zeta
+
+# nucleus-only: GRAPH_TABLE is a table: joined, grouped
+query TI
+SELECT c.name, count(*) FROM GRAPH_TABLE (world MATCH (a IS human)-[IS located]->(c IS firm) COLUMNS (c.name AS firm)) g JOIN company c ON c.name = g.firm GROUP BY c.name ORDER BY 1
+----
+acme 2
+zeta 1
+
+# nucleus-only: column aliases
+query T
+SELECT f FROM GRAPH_TABLE (world MATCH (x IS firm) COLUMNS (x.name)) AS g (f) ORDER BY 1
+----
+acme
+zeta
+
+# Errors.
+
+# nucleus-only: SQL/PGQ
+statement error 42710
+CREATE PROPERTY GRAPH social VERTEX TABLES (person)
+
+# nucleus-only: SQL/PGQ
+statement error 42P01
+CREATE PROPERTY GRAPH nope VERTEX TABLES (nobody)
+
+# nucleus-only: SQL/PGQ
+statement error 42703
+CREATE PROPERTY GRAPH nope VERTEX TABLES (person KEY (nothing))
+
+# nucleus-only: SQL/PGQ
+statement error 42704
+CREATE PROPERTY GRAPH nope VERTEX TABLES (person) EDGE TABLES (lives SOURCE person DESTINATION city)
+
+# nucleus-only: SQL/PGQ
+statement error 42704
+SELECT * FROM GRAPH_TABLE (nope MATCH (a) COLUMNS (a.id))
+
+# nucleus-only: SQL/PGQ
+statement error 42704
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS nobody) COLUMNS (a.id))
+
+# nucleus-only: a walk without an end needs ANY SHORTEST
+statement error 0A000
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]->+(b IS person) COLUMNS (a.id))
+
+# nucleus-only: a quantified edge's variable is a group of edges
+statement error 0A000
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[k IS knows]->{1,2}(b IS person) COLUMNS (k.since))
+
+# nucleus-only: a walk through vertex tables of two kinds
+statement error 0A000
+SELECT * FROM GRAPH_TABLE (social MATCH (a)-[]->{1,2}(b) COLUMNS (a.id))
+
+# nucleus-only: SQL/PGQ
+statement error 42703
+SELECT * FROM GRAPH_TABLE (social MATCH p = (a IS person)-[IS knows]->{1,2}(b IS person) COLUMNS (path_length(q) AS n))
+
+# nucleus-only: SQL/PGQ
+statement error 42601
+SELECT * FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]->{3,1}(b IS person) COLUMNS (a.id))
+
+# nucleus-only: what a graph names stays while it does
+statement error 2BP01
+DROP TABLE works
+
+# nucleus-only: SQL/PGQ
+statement error 2BP01
+ALTER TABLE company RENAME TO firm
+
+# nucleus-only: SQL/PGQ
+statement error 2BP01
+ALTER TABLE company DROP COLUMN founded
+
+# nucleus-only: SQL/PGQ
+statement error 2BP01
+ALTER TABLE person RENAME COLUMN born TO birth
+
+statement ok
+CREATE TABLE tag (id int PRIMARY KEY, label text, junk int)
+
+# nucleus-only: the standard's spelling of all columns but some
+statement ok
+CREATE PROPERTY GRAPH tags VERTEX TABLES (tag PROPERTIES ARE ALL COLUMNS EXCEPT (id, junk))
+
+# nucleus-only: SQL/PGQ
+query T
+SELECT definition FROM nc_catalog.property_graphs WHERE name = 'tags'
+----
+CREATE PROPERTY GRAPH tags VERTEX TABLES (tag KEY (id) LABEL tag PROPERTIES (label))
+
+# nucleus-only: a column it does not name is the table's to change
+statement ok
+ALTER TABLE tag DROP COLUMN junk
+
+# nucleus-only: SQL/PGQ
+statement error 2BP01
+ALTER TABLE tag DROP COLUMN label
+
+# nucleus-only: CASCADE drops the graph too
+statement ok
+ALTER TABLE tag DROP COLUMN label CASCADE
+
+# nucleus-only: SQL/PGQ
+query I
+SELECT count(*) FROM nc_catalog.property_graphs WHERE name = 'tags'
+----
+0
+
+# nucleus-only: SQL/PGQ
+statement ok
+CREATE PROPERTY GRAPH tags VERTEX TABLES (tag)
+
+# nucleus-only: SQL/PGQ
+statement ok
+DROP TABLE tag CASCADE
+
+# nucleus-only: SQL/PGQ
+statement error 42704
+DROP PROPERTY GRAPH tags
+
+# nucleus-only: SQL/PGQ
+statement error 42704
+DROP PROPERTY GRAPH tags
+
+# nucleus-only: SQL/PGQ
+statement ok
+DROP PROPERTY GRAPH IF EXISTS tags
+
+# nucleus-only: a graph is its maker's to drop
+statement ok
+CREATE ROLE slt_graph_other
+
+# nucleus-only: SQL/PGQ
+statement ok
+GRANT SELECT ON person, knows TO slt_graph_other
+
+# nucleus-only: SQL/PGQ
+statement ok
+SET ROLE slt_graph_other
+
+# nucleus-only: reading a graph reads its tables, by the reader's rights
+query I
+SELECT count(*) FROM GRAPH_TABLE (social MATCH (a IS person)-[IS knows]->(b IS person) COLUMNS (a.id))
+----
+5
+
+# nucleus-only: SQL/PGQ
+statement error 42501
+SELECT count(*) FROM GRAPH_TABLE (social MATCH (a IS person)-[IS lives]->(b) COLUMNS (a.id))
+
+# nucleus-only: SQL/PGQ
+statement error 42501
+DROP PROPERTY GRAPH social
+
+# nucleus-only: SQL/PGQ
+statement ok
+CREATE PROPERTY GRAPH theirs VERTEX TABLES (person)
+
+# nucleus-only: SQL/PGQ
+statement ok
+RESET ROLE
+
+# nucleus-only: SQL/PGQ
+statement ok
+REVOKE SELECT ON person, knows FROM slt_graph_other
+
+# nucleus-only: a role that owns a graph stays
+statement error 2BP01
+DROP ROLE slt_graph_other
+
+# nucleus-only: the superuser may drop anyone's
+statement ok
+DROP PROPERTY GRAPH theirs
+
+# nucleus-only: SQL/PGQ
+statement ok
+DROP ROLE slt_graph_other
+
+# A generated graph: 100 nodes, 250 edges.
+
+statement ok
+CREATE TABLE node (id int PRIMARY KEY, grp int)
+
+statement ok
+INSERT INTO node SELECT g, g % 7 FROM generate_series(0, 99) g
+
+statement ok
+CREATE TABLE edge (id int PRIMARY KEY, src int REFERENCES node, dst int REFERENCES node, w int)
+
+statement ok
+INSERT INTO edge SELECT g, g % 100, (g * 37 + 11) % 100, g % 5 + 1 FROM generate_series(0, 249) g
+
+# nucleus-only: SQL/PGQ
+statement ok
+CREATE PROPERTY GRAPH gen VERTEX TABLES (node) EDGE TABLES (edge SOURCE KEY (src) REFERENCES node (id) DESTINATION KEY (dst) REFERENCES node (id))
+
+# nucleus-only: = SELECT count(*), sum(a.id), sum(c.id) FROM node a JOIN
+# edge e ON e.src = a.id JOIN node b ON b.id = e.dst JOIN edge f ON
+# f.src = b.id JOIN node c ON c.id = f.dst WHERE a.grp = c.grp
+query III
+SELECT count(*), sum(a), sum(c) FROM GRAPH_TABLE (gen MATCH (a)-[e]->(b)-[f]->(c) WHERE a.grp = c.grp COLUMNS (a.id AS a, c.id AS c))
+----
+75 3359 3821
+
+# nucleus-only: = SELECT count(*), sum(b.id) FROM node a JOIN edge e ON
+# e.src = a.id OR e.dst = a.id JOIN node b ON (e.src = a.id AND e.dst =
+# b.id) OR (e.dst = a.id AND e.src = b.id) WHERE a.id < 10
+query II
+SELECT count(*), sum(b) FROM GRAPH_TABLE (gen MATCH (a WHERE a.id < 10)-[e]-(b) COLUMNS (b.id AS b))
+----
+54 2637
+
+# nucleus-only: = WITH RECURSIVE r (s, e, len) AS (SELECT src, dst, 1 FROM
+# edge WHERE w > 1 AND src < 5 UNION ALL SELECT r.s, x.dst, r.len + 1
+# FROM r JOIN edge x ON x.src = r.e WHERE x.w > 1 AND r.len < 4) SELECT
+# count(*), sum(len), sum(e) FROM r
+query III
+SELECT count(*), sum(n), sum(b) FROM GRAPH_TABLE (gen MATCH p = (a WHERE a.id < 5)-[e WHERE e.w > 1]->{1,4}(b) COLUMNS (path_length(p) AS n, b.id AS b))
+----
+90 246 3918
+
+# nucleus-only: = WITH RECURSIVE r (s, e, len) AS (SELECT src, dst, 1 FROM
+# edge UNION SELECT r.s, x.dst, r.len + 1 FROM r JOIN edge x ON x.src =
+# r.e WHERE r.len < 30) SELECT count(*), sum(m), max(m) FROM (SELECT s, e,
+# min(len) m FROM r GROUP BY s, e) t
+query III
+SELECT count(*), sum(n), max(n) FROM GRAPH_TABLE (gen MATCH p = ANY SHORTEST (a)-[e]->+(b) COLUMNS (path_length(p) AS n))
+----
+1680 17000 20
+
+# nucleus-only: = the same, min(len) of the rows WHERE len >= 2
+query III
+SELECT count(*), sum(n), max(n) FROM GRAPH_TABLE (gen MATCH p = ANY SHORTEST (a)-[e]->{2,}(b) COLUMNS (path_length(p) AS n))
+----
+1680 18680 21
+
+# nucleus-only: = WITH RECURSIVE x (s, d) AS (SELECT src, dst FROM edge
+# UNION ALL SELECT dst, src FROM edge), r (s, e, len) AS (SELECT 0, 0, 0
+# UNION SELECT r.s, x.d, r.len + 1 FROM r JOIN x ON x.s = r.e WHERE r.len
+# < 30) SELECT count(*), sum(m), max(m) FROM (SELECT s, e, min(len) m FROM
+# r GROUP BY s, e) t
+query III
+SELECT count(*), sum(n), max(n) FROM GRAPH_TABLE (gen MATCH p = ANY SHORTEST (a WHERE a.id = 0)-[e]-*(b) COLUMNS (path_length(p) AS n))
+----
+20 100 10
+
+# nucleus-only: = WITH RECURSIVE r (s, e, len) AS (SELECT dst, src, 1 FROM
+# edge UNION SELECT r.s, x.src, r.len + 1 FROM r JOIN edge x ON x.dst =
+# r.e WHERE r.len < 3) SELECT count(*), sum(m) FROM (SELECT s, e, min(len)
+# m FROM r GROUP BY s, e) t JOIN node a ON a.id = t.s JOIN node b ON b.id
+# = t.e WHERE a.grp = b.grp
+query II
+SELECT count(*), sum(n) FROM GRAPH_TABLE (gen MATCH p = ANY SHORTEST (a)<-[e]-{1,3}(b) WHERE a.grp = b.grp COLUMNS (path_length(p) AS n))
+----
+43 85
+
+# nucleus-only: SQL/PGQ
+statement ok
+DROP PROPERTY GRAPH gen
+
+# nucleus-only: the graph world is left for the schema's replay
+statement ok
+DROP PROPERTY GRAPH social

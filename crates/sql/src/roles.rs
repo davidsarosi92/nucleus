@@ -594,6 +594,12 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                         .filter(|m| m.owner == *name)
                         .map(|m| format!("model {}", m.name)),
                 );
+                owned.extend(
+                    crate::graphs::all(&*txn)?
+                        .into_iter()
+                        .filter(|g| g.owner == *name)
+                        .map(|g| format!("property graph {}", g.name)),
+                );
                 owned.extend(crate::privileges::held_by(&*txn, name)?);
                 if !owned.is_empty() {
                     return Err(Error::dependent_objects(format!(

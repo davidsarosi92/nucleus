@@ -292,7 +292,7 @@ are marked ✅.
 | | M14.30 | Encryption and key custody: one key hierarchy (database-managed, user-managed, an external KMS), encryption at rest, per-user keys released for a session, client-side encrypted columns | ✅ 2026-11-16: K1 ✅, K2 ✅ (2026-11-15), the CPU's AES ✅, K3a AWS KMS ✅, K3b Vault Transit ✅, K3c Google Cloud KMS ✅, K3 ✅ (2026-11-16: AWS KMS, Vault Transit, Google Cloud KMS, Azure Key Vault, PKCS#11, a new data key online), K4a sealed rows ✅, K4b keys users hold ✅, K4c sealed memory stores ✅, K5a encrypted columns' format (Rust) ✅, K5b every driver ✅ |
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
-| | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ⬜ agreed 2026-11-22 (G1–G4); G1–G3 ✅, G4 next |
+| | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ study written, D1–D4 agreed (2026-11-20) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -13143,7 +13143,7 @@ DISTINCT (a, b)`.  For the performance pass: the row-at-a-time join
 of that self-join takes 76 s (the vectorized 2 s), and its aggregate
 did not run on the workers without statistics (`rows=1000` estimated).
 
-### §M14.34 — Recursive queries and graphs ⬜ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap)
+### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 
 Parent and child rows — categories, org charts, comment threads, bills of
 materials, file trees — and graphs — a knowledge graph an agent keeps
@@ -13353,6 +13353,98 @@ A recursive `UNION`'s rows seen were held whole (G1 item 6: past
   graph a view in `nc_catalog` (principle 8), one transaction with the
   tables (principle 11).  The documents of §M15–§M16 as its nodes where
   the study finds it useful.
+
+  **The study (2026-11-23).**  SQL/PGQ (ISO/IEC 9075-16:2023) is the
+  standard's graph view of tables; GQL (ISO/IEC 39075:2024) the
+  same patterns in a language of their own; Cypher their ancestor.
+  PostgreSQL 19's beta had SQL/PGQ — `CREATE PROPERTY GRAPH` over tables,
+  `GRAPH_TABLE` rewritten into joins, no quantified paths, no path
+  variables, no shortest paths — and it was reverted before the release
+  (2026-09-07; PostgreSQL 20 at the earliest).  DuckPGQ (CWI, a DuckDB
+  extension) has the same forms plus `{m,n}` / `+` quantifiers on an edge,
+  `ANY SHORTEST`, `path_length`, and graph algorithms as table functions
+  (`pagerank`, `weakly_connected_component`).  What nucleus takes:
+  - *The graph is a definition, not data* (principle 8): `CREATE
+    PROPERTY GRAPH g VERTEX TABLES (…) EDGE TABLES (…)`, `DROP PROPERTY
+    GRAPH`, kept in the catalog (`00 1D`, watched as the rest), listed in
+    `nc_catalog.property_graphs`; the standard's defaults — a table's key
+    its primary key, its label its name (or alias), its properties all
+    its columns, an edge's `SOURCE` / `DESTINATION` keys from its foreign
+    key to the vertex table when not given — resolved when it is made, so
+    a later column is not a property by accident.  A table a graph uses
+    cannot be dropped or renamed under it (`2BP01`).
+  - *`GRAPH_TABLE` is a query over the tables* (principle 11, and
+    PostgreSQL's design): `GRAPH_TABLE (g MATCH pattern [, pattern]
+    [WHERE …] COLUMNS (expr AS name, …))` in `FROM`, rewritten before
+    binding into joins of the element tables — one join query per choice
+    of table for each variable, `UNION ALL` of them — so the optimizer,
+    every executor, privileges and row security apply as to the query
+    written by hand.  Labels as `IS l` (the standard) or `:l` (GQL,
+    DuckPGQ), label expressions `|`, `&`, `!`, `%`; edges `-[e]->`,
+    `<-[e]-`, `-[e]-` and `->`, `<-`, `-`; `WHERE` inside an element and
+    after the pattern; a variable named twice is one element.
+  - *Paths of many edges are rounds* (G1–G3): a quantified edge
+    `-[e IS l WHERE …]->{m,n}` (also `{n}`, `{m,}`, `+`, `*`) — the
+    standard's walk, one row a path, bounded — as a recursive query
+    over the edge table; `ANY SHORTEST` (one path a pair of endpoints,
+    of the fewest edges, unbounded quantifiers allowed under it) as G3's
+    `USING KEY (start, end, min(len))`; `p = …` with `path_length(p)`.
+    An unbounded quantifier without `ANY SHORTEST` is refused (the
+    standard requires a finite result).
+  - *Not taken now*: `ALL SHORTEST`, `ANY k` / `SHORTEST k`, the path
+    modes `TRAIL` / `ACYCLIC` / `SIMPLE`, a quantified group of more than
+    one edge, a quantified edge's properties read outside it, `ALTER
+    PROPERTY GRAPH`, graph algorithms as functions (G1–G3 write them in
+    SQL), the §M15 documents as nodes — each when a use asks.
+
+  **G4 ✅ (2026-11-23).**  `graphs` (new): the definition (`00 1D <name>`:
+  owner; per element its table, alias, key, ends, labels and their
+  properties as SQL text), `CREATE` resolving the defaults (an end's key
+  from the edge table's one foreign key to the vertex table not taken by
+  its other end — two to the same table is ambiguous and refused, as
+  the standard does), the checks (a label's properties the same names
+  wherever it is, a property one expression per element), `DROP` by its
+  owner or a superuser, the canonical text (`nc_catalog.property_graphs`,
+  the schema's dump, which replays); `DROP TABLE` / `DROP COLUMN` refused
+  while a graph names it, or with `CASCADE` the graph dropped too;
+  `RENAME` refused; a role owning a graph not dropped.  `GRAPH_TABLE` is
+  rewritten into SQL text, parsed and bound as a subquery: each variable a
+  derived table over its element table — every property of its kind
+  (`NULL` where the table has none), the columns its key and ends join by
+  under hidden names — one `SELECT` per choice of tables whose edges join
+  (the choices limited to 4,096), `UNION ALL`.  An any-direction edge
+  between two vertices of the same table is one join with `OR` (an edge
+  to itself matched once).  A quantified edge is a recursive CTE of
+  (start, end, length) whose base and steps join the edge tables
+  themselves — the first version kept the edges as a CTE between, which
+  lost their index: `ANY SHORTEST` over 100k vertices took 65 s, joined
+  directly 215 ms; its first vertex's own conditions start it (pushed
+  into the base); `ANY SHORTEST` is G3's `USING KEY (start, end,
+  min(len))`, with a lower bound ≥ 2 a phase column `least(len, m)` in
+  the key so walks shorter than the bound go on.  Patterns match as joins
+  do (homomorphism, as PostgreSQL 19's beta): two edge variables may be
+  the same edge.  Taken beyond the study's list: nothing; narrowed: a
+  quantified edge's tables must each join one vertex table to itself by
+  the same columns (a walk across tables of two kinds is refused), and
+  `ANY SHORTEST` is a path of one quantified edge.  Privileges are the
+  reader's (the rewrite reads the tables), so making a graph needs none
+  on its tables.
+  Measured (100k vertices, 300k edges, three out of each, release build,
+  median of six runs in ABBA order; PostgreSQL 18 the same questions as joins
+  and recursive queries): `ANY SHORTEST` from one vertex reaching all
+  100k: 215 ms — the same `USING KEY` by hand 185 ms, 202 ms with the end
+  vertices joined as `GRAPH_TABLE` does; PostgreSQL 3,633 ms (bounded
+  recursion, then `min`).  Two hops with filters on the ends: 16.2 ms, by
+  hand 16.6 ms, PostgreSQL 40.2 ms.  Walks of one to four edges from 100
+  vertices (12,000): 15.6 ms, by hand with the ends 13.4 ms, PostgreSQL
+  19.1 ms.  Tests: `86_property_graphs.slt` (the generated graph's
+  answers checked against PostgreSQL 18), the schema dump's replay with a
+  graph; mutation-checked.
+  Ideas from: SQL/PGQ (ISO/IEC 9075-16:2023) for the forms and their
+  meaning; PostgreSQL 19 beta's design (as its documentation describes it:
+  `GRAPH_TABLE` rewritten into joins, one per choice of tables); DuckPGQ (ten Wolde, Singh, Szárnyas, Boncz, CIDR 2023) for
+  quantified edges, `ANY SHORTEST` and `path_length` over recursive SQL.
+  No source of either was read.
 
 The planner chooses among them where they overlap (a fixed-depth pattern
 as joins, a variable one as rounds, by key when a key is given), so a

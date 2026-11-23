@@ -36,7 +36,7 @@ const OP_CHARS: &[u8] = b"+-*/<>=~!@#%^&|`?";
 /// Longest first, so `<=` is not read as `<` `=`.
 const OPS: &[&str] = &[
     "!~*", "<>", "!~", "!=", "~*", "<=", ">=", "||", "::", ":", "(", ")", "[", "]", ",", ";", ".",
-    "*", "+", "-", "/", "%", "=", "<", ">", "~",
+    "*", "+", "-", "/", "%", "=", "<", ">", "~", "{", "}",
 ];
 
 /// The body of an `E'…'` string from just after its opening quote: C-style
@@ -277,7 +277,9 @@ mod tests {
             ]
         );
         assert!(tokenize("'open").is_err());
-        assert!(tokenize("a { b").is_err());
+        assert!(tokenize("a \\ b").is_err());
+        // A graph pattern's quantifier.
+        assert_eq!(tokenize("{1,3}").unwrap()[0].0, Token::Op("{"));
     }
 }
 

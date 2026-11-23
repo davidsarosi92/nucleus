@@ -2181,6 +2181,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 19 <seq>` | an erasure record (§8.29); `00 1A` the last number |
 | `00 1B <version u64>` | a migration applied: its name, checksum, when and by whom (§8.34) |
 | `00 1C <table id>` | a table being moved to another engine: the id its keys are copied under (§4.6) |
+| `00 1D <name>` | a property graph: its owner, vertex and edge tables, keys, ends, labels and properties (§M14.34 G4) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -2334,6 +2335,49 @@ came.  In the step, `recurring.name` reads the table as the round began
 min(dist))` with `UNION`; NULL keys are one key; no `SEARCH` / `CYCLE`
 with it (`0A000`); `min` and `max` only (`0A000`); a key column must
 hash (`42883`).
+Property graphs (SQL/PGQ, ISO/IEC 9075-16; `crates/sql/src/graphs.rs`):
+`CREATE PROPERTY GRAPH g VERTEX TABLES (t [AS a] [KEY (c…)] [labels], …)
+[EDGE TABLES (t [AS a] [KEY (c…)] SOURCE [KEY (c…) REFERENCES] v [(c…)]
+DESTINATION [KEY (c…) REFERENCES] w [(c…)] [labels], …)]`, labels
+`LABEL l [PROPERTIES (expr [AS name], …) | PROPERTIES ARE ALL COLUMNS
+[EXCEPT (c…)] | NO PROPERTIES]` (or `DEFAULT LABEL`, or bare
+`PROPERTIES …` for the table's own label); `DROP PROPERTY GRAPH [IF
+EXISTS] g` (its owner or a superuser, `42501`).  A graph is a definition
+over tables, not data: the standard's defaults are resolved when it is
+made — a table's key its primary key, its label its alias, its properties
+all its columns, an edge's end the edge table's one foreign key to that
+vertex table (two are ambiguous, `42P17`) — and kept spelled out
+(`nc_catalog.property_graphs`: name, owner, tables, definition; the
+schema's dump).  A label has the same property names wherever it is
+(`42P17`).  While a graph names a table or a column of it, `DROP TABLE`,
+`ALTER TABLE … DROP COLUMN` and the renames are refused (`2BP01`); with
+`CASCADE` the drops take the graph too; a role owning a graph is not
+dropped.  In `FROM`, `GRAPH_TABLE (g MATCH pattern [, pattern…] [WHERE
+cond] COLUMNS (expr [AS name], …)) [AS alias [(names)]]` is the table of
+the pattern's matches.  A pattern alternates vertices `(v [IS label]
+[WHERE cond])` and edges `-[e …]->`, `<-[e …]-`, `-[e …]-` (either way)
+or bare `->`, `<-`, `-`; `:label` is the same as `IS label`; label
+expressions combine with `|`, `&`, `!` and `%` (any label).  A variable
+named twice is one element; two patterns sharing a variable are joined
+by it; patterns match as joins do (two edge variables may be one edge).
+A property a table of the variable's labels lacks is `NULL`.  An edge
+quantified `{m,n}`, `{n}`, `{m,}`, `{,n}`, `+` or `*` is a walk of that
+many edges (each walk a row), over edge tables that each join one vertex
+table to itself by the same columns (else `0A000`); `p = …` names the
+path and `path_length(p)` is its number of edges; a quantified edge's
+variable is not read outside it (`0A000`).  Without an upper bound a walk
+needs `ANY SHORTEST` (`0A000`): `p = ANY SHORTEST (a)-[e]->+(b)` gives
+one walk of the fewest edges for each pair of ends (a path of one
+quantified edge).  `GRAPH_TABLE` is rewritten into the query it means
+before binding — for each choice of tables for its variables whose edges
+join them (at most 4,096, `54000`), one join of derived tables over them,
+`UNION ALL`; a quantified edge a recursive CTE over its edge tables
+(`ANY SHORTEST` with `USING KEY (start, end, min(len))`), started at its
+first vertex's own conditions — so the optimizer, every executor,
+privileges (the reader's, on the tables) and row security treat it as the
+same query written by hand.  Not taken: `ALL SHORTEST`, `ANY k`, path
+modes (`TRAIL`, `ACYCLIC`, `SIMPLE`), quantified groups of several edges,
+`ALTER PROPERTY GRAPH`.
 `SELECT [DISTINCT]`,
 `FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
 subqueries and functions in `FROM` (`generate_series`, `unnest`, any

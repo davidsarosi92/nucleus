@@ -499,6 +499,16 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
         }
     }
 
+    // Property graphs, over the tables (every default spelled out).
+    for g in crate::graphs::all(txn)? {
+        def(
+            "property graph",
+            &g.name,
+            None,
+            crate::graphs::definition(&g),
+        );
+    }
+
     // Comments, then each table's settings.
     for t in &tables {
         if let Some(c) = &t.comment {

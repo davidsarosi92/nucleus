@@ -2836,6 +2836,7 @@ pub(crate) fn execute_statement(
                 match catalog::get_table(&*txn, name)? {
                     Some(mut t) => {
                         checker.require_owner(&*txn, crate::privileges::Kind::Table, name)?;
+                        crate::graphs::cascade(txn, name, None, *cascade)?;
                         crate::privileges::forget(txn, crate::privileges::Kind::Table, name)?;
                         crate::policies::forget(txn, name)?;
                         crate::tokens::forget_table(txn, name)?;
@@ -3339,6 +3340,14 @@ pub(crate) fn execute_statement(
                 *revoke,
             )?;
             Output::Command("ALTER DEFAULT PRIVILEGES".into())
+        }
+        Statement::CreatePropertyGraph(def) => {
+            crate::graphs::create(txn, def)?;
+            Output::Command("CREATE PROPERTY GRAPH".into())
+        }
+        Statement::DropPropertyGraph { name, if_exists } => {
+            crate::graphs::drop(txn, name, *if_exists)?;
+            Output::Command("DROP PROPERTY GRAPH".into())
         }
         Statement::CreateEnum { name, labels } => {
             crate::enums::create(txn, reg, name, labels)?;

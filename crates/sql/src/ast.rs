@@ -469,6 +469,16 @@ pub enum Statement {
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
     },
+    /// `CREATE PROPERTY GRAPH name VERTEX TABLES (…) [EDGE TABLES (…)]`
+    /// (SQL/PGQ, PLAN.md §M14.34 G4).
+    CreatePropertyGraph(Box<CreateGraph>),
+    /// `DROP PROPERTY GRAPH [IF EXISTS] name`.
+    DropPropertyGraph {
+        /// Name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP STATISTICS [IF EXISTS] name`.
     DropStatistics {
         /// Name.
@@ -1227,6 +1237,8 @@ pub enum TableRef {
     /// items before it (a join's left side), and runs for each of their
     /// rows.
     Lateral(Box<TableRef>),
+    /// `GRAPH_TABLE (…)` (SQL/PGQ).
+    GraphTable(Box<GraphTable>),
     /// A join.
     Join {
         /// Left side.
@@ -1240,6 +1252,151 @@ pub enum TableRef {
         /// `USING (columns)`: equal columns, resolved by the binder.
         using: Vec<String>,
     },
+}
+
+/// `CREATE PROPERTY GRAPH` (SQL/PGQ): a graph over tables — its vertices
+/// rows of the vertex tables, its edges rows of the edge tables, each
+/// joining a source and a destination vertex by keys.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateGraph {
+    /// Name.
+    pub name: String,
+    /// `VERTEX TABLES (…)`.
+    pub vertices: Vec<GraphElementDef>,
+    /// `EDGE TABLES (…)`.
+    pub edges: Vec<GraphElementDef>,
+}
+
+/// A vertex or edge table of a [`CreateGraph`]: `table [AS alias] [KEY
+/// (columns)] [SOURCE … DESTINATION …] [labels and properties]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphElementDef {
+    /// The table.
+    pub table: String,
+    /// `AS alias` (else the table's name).
+    pub alias: Option<String>,
+    /// `KEY (columns)` (else the primary key).
+    pub key: Option<Vec<String>>,
+    /// An edge's `SOURCE`.
+    pub source: Option<GraphEndpointDef>,
+    /// An edge's `DESTINATION`.
+    pub destination: Option<GraphEndpointDef>,
+    /// `LABEL l [properties]` / `DEFAULT LABEL [properties]`, or the
+    /// properties alone (the default label's); none: the default label
+    /// with every column.
+    pub labels: Vec<GraphLabelDef>,
+}
+
+/// `SOURCE | DESTINATION [KEY (columns) REFERENCES] vertex [(columns)]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphEndpointDef {
+    /// The edge table's columns (else its foreign key's to the vertex
+    /// table).
+    pub key: Option<Vec<String>>,
+    /// The vertex table's alias.
+    pub vertex: String,
+    /// The vertex table's columns (else its key).
+    pub references: Option<Vec<String>>,
+}
+
+/// A label of a graph element and its properties.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphLabelDef {
+    /// `LABEL name`; `None`: `DEFAULT LABEL` (the alias).
+    pub name: Option<String>,
+    /// Its properties.
+    pub properties: GraphProperties,
+}
+
+/// A label's properties.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GraphProperties {
+    /// `PROPERTIES ALL COLUMNS [EXCEPT (columns)]` (or nothing said).
+    All {
+        /// `EXCEPT (columns)`.
+        except: Vec<String>,
+    },
+    /// `NO PROPERTIES`.
+    None,
+    /// `PROPERTIES (expr [AS name], …)`: each one's SQL text over the
+    /// table's columns, and its name.
+    List(Vec<(String, String)>),
+}
+
+/// `GRAPH_TABLE (g MATCH pattern [, pattern …] [WHERE cond] COLUMNS
+/// (expr [AS name], …)) [AS] alias [(columns)]` (SQL/PGQ): the rows the
+/// patterns match in property graph `g`.  Its expressions are kept as
+/// their text: the query is rewritten as joins of the graph's tables
+/// ([`crate::graphs`]) and parsed again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphTable {
+    /// The property graph.
+    pub graph: String,
+    /// The path patterns.
+    pub paths: Vec<GraphPath>,
+    /// `WHERE`'s text.
+    pub filter: Option<String>,
+    /// `COLUMNS`: each expression's text and name.
+    pub columns: Vec<(String, String)>,
+    /// Alias.
+    pub alias: Option<String>,
+    /// Column aliases.
+    pub column_aliases: Vec<String>,
+}
+
+/// A path pattern: `[p =] [ANY SHORTEST] (v) -[e]-> (w) …`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphPath {
+    /// `p =`: the path's variable.
+    pub var: Option<String>,
+    /// `ANY SHORTEST`: one path of the fewest edges for each pair of its
+    /// ends.
+    pub any_shortest: bool,
+    /// Vertices and edges, in order (a vertex first and last, one between
+    /// two edges).
+    pub elements: Vec<GraphPattern>,
+}
+
+/// A vertex or edge pattern.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphPattern {
+    /// Its variable.
+    pub var: Option<String>,
+    /// `IS labels` / `:labels`.
+    pub label: Option<LabelExpr>,
+    /// `WHERE`'s text inside it.
+    pub filter: Option<String>,
+    /// An edge's direction (`None`: a vertex).
+    pub edge: Option<EdgeDirection>,
+    /// An edge's `{m,n}` (`*` = `{0,}`, `+` = `{1,}`); `None` above: no
+    /// bound.
+    pub quantifier: Option<(u32, Option<u32>)>,
+}
+
+/// An edge pattern's direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeDirection {
+    /// `-[ ]->`: source on the left.
+    Right,
+    /// `<-[ ]-`: source on the right.
+    Left,
+    /// `-[ ]-`: either.
+    Any,
+}
+
+/// A label expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LabelExpr {
+    /// A label.
+    Name(String),
+    /// `%`: any label.
+    Any,
+    /// `!l`.
+    Not(Box<LabelExpr>),
+    /// `a & b`.
+    And(Box<LabelExpr>, Box<LabelExpr>),
+    /// `a | b`.
+    Or(Box<LabelExpr>, Box<LabelExpr>),
 }
 
 /// A join kind.

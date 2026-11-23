@@ -241,6 +241,7 @@ fn drop_sql(d: &Definition) -> Option<String> {
         }
         "row security" => alter("DISABLE ROW LEVEL SECURITY"),
         "policy" => Some(format!("DROP POLICY {name} ON {table}")),
+        "property graph" => Some(format!("DROP PROPERTY GRAPH {name}")),
         _ => None,
     }
 }

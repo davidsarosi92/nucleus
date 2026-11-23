@@ -222,6 +222,15 @@ the other, `CREATE BRANCH before AS OF TIMESTAMP …` is the database as
 it was then, and `DROP BRANCH` gives back what the branch changed (a
 branch of 548 MiB made in 8 ms;
 [`examples/python/branches.py`](examples/python/branches.py)).
+Recursive queries and graphs are in (§M14.34): each round of `WITH
+RECURSIVE` joins by the rows the last one gave, `SEARCH` / `CYCLE` as
+PostgreSQL's, `USING KEY` keeps a recursive query's rows by key
+(weighted shortest paths over 100,000 nodes in 179 ms, PostgreSQL's
+equivalent 2.8 s), and SQL/PGQ property graphs over tables — `CREATE
+PROPERTY GRAPH`, `GRAPH_TABLE (g MATCH p = ANY SHORTEST (a)-[e]->+(b)
+COLUMNS (…))` — are the joins and recursive queries they mean (the fewest
+edges from one vertex to each of 100,000 in 215 ms, PostgreSQL's
+recursive equivalent 3.6 s).
 A column's type changes while the table is in use (§M14.18 O5): `ALTER
 TABLE t ALTER COLUMN v TYPE bigint CONCURRENTLY` converts it a part at a
 time — writers keep each row's converted value and the column's indexes

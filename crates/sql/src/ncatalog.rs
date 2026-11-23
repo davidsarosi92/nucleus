@@ -533,6 +533,10 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         &[("type", T), ("label", T), ("position", I), ("sort_key", T)],
     ),
     (
+        "property_graphs",
+        &[("name", T), ("owner", T), ("tables", TA), ("definition", T)],
+    ),
+    (
         "types",
         &[
             ("name", T),
@@ -1472,6 +1476,17 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         text(hex(key)),
                     ]);
                 }
+            }
+        }
+        "property_graphs" => {
+            for g in crate::graphs::all(txn)? {
+                let tables = g.elements.iter().map(|e| text(e.table.clone())).collect();
+                out.push(vec![
+                    text(g.name.clone()),
+                    text(g.owner.clone()),
+                    Value::Array(tables),
+                    text(crate::graphs::definition(&g)),
+                ]);
             }
         }
         "casts" => {

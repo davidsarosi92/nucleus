@@ -1596,6 +1596,17 @@ impl<'a> Binder<'a> {
                 rename_columns(&mut b.scope, alias, columns)?;
                 Ok(b)
             }
+            TableRef::GraphTable(gt) => {
+                // The query the patterns mean, bound as a subquery.
+                let query = crate::graphs::rewrite(self.txn, gt)?;
+                let alias = gt.alias.as_deref().unwrap_or("graph_table");
+                let mut b = self.query(&query)?;
+                for c in &mut b.scope.cols {
+                    c.table = Some(alias.to_string());
+                }
+                rename_columns(&mut b.scope, alias, &gt.column_aliases)?;
+                Ok(b)
+            }
             TableRef::Join {
                 left,
                 right,

@@ -257,14 +257,22 @@ STDIN [WITH (FORMAT csv, HEADER)]` with the data sent by the client.
 and `WITH d AS (DELETE FROM t … RETURNING *) INSERT INTO archive SELECT
 * FROM d`: the CTE runs first, and what follows sees its writes;
 a recursive one with `SEARCH DEPTH|BREADTH FIRST BY c SET ord` and
-`CYCLE c SET seen USING path`, as PostgreSQL's),
+`CYCLE c SET seen USING path`, as PostgreSQL's; `WITH RECURSIVE sp (node,
+dist) USING KEY (node, min(dist)) AS (base UNION step)` keeps one row a
+key — shortest paths),
 `SELECT [DISTINCT]`, `FROM` with comma
 joins and `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`, subqueries in
 `FROM`, `generate_series(a, b [, step])` and `unnest(array) [WITH
 ORDINALITY]` in `FROM`, `WHERE`, `GROUP BY` (also `ROLLUP (…)`, `CUBE (…)`,
 `GROUPING SETS (…)`, `GROUPING(…)`), `HAVING`, `UNION | EXCEPT |
 INTERSECT [ALL]`, `ORDER BY … [ASC|DESC] [NULLS FIRST|LAST]`, `LIMIT`,
-`OFFSET`.  Expressions: `IS [NOT] DISTINCT FROM`, `BETWEEN`, `IN (list |
+`OFFSET`.  Graphs (SQL/PGQ) over tables: `CREATE PROPERTY GRAPH g VERTEX
+TABLES (person) EDGE TABLES (knows SOURCE KEY (a) REFERENCES person (id)
+DESTINATION KEY (b) REFERENCES person (id))`, then in `FROM`
+`GRAPH_TABLE (g MATCH p = (x IS person WHERE x.name = 'ann')-[IS
+knows]->{1,3}(y IS person) COLUMNS (y.name, path_length(p) AS hops))`;
+`-[e]->`, `<-[e]-`, `-[e]-`; `ANY SHORTEST` for the fewest edges (and
+required by `+` / `*`).  Expressions: `IS [NOT] DISTINCT FROM`, `BETWEEN`, `IN (list |
 subquery)`, `EXISTS`, `= ANY (array | subquery)`, `LIKE`, `ILIKE`, `~`
 (regular expressions), `CASE`, `CAST(x AS t)` / `x::t`, `ARRAY[…]`,
 `a[i]` (1-based), integer bitwise `& | # ~ << >>`; rows compared —
