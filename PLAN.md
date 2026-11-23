@@ -13856,6 +13856,14 @@ module and driver versions work with which server.
   each driver's tests against the oldest and the newest server it
   claims, and published in DOCS and with each release.  Semantic
   versioning's rules for each, a changelog per component.
+- **Licence notices in every package** (found 2026-11-23, with
+  `THIRD_PARTY.md`).  The archives, `.deb`, `.rpm`, the Python wheel and
+  the npm package carry `COPYRIGHT` (or the AGPL text) and
+  `THIRD_PARTY.md`; the Swift package's `NucleusEmbedded.xcframework` and
+  the Android library carry the database (AGPL-3.0-only, with Snowball's
+  BSD-3 and Unicode's notices) with only the drivers' MIT `LICENSE` —
+  each to carry `COPYRIGHT` and `THIRD_PARTY.md` too, checked by a test
+  that opens every built package and looks for them.
 - **D2 — drivers in their own repositories.**  Each language's driver
   in a repository of its own (what each registry's tooling and each
   language's users expect), mirrored from this one so its tests keep

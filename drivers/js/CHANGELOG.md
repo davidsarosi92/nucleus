@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The package carries `wasm/THIRD_PARTY.md` beside `wasm/LICENSE`: the
+  notices of the third-party code and data inside `nucleus.wasm`
+  (Snowball, BSD-3-Clause; Unicode tables, Unicode License v3).
 - A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as the
   host — `connect({ host: "/tmp/nucleus.sock" })` — reaches `nucleus
   server --socket` (Node, Bun, Deno); no TLS there.

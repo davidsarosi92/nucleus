@@ -54,7 +54,7 @@ for kind in $kinds; do
       pkg="$stage/pkg"
       mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/doc/nucleus"
       cp "$bin" "$tdir/$target/release/$shell" "$pkg/usr/bin/"
-      cat "$root/COPYRIGHT" "$root/LICENSE" >"$pkg/usr/share/doc/nucleus/copyright"
+      cat "$root/COPYRIGHT" "$root/LICENSE" "$root/THIRD_PARTY.md" >"$pkg/usr/share/doc/nucleus/copyright"
       cat > "$pkg/DEBIAN/control" <<CONTROL
 Package: nucleus
 Version: $version
@@ -73,7 +73,7 @@ CONTROL
       file="nucleus-$version-1.$arch.rpm"
       mkdir -p "$stage/files"
       cp "$bin" "$tdir/$target/release/$shell" "$stage/files/"
-      cp "$root/LICENSE" "$root/COPYRIGHT" "$stage/files/"
+      cp "$root/LICENSE" "$root/COPYRIGHT" "$root/THIRD_PARTY.md" "$stage/files/"
       cat > "$stage/nucleus.spec" <<SPEC
 Name: nucleus
 Version: $version
@@ -89,12 +89,13 @@ The nucleus command (server, SQL shell, tools) and ncsql, statically linked.
 %install
 mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/licenses/nucleus
 install -m 755 $stage/files/nucleus $stage/files/ncsql %{buildroot}/usr/bin/
-install -m 644 $stage/files/LICENSE $stage/files/COPYRIGHT %{buildroot}/usr/share/licenses/nucleus/
+install -m 644 $stage/files/LICENSE $stage/files/COPYRIGHT $stage/files/THIRD_PARTY.md %{buildroot}/usr/share/licenses/nucleus/
 %files
 /usr/bin/nucleus
 /usr/bin/ncsql
 %license /usr/share/licenses/nucleus/LICENSE
 %license /usr/share/licenses/nucleus/COPYRIGHT
+%license /usr/share/licenses/nucleus/THIRD_PARTY.md
 SPEC
       rpmbuild -bb --quiet --target "$arch" --define "_topdir $stage/rpm" "$stage/nucleus.spec" >/dev/null
       mv "$stage/rpm/RPMS/$arch/$file" "$out/"
@@ -102,7 +103,7 @@ SPEC
   esac
   mkdir -p "$stage/$name/bin"
   cp "$bin" "$tdir/$target/release/$shell" "$stage/$name/bin/"
-  cp "$root/LICENSE" "$root/COPYRIGHT" "$root/AUTHORS" "$root/README.md" "$stage/$name/"
+  cp "$root/LICENSE" "$root/COPYRIGHT" "$root/THIRD_PARTY.md" "$root/AUTHORS" "$root/README.md" "$stage/$name/"
   case $kind in
     linux)      file="$name-linux-$arch.tar.gz" ;;
     linux-musl) file="$name-linux-$arch-musl.tar.gz" ;;

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The wheel carries `THIRD_PARTY.md` beside `COPYRIGHT`: the notices of
+  the third-party code and data inside the embedded library (Snowball,
+  BSD-3-Clause; Unicode tables, Unicode License v3).
 - A date or timestamp Python cannot hold (before year 1, past 9999;
   the database has them) raised `OverflowError` in the middle of the
   replies, which stayed unread: the next query read the rest of this

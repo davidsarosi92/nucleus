@@ -76,4 +76,16 @@ the break tests' data: generated from the Unicode Character Database.
 Copyright (c) 1991-2024 Unicode, Inc.  Unicode License v3
 (https://www.unicode.org/license.txt).
 
-Each file keeps its notice.  The authors of nucleus: AUTHORS.
+drivers/android/gradlew, gradlew.bat and gradle/wrapper/gradle-wrapper.jar:
+the Gradle wrapper (https://gradle.org).  Copyright (c) 2015-2021 the
+original authors.  Apache License 2.0.
+
+Smaller pieces: Apache Lucene's 33 English stop words
+(crates/sql/src/text/mod.rs, Apache License 2.0); the coefficients of
+Eigen's erf approximation (MPL-2.0) and the constants of Cephes' expf
+(crates/kernels/src/neural.rs).
+
+Each file keeps its notice; THIRD_PARTY.md lists them all, with the
+licences in full.  Ideas taken from other systems and papers (not their
+code) are credited in ACKNOWLEDGEMENTS.md.  The authors of nucleus:
+AUTHORS.

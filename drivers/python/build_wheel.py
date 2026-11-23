@@ -83,8 +83,9 @@ def main():
         "Wheel-Version: 1.0\nGenerator: nucleus build_wheel.py\nRoot-Is-Purelib: false\n"
         f"Tag: py3-none-{plat}\n").encode()
     files[f"{info}/LICENSE"] = open(os.path.join(HERE, "LICENSE"), "rb").read()
-    # The library inside is the database: AGPL-3.0-only (COPYRIGHT).
-    for name in ("COPYING", "COPYRIGHT"):
+    # The library inside is the database: AGPL-3.0-only (COPYRIGHT), with
+    # the third-party notices it carries (THIRD_PARTY.md).
+    for name in ("COPYING", "COPYRIGHT", "THIRD_PARTY.md"):
         src = "LICENSE" if name == "COPYING" else name
         files[f"{info}/{name}"] = open(os.path.join(HERE, "..", "..", src), "rb").read()
     record = [record_line(n, d) for n, d in files.items()] + [f"{info}/RECORD,,"]

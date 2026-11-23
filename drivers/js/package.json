@@ -21,7 +21,8 @@
     "dist",
     "src",
     "wasm/nucleus.wasm",
-    "wasm/LICENSE"
+    "wasm/LICENSE",
+    "wasm/THIRD_PARTY.md"
   ],
   "engines": {
     "node": ">=20"

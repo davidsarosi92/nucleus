@@ -28,4 +28,7 @@ if command -v wasm-opt >/dev/null 2>&1; then
 else
   cp target/wasm/wasm32-wasip1/release/nucleus_embedded.wasm "$out"
 fi
+# The third-party notices the engine carries (BSD-3 and Unicode: their
+# texts go with every copy), beside its LICENSE in the npm package.
+cp "$root/THIRD_PARTY.md" "$here/THIRD_PARTY.md"
 ls -l "$out"

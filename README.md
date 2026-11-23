@@ -365,4 +365,7 @@ examples and the monitoring rules, so that any program — open or closed — ca
 offers a modified nucleus as a network service shares its changes.  A
 commercial licence for the database is available from the copyright
 holder.  Original author: Dávid Sárosi ([AUTHORS](AUTHORS)); contributing:
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md).  The few files that came from
+elsewhere, with their licences: [THIRD_PARTY.md](THIRD_PARTY.md); the
+systems, papers and libraries whose ideas nucleus builds on:
+[ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
