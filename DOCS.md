@@ -3498,6 +3498,16 @@ online schema change (Rae et al., VLDB 2013: a write-only state between
 absent and public); here no second pass over the rows written meanwhile
 is needed — each part's rows are a premise of its commit — and no wait
 for older transactions — the validated table record turns them away.
+**`DROP INDEX`** (and `DROP CONSTRAINT` of a unique one) changes only the
+table record in its transaction: the index's id joins the table's
+*dropped* list (`Table::dropped`, record version 25), and its entries
+are removed after the drop commits, a part a transaction
+(`online_index::clean_dropped`: by the session after the statement or
+the block's `COMMIT`, by the maintenance thread for a drop cut short);
+then the id leaves the list.  Deleted in the drop's own transaction, the
+entries met every concurrent writer of the index's keys (`40001`).  The
+integrity check and backups know the dropped ids; a restore leaves their
+entries out.
 `crates/sql/tests/online_index.rs` builds indexes on a twin table in one
 transaction and online, with writes between the parts, duplicates
 written or resolved meanwhile, other changes refused, a crash at thirty

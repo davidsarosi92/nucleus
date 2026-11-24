@@ -299,6 +299,9 @@ struct Block {
     now: i64,
     mode: TxnMode,
     failed: bool,
+    /// An index dropped in it: its entries removed once it commits
+    /// (`crate::online_index::after_statement`).
+    dropped: bool,
 }
 
 /// The session setting whose time (or `commit n`) every statement and
@@ -960,6 +963,7 @@ impl Session {
                         now: 0,
                         mode: mode.clone(),
                         failed: false,
+                        dropped: false,
                     });
                 }
                 Ok(Output::Command("BEGIN".into()))
@@ -973,6 +977,9 @@ impl Session {
                 }
                 if let Some(txn) = block.txn {
                     txn.commit()?;
+                    if block.dropped {
+                        crate::online_index::mark_dropped();
+                    }
                     self.after_statement(true);
                 }
                 Ok(Output::Command("COMMIT".into()))
@@ -1623,6 +1630,8 @@ impl Session {
     /// Its failure is not the statement's: the next one tries again.
     fn after_statement(&self, wrote: bool) {
         let _ = crate::index_method::after_statement(&self.kv, wrote);
+        // A dropped index's entries (`DROP INDEX` committed).
+        let _ = crate::online_index::after_statement(&self.kv);
         // The embedding columns' jobs, unless a background worker runs
         // them (§M14.22 E4b).
         let _ = crate::embedding::after_statement(&self.kv, &self.registry);
@@ -1735,6 +1744,8 @@ impl Session {
                     })
                 })
             });
+            // An index dropped: the block's, until it commits.
+            block.dropped |= crate::online_index::take_dropped();
             // In a block a result is handed over at once: nothing commits.
             let r = r.and_then(|out| deliver(stmt, out, sink).map(Output::Command));
             // Recorded in the block's transaction when it went through and
@@ -3298,14 +3309,9 @@ pub(crate) fn execute_statement(
                             "cannot drop index {name} because constraint {fk} on table {child} requires it"
                         )));
                     }
-                    let prefix = t.index_prefix(t.indexes[i].id);
-                    catalog::delete_range(
-                        txn,
-                        &prefix,
-                        nucleus_kv::prefix_end(&prefix).as_deref(),
-                    )?;
-                    t.indexes.remove(i);
-                    catalog::update_table(txn, &t)?;
+                    // Its entries removed after the drop commits.
+                    let id = t.indexes.remove(i).id;
+                    crate::online_index::drop_entries_later(txn, &mut t, id)?;
                 }
                 None if *if_exists => {}
                 None => {
@@ -4244,6 +4250,7 @@ pub(crate) fn create_table(
         subject: Vec::new(),
         converting: None,
         building: Vec::new(),
+        dropped: Vec::new(),
         memory: None,
         engine: opts.engine,
         relative_directory: true,
@@ -4907,9 +4914,8 @@ fn drop_constraint(txn: &mut dyn KvTxn, table: &str, name: &str, if_exists: bool
                 "cannot drop constraint {name} on table {table} because constraint {fk} on table {child} requires it"
             )));
         }
-        let prefix = t.index_prefix(t.indexes[i].id);
-        catalog::delete_range(txn, &prefix, nucleus_kv::prefix_end(&prefix).as_deref())?;
-        t.indexes.remove(i);
+        let id = t.indexes.remove(i).id;
+        return crate::online_index::drop_entries_later(txn, &mut t, id);
     } else if name == format!("{table}_pkey") {
         return Err(Error::feature("dropping a primary key is not supported"));
     } else if if_exists {

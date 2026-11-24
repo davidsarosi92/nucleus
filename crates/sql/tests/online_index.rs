@@ -480,3 +480,64 @@ fn a_build_cut_short_by_a_crash_finishes() {
         assert!(middles > 0, "no crash fell in the middle of the build");
     });
 }
+
+/// The keys under index `name`'s prefix (`nc_catalog.indexes.key_prefix`).
+fn index_keys(kv: &Arc<dyn Kv>, prefix_hex: &str) -> usize {
+    let prefix: Vec<u8> = (0..prefix_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&prefix_hex[i..i + 2], 16).unwrap())
+        .collect();
+    let end = nucleus_kv::prefix_end(&prefix).unwrap();
+    let txn = kv.begin(TxnOptions::read_only()).unwrap();
+    txn.scan(
+        std::ops::Bound::Included(&prefix[..]),
+        std::ops::Bound::Excluded(&end[..]),
+    )
+    .unwrap()
+    .count()
+}
+
+#[test]
+fn a_dropped_index_meets_no_writer() {
+    let kv = open(7);
+    let mut s = Session::new(Arc::clone(&kv));
+    for storage in STORAGES {
+        s.execute(&format!(
+            "DROP TABLE IF EXISTS x; \
+             CREATE TABLE x (id INT PRIMARY KEY, v INT) {storage}; \
+             CREATE INDEX x_v ON x (v); CREATE UNIQUE INDEX x_u ON x (v, id); \
+             INSERT INTO x SELECT i, i FROM generate_series(1, 3000) i"
+        ))
+        .unwrap();
+        let prefixes = outcome(
+            &mut s,
+            "SELECT key_prefix FROM nc_catalog.indexes WHERE table_name = 'x' \
+             AND NOT is_primary ORDER BY name",
+        )
+        .unwrap();
+        let (v, u) = (prefixes[0][0].clone(), prefixes[1][0].clone());
+        assert_eq!(index_keys(&kv, &v), 3000, "{storage}");
+        // A drop whose snapshot is older than a write of the index's
+        // keys: only the catalog changes, so it commits.
+        let mut w = Session::new(Arc::clone(&kv));
+        s.execute("BEGIN; DROP INDEX x_v; ALTER TABLE x DROP CONSTRAINT x_u")
+            .unwrap();
+        w.execute("UPDATE x SET v = v + 1 WHERE id <= 10").unwrap();
+        assert_eq!(index_keys(&kv, &v), 3000, "{storage}: before the commit");
+        s.execute("COMMIT").unwrap();
+        // Its entries removed after it.
+        assert_eq!(index_keys(&kv, &v), 0, "{storage}");
+        assert_eq!(index_keys(&kv, &u), 0, "{storage}");
+        check(&kv, &s, storage);
+        // Rolled back: the index and its entries stay.
+        s.execute("CREATE INDEX x_v ON x (v); BEGIN; DROP INDEX x_v; ROLLBACK")
+            .unwrap();
+        assert_eq!(indexes(&mut s, "x"), [["x_v", "t"]], "{storage}");
+        assert_eq!(
+            outcome(&mut s, "SELECT id FROM x WHERE v = 5").unwrap(),
+            [["4"]],
+            "{storage}"
+        );
+        check(&kv, &s, &format!("{storage}: rolled back"));
+    }
+}

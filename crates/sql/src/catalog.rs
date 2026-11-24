@@ -93,9 +93,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// column's type being changed online ([`Conversion`]); version 21 a
 /// memory store's analyzer; version 22 the engine holding its keys
 /// ([`TableEngine`]); version 24 the indexes being built online
-/// ([`Table::building`], after the others in the index list); older
-/// versions still read.
-const TABLE_VERSION: u8 = 24;
+/// ([`Table::building`], after the others in the index list); version 25
+/// the dropped indexes whose entries are left to remove
+/// ([`Table::dropped`]); older versions still read.
+const TABLE_VERSION: u8 = 25;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -439,6 +440,10 @@ pub struct Table {
     /// Indexes being built online ([`crate::online_index`]): writers keep
     /// their entries, readers and the planner do not see them.
     pub building: Vec<Index>,
+    /// Ids of indexes dropped whose entries are left to remove, after the
+    /// drop committed (`crate::online_index::clean_dropped`): removed in
+    /// the drop's transaction they met every writer's.
+    pub dropped: Vec<u32>,
     /// The engine holding its keys, `WITH (engine = …)`.
     pub engine: TableEngine,
     /// Its column copy's directory keys each segment by the suffix of its
@@ -687,9 +692,14 @@ impl Table {
         t
     }
 
-    /// The ids of its indexes, those being built online too.
+    /// The ids its keys may be under besides the rows': its indexes', those
+    /// being built online, and those dropped whose entries are left.
     pub fn index_ids(&self) -> impl Iterator<Item = u32> + '_ {
-        self.indexes.iter().chain(&self.building).map(|i| i.id)
+        self.indexes
+            .iter()
+            .chain(&self.building)
+            .map(|i| i.id)
+            .chain(self.dropped.iter().copied())
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -892,6 +902,10 @@ impl Table {
         });
         w.u8(u8::from(self.relative_directory));
         w.u32(self.building.len() as u32);
+        w.u32(self.dropped.len() as u32);
+        for &id in &self.dropped {
+            w.u32(id);
+        }
         w.0
     }
 
@@ -1140,8 +1154,14 @@ impl Table {
             TableEngine::BTree
         };
         let relative_directory = version >= 23 && r.u8()? != 0;
+        let building_n = if version >= 24 { r.u32()? as usize } else { 0 };
+        let dropped = if version >= 25 {
+            (0..r.u32()?).map(|_| r.u32()).collect::<Result<_>>()?
+        } else {
+            Vec::new()
+        };
         let building = if version >= 24 {
-            let n = r.u32()? as usize;
+            let n = building_n;
             if n > indexes.len() {
                 return Err(Error::internal("more indexes being built than indexes"));
             }
@@ -1176,6 +1196,7 @@ impl Table {
             subject,
             converting,
             building,
+            dropped,
             engine,
             relative_directory,
         })
@@ -2165,6 +2186,7 @@ mod tests {
                 ];
                 ix
             }],
+            dropped: vec![5, 6],
             engine: TableEngine::Lsm,
             relative_directory: true,
         };

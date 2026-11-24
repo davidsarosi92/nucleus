@@ -320,13 +320,84 @@ fn abandon(kv: &Arc<dyn Kv>, table: &str, name: &str) -> Result<()> {
     }
 }
 
-/// `DROP INDEX` of index `b` of `t`'s being built: gone from the record
-/// (its entries removed in `txn` too); the build, if it runs, stops.
+/// `DROP INDEX` of index `b` of `t`'s being built: gone from the record,
+/// its entries removed after the drop commits; the build, if it runs,
+/// stops.
 pub(crate) fn drop_building(txn: &mut dyn KvTxn, mut t: Table, b: usize) -> Result<()> {
-    let prefix = t.index_prefix(t.building[b].id);
-    catalog::delete_range(txn, &prefix, nucleus_kv::prefix_end(&prefix).as_deref())?;
-    t.building.remove(b);
-    catalog::update_table(txn, &t)
+    let id = t.building.remove(b).id;
+    drop_entries_later(txn, &mut t, id)
+}
+
+thread_local! {
+    /// Whether a statement on this thread dropped an index since
+    /// [`after_statement`] last looked.
+    static DROPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Records index `id` of `t` (gone from its indexes) as dropped and `t` in
+/// `txn`: its entries are removed once the drop commits
+/// ([`clean_dropped`]).  Removed in the drop's own transaction, they met
+/// the writes of every writer of the index's keys — a drop under writes
+/// failed `40001` (issue #18).
+pub(crate) fn drop_entries_later(txn: &mut dyn KvTxn, t: &mut Table, id: u32) -> Result<()> {
+    t.dropped.push(id);
+    catalog::update_table(txn, t)?;
+    DROPPED.with(|d| d.set(true));
+    Ok(())
+}
+
+/// Whether a statement on this thread dropped an index since the last
+/// look (cleared): a transaction block keeps it until it commits.
+pub(crate) fn take_dropped() -> bool {
+    DROPPED.with(|d| d.replace(false))
+}
+
+/// Notes an index dropped by a block now committed.
+pub(crate) fn mark_dropped() {
+    DROPPED.with(|d| d.set(true));
+}
+
+/// After a session's statement (or block) committed: the entries of the
+/// indexes it dropped removed (a drop rolled back leaves none to remove;
+/// one cut short, the maintenance thread's [`clean_dropped`] finishes).
+pub(crate) fn after_statement(kv: &Arc<dyn Kv>) -> Result<()> {
+    if DROPPED.with(|d| d.replace(false)) {
+        clean_dropped(kv)?;
+    }
+    Ok(())
+}
+
+/// Removes the entries of every dropped index, a part a transaction, then
+/// its id from its table's record.  Returns how many indexes were done.
+pub fn clean_dropped(kv: &Arc<dyn Kv>) -> Result<usize> {
+    let tables: Vec<Table> = {
+        let txn = kv.begin(TxnOptions::read_only())?;
+        catalog::tables(&*txn)?
+            .into_iter()
+            .filter(|t| !t.dropped.is_empty())
+            .collect()
+    };
+    let mut done = 0;
+    for t in tables {
+        let Some(_claim) = claim(kv, &format!("\u{2}dropped {}", t.name)) else {
+            continue; // another session's
+        };
+        for &id in &t.dropped {
+            crate::retype::remove_entries(kv, &t, id)?;
+        }
+        attempt(kv, |txn| {
+            let Some(mut now) = catalog::get_table(&*txn, &t.name)? else {
+                return Ok(()); // dropped, its keys with it
+            };
+            if now.id != t.id {
+                return Ok(());
+            }
+            now.dropped.retain(|id| !t.dropped.contains(id));
+            catalog::update_table(txn, &now)
+        })?;
+        done += t.dropped.len();
+    }
+    Ok(done)
 }
 
 /// Whether `new` may replace `old` as a table's record while an index of

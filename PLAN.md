@@ -13179,6 +13179,20 @@ did not run on the workers without statistics (`rows=1000` estimated).
   now with an index to drop, failed `40001` 8 times a run (its entries
   deleted in its transaction meet the writers'); `ALTER COLUMN … TYPE`
   13 and 13, `DROP COLUMN` 1 and 6, `ADD COLUMN` 8 and 2.
+- Issue #18, step 1b — `DROP INDEX` without the writers' keys.  With
+  indexes now built, dropping one failed `40001` 8 times a run: its
+  entries, deleted in its transaction, met every writer of the index's
+  keys.  Now the drop changes only the table record — the id joins
+  `Table::dropped` (record version 25) — and the entries are removed
+  after it commits, a part a transaction (`online_index::clean_dropped`:
+  the session after the statement or the block's `COMMIT`, a
+  per-block flag; the maintenance thread for one cut short).  Measured
+  (as step 1): `DROP INDEX` 32 and 31 times, never failing (21 and 22
+  succeeding, 8 and 8 failing before); `CREATE INDEX` 27 and 30, never
+  failing; checks clean.  Test: `a_dropped_index_meets_no_writer` (a
+  drop whose snapshot is older than a committed write of its keys
+  commits; entries gone after `COMMIT`, kept on `ROLLBACK`; three
+  storages); 3 mutants killed.
 
 ### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 

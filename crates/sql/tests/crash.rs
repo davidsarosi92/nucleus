@@ -112,7 +112,12 @@ fn step(rng: &SplitMix64, i: u64) -> String {
 fn dump(kv: &dyn Kv) -> String {
     let txn = kv.begin(TxnOptions::read_only()).unwrap();
     let mut out = String::new();
-    for t in catalog::tables(&*txn).unwrap() {
+    for mut t in catalog::tables(&*txn).unwrap() {
+        // Ids of dropped indexes whose entries are still to be removed
+        // (`online_index::clean_dropped`, after the drop committed) are
+        // leftover work, not what SQL sees: a crash between the drop and
+        // the cleanup may leave them.
+        t.dropped.clear();
         out.push_str(&format!("{t:?}\n"));
         let prefix = t.index_prefix(0);
         let end = nucleus_kv::prefix_end(&prefix).unwrap();

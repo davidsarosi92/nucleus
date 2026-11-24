@@ -734,6 +734,10 @@ pub fn maintain_with(
                         nucleus_platform::log!("nucleus-server: index builds: {}", e.message)
                     }
                 }
+                // Dropped indexes' entries left (a drop cut short).
+                if let Err(e) = nucleus_sql::online_index::clean_dropped(&kv) {
+                    nucleus_platform::log!("nucleus-server: dropped indexes: {}", e.message);
+                }
             }
             seen = kv.activity();
         }
