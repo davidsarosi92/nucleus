@@ -1031,6 +1031,9 @@ impl Writer {
                 )));
             }
         }
+        if !t.validating.is_empty() {
+            crate::validating::obeyed(ctx.txn, t, row)?;
+        }
         if let Some((spec, bound, others)) = &self.bound {
             let key: Vec<Value> = spec.columns.iter().map(|&c| row[c].clone()).collect();
             let fits = match bound {
@@ -1304,7 +1307,11 @@ const CHUNK: usize = 4096;
 /// Converts a value for storing in column `c` (assignment cast; an enum's
 /// label read through `txn`'s catalog).
 pub fn assign(txn: &dyn KvTxn, v: Value, table: &Table, c: usize) -> Result<Value> {
-    let col = &table.columns[c];
+    assign_to(txn, v, &table.columns[c])
+}
+
+/// [`assign`] for column definition `col`.
+pub fn assign_to(txn: &dyn KvTxn, v: Value, col: &crate::catalog::Column) -> Result<Value> {
     // Assignment casts: within numbers, within dates and timestamps, and
     // from or to text (text is parsed, as an untyped literal would be).
     // (A value's own type is approximate: an integer reads as `bigint`, an

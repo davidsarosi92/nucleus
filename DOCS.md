@@ -3963,6 +3963,40 @@ transaction: readers keep the old column until it commits.  A column a
 foreign key uses cannot change type yet.  `22_alter_column_type.slt`'s
 results came from PostgreSQL 18.
 
+**A type that keeps the values** (`validating`, issue #18) rewrites no
+row: values are stored as what they are, not by the column's type, so an
+`integer` and a `bigint` hold the same value, a `varchar(n)` a text.
+Without `USING`, on a column no index reads through anything but its
+values (an expression, a method, an ordering or operator class):
+
+- the **same** type changes nothing;
+- a **wider** one — `smallint` → `integer` → `bigint`, `varchar(n)` to a
+  longer one or `text`, `numeric(p, s)` → `numeric` — changes the catalog
+  alone, reading no row, so no write to the table makes it fail;
+- a **narrower** one — the other way — checks every value fits (`22003`,
+  `22001`) and the default too, then changes the catalog.  In the
+  statement's transaction the rows are a premise of its commit, so a
+  write committed meanwhile fails it (`40001`); a statement run alone
+  then checks them online instead of again: one transaction records the
+  new type as being validated (`Table::validating`), which every writer
+  obeys from then on — its transaction reads the table's record
+  validated, so one begun before fails and runs again — then one
+  read-only snapshot, taken after, holds every row written under the old
+  type and is checked whole, and a last transaction gives the column its
+  type.  A value that does not fit abandons it: the record cleared, the
+  statement failing with what was found.  While a type is validated, the
+  table's other changes wait (`55006`); one cut short (a crash, its
+  session gone) is taken over by the same statement run again, else
+  abandoned by the server's maintenance thread
+  (`validating::abandon_all`) or a restore.
+
+Any other change run alone whose rewrite in one transaction met a write
+is converted online instead (the `CONCURRENTLY` form below), when that
+form can take it.  The design is PostgreSQL's binary-coercible type
+changes (no rewrite) and its `NOT VALID` constraint with `VALIDATE
+CONSTRAINT` made one statement, and F1's online schema change (Rae et
+al., VLDB 2013: a state writers obey before the data is known to).
+
 **Online: `ALTER TABLE t ALTER COLUMN c TYPE type [USING expr]
 CONCURRENTLY`** (`retype`, §M14.18 O5) converts the same way while other
 sessions read and write the table — in transactions of its own, a part

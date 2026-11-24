@@ -1818,20 +1818,20 @@ impl Session {
                 deliver(stmt, out, sink).map(Output::Command)
             });
             match r {
-                // A `CREATE INDEX` whose build met a write committed under
-                // it: built online instead (issue #18) — unless the index
-                // cannot be, which runs again.
+                // DDL (a `CREATE INDEX`, an `ALTER COLUMN … TYPE`) that
+                // met a write committed under it: run online instead
+                // (issue #18) — unless it cannot be, and runs again.
                 Err(e) if e.code == "40001" && crate::online_index::may_fall_back(stmt) => {
-                    let built = crate::datetime::with_now(now, &self.kv, || {
-                        crate::online_index::create(&self.kv, &self.registry, stmt, true)
+                    let online = crate::datetime::with_now(now, &self.kv, || {
+                        crate::online_index::instead(&self.kv, &self.registry, stmt)
                     });
-                    let out = match built {
-                        Ok(false) => {
+                    let out = match online {
+                        Ok(None) => {
                             attempt += 1;
                             self.kv.back_off(attempt);
                             continue;
                         }
-                        Ok(true) => Ok(Output::Command("CREATE INDEX".into())),
+                        Ok(Some(tag)) => Ok(Output::Command(tag.into())),
                         Err(e) => Err(e),
                     };
                     let record = crate::datetime::with_now(now, &self.kv, || {
@@ -4251,6 +4251,7 @@ pub(crate) fn create_table(
         converting: None,
         building: Vec::new(),
         dropped: Vec::new(),
+        validating: Vec::new(),
         memory: None,
         engine: opts.engine,
         relative_directory: true,
@@ -4577,7 +4578,6 @@ fn alter_column_type(
     using: Option<&crate::ast::Expr>,
 ) -> Result<()> {
     let old = catalog::table(&*txn, table)?;
-    dml::rows_are_premise(&*txn, &old)?;
     let c = old.column(column).ok_or_else(|| {
         Error::undefined_column(format!(
             "column \"{column}\" of relation \"{table}\" does not exist"
@@ -4621,9 +4621,24 @@ fn alter_column_type(
         )));
     }
     let to = crate::binder::column_type(&*txn, reg, ty)?;
+    crate::binder::check_modifier(to, typmod.max_len)?;
+    // Values kept as they are: no row rewritten (issue #18).
+    let fit = crate::validating::fit(&old.columns[c], to, typmod.max_len, typmod.numeric);
+    if using.is_none()
+        && fit != crate::validating::Fit::Rewrite
+        && crate::validating::in_place(&old, c)
+    {
+        return type_in_place(txn, reg, old, c, to, typmod, fit);
+    }
+    if let Some(v) = old.validating.first() {
+        return Err(Error::object_in_use(format!(
+            "the type of column \"{}\" of \"{table}\" is being changed; wait for it to finish",
+            old.columns[v.column_index()].name
+        )));
+    }
+    dml::rows_are_premise(&*txn, &old)?;
     let conversion = crate::retype::conversion_expr(&*txn, reg, &old, c, to, using)?;
     let mut new = old.clone();
-    crate::binder::check_modifier(to, typmod.max_len)?;
     new.columns[c].ty = to;
     new.columns[c].max_len = typmod.max_len;
     new.columns[c].numeric = typmod.numeric;
@@ -4694,6 +4709,46 @@ fn alter_column_type(
     catalog::delete_stats_sample(txn, &new)?;
     catalog::note_stored_types(txn, &new.columns)?;
     catalog::update_table(txn, &new)
+}
+
+/// `ALTER COLUMN … TYPE` of column `c` of `old` to a type that keeps its
+/// values (`crate::validating`): the catalog changed alone; a narrower
+/// type's rows checked first, a premise of the commit.  A change being
+/// validated online is finished so when it is this one.
+fn type_in_place(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    old: Table,
+    c: usize,
+    to: DataType,
+    typmod: &crate::ast::TypeMod,
+    fit: crate::validating::Fit,
+) -> Result<()> {
+    use crate::validating::Fit;
+    let col = crate::validating::retyped(&old.columns[c], to, typmod.max_len, typmod.numeric);
+    if let Some(v) = old.validating.first()
+        && (v.column_index() != c || v.column(&old) != col)
+    {
+        return Err(Error::object_in_use(format!(
+            "the type of column \"{}\" of \"{}\" is being changed; wait for it to finish",
+            old.columns[v.column_index()].name,
+            old.name
+        )));
+    }
+    if fit == Fit::Same {
+        return Ok(());
+    }
+    if fit == Fit::Narrower {
+        dml::rows_are_premise(&*txn, &old)?;
+        crate::validating::check_rows(&*txn, reg, &old, c, &col)?;
+    }
+    if col.default.is_some() {
+        let mut new = old.clone();
+        new.columns[c] = col.clone();
+        let w = dml::Writer::new(&*txn, reg, new)?;
+        w.default_of(c, &Ctx::new(&*txn, reg, &[]))?;
+    }
+    crate::validating::give_type(txn, old, c, col)
 }
 
 /// `DESCRIBE`'s columns.

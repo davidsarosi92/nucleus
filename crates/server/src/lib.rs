@@ -738,6 +738,11 @@ pub fn maintain_with(
                 if let Err(e) = nucleus_sql::online_index::clean_dropped(&kv) {
                     nucleus_platform::log!("nucleus-server: dropped indexes: {}", e.message);
                 }
+                // Type checks cut short: abandoned (their statements run
+                // again).
+                if let Err(e) = nucleus_sql::validating::abandon_all(&kv) {
+                    nucleus_platform::log!("nucleus-server: type checks: {}", e.message);
+                }
             }
             seen = kv.activity();
         }

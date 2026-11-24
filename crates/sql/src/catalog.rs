@@ -95,8 +95,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// ([`TableEngine`]); version 24 the indexes being built online
 /// ([`Table::building`], after the others in the index list); version 25
 /// the dropped indexes whose entries are left to remove
-/// ([`Table::dropped`]); older versions still read.
-const TABLE_VERSION: u8 = 25;
+/// ([`Table::dropped`]); version 26 the type changes being validated
+/// ([`Table::validating`]); older versions still read.
+const TABLE_VERSION: u8 = 26;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -444,6 +445,9 @@ pub struct Table {
     /// drop committed (`crate::online_index::clean_dropped`): removed in
     /// the drop's transaction they met every writer's.
     pub dropped: Vec<u32>,
+    /// Definitions its writers obey already while the rows written before
+    /// are checked against them (`crate::validating`).
+    pub validating: Vec<Validating>,
     /// The engine holding its keys, `WITH (engine = …)`.
     pub engine: TableEngine,
     /// Its column copy's directory keys each segment by the suffix of its
@@ -515,6 +519,85 @@ pub struct Conversion {
     /// Index ids whose entries are left to remove (the old indexes after
     /// the cutover, the shadows after a failure).
     pub stale: Vec<u32>,
+}
+
+/// A definition a table's writers obey while the rows written before are
+/// checked against it (`crate::validating`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Validating {
+    /// Column `column` to take a type that keeps its values.
+    Type {
+        /// The column, by position.
+        column: usize,
+        /// Its new type.
+        ty: DataType,
+        /// `varchar(n)`: the longest value.
+        max_len: Option<u32>,
+        /// `numeric(precision, scale)`.
+        numeric: Option<(u32, u32)>,
+    },
+}
+
+impl Validating {
+    /// The column it is about, by position.
+    pub fn column_index(&self) -> usize {
+        match self {
+            Validating::Type { column, .. } => *column,
+        }
+    }
+
+    /// The column's definition once it holds, in table `t`.
+    pub fn column(&self, t: &Table) -> Column {
+        match self {
+            Validating::Type {
+                column,
+                ty,
+                max_len,
+                numeric,
+            } => crate::validating::retyped(&t.columns[*column], *ty, *max_len, *numeric),
+        }
+    }
+
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            Validating::Type {
+                column,
+                ty,
+                max_len,
+                numeric,
+            } => {
+                w.u8(0).u32(*column as u32);
+                write_type(w, *ty);
+                w.u32(max_len.map_or(0, |n| n + 1));
+                let (p, s) = numeric.map_or((0, 0), |(p, s)| (p + 1, s));
+                w.u32(p).u32(s);
+            }
+        }
+    }
+
+    fn decode(r: &mut Reader) -> Result<Self> {
+        match r.u8()? {
+            0 => {
+                let column = r.u32()? as usize;
+                let ty = read_type(r)?;
+                let max_len = match r.u32()? {
+                    0 => None,
+                    n => Some(n - 1),
+                };
+                let numeric = match (r.u32()?, r.u32()?) {
+                    (0, _) => None,
+                    (p, s) => Some((p - 1, s)),
+                };
+                Ok(Validating::Type {
+                    column,
+                    ty,
+                    max_len,
+                    numeric,
+                })
+            }
+            _ => Err(Error::internal("unknown validation in a table record")),
+        }
+    }
 }
 
 /// The phases of a [`Conversion`].
@@ -906,6 +989,10 @@ impl Table {
         for &id in &self.dropped {
             w.u32(id);
         }
+        w.u32(self.validating.len() as u32);
+        for v in &self.validating {
+            v.encode(&mut w);
+        }
         w.0
     }
 
@@ -1160,6 +1247,13 @@ impl Table {
         } else {
             Vec::new()
         };
+        let validating = if version >= 26 {
+            (0..r.u32()?)
+                .map(|_| Validating::decode(&mut r))
+                .collect::<Result<_>>()?
+        } else {
+            Vec::new()
+        };
         let building = if version >= 24 {
             let n = building_n;
             if n > indexes.len() {
@@ -1197,6 +1291,7 @@ impl Table {
             converting,
             building,
             dropped,
+            validating,
             engine,
             relative_directory,
         })
@@ -1546,6 +1641,7 @@ pub fn update_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
         let old = Table::decode(&old)?;
         crate::retype::allows_change(&old, table)?;
         crate::online_index::allows_change(&old, table)?;
+        crate::validating::allows_change(&old, table)?;
     }
     crate::sealed::check_table(&*txn, table)?;
     txn.put(&table_key(&table.name), &table.encode())?;
@@ -1569,6 +1665,14 @@ pub fn rename_table(txn: &mut dyn KvTxn, from: &str, table: &Table) -> Result<()
         return Err(Error::object_in_use(format!(
             "index \"{}\" of \"{from}\" is being built; the table can be renamed when that is done",
             ix.name
+        )));
+    }
+    if let Some(t) = get_table(&*txn, from)?
+        && let Some(v) = t.validating.first()
+    {
+        return Err(Error::object_in_use(format!(
+            "the type of column \"{}\" of \"{from}\" is being changed; the table can be renamed when that is done",
+            t.columns[v.column_index()].name
         )));
     }
     txn.delete(&table_key(from))?;
@@ -2187,6 +2291,12 @@ mod tests {
                 ix
             }],
             dropped: vec![5, 6],
+            validating: vec![Validating::Type {
+                column: 0,
+                ty: DataType::SmallInt,
+                max_len: None,
+                numeric: None,
+            }],
             engine: TableEngine::Lsm,
             relative_directory: true,
         };

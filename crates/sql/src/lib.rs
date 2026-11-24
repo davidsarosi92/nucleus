@@ -120,6 +120,7 @@ pub mod topk;
 pub mod types;
 pub mod unnest;
 pub mod uuid;
+pub mod validating;
 pub mod vector;
 pub mod vectors;
 pub mod window;

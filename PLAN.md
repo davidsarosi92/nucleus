@@ -13193,6 +13193,28 @@ did not run on the workers without statistics (`rows=1000` estimated).
   drop whose snapshot is older than a committed write of its keys
   commits; entries gone after `COMMIT`, kept on `ROLLBACK`; three
   storages); 3 mutants killed.
+- Issue #18, step 2 — `ALTER COLUMN … TYPE` without a rewrite where the
+  values stay (`validating`).  It failed `40001` 14 times a run (5 and 3
+  succeeding): every row rewritten in one transaction met a writer, and
+  the column-stored table cannot take the `CONCURRENTLY` form.  Values
+  are encoded by what they are, so a type that keeps them needs no
+  rewrite: the same type is nothing, a wider one (`smallint` → `integer`
+  → `bigint`, `varchar(n)` → longer or `text`, `numeric(p, s)` →
+  `numeric`) the catalog alone, a narrower one a check of the rows; run
+  alone and meeting a write, the check goes online — the new type
+  recorded as validated (`Table::validating`, record version 26) and
+  obeyed by writers (`Writer::validate`), then one read-only snapshot
+  checked, then the type given.  Other changes run alone that meet a
+  write fall back to `retype`'s online conversion when it can take
+  them.  Taken: PostgreSQL's binary-coercible changes and `NOT VALID` /
+  `VALIDATE CONSTRAINT` (documentation), F1's write-only states.
+  Measured (as step 1): `ALTER TYPE` 19 and 18 succeeding, none failing;
+  commits 689k and 703k (656k, 657k before); checks clean.  Tests:
+  `tests/type_change.rs` (writers obey a narrowing being checked; a value
+  or a default that does not fit abandons it; a change cut short taken
+  over or abandoned; a block's check a premise of its commit; changes
+  under writes that do not pause; a rewrite converted online where
+  `retype` can; three storages); 15 mutants killed.
 
 ### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 

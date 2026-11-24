@@ -255,6 +255,9 @@ fn refuse(
     if !t.building.is_empty() {
         return no("an index of the table is being built");
     }
+    if !t.validating.is_empty() {
+        return no("a column's type is being checked");
+    }
     for ix in t.indexes.iter().filter(|ix| ix.uses(c)) {
         let own = ix.columns.iter().zip(&ix.exprs).zip(&ix.orderings);
         if ix.method.is_some()
@@ -371,6 +374,50 @@ pub fn alter(
     // `false`: the same conversion, cut short — finished all the same.
     attempt(kv, |txn| start(txn, reg, table, column, ty, typmod, using))?;
     finish(kv, reg, table)
+}
+
+/// `ALTER COLUMN … TYPE` (`stmt`, without `CONCURRENTLY`) whose rewrite
+/// in one transaction met a write committed under it: converted online
+/// instead, when it is a rewrite this can do (`Ok(false)` otherwise: the
+/// statement runs again as it was).
+pub fn fall_back(kv: &Arc<dyn Kv>, reg: &Registry, stmt: &crate::ast::Statement) -> Result<bool> {
+    let crate::ast::Statement::AlterColumnType {
+        table,
+        column,
+        ty,
+        typmod,
+        using,
+        using_text,
+        concurrently: false,
+    } = stmt
+    else {
+        return Ok(false);
+    };
+    {
+        let txn = kv.begin(TxnOptions::read_only())?;
+        let t = catalog::table(&*txn, table)?;
+        let Some(c) = t.column(column) else {
+            return Ok(false);
+        };
+        let to = crate::binder::column_type(&*txn, reg, ty)?;
+        // Values kept as they are: the catalog's change (or a check).
+        let fit = crate::validating::fit(&t.columns[c], to, typmod.max_len, typmod.numeric);
+        if using.is_none()
+            && fit != crate::validating::Fit::Rewrite
+            && crate::validating::in_place(&t, c)
+        {
+            return Ok(false);
+        }
+        let conversion = conversion_expr(&*txn, reg, &t, c, to, using.as_ref())?;
+        match refuse(&*txn, reg, &t, c, to, &conversion) {
+            Ok(()) => {}
+            Err(e) if e.code == "0A000" => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    let using = using.as_ref().zip(using_text.as_deref());
+    alter(kv, reg, table, column, ty, typmod, using)?;
+    Ok(true)
 }
 
 /// Records the conversion (the backfill begins); `false` when the same one

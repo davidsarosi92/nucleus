@@ -208,6 +208,7 @@ checked against.
 - **pgBackRest; restic / Borg; WAL-G / Barman; AWS SigV4** — backups. O3–O4.
 - **CockroachDB online schema changes and F1 (Rae et al., VLDB 2013); gh-ost / pt-osc; PostgreSQL `CREATE INDEX CONCURRENTLY`, `SET ACCESS METHOD`; MySQL `ENGINE=`** — online type and engine changes. O5; §M14.28 L3b.
 - **PostgreSQL `CREATE INDEX CONCURRENTLY` (as its documentation describes it); F1's write-only state (Rae et al., VLDB 2013)** — an index kept by writers before it is read, filled in parts, then made ready. Issue #18 (`online_index`).
+- **PostgreSQL's binary-coercible type changes and `NOT VALID` / `VALIDATE CONSTRAINT` (as its documentation describes them); F1's states writers obey before the data is known to (Rae et al., VLDB 2013)** — a column type that keeps the values changed in the catalog alone, a narrower one checked online after writers obey it. Issue #18 step 2 (`validating`).
 - **`pg_dump`'s dependency sort; Flyway checksums; dbmate; golang-migrate / sqlx names; Rails `schema_migrations`; sqlc** — migrations and code generation. §M14.16.
 - **rustup's, Deno's and DuckDB's install scripts; shell.duckdb.org, the PGlite REPL, SQLite fiddle** — install and playground. §M14.17.
 

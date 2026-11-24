@@ -2319,6 +2319,8 @@ fn rebuild(
     // Indexes being built online: built with the others
     // (`crate::online_index::settle`).
     crate::online_index::settle(kv)?;
+    // Type changes being checked: abandoned (`crate::validating`).
+    crate::validating::abandon_all(kv)?;
     let tables = {
         let txn = kv.begin(TxnOptions::read_only())?;
         catalog::tables(&*txn)?

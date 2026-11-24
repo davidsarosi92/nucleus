@@ -241,7 +241,11 @@ one-transaction form never finishes under those writes).  An index is built
 the same way — `CREATE INDEX CONCURRENTLY`, or a `CREATE INDEX` that
 meets writes: writers keep it before queries read it, and the rows get
 their entries a part at a time (under 2,600 commits/s, every build
-succeeds; in one transaction 3 of 44 did).
+succeeds; in one transaction 3 of 44 did).  A type that keeps the
+values — `integer` to `bigint` and back, `varchar(n)` to `text` — rewrites
+no row: a wider one changes the catalog alone, a narrower one checks the
+rows, online when it meets writes (writers obey the new type while the
+rows written before are checked).
 Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …), then

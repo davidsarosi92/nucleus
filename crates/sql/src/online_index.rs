@@ -71,8 +71,9 @@ pub(crate) fn refusal(t: &Table, ix: &Index) -> Option<&'static str> {
     }
 }
 
-/// Whether `stmt` is a `CREATE INDEX` that, its build in one transaction
-/// failing over a concurrent write, is built online instead.
+/// Whether `stmt` is DDL that, failing in one transaction over a
+/// concurrent write, may run online instead ([`instead`]): a `CREATE
+/// INDEX`, an `ALTER COLUMN … TYPE`.
 pub fn may_fall_back(stmt: &crate::ast::Statement) -> bool {
     matches!(
         stmt,
@@ -80,8 +81,32 @@ pub fn may_fall_back(stmt: &crate::ast::Statement) -> bool {
             concurrently: false,
             method: None,
             ..
+        } | crate::ast::Statement::AlterColumnType {
+            concurrently: false,
+            ..
         }
     )
+}
+
+/// `stmt` ([`may_fall_back`]), whose transaction met a write committed
+/// under it, run online: an index built online, a type that keeps the
+/// values checked online (`crate::validating`), another converted online
+/// (`crate::retype`).  Its command tag, or `None` when it cannot be (it
+/// runs again as it was).
+pub fn instead(
+    kv: &Arc<dyn Kv>,
+    reg: &Registry,
+    stmt: &crate::ast::Statement,
+) -> Result<Option<&'static str>> {
+    Ok(match stmt {
+        crate::ast::Statement::CreateIndex { .. } => {
+            create(kv, reg, stmt, true)?.then_some("CREATE INDEX")
+        }
+        crate::ast::Statement::AlterColumnType { .. } => (crate::validating::alter(kv, reg, stmt)?
+            || crate::retype::fall_back(kv, reg, stmt)?)
+        .then_some("ALTER TABLE"),
+        _ => None,
+    })
 }
 
 /// What [`create`] began.
