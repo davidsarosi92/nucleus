@@ -318,6 +318,10 @@ pub fn read_some(
         Some(cv) => crate::retype::read_some(t, cv, bytes, wanted, &mut resolve)?,
         None => crate::encoding::decode_some(bytes, t.columns.len(), wanted, &mut resolve)?,
     };
+    // Columns added since the row was stored: their value for it.
+    if !t.missing.is_empty() {
+        t.fill_missing(crate::encoding::row_header(bytes)?.n, &mut row, wanted);
+    }
     for (v, c) in row.iter_mut().zip(&t.columns) {
         if matches!(c.ty, DataType::Enum(_)) {
             labels.fill(txn, c.ty, v)?;

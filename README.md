@@ -245,7 +245,9 @@ succeeds; in one transaction 3 of 44 did).  A type that keeps the
 values — `integer` to `bigint` and back, `varchar(n)` to `text` — rewrites
 no row: a wider one changes the catalog alone, a narrower one checks the
 rows, online when it meets writes (writers obey the new type while the
-rows written before are checked).
+rows written before are checked).  `ADD COLUMN` with a default the same for
+every row reads and rewrites no row: the rows stored before read the
+value kept in the table's definition.
 Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …), then

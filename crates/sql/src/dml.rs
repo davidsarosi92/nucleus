@@ -2519,23 +2519,28 @@ pub fn replace_rows(
     build_methods(txn, reg, table, &keys)
 }
 
-/// Every row of a table rewritten (after `ADD COLUMN … DEFAULT`).
-pub fn rewrite_rows(
-    txn: &mut dyn KvTxn,
-    reg: &Registry,
-    table: &Table,
-    fill: &Value,
-) -> Result<()> {
+/// Every row of a table rewritten with its last column — just added —
+/// given its default, made for each row (a volatile one's values differ),
+/// and the row checked (the column's `CHECK`, `NOT NULL`).
+pub fn rewrite_rows(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<()> {
+    let w = Writer::new(&*txn, reg, table.clone())?;
+    let last = table.columns.len() - 1;
     let rows = {
         let ctx = Ctx::new(&*txn, reg, &[]);
-        exec::matching_stash(table, &Access::Full, None, &ctx)?
+        let mut rows = crate::spill::Stash::new();
+        for r in exec::matching(table, &Access::Full, None, &ctx)? {
+            let (key, mut row) = r?;
+            row[last] = w.default_of(last, &ctx)?;
+            w.validate(&row, &ctx)?;
+            rows.push(exec::keyed(key, row))?;
+        }
+        rows.seal()?
     };
     let storage = crate::storage::of(table)?;
     for r in rows.into_iter() {
-        let (key, row) = exec::unkeyed(r?)?;
-        let mut filled = row.clone();
-        let last = table.columns.len() - 1;
-        filled[last] = fill.clone();
+        let (key, filled) = exec::unkeyed(r?)?;
+        let mut row = filled.clone();
+        row[last] = Value::Null;
         storage.write(txn, table, &key, &filled, Some(&row))?;
     }
     crate::storage::written(table);

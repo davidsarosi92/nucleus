@@ -8,7 +8,9 @@
 //! TABLE`: an index on `note` held entries for notes the rows no longer
 //! had; then, two sessions at a time, a dropped column whose concurrent
 //! insert kept it (its value read as the next column's), a `CHECK` and a
-//! `NOT NULL` that rows broke, a column added whose new row had no default.
+//! `NOT NULL` that rows broke, a column added whose new row had no default
+//! (since, a default the same for every row is the rows' without reading
+//! them, issue #18 — its case here is a volatile one's).
 
 use std::sync::Arc;
 
@@ -78,10 +80,10 @@ fn ddl_fails_over_a_write_committed_under_it() {
             None,
         ),
         (
-            "ALTER TABLE t ADD COLUMN w int NOT NULL DEFAULT 7",
+            "ALTER TABLE t ADD COLUMN w float NOT NULL DEFAULT random() + 7",
             "INSERT INTO t VALUES (100, 'x', 1)",
             Ok(()),
-            Some(("SELECT w FROM t WHERE id = 100", Int(7))),
+            Some(("SELECT w >= 7 FROM t WHERE id = 100", Value::Bool(true))),
         ),
         (
             "ALTER TABLE t ADD COLUMN g int GENERATED ALWAYS AS (k * 2) STORED",
@@ -127,5 +129,21 @@ fn ddl_fails_over_a_write_committed_under_it() {
                 assert_eq!(one(&mut b, sql), *want, "{what}: {sql}");
             }
         }
+        // A column added with a default the same for every row reads no
+        // row (issue #18): the write's row, stored under the old
+        // definition, reads the default as the others do.
+        let kv: Arc<dyn Kv> =
+            Arc::new(Database::open_in_memory(nucleus_kv::Options::in_memory()).unwrap());
+        let (mut a, mut b) = (Session::new(kv.clone()), Session::new(kv));
+        a.execute(&format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, v TEXT, k INT) {kind}; \
+             INSERT INTO t SELECT i, 'old', i FROM generate_series(1, 10) i"
+        ))
+        .unwrap();
+        a.execute("BEGIN ISOLATION LEVEL REPEATABLE READ; ALTER TABLE t ADD COLUMN w int NOT NULL DEFAULT 7")
+            .unwrap();
+        b.execute("INSERT INTO t VALUES (100, 'x', 1)").unwrap();
+        a.execute("COMMIT").unwrap();
+        assert_eq!(one(&mut b, "SELECT sum(w) FROM t"), Int(77), "[{kind}]");
     }
 }

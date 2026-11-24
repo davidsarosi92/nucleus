@@ -2623,8 +2623,9 @@ fn decode_into(
             (col, _) => col.push(crate::encoding::decode_value(&mut r)?),
         }
     }
-    for col in cols.iter_mut().skip(n) {
-        col.push_null();
+    // Columns added since the row was stored: their value for it.
+    for (c, col) in cols.iter_mut().enumerate().skip(n) {
+        col.push(t.missing_value(n, c));
     }
     Ok(true)
 }

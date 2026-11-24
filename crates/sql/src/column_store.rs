@@ -1022,7 +1022,9 @@ fn values_of(
     rows: &[usize],
 ) -> Result<Vec<Value>> {
     let mut values = if !seg.cols.contains(&(col as u16)) {
-        vec![Value::Null; rows.len()]
+        // A column added after the segment was written: its value for
+        // the rows before (`Table::missing`), else NULL.
+        vec![t.missing_value(0, col); rows.len()]
     } else if let Some(Decoded::Column(v)) = cache_get(&(seg.id, col as u16)) {
         rows.iter().map(|&i| v.value(i)).collect()
     } else {
@@ -1056,7 +1058,7 @@ fn values_of(
 /// [`value_of`] as stored (an enum's value without its label).
 fn stored_value(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> Result<Value> {
     if !seg.cols.contains(&(col as u16)) {
-        return Ok(Value::Null);
+        return Ok(t.missing_value(0, col));
     }
     let decoded = cache_get(&(seg.id, col as u16));
     if let Some(Decoded::Column(v)) = decoded {
@@ -1108,8 +1110,9 @@ fn column_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Ar
 /// [`column_of`] as stored (an enum's values without their labels).
 fn stored_column(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Arc<Vector>> {
     if !seg.cols.contains(&(col as u16)) {
-        // A column added after the segment was written: NULL.
-        return Ok(Arc::new(Vector::Const(Value::Null)));
+        // A column added after the segment was written: its value for the
+        // rows before (`Table::missing`), else NULL.
+        return Ok(Arc::new(Vector::Const(t.missing_value(0, col))));
     }
     match cached(txn, t, seg, col as u16)? {
         Decoded::Column(v) => Ok(v),

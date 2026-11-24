@@ -13215,6 +13215,29 @@ did not run on the workers without statistics (`rows=1000` estimated).
   over or abandoned; a block's check a premise of its commit; changes
   under writes that do not pause; a rewrite converted online where
   `retype` can; three storages); 15 mutants killed.
+- Issue #18, step 4 — `ADD COLUMN` without reading the rows.  With
+  `ALTER TYPE` fixed, `ADD COLUMN extra int DEFAULT 5` failed `40001` 8
+  and 4 times a run (3 and 2 succeeding): it rewrote every row, and even
+  without a default took the rows as a premise.  Now a default the same
+  for every row (immutable, a plain type, no `CHECK` or `REFERENCES` of
+  its own) is made once and kept in the table's record
+  (`Table::missing`, record version 27): a row stored with fewer values
+  reads it — `large::read_some`, the vectorized decoder, a column segment
+  written before; `DROP COLUMN` moves the positions.  No row read, none
+  is a premise: a write committed meanwhile stored a row that reads the
+  value like the others.  Found on the way and fixed: the rewrite (a
+  volatile default, a check) gave every row one value of a volatile
+  default (PostgreSQL makes one per row) and did not check the rows
+  against the column's `CHECK`.  Taken: PostgreSQL 11's fast `ADD COLUMN`
+  (its missing value; documentation).  Measured (as step 1): `ADD
+  COLUMN` 4 and 3 succeeding, none failing with `40001` (the rest `42701`:
+  the column was there, its `DROP COLUMN` failing — next); `ALTER TYPE`
+  19 and 18; checks clean.  Tests: `tests/add_column.rs` (twin tables,
+  one rewritten, answering the same through four storages, writes, an
+  index, a type change and a drop after; a reopen; defaults that rewrite;
+  no row a premise; under writes that do not pause); 11 of 13 mutants
+  killed — the 2 left (`DROP COLUMN` moving the kept values' positions)
+  are equivalent while `DROP COLUMN` rewrites every row.
 
 ### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 

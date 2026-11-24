@@ -3680,7 +3680,6 @@ fn add_column(
     column: &crate::ast::ColumnSpec,
 ) -> Result<()> {
     let mut t = catalog::table(&*txn, table)?;
-    dml::rows_are_premise(&*txn, &t)?;
     if t.column(&column.name).is_some() {
         return Err(Error::duplicate_column(format!(
             "column \"{}\" of relation \"{table}\" already exists",
@@ -3716,7 +3715,10 @@ fn add_column(
             ));
         }
         match g {
-            crate::ast::Generated::Stored(_) => dml::generate_rows(txn, reg, &t)?,
+            crate::ast::Generated::Stored(_) => {
+                dml::rows_are_premise(&*txn, &t)?;
+                dml::generate_rows(txn, reg, &t)?
+            }
             // Every row's vector, made by the workers.
             crate::ast::Generated::Embedding { .. } => {
                 crate::embedding::enqueue_all(txn, reg, &t, t.columns.len() - 1)?
@@ -3730,6 +3732,22 @@ fn add_column(
         let ctx = Ctx::new(&*txn, reg, &[]);
         w.default_of(t.columns.len() - 1, &ctx)?
     };
+    // A value one for every row: the rows stored before read it as theirs,
+    // none rewritten (issue #18) — nor read, so no write to the table
+    // makes the change fail.  A row a writer stores meanwhile under the
+    // old definition is one of them.
+    if column.references.is_none() && column.check.is_none() && missing_fits(&*txn, reg, &t, &fill)?
+    {
+        let c = t.columns.len() - 1;
+        if !fill.is_null() {
+            t.missing.push((c, fill));
+        }
+        catalog::update_table(txn, &t)?;
+        return Ok(());
+    }
+    // The rows read (a premise of the commit: a write committed
+    // meanwhile was made under the old definition) or rewritten.
+    dml::rows_are_premise(&*txn, &t)?;
     let has_rows = {
         let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching(&t, &crate::plan::Access::Full, None, &ctx)?
@@ -3744,8 +3762,8 @@ fn add_column(
                 column.name
             )));
         }
-        if !fill.is_null() {
-            dml::rewrite_rows(txn, reg, &t, &fill)?;
+        if !fill.is_null() || column.default.is_some() || column.check.is_some() {
+            dml::rewrite_rows(txn, reg, &t)?;
         }
     }
     if let Some((name, r)) = &column.references {
@@ -3761,6 +3779,52 @@ fn add_column(
     }
     catalog::update_table(txn, &t)?;
     Ok(())
+}
+
+/// Whether the rows stored before column (the last of `t`, being added)
+/// may read `fill` — its default's value, once — as theirs
+/// ([`Table::missing`]) instead of being rewritten: the default the same
+/// for every row (immutable; or none, `NULL`, on a column that may be
+/// `NULL`), of a type whose stored value is the value itself, on a table
+/// whose rows the row and column stores hold (a partitioned table's,
+/// its partitions').
+fn missing_fits(txn: &dyn KvTxn, reg: &Registry, t: &Table, fill: &Value) -> Result<bool> {
+    let col = &t.columns[t.columns.len() - 1];
+    if t.memory.is_some() || t.chunks.is_some() {
+        return Ok(false);
+    }
+    if fill.is_null() {
+        return Ok(col.nullable);
+    }
+    let plain = matches!(
+        col.ty,
+        DataType::Bool
+            | DataType::SmallInt
+            | DataType::Integer
+            | DataType::BigInt
+            | DataType::Real
+            | DataType::Float
+            | DataType::Text
+            | DataType::Char
+            | DataType::Bytea
+            | DataType::Numeric
+            | DataType::Date
+            | DataType::Time
+            | DataType::Timestamp
+            | DataType::TimestampTz
+            | DataType::Interval
+    );
+    let Some(default) = &col.default else {
+        return Ok(false);
+    };
+    if !plain {
+        return Ok(false);
+    }
+    let mut binder = Binder::new(txn, reg);
+    let e = binder
+        .expr(&crate::parser::parse_expr(default)?, &dml::table_scope(t))?
+        .0;
+    Ok(dml::immutability_problem(&e, t).is_none())
 }
 
 /// Refuses `what` on a partitioned table or a partition (their definitions
@@ -4252,6 +4316,7 @@ pub(crate) fn create_table(
         building: Vec::new(),
         dropped: Vec::new(),
         validating: Vec::new(),
+        missing: Vec::new(),
         memory: None,
         engine: opts.engine,
         relative_directory: true,

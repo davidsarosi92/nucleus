@@ -96,8 +96,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// ([`Table::building`], after the others in the index list); version 25
 /// the dropped indexes whose entries are left to remove
 /// ([`Table::dropped`]); version 26 the type changes being validated
-/// ([`Table::validating`]); older versions still read.
-const TABLE_VERSION: u8 = 26;
+/// ([`Table::validating`]); version 27 the values of columns added since
+/// rows were stored ([`Table::missing`]); older versions still read.
+const TABLE_VERSION: u8 = 27;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -448,6 +449,11 @@ pub struct Table {
     /// Definitions its writers obey already while the rows written before
     /// are checked against them (`crate::validating`).
     pub validating: Vec<Validating>,
+    /// Columns added with a default whose value is one for every row:
+    /// a row stored before (shorter than the table) reads it there, as
+    /// if it held it — the column added without the rows rewritten
+    /// ([`Table::fill_missing`]).  By column position.
+    pub missing: Vec<(usize, Value)>,
     /// The engine holding its keys, `WITH (engine = …)`.
     pub engine: TableEngine,
     /// Its column copy's directory keys each segment by the suffix of its
@@ -775,6 +781,33 @@ impl Table {
         t
     }
 
+    /// Gives a row stored with `stored` values (decoded to the table's
+    /// width, the columns past them `NULL`) the values of the columns
+    /// added since ([`Table::missing`]); those `wanted` marks, if given.
+    pub fn fill_missing(&self, stored: usize, row: &mut [Value], wanted: Option<&[bool]>) {
+        for (c, v) in &self.missing {
+            if *c >= stored
+                && *c < row.len()
+                && wanted.is_none_or(|w| w.get(*c).copied().unwrap_or(false))
+            {
+                row[*c] = v.clone();
+            }
+        }
+    }
+
+    /// The value a row stored with `stored` values reads for column `c`,
+    /// when it holds none: added since with a value ([`Table::missing`]),
+    /// else `NULL`.
+    pub fn missing_value(&self, stored: usize, c: usize) -> Value {
+        if c < stored {
+            return Value::Null;
+        }
+        self.missing
+            .iter()
+            .find(|(m, _)| *m == c)
+            .map_or(Value::Null, |(_, v)| v.clone())
+    }
+
     /// The ids its keys may be under besides the rows': its indexes', those
     /// being built online, and those dropped whose entries are left.
     pub fn index_ids(&self) -> impl Iterator<Item = u32> + '_ {
@@ -992,6 +1025,10 @@ impl Table {
         w.u32(self.validating.len() as u32);
         for v in &self.validating {
             v.encode(&mut w);
+        }
+        w.u32(self.missing.len() as u32);
+        for (c, v) in &self.missing {
+            w.u32(*c as u32).value(v);
         }
         w.0
     }
@@ -1254,6 +1291,16 @@ impl Table {
         } else {
             Vec::new()
         };
+        let missing = if version >= 27 {
+            (0..r.u32()?)
+                .map(|_| {
+                    let c = r.u32()? as usize;
+                    Ok((c, r.value()?))
+                })
+                .collect::<Result<_>>()?
+        } else {
+            Vec::new()
+        };
         let building = if version >= 24 {
             let n = building_n;
             if n > indexes.len() {
@@ -1292,6 +1339,7 @@ impl Table {
             building,
             dropped,
             validating,
+            missing,
             engine,
             relative_directory,
         })
@@ -2291,6 +2339,7 @@ mod tests {
                 ix
             }],
             dropped: vec![5, 6],
+            missing: vec![(1, Value::Int(5)), (2, Value::Text("x".into()))],
             validating: vec![Validating::Type {
                 column: 0,
                 ty: DataType::SmallInt,

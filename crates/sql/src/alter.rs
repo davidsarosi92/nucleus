@@ -706,6 +706,10 @@ fn drop_column(
         s.columns.iter_mut().for_each(down);
     }
     new.columnar.iter_mut().for_each(down);
+    new.missing.retain(|(m, _)| *m != c);
+    for (m, _) in &mut new.missing {
+        down(m);
+    }
     new.subject.iter_mut().for_each(down);
     new.expiry.iter_mut().for_each(down);
     if let Some(spec) = &mut new.partition_by {

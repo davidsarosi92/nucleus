@@ -2094,8 +2094,9 @@ rewrites the keys of every table with an array in a key
 (`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `04`, column count, the
 offsets of columns 16, 32, … (`u16` from the row's start; `FFFF` for one
 past 64 KiB, reached by reading on from the mark before it), tagged values
-(missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
-unless it has a default); an integer is tag `12` (2 bytes), `13` (4) or
+(missing trailing columns read as NULL — or as a column's value kept
+for the rows stored before it was added, `Table::missing` — so `ADD
+COLUMN` needs no rewrite unless its default differs from row to row); an integer is tag `12` (2 bytes), `13` (4) or
 `2` (8), the fewest that hold it (version `01`, still read, had only `2`);
 a real is tag `14`, a bytea `15`; a registered type's value is tag `11`,
 its id, its encoding version and its canonical bytes; tag `16` (a
@@ -3439,11 +3440,30 @@ Constraint errors: `23502` NOT NULL, `22001` too long, `23514` CHECK (a
 NULL check passes), `23505` duplicate key, `23503` foreign key; `42804`
 wrong assignment type (assignment converts within numbers, within dates
 and timestamps, and from or to text).
-`CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`);
-`ADD COLUMN` with a default rewrites existing rows.
+`CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`).
 
-**DDL over a table's rows** — an index built, `ADD COLUMN`, `DROP
-COLUMN`, `ALTER COLUMN … TYPE`, `SET NOT NULL`, `ADD CONSTRAINT` — makes
+**`ADD COLUMN`** (issue #18, step 4) reads no row when the rows stored
+before can take the new column's value as theirs: with no default (a
+column that may be `NULL`: they read `NULL`), or a default the same for
+every row — immutable, of a type whose stored value is the value itself
+(booleans, numbers, text, `char`, `bytea`, dates and times) — without a
+`CHECK` or `REFERENCES` of its own.  The default's value, made once, is
+kept in the table's record (`Table::missing`, by column position): a row
+stored with fewer values than the column's position reads it there — in
+the row decoder (`large::read_some`), the vectorized one, and a column
+segment written before (`column_store`); a row written after holds its
+own; a later `SET DEFAULT` changes neither.  No row read, no row is a
+premise of the commit: a write committed meanwhile under the old
+definition stored a row that reads the value as the others do, so no
+write to the table makes the change fail.  Otherwise (a volatile
+default — `random()`, `now()`, a sequence —, a check, a foreign key, `NOT
+NULL` without a default) every row is rewritten, its default made for it
+(a volatile one's values differ from row to row, as in PostgreSQL) and
+the row checked.  The design is PostgreSQL 11's fast `ADD COLUMN` (a
+non-volatile default kept as the attribute's missing value).
+
+**DDL over a table's rows** — an index built, an `ADD COLUMN` that
+rewrites them, `DROP COLUMN`, `ALTER COLUMN … TYPE`, `SET NOT NULL`, `ADD CONSTRAINT` — makes
 the rows as its snapshot has them a premise of its commit
 (`dml::rows_are_premise`: the table's whole key range validated, at any
 isolation level).  A write the table's validated definition does not
