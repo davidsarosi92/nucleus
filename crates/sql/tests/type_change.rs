@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nucleus_kv::{Database, Kv, Options, TxnOptions};
 use nucleus_platform::sim::SimPlatform;
@@ -308,13 +308,15 @@ fn type_changes_under_writes_that_do_not_pause() {
     for storage in STORAGES {
         setup(&mut s, storage);
         let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicU64::new(0));
         let writer = {
-            let (kv, stop) = (Arc::clone(&kv), Arc::clone(&stop));
+            let (kv, stop, done) = (Arc::clone(&kv), Arc::clone(&stop), Arc::clone(&done));
             std::thread::spawn(move || {
                 let mut w = Session::new(kv);
                 let mut round = 0u64;
                 while !stop.load(Ordering::SeqCst) {
                     round += 1;
+                    done.store(round, Ordering::SeqCst);
                     let k = round * 7919 % 5000 + 1;
                     let sql = format!(
                         "UPDATE x SET n = (n + 1) % 1000, t = 'w' || id, u = u + 1 WHERE id = {k}"
@@ -332,6 +334,12 @@ fn type_changes_under_writes_that_do_not_pause() {
             ("ALTER TABLE x ALTER COLUMN t TYPE text", "text"),
             ("ALTER TABLE x ALTER COLUMN t TYPE varchar(12)", "varchar"),
         ] {
+            // Between writes (a change that reads no row is over before a
+            // thread starts).
+            let at = done.load(Ordering::SeqCst);
+            while done.load(Ordering::SeqCst) < at + 5 {
+                std::thread::yield_now();
+            }
             s.execute(sql)
                 .unwrap_or_else(|e| panic!("{storage} {sql}: {e:?}"));
             let got = type_of(&mut s, "x", sql.split(' ').nth(5).unwrap());
