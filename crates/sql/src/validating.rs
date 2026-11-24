@@ -181,16 +181,17 @@ fn claim_key(table: &str) -> String {
 /// committed meanwhile: the rows checked online (see the module).
 /// `Ok(false)`: not a narrowing this does — the statement runs as it was.
 pub fn alter(kv: &Arc<dyn Kv>, reg: &Registry, stmt: &crate::ast::Statement) -> Result<bool> {
-    alter_watched(kv, reg, stmt, &mut || ())
+    alter_watched(kv, reg, stmt, &mut || Ok(()))
 }
 
 /// [`alter`], `between` run once the new type is recorded, before the
-/// rows are read.
+/// rows are read (an error it returns leaves the change as one cut short
+/// would).
 pub fn alter_watched(
     kv: &Arc<dyn Kv>,
     reg: &Registry,
     stmt: &crate::ast::Statement,
-    between: &mut dyn FnMut(),
+    between: &mut dyn FnMut() -> Result<()>,
 ) -> Result<bool> {
     let crate::ast::Statement::AlterColumnType {
         table,
@@ -213,7 +214,7 @@ pub fn alter_watched(
     let Some((c, col)) = begun else {
         return Ok(false);
     };
-    between();
+    between()?;
     // The snapshot after the record committed: every row written without
     // obeying it.
     let checked = {

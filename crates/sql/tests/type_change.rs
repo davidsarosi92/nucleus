@@ -69,7 +69,7 @@ fn alter_watched(
     kv: &Arc<dyn Kv>,
     s: &Session,
     sql: &str,
-    between: &mut dyn FnMut(),
+    between: &mut dyn FnMut() -> nucleus_sql::Result<()>,
 ) -> Result<bool, String> {
     let stmt = nucleus_sql::parser::parse_one(sql).unwrap();
     nucleus_sql::validating::alter_watched(kv, s.registry(), &stmt, between)
@@ -108,6 +108,7 @@ fn writers_obey_a_narrowing_being_checked() {
                     code(&mut w, "ALTER TABLE x ALTER COLUMN t TYPE text"),
                     code(&mut w, "ALTER TABLE x RENAME TO y"),
                 ];
+                Ok(())
             },
         );
         assert_eq!(done, Ok(true), "{storage}");
@@ -149,7 +150,10 @@ fn a_value_that_does_not_fit_abandons_the_change() {
             ),
         ] {
             let mut ran = false;
-            let r = alter_watched(&kv, &s, sql, &mut || ran = true);
+            let r = alter_watched(&kv, &s, sql, &mut || {
+                ran = true;
+                Ok(())
+            });
             match err {
                 // The same type, a wider one: no check — the statement's
                 // to make.
@@ -168,7 +172,10 @@ fn a_value_that_does_not_fit_abandons_the_change() {
             &kv,
             &s,
             "ALTER TABLE x ALTER COLUMN u TYPE smallint",
-            &mut || ran = true,
+            &mut || {
+                ran = true;
+                Ok(())
+            },
         );
         assert_eq!(r.map_err(|e| e[..5].to_string()), Err("22003".to_string()));
         assert!(!ran, "{storage}");
@@ -195,11 +202,9 @@ fn a_change_cut_short_is_taken_over_or_abandoned() {
     let reg = s.registry().clone();
     let cut = |sql: &str| {
         let stmt = nucleus_sql::parser::parse_one(sql).unwrap();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = nucleus_sql::validating::alter_watched(&kv, &reg, &stmt, &mut || {
-                panic!("cut short")
-            });
-        }));
+        let r = nucleus_sql::validating::alter_watched(&kv, &reg, &stmt, &mut || {
+            Err(nucleus_sql::Error::internal("cut short"))
+        });
         assert!(r.is_err());
     };
     // Its statement again: taken over, finished — online, or in the
@@ -218,7 +223,7 @@ fn a_change_cut_short_is_taken_over_or_abandoned() {
             &kv,
             &s,
             "ALTER TABLE x ALTER COLUMN n TYPE smallint",
-            &mut || ()
+            &mut || Ok(())
         ),
         Ok(true)
     );
