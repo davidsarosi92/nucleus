@@ -2271,8 +2271,9 @@ REFERENCES …`, each with an optional `CONSTRAINT name`), `CREATE TABLE
 query's columns, names given replacing theirs from the left, with their
 types — without a length or a numeric's precision — and no constraints;
 filled by the query unless `WITH NO DATA`; tagged `SELECT n`), `DROP TABLE [IF
-EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]` (of
-columns and expressions), `DROP INDEX
+EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT
+EXISTS]` (of columns and expressions; `CONCURRENTLY`: built online, §8.7),
+`DROP INDEX
 [IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] [IF NOT EXISTS] …`, `ALTER TABLE … ADD
 [CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
 CONSTRAINT [IF EXISTS] n`, `ALTER TABLE … RENAME …`, `… DROP COLUMN …`,
@@ -3451,10 +3452,56 @@ otherwise keep no entries in a new index, break a new check, `NOT NULL`
 or foreign key, miss a new column's default, or keep a dropped column;
 instead the DDL's commit fails (`40001`), an autocommit DDL running again
 (up to ten times) and then seeing the write.  On a table written without
-pause a DDL can so fail every time; an online build (the index written by
-writers before it is read, PostgreSQL's `CREATE INDEX CONCURRENTLY`) is
-not yet there.  `ALTER COLUMN … TYPE … CONCURRENTLY` and storage
-conversions work in parts of their own (§M14.20).
+pause such a DDL can fail every time; the forms that work in parts of
+their own do not: an index built online (below), `ALTER COLUMN … TYPE …
+CONCURRENTLY` and storage conversions (§M14.20).
+
+**Indexes built online** (`online_index`, issue #18): `CREATE [UNIQUE]
+INDEX CONCURRENTLY name ON t (…)` — and a `CREATE INDEX` run alone whose
+build in one transaction failed over a write committed under it (it is
+built online then, instead of again) — builds the index while other
+sessions write the table, in transactions of its own; not inside a
+transaction block (`25001`); it returns when the index is ready.
+First the index joins the table's indexes *being built*
+(`Table::building`, after the others in the table record): every writer
+— whose transaction reads the table's record validated, so one begun
+before fails `40001` and runs again — keeps its entries as any index's,
+a unique one refusing a duplicate it sees (`23505`), while queries and
+the planner do not see it (`nc_catalog.indexes.is_ready` is false).
+Then every row's entry is written a part at a time in primary key order
+(`retype::in_parts`: a part that meets a writer runs again smaller): a
+part reads its rows validated, so it commits only if they stayed as it
+read them, and a row's entry may be there already — its writer's — or,
+in a unique index, another row's: a duplicate, which fails the build.
+Last, one transaction moves the index among the table's indexes.  A row
+written after the first step has its entry from its writer, one written
+before from the part that read it.  The one entry a writer may meet that
+is not its row's is a unique index's, of another row with the same value
+before the build finds the duplicate: so a writer removes a unique entry
+of an index being built only when it is its row's, a look validated
+(`dml::drop_entry`; a build's entry written after the writer's snapshot
+fails it, where a removal would have met the build's write).  A failed
+build (a duplicate, the statement's timeout or cancel) removes the index
+and its entries; `DROP INDEX` of one being built stops its build
+(`55006`).  While an index is built, other changes of the table's
+definition wait (`55006`).  A build cut short by a crash leaves an index
+being built — written, not read; running the statement again finishes
+it, and so does the server's maintenance thread
+(`online_index::resume_all`); a restore builds it with the table's other
+indexes.  Not built online (`0A000` for `CONCURRENTLY`, the one
+transaction's build for a fallback): an index method's index, a
+partitioned table's or a partition's, a memory store's, and a table
+whose column's type or storage is being changed.  The design is
+PostgreSQL's `CREATE INDEX CONCURRENTLY` (an index first committed as
+kept by writers and not read, then filled, then made valid) and F1's
+online schema change (Rae et al., VLDB 2013: a write-only state between
+absent and public); here no second pass over the rows written meanwhile
+is needed — each part's rows are a premise of its commit — and no wait
+for older transactions — the validated table record turns them away.
+`crates/sql/tests/online_index.rs` builds indexes on a twin table in one
+transaction and online, with writes between the parts, duplicates
+written or resolved meanwhile, other changes refused, a crash at thirty
+points, and writes that do not pause, on row, column and LSM tables.
 
 **Index builds** (`dml::IndexBuild`, §M14.20 W2) — a new index's
 entries, and every index's when `ALTER … TYPE` or a key change rewrites
@@ -3756,7 +3803,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.partitions` | `table_name`, `partition`, `strategy` (`range`, `list`, `hash`), `key` (names), `bound` (`FOR VALUES …` or `DEFAULT`), `storage` (§8.16) |
 | `nc_catalog.segments` | `table_name`, `segment` (id, hex), `rows`, `deleted`, `bytes` (encoded) — each segment of each `column` table (§8.15) |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key`, `comment`, `generated` (`stored`, `embedding`, or NULL), `generation_expr`, `model`, `model_version`, `next_model` (§8.24) |
-| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL), `method` (`btree` or a registered method's, §8.17), `opclasses` (per column, its operator class, or NULL), `options` (`name=value`) |
+| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL), `method` (`btree` or a registered method's, §8.17), `opclasses` (per column, its operator class, or NULL), `options` (`name=value`), `is_ready` (false while it is built online: writers keep it, queries do not use it) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |

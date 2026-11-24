@@ -82,6 +82,7 @@ pub mod models;
 pub mod moments;
 pub mod narrow;
 pub mod ncatalog;
+pub mod online_index;
 pub mod optimizer;
 pub mod parallel;
 pub mod parser;

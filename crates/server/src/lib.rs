@@ -719,6 +719,21 @@ pub fn maintain_with(
                         nucleus_platform::log!("nucleus-server: column type changes: {}", e.message)
                     }
                 }
+                // Index builds cut short: finished.
+                match nucleus_sql::datetime::with_now(now, &kv, || {
+                    nucleus_sql::online_index::resume_all(&kv, &registry)
+                }) {
+                    Ok(done) => {
+                        for ix in done {
+                            nucleus_platform::log!(
+                                "nucleus-server: the build of index {ix} finished"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        nucleus_platform::log!("nucleus-server: index builds: {}", e.message)
+                    }
+                }
             }
             seen = kv.activity();
         }

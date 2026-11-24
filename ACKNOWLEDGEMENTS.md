@@ -207,6 +207,7 @@ checked against.
 - **postgres_exporter / mysqld_exporter mixins** — alert rules. O2.
 - **pgBackRest; restic / Borg; WAL-G / Barman; AWS SigV4** — backups. O3–O4.
 - **CockroachDB online schema changes and F1 (Rae et al., VLDB 2013); gh-ost / pt-osc; PostgreSQL `CREATE INDEX CONCURRENTLY`, `SET ACCESS METHOD`; MySQL `ENGINE=`** — online type and engine changes. O5; §M14.28 L3b.
+- **PostgreSQL `CREATE INDEX CONCURRENTLY` (as its documentation describes it); F1's write-only state (Rae et al., VLDB 2013)** — an index kept by writers before it is read, filled in parts, then made ready. Issue #18 (`online_index`).
 - **`pg_dump`'s dependency sort; Flyway checksums; dbmate; golang-migrate / sqlx names; Rails `schema_migrations`; sqlc** — migrations and code generation. §M14.16.
 - **rustup's, Deno's and DuckDB's install scripts; shell.duckdb.org, the PGlite REPL, SQLite fiddle** — install and playground. §M14.17.
 

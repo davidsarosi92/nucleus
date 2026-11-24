@@ -440,6 +440,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("method", T),
             ("opclasses", TA),
             ("options", TA),
+            ("is_ready", B),
         ],
     ),
     (
@@ -1294,9 +1295,12 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         text(crate::index_method::BTREE),
                         Value::Array(vec![Value::Null; t.primary_key.len()]),
                         Value::Array(Vec::new()),
+                        Value::Bool(true),
                     ]);
                 }
-                for ix in &t.indexes {
+                // An index being built online is not ready (`is_ready`).
+                let all = t.indexes.iter().map(|ix| (ix, true));
+                for (ix, ready) in all.chain(t.building.iter().map(|ix| (ix, false))) {
                     out.push(vec![
                         id(t),
                         text(t.name.clone()),
@@ -1329,6 +1333,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                                 .map(|(k, v)| text(format!("{k}={v}")))
                                 .collect(),
                         ),
+                        Value::Bool(ready),
                     ]);
                 }
             }

@@ -252,6 +252,9 @@ fn refuse(
     if t.converting.is_some() {
         return no("another column's type is being changed");
     }
+    if !t.building.is_empty() {
+        return no("an index of the table is being built");
+    }
     for ix in t.indexes.iter().filter(|ix| ix.uses(c)) {
         let own = ix.columns.iter().zip(&ix.exprs).zip(&ix.orderings);
         if ix.method.is_some()
@@ -323,11 +326,12 @@ fn running() -> &'static Mutex<HashSet<(usize, String)>> {
     R.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Marks a conversion as run here until dropped; `None` if it already is.
-struct Running((usize, String));
+/// Marks a conversion (or another change run in parts, by its key) as run
+/// here until dropped; `None` if it already is.
+pub(crate) struct Running((usize, String));
 
 impl Running {
-    fn claim(kv: &Arc<dyn Kv>, table: &str) -> Option<Self> {
+    pub(crate) fn claim(kv: &Arc<dyn Kv>, table: &str) -> Option<Self> {
         let key = (Arc::as_ptr(kv) as *const () as usize, table.to_string());
         running()
             .lock()
@@ -486,9 +490,18 @@ pub fn finish(kv: &Arc<dyn Kv>, reg: &Registry, table: &str) -> Result<()> {
 /// conflicts with the table's writers runs again smaller (down to a row),
 /// one that commits lets the next grow back: under many writes the parts
 /// shrink until they slip between them.
-fn in_parts(
+pub(crate) fn in_parts(
+    kv: &Arc<dyn Kv>,
+    part: impl FnMut(&mut dyn KvTxn, Option<&[u8]>, usize) -> Result<Option<Vec<u8>>>,
+) -> Result<()> {
+    in_parts_watched(kv, part, &mut |_| ())
+}
+
+/// [`in_parts`], `after` told the last key of each part committed.
+pub(crate) fn in_parts_watched(
     kv: &Arc<dyn Kv>,
     mut part: impl FnMut(&mut dyn KvTxn, Option<&[u8]>, usize) -> Result<Option<Vec<u8>>>,
+    after_part: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     let mut after: Option<Vec<u8>> = None;
     let mut size = FIRST_PART;
@@ -499,6 +512,7 @@ fn in_parts(
             .and_then(|v| txn.commit().map(|_| v).map_err(Error::from));
         match r {
             Ok(Some(k)) => {
+                after_part(&k);
                 after = Some(k);
                 tries = 0;
                 size = (size * 2).min(CHUNK_ROWS);
@@ -693,32 +707,38 @@ fn drop_stale(kv: &Arc<dyn Kv>, table: &str) -> Result<()> {
         return Ok(());
     };
     for &id in &cv.stale {
-        let (p, end) = (t.index_prefix(id), t.index_end(id));
-        // From where the last part ended: the keys before it are deleted
-        // versions a scan from the start would walk again.
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let last = attempt(kv, |txn| {
-                let from = after
-                    .as_deref()
-                    .map_or(Bound::Included(p.as_slice()), Bound::Excluded);
-                let keys: Vec<Vec<u8>> = txn
-                    .scan(from, Bound::Excluded(&end[..]))?
-                    .take(CLEAN_KEYS)
-                    .map(|e| e.map(|(k, _)| k))
-                    .collect::<nucleus_kv::Result<_>>()?;
-                for k in &keys {
-                    txn.delete(k)?;
-                }
-                Ok(keys.last().cloned())
-            })?;
-            match last {
-                Some(k) => after = Some(k),
-                None => break,
-            }
-        }
+        remove_entries(kv, &t, id)?;
     }
     Ok(())
+}
+
+/// Removes the entries of index `id` of `t` (no longer in its record), a
+/// part a transaction.
+pub(crate) fn remove_entries(kv: &Arc<dyn Kv>, t: &Table, id: u32) -> Result<()> {
+    let (p, end) = (t.index_prefix(id), t.index_end(id));
+    // From where the last part ended: the keys before it are deleted
+    // versions a scan from the start would walk again.
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let last = attempt(kv, |txn| {
+            let from = after
+                .as_deref()
+                .map_or(Bound::Included(p.as_slice()), Bound::Excluded);
+            let keys: Vec<Vec<u8>> = txn
+                .scan(from, Bound::Excluded(&end[..]))?
+                .take(CLEAN_KEYS)
+                .map(|e| e.map(|(k, _)| k))
+                .collect::<nucleus_kv::Result<_>>()?;
+            for k in &keys {
+                txn.delete(k)?;
+            }
+            Ok(keys.last().cloned())
+        })?;
+        match last {
+            Some(k) => after = Some(k),
+            None => return Ok(()),
+        }
+    }
 }
 
 /// The tables whose column's type is being changed, read in a read-only

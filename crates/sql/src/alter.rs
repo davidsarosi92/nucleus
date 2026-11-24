@@ -336,7 +336,7 @@ fn rename_table(txn: &mut dyn KvTxn, reg: &Registry, from: &str, to: &str) -> Re
             for s in ["subject", "embedding", "content"] {
                 if ix.name == format!("{from}_{s}") {
                     let name = format!("{to}_{s}");
-                    if catalog::find_index(&*txn, &name)?.is_some() {
+                    if catalog::index_name_taken(&*txn, &name)? {
                         return Err(Error::duplicate_table(format!(
                             "relation \"{name}\" already exists"
                         )));
@@ -527,7 +527,7 @@ pub(crate) fn rename_index(
             "index \"{name}\" does not exist"
         )));
     };
-    if catalog::find_index(&*txn, to)?.is_some() {
+    if catalog::index_name_taken(&*txn, to)? {
         return Err(Error::duplicate_table(format!(
             "relation \"{to}\" already exists"
         )));

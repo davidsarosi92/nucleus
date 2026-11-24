@@ -1066,6 +1066,26 @@ impl Session {
                 })?;
                 Ok(Output::Command("ALTER TABLE".into()))
             }
+            Statement::CreateIndex {
+                concurrently: true, ..
+            } => {
+                // In transactions of its own, a part at a time, while
+                // others write the table.
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "CREATE INDEX CONCURRENTLY cannot run inside a transaction block",
+                    ));
+                }
+                {
+                    let txn = self.kv.begin(TxnOptions::read_only())?;
+                    crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                }
+                let now = crate::datetime::from_system(self.kv.wall_clock());
+                crate::datetime::with_now(now, &self.kv, || {
+                    crate::online_index::create(&self.kv, &self.registry, stmt, false)
+                })?;
+                Ok(Output::Command("CREATE INDEX".into()))
+            }
             Statement::Forget { .. } if self.block.is_some() => Err(Error::active_txn(
                 "FORGET SUBJECT cannot run inside a transaction block",
             )),
@@ -1787,6 +1807,31 @@ impl Session {
                 deliver(stmt, out, sink).map(Output::Command)
             });
             match r {
+                // A `CREATE INDEX` whose build met a write committed under
+                // it: built online instead (issue #18) — unless the index
+                // cannot be, which runs again.
+                Err(e) if e.code == "40001" && crate::online_index::may_fall_back(stmt) => {
+                    let built = crate::datetime::with_now(now, &self.kv, || {
+                        crate::online_index::create(&self.kv, &self.registry, stmt, true)
+                    });
+                    let out = match built {
+                        Ok(false) => {
+                            attempt += 1;
+                            self.kv.back_off(attempt);
+                            continue;
+                        }
+                        Ok(true) => Ok(Output::Command("CREATE INDEX".into())),
+                        Err(e) => Err(e),
+                    };
+                    let record = crate::datetime::with_now(now, &self.kv, || {
+                        Self::statement_record(&who, stmt, text, &out)
+                    });
+                    self.audit_apart(record)?;
+                    if out.is_ok() {
+                        self.after_statement(true);
+                    }
+                    return out;
+                }
                 // (Not once part of a query's result has gone out.)
                 Err(e) if e.code == "40001" && attempt < 10 && !sink.started => {
                     attempt += 1;
@@ -2874,188 +2919,11 @@ pub(crate) fn execute_statement(
             }
             Output::Command("DROP TABLE".into())
         }
-        Statement::CreateIndex {
-            name,
-            table,
-            columns,
-            exprs,
-            orderings,
-            method,
-            opclasses,
-            options,
-            partition_by,
-            unique,
-            if_not_exists,
-        } => {
-            let access = match method {
-                Some(m) => crate::index_method::named(m)?,
-                None => None,
+        Statement::CreateIndex { unique, .. } => {
+            let Some((mut t, ix)) = define_index(&*txn, reg, stmt, false)? else {
+                return Ok(Output::Command("CREATE INDEX".into()));
             };
-            // `PARTITION BY (c, …)`: the columns after the indexed ones,
-            // the method's `partition_by` option their number.
-            let (columns, exprs, orderings, opclasses, options) = &{
-                let (mut c, mut x, mut o, mut p, mut w) = (
-                    columns.clone(),
-                    exprs.clone(),
-                    orderings.clone(),
-                    opclasses.clone(),
-                    options.clone(),
-                );
-                if !partition_by.is_empty() {
-                    if access.is_none() {
-                        return Err(Error::feature(
-                            "PARTITION BY is for an index method's index (USING method)",
-                        ));
-                    }
-                    if w.iter().any(|(k, _)| k == "partition_by") {
-                        return Err(Error::invalid_parameter(
-                            "give the partitioning columns once: PARTITION BY or WITH (partition_by)",
-                        ));
-                    }
-                    for col in partition_by {
-                        c.push(col.clone());
-                        x.push(None);
-                        o.push(None);
-                        p.push(None);
-                    }
-                    w.push(("partition_by".into(), partition_by.len().to_string()));
-                }
-                (c, x, o, p, w)
-            };
-            let has_exprs = exprs.iter().any(Option::is_some);
-            if let Some(m) = &access {
-                if *unique {
-                    return Err(Error::feature(format!(
-                        "access method \"{}\" does not support unique indexes",
-                        m.name()
-                    )));
-                }
-                if has_exprs {
-                    return Err(Error::feature(format!(
-                        "access method \"{}\" indexes columns, not expressions",
-                        m.name()
-                    )));
-                }
-                if orderings.iter().any(Option::is_some) {
-                    return Err(Error::feature(format!(
-                        "access method \"{}\" does not index in taught orderings",
-                        m.name()
-                    )));
-                }
-            } else {
-                if let Some(o) = opclasses.iter().flatten().next() {
-                    return Err(Error::undefined_object(format!(
-                        "operator class \"{o}\" does not exist for access method \"btree\""
-                    )));
-                }
-                if let Some((k, _)) = options.first() {
-                    return Err(Error::invalid_parameter(format!(
-                        "unrecognized parameter \"{k}\" for access method \"btree\""
-                    )));
-                }
-            }
-            let name = &match name {
-                Some(n) => n.clone(),
-                None => {
-                    // PostgreSQL's: table_columns_idx, numbered if taken —
-                    // an expression's part named by its function, or `expr`.
-                    let parts: Vec<String> = columns
-                        .iter()
-                        .zip(exprs)
-                        .map(|(c, e)| match e {
-                            None => c.clone(),
-                            Some(e) => expr_part_name(e),
-                        })
-                        .collect();
-                    let base = format!("{table}_{}_idx", parts.join("_"));
-                    let mut n = base.clone();
-                    let mut k = 1;
-                    while catalog::find_index(&*txn, &n)?.is_some()
-                        || catalog::get_table(&*txn, &n)?.is_some()
-                    {
-                        n = format!("{base}{k}");
-                        k += 1;
-                    }
-                    n
-                }
-            };
-            if catalog::find_index(&*txn, name)?.is_some()
-                || catalog::get_table(&*txn, name)?.is_some()
-            {
-                if *if_not_exists {
-                    return Ok(Output::Command("CREATE INDEX".into()));
-                }
-                return Err(Error::duplicate_table(format!(
-                    "relation \"{name}\" already exists"
-                )));
-            }
-            let mut t = catalog::table(&*txn, table)?;
-            let cols = columns
-                .iter()
-                .zip(exprs)
-                .map(|(c, e)| {
-                    if e.is_some() {
-                        return Ok(0); // set when the expression is bound
-                    }
-                    t.column(c).ok_or_else(|| {
-                        Error::undefined_column(format!("column \"{c}\" does not exist"))
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let mut plain = Vec::new();
-            for ((&c, o), e) in cols.iter().zip(orderings).zip(exprs) {
-                if e.is_some() {
-                    if o.is_some() {
-                        return Err(Error::feature(
-                            "an index expression in a taught ordering is not supported",
-                        ));
-                    }
-                    continue;
-                }
-                let Some(o) = o else {
-                    plain.push(c);
-                    continue;
-                };
-                if *unique {
-                    return Err(Error::feature(
-                        "a UNIQUE index in a taught ordering is not supported: its mapping may have ties",
-                    ));
-                }
-                let ty = t.columns[c].ty;
-                if let crate::binder::OrderingUse::Mapped { result, .. } =
-                    Binder::new(&*txn, reg).ordering(Some(ty), o)?
-                {
-                    crate::binder::require(
-                        result,
-                        &[crate::binder::Need::KeyEncoding],
-                        "an index in an ordering",
-                    )?;
-                } else {
-                    plain.push(c);
-                }
-            }
-            let mut ix = Index::plain(t.next_index_id, name.clone(), cols, *unique);
-            ix.orderings = orderings.clone();
-            ix.exprs = exprs
-                .iter()
-                .map(|e| {
-                    e.as_ref().map(|sql| catalog::IndexExpr {
-                        sql: sql.clone(),
-                        ty: DataType::Text,
-                        uses: Vec::new(),
-                    })
-                })
-                .collect();
-            bind_index_exprs(&*txn, reg, &t, &mut ix)?;
-            match &access {
-                None => require_keys(&t.columns, &plain, *unique, "an index")?,
-                Some(m) => {
-                    ix.method = Some(m.name().to_string());
-                    ix.opclasses = opclasses.clone();
-                    ix.options = options.clone();
-                    m.define(&t, &mut ix)?;
-                }
-            }
+            let name = &ix.name.clone();
             t.indexes.push(ix);
             // Before it is filled: a sealed table's index on a sealed column.
             crate::sealed::check_table(&*txn, &t)?;
@@ -3418,6 +3286,11 @@ pub(crate) fn execute_statement(
             Output::Command("DROP STATISTICS".into())
         }
         Statement::DropIndex { name, if_exists } => {
+            // One being built online: dropped (its build stops).
+            if let Some((t, b)) = catalog::find_building(&*txn, name)? {
+                crate::online_index::drop_building(txn, t, b)?;
+                return Ok(Output::Command("DROP INDEX".into()));
+            }
             match catalog::find_index(&*txn, name)? {
                 Some((mut t, i)) => {
                     if let Some((child, fk)) = crate::fk::index_users(&*txn, &t, i)?.first() {
@@ -3524,6 +3397,205 @@ pub(crate) fn execute_statement(
 /// privilege and row policies.  As PostgreSQL's: a table another
 /// references by a foreign key is refused unless that one is truncated
 /// too (named, or by `CASCADE`); the referencing go first.
+/// The index `CREATE INDEX` defines (`stmt`), on its table as read in
+/// `txn`: checked and bound, its id the table's next; `None` when it
+/// exists and the statement says `IF NOT EXISTS`.  `online`: a build of
+/// the same name under way (cut short) is no clash — the online build
+/// finishes it.
+pub(crate) fn define_index(
+    txn: &dyn KvTxn,
+    reg: &Registry,
+    stmt: &Statement,
+    online: bool,
+) -> Result<Option<(catalog::Table, Index)>> {
+    let Statement::CreateIndex {
+        name,
+        table,
+        columns,
+        exprs,
+        orderings,
+        method,
+        opclasses,
+        options,
+        partition_by,
+        unique,
+        if_not_exists,
+        ..
+    } = stmt
+    else {
+        return Err(Error::internal("not a CREATE INDEX"));
+    };
+    let access = match method {
+        Some(m) => crate::index_method::named(m)?,
+        None => None,
+    };
+    // `PARTITION BY (c, …)`: the columns after the indexed ones,
+    // the method's `partition_by` option their number.
+    let (columns, exprs, orderings, opclasses, options) = &{
+        let (mut c, mut x, mut o, mut p, mut w) = (
+            columns.clone(),
+            exprs.clone(),
+            orderings.clone(),
+            opclasses.clone(),
+            options.clone(),
+        );
+        if !partition_by.is_empty() {
+            if access.is_none() {
+                return Err(Error::feature(
+                    "PARTITION BY is for an index method's index (USING method)",
+                ));
+            }
+            if w.iter().any(|(k, _)| k == "partition_by") {
+                return Err(Error::invalid_parameter(
+                    "give the partitioning columns once: PARTITION BY or WITH (partition_by)",
+                ));
+            }
+            for col in partition_by {
+                c.push(col.clone());
+                x.push(None);
+                o.push(None);
+                p.push(None);
+            }
+            w.push(("partition_by".into(), partition_by.len().to_string()));
+        }
+        (c, x, o, p, w)
+    };
+    let has_exprs = exprs.iter().any(Option::is_some);
+    if let Some(m) = &access {
+        if *unique {
+            return Err(Error::feature(format!(
+                "access method \"{}\" does not support unique indexes",
+                m.name()
+            )));
+        }
+        if has_exprs {
+            return Err(Error::feature(format!(
+                "access method \"{}\" indexes columns, not expressions",
+                m.name()
+            )));
+        }
+        if orderings.iter().any(Option::is_some) {
+            return Err(Error::feature(format!(
+                "access method \"{}\" does not index in taught orderings",
+                m.name()
+            )));
+        }
+    } else {
+        if let Some(o) = opclasses.iter().flatten().next() {
+            return Err(Error::undefined_object(format!(
+                "operator class \"{o}\" does not exist for access method \"btree\""
+            )));
+        }
+        if let Some((k, _)) = options.first() {
+            return Err(Error::invalid_parameter(format!(
+                "unrecognized parameter \"{k}\" for access method \"btree\""
+            )));
+        }
+    }
+    let name = &match name {
+        Some(n) => n.clone(),
+        None => {
+            // PostgreSQL's: table_columns_idx, numbered if taken —
+            // an expression's part named by its function, or `expr`.
+            let parts: Vec<String> = columns
+                .iter()
+                .zip(exprs)
+                .map(|(c, e)| match e {
+                    None => c.clone(),
+                    Some(e) => expr_part_name(e),
+                })
+                .collect();
+            let base = format!("{table}_{}_idx", parts.join("_"));
+            let mut n = base.clone();
+            let mut k = 1;
+            while catalog::index_name_taken(txn, &n)? || catalog::get_table(txn, &n)?.is_some() {
+                n = format!("{base}{k}");
+                k += 1;
+            }
+            n
+        }
+    };
+    // (One being built online: its build finishes, run again.)
+    let building = catalog::find_building(txn, name)?.is_some();
+    if (catalog::index_name_taken(txn, name)? && !(online && building))
+        || catalog::get_table(txn, name)?.is_some()
+    {
+        if *if_not_exists {
+            return Ok(None);
+        }
+        return Err(Error::duplicate_table(format!(
+            "relation \"{name}\" already exists"
+        )));
+    }
+    let t = catalog::table(txn, table)?;
+    let cols = columns
+        .iter()
+        .zip(exprs)
+        .map(|(c, e)| {
+            if e.is_some() {
+                return Ok(0); // set when the expression is bound
+            }
+            t.column(c)
+                .ok_or_else(|| Error::undefined_column(format!("column \"{c}\" does not exist")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut plain = Vec::new();
+    for ((&c, o), e) in cols.iter().zip(orderings).zip(exprs) {
+        if e.is_some() {
+            if o.is_some() {
+                return Err(Error::feature(
+                    "an index expression in a taught ordering is not supported",
+                ));
+            }
+            continue;
+        }
+        let Some(o) = o else {
+            plain.push(c);
+            continue;
+        };
+        if *unique {
+            return Err(Error::feature(
+                "a UNIQUE index in a taught ordering is not supported: its mapping may have ties",
+            ));
+        }
+        let ty = t.columns[c].ty;
+        if let crate::binder::OrderingUse::Mapped { result, .. } =
+            Binder::new(txn, reg).ordering(Some(ty), o)?
+        {
+            crate::binder::require(
+                result,
+                &[crate::binder::Need::KeyEncoding],
+                "an index in an ordering",
+            )?;
+        } else {
+            plain.push(c);
+        }
+    }
+    let mut ix = Index::plain(t.next_index_id, name.clone(), cols, *unique);
+    ix.orderings = orderings.clone();
+    ix.exprs = exprs
+        .iter()
+        .map(|e| {
+            e.as_ref().map(|sql| catalog::IndexExpr {
+                sql: sql.clone(),
+                ty: DataType::Text,
+                uses: Vec::new(),
+            })
+        })
+        .collect();
+    bind_index_exprs(txn, reg, &t, &mut ix)?;
+    match &access {
+        None => require_keys(&t.columns, &plain, *unique, "an index")?,
+        Some(m) => {
+            ix.method = Some(m.name().to_string());
+            ix.opclasses = opclasses.clone();
+            ix.options = options.clone();
+            m.define(&t, &mut ix)?;
+        }
+    }
+    Ok(Some((t, ix)))
+}
+
 fn truncate(
     txn: &mut dyn KvTxn,
     reg: &Registry,
@@ -4171,6 +4243,7 @@ pub(crate) fn create_table(
         expiry: None,
         subject: Vec::new(),
         converting: None,
+        building: Vec::new(),
         memory: None,
         engine: opts.engine,
         relative_directory: true,
@@ -4179,7 +4252,7 @@ pub(crate) fn create_table(
         table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);
     }
     for (n, cols) in uniques {
-        if catalog::find_index(&*txn, &n)?.is_some() {
+        if catalog::index_name_taken(&*txn, &n)? {
             return Err(Error::duplicate_table(format!(
                 "relation \"{n}\" already exists"
             )));
@@ -4791,7 +4864,7 @@ fn add_constraint(
             let name = name
                 .clone()
                 .unwrap_or_else(|| format!("{table}_{}_key", cols.join("_")));
-            if catalog::find_index(&*txn, &name)?.is_some() {
+            if catalog::index_name_taken(&*txn, &name)? {
                 return Err(Error::duplicate_table(format!(
                     "relation \"{name}\" already exists"
                 )));

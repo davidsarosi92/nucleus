@@ -92,8 +92,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// `subject` before it); version 19 index expressions; version 20 a
 /// column's type being changed online ([`Conversion`]); version 21 a
 /// memory store's analyzer; version 22 the engine holding its keys
-/// ([`TableEngine`]); older versions still read.
-const TABLE_VERSION: u8 = 23;
+/// ([`TableEngine`]); version 24 the indexes being built online
+/// ([`Table::building`], after the others in the index list); older
+/// versions still read.
+const TABLE_VERSION: u8 = 24;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -434,6 +436,9 @@ pub struct Table {
     pub subject: Vec<usize>,
     /// `ALTER COLUMN … TYPE … CONCURRENTLY` under way ([`crate::retype`]).
     pub converting: Option<Conversion>,
+    /// Indexes being built online ([`crate::online_index`]): writers keep
+    /// their entries, readers and the planner do not see them.
+    pub building: Vec<Index>,
     /// The engine holding its keys, `WITH (engine = …)`.
     pub engine: TableEngine,
     /// Its column copy's directory keys each segment by the suffix of its
@@ -673,6 +678,20 @@ impl Table {
         data_prefix_of(self.id)
     }
 
+    /// The table as its writers keep it: the indexes being built online
+    /// ([`Table::building`]) among its indexes, after the others.
+    pub fn with_building(&self) -> Table {
+        let mut t = self.clone();
+        let building = std::mem::take(&mut t.building);
+        t.indexes.extend(building);
+        t
+    }
+
+    /// The ids of its indexes, those being built online too.
+    pub fn index_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.indexes.iter().chain(&self.building).map(|i| i.id)
+    }
+
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::default();
         w.u8(TABLE_VERSION)
@@ -697,8 +716,10 @@ impl Table {
         for &p in &self.primary_key {
             w.u32(p as u32);
         }
-        w.u32(self.indexes.len() as u32);
-        for i in &self.indexes {
+        // The indexes being built after the others (their number last).
+        let all: Vec<&Index> = self.indexes.iter().chain(&self.building).collect();
+        w.u32(all.len() as u32);
+        for i in &all {
             w.u32(i.id)
                 .str(&i.name)
                 .u8(u8::from(i.unique))
@@ -839,7 +860,7 @@ impl Table {
         for &c in &self.subject {
             w.u32(c as u32);
         }
-        for i in &self.indexes {
+        for i in &all {
             for e in &i.exprs {
                 match e {
                     None => {
@@ -870,6 +891,7 @@ impl Table {
             TableEngine::Lsm => 1,
         });
         w.u8(u8::from(self.relative_directory));
+        w.u32(self.building.len() as u32);
         w.0
     }
 
@@ -1118,6 +1140,15 @@ impl Table {
             TableEngine::BTree
         };
         let relative_directory = version >= 23 && r.u8()? != 0;
+        let building = if version >= 24 {
+            let n = r.u32()? as usize;
+            if n > indexes.len() {
+                return Err(Error::internal("more indexes being built than indexes"));
+            }
+            indexes.split_off(indexes.len() - n)
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             id,
             name,
@@ -1144,6 +1175,7 @@ impl Table {
             memory,
             subject,
             converting,
+            building,
             engine,
             relative_directory,
         })
@@ -1492,6 +1524,7 @@ pub fn update_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
     {
         let old = Table::decode(&old)?;
         crate::retype::allows_change(&old, table)?;
+        crate::online_index::allows_change(&old, table)?;
     }
     crate::sealed::check_table(&*txn, table)?;
     txn.put(&table_key(&table.name), &table.encode())?;
@@ -1507,6 +1540,14 @@ pub fn rename_table(txn: &mut dyn KvTxn, from: &str, table: &Table) -> Result<()
         return Err(Error::object_in_use(format!(
             "the type of column \"{}\" of \"{from}\" is being changed; it can be renamed when that is done",
             t.columns[cv.column].name
+        )));
+    }
+    if let Some(t) = get_table(&*txn, from)?
+        && let Some(ix) = t.building.first()
+    {
+        return Err(Error::object_in_use(format!(
+            "index \"{}\" of \"{from}\" is being built; the table can be renamed when that is done",
+            ix.name
         )));
     }
     txn.delete(&table_key(from))?;
@@ -1552,6 +1593,24 @@ pub fn find_index(txn: &dyn KvTxn, name: &str) -> Result<Option<(Table, usize)>>
         }
     }
     Ok(None)
+}
+
+/// The table whose index being built online is named `name`, and its
+/// position among [`Table::building`], if any.
+pub fn find_building(txn: &dyn KvTxn, name: &str) -> Result<Option<(Table, usize)>> {
+    for t in tables(txn)? {
+        if let Some(i) = t.building.iter().position(|i| i.name == name) {
+            return Ok(Some((t, i)));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether an index — built or being built online — is named `name`.
+pub fn index_name_taken(txn: &dyn KvTxn, name: &str) -> Result<bool> {
+    Ok(tables(txn)?
+        .iter()
+        .any(|t| t.indexes.iter().chain(&t.building).any(|i| i.name == name)))
 }
 
 /// The table holding statistics `name` (`CREATE STATISTICS`), if any.
@@ -2094,6 +2153,18 @@ mod tests {
                 phase: ConversionPhase::Rewrite,
                 stale: vec![2, 4],
             }),
+            building: vec![{
+                let mut ix = Index::plain(9, "people_new".into(), vec![1, 0], true);
+                ix.exprs = vec![
+                    Some(IndexExpr {
+                        sql: "lower(name)".into(),
+                        ty: DataType::Text,
+                        uses: vec![1],
+                    }),
+                    None,
+                ];
+                ix
+            }],
             engine: TableEngine::Lsm,
             relative_directory: true,
         };

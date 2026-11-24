@@ -237,7 +237,11 @@ time — writers keep each row's converted value and the column's indexes
 over it beside the old ones until a one-transaction cutover — and a
 value that does not convert leaves the table as it was (1,000,000 rows
 converted in 26 s while another session updates them; the
-one-transaction form never finishes under those writes).
+one-transaction form never finishes under those writes).  An index is built
+the same way — `CREATE INDEX CONCURRENTLY`, or a `CREATE INDEX` that
+meets writes: writers keep it before queries read it, and the rows get
+their entries a part at a time (under 2,600 commits/s, every build
+succeeds; in one transaction 3 of 44 did).
 Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …), then

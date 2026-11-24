@@ -13142,6 +13142,43 @@ aggregate `FILTER (WHERE …)` (known, §M14.27), `IS [NOT] UNKNOWN`,
 DISTINCT (a, b)`.  For the performance pass: the row-at-a-time join
 of that self-join takes 76 s (the vectorized 2 s), and its aggregate
 did not run on the workers without statistics (`rows=1000` estimated).
+- Issue #18, first step — indexes built online.  DDL over a table's rows
+  had become a premise of its commit (above), so on a table written
+  without pause it failed: 8 clients transferring between 200 accounts
+  (~2,600 commits/s) against a maintenance client's DDL, 120 s, seeds 2
+  and 4 — `CREATE INDEX` succeeded 2 and 1 times, failed `40001` (after
+  its ten tries) 19 and 22 times.  Now `CREATE [UNIQUE] INDEX
+  CONCURRENTLY` builds online (`online_index`), and so does a `CREATE
+  INDEX` run alone whose build in one transaction failed over a write:
+  the index first joins the table's indexes being built
+  (`Table::building`, record version 24) — kept by every writer, whose
+  validated read of the table record turns away one begun before; seen
+  by no query (`nc_catalog.indexes.is_ready` false) — then every row's
+  entry is written a part at a time (`retype::in_parts`, the part's rows
+  read validated), then one transaction makes it ready.  A failed build
+  removes it; `DROP INDEX` stops one; other changes of the table wait
+  (`55006`); a crash leaves it to the statement run again or the
+  maintenance thread (`online_index::resume_all`); a restore builds it
+  with the rest.  Found while testing: a writer removing a unique entry
+  of an index being built may meet another row's of the same value (a
+  duplicate the build has yet to find) — it removes only its row's, a
+  look validated (`dml::drop_entry`; unvalidated, the build's entry
+  written after the writer's snapshot stayed: 2 extra entries on a
+  column table under constant writes).  Measured again: `CREATE INDEX`
+  24 and 27 times, never failing; the transfers committed 620k and 608k
+  (316k and 325k before: the DDL's ten full builds no longer hold the
+  table); the checks (58 a run, and after a restart) found nothing.
+  Tests: `crates/sql/tests/online_index.rs` (7: a twin table built in
+  one transaction, writes between the parts, duplicates written or
+  resolved meanwhile, other changes refused, a crash at thirty points,
+  constant writes; row, column and LSM tables), `06_indexes.slt`;
+  14 mutants killed.  Ideas from PostgreSQL's `CREATE INDEX
+  CONCURRENTLY` (its documentation) and F1's write-only state (Rae et
+  al., VLDB 2013); no second pass over the rows written meanwhile and no
+  wait for older transactions are needed here.  Seen next: `DROP INDEX`,
+  now with an index to drop, failed `40001` 8 times a run (its entries
+  deleted in its transaction meet the writers'); `ALTER COLUMN … TYPE`
+  13 and 13, `DROP COLUMN` 1 and 6, `ADD COLUMN` 8 and 2.
 
 ### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 

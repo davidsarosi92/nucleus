@@ -163,3 +163,39 @@ CREATE INDEX ON events (what text_pattern_ops)
 
 statement error 22023
 CREATE INDEX ON events USING btree (what) WITH (fillfactor = 70)
+
+# Built online (issue #18): CREATE INDEX CONCURRENTLY, outside a
+# transaction block; IF NOT EXISTS; a unique index's duplicate refused
+# and nothing left.
+statement ok
+CREATE INDEX CONCURRENTLY events_day ON events (day)
+
+query I
+SELECT seq FROM events WHERE day = 2 ORDER BY seq
+----
+1
+2
+
+statement ok
+CREATE INDEX CONCURRENTLY IF NOT EXISTS events_day ON events (day)
+
+statement error 23505
+CREATE UNIQUE INDEX CONCURRENTLY events_dup ON events ((day - day))
+
+statement ok
+BEGIN
+
+# nucleus-only: the check runs each record alone, outside the block
+statement error 25001
+CREATE INDEX CONCURRENTLY events_day2 ON events (day)
+
+statement ok
+ROLLBACK
+
+# nucleus-only: nc_catalog
+query TB
+SELECT name, is_ready FROM nc_catalog.indexes WHERE table_name = 'events' ORDER BY name
+----
+events_day true
+events_pkey true
+events_what true

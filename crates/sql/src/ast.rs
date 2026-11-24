@@ -84,6 +84,9 @@ pub enum Statement {
         unique: bool,
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
+        /// `CONCURRENTLY`: built online, while others write the table
+        /// (`crate::online_index`).
+        concurrently: bool,
     },
     /// `ALTER TABLE t ATTACH PARTITION p FOR VALUES … | DEFAULT`.
     AttachPartition {

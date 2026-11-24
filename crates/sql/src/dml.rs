@@ -881,6 +881,9 @@ pub struct Writer {
     /// A column's type being changed (`crate::retype`): what its writes
     /// keep beside their own.
     shadow: Option<crate::retype::Shadow>,
+    /// Indexes being built online (`crate::online_index`): the table with
+    /// them among its indexes, whose entries its writes keep.
+    building: Option<Table>,
     /// A partition: the key a row must have — its partitioning, its bound,
     /// and (a default partition) its siblings' bounds.
     bound: Option<(
@@ -894,6 +897,8 @@ impl Writer {
     /// Binds the table's `CHECK` and `DEFAULT` expressions.
     pub fn new(txn: &dyn KvTxn, reg: &Registry, table: Table) -> Result<Self> {
         let shadow = crate::retype::Shadow::of(txn, reg, &table)?;
+        let building =
+            (shadow.is_none() && !table.building.is_empty()).then(|| table.with_building());
         let parts = match &shadow {
             // A column's type being changed: bound afresh (its view is
             // the conversion's state, not the definition's alone).
@@ -903,7 +908,7 @@ impl Writer {
                 crate::catalog_cache::Part::Writer,
                 &table.name,
                 |b: &Arc<Bound>| b.table == table,
-                || Bound::new(txn, reg, &table, &table).map(Arc::new),
+                || Bound::new(txn, reg, &table, building.as_ref().unwrap_or(&table)).map(Arc::new),
             )?,
         };
         let keys = Arc::clone(&parts.keys);
@@ -950,15 +955,20 @@ impl Writer {
             storage,
             partitions,
             shadow,
+            building,
             bound,
         })
     }
 
     /// The table as its rows are written: during a column's type change
     /// (`crate::retype`), with the hidden value's column and the shadow
-    /// indexes.
+    /// indexes; while indexes are built online, with them.
     pub fn write_table(&self) -> &Table {
-        self.shadow.as_ref().map_or(&self.table, |s| &s.view)
+        match (&self.shadow, &self.building) {
+            (Some(s), _) => &s.view,
+            (None, Some(b)) => b,
+            (None, None) => &self.table,
+        }
     }
 
     /// A new or changed row made whole: its stored generated columns
@@ -1915,19 +1925,19 @@ pub fn update_rows(
             // The same index's old entry (a row without its hidden value
             // has no shadow entry).
             if let Some(at) = olds.iter().position(|(j, _, _)| *j == i) {
-                let (_, ok, _) = olds.swap_remove(at);
+                let (_, ok, old_unique) = olds.swap_remove(at);
                 if ok == nk && old_pk == new_pk {
                     continue;
                 }
-                txn.delete(&ok)?;
+                drop_entry(txn, &w.table, i, &ok, old_unique, old_pk)?;
             }
             if unique && txn.get(&nk)?.is_some() {
                 return Err(duplicate(&t.indexes[i].name));
             }
             txn.put(&nk, new_pk)?;
         }
-        for (_, ok, _) in olds {
-            txn.delete(&ok)?;
+        for (i, ok, unique) in olds {
+            drop_entry(txn, &w.table, i, &ok, unique, old_pk)?;
         }
         w.keys
             .keep(txn, t, Some((old_pk, old)), Some((new_pk, new)))?;
@@ -1971,7 +1981,13 @@ pub fn delete_rows(
     rows: &[(Vec<u8>, Row)],
 ) -> Result<()> {
     let shadow = crate::retype::Shadow::of(&*txn, reg, t)?;
-    let keys = IndexKeys::new(&*txn, reg, shadow.as_ref().map_or(t, |s| &s.view))?;
+    // Indexes being built online: their entries too.
+    let building = (shadow.is_none() && !t.building.is_empty()).then(|| t.with_building());
+    let keys = match (&shadow, &building) {
+        (Some(s), _) => IndexKeys::new(&*txn, reg, &s.view)?,
+        (None, Some(b)) => IndexKeys::new(&*txn, reg, b)?,
+        (None, None) => IndexKeys::new(&*txn, reg, t)?,
+    };
     let storage = crate::storage::of(t)?;
     catalog::validate_table(&*txn, &t.name)?;
     let embedded: Vec<usize> = crate::embedding::columns_of(t).collect();
@@ -1992,7 +2008,12 @@ pub fn delete_rows(
             &extended
         }
     };
-    let t = shadow.as_ref().map_or(t, |s| &s.view);
+    let defined = t;
+    let t = match (&shadow, &building) {
+        (Some(s), _) => &s.view,
+        (None, Some(b)) => b,
+        (None, None) => t,
+    };
     for (key, row) in rows {
         storage.remove_row(txn, t, key, row)?;
         for &c in &embedded {
@@ -2002,8 +2023,8 @@ pub fn delete_rows(
             continue;
         }
         let pk = pk_suffix(t, key);
-        for (_, k, _) in keys.entries(&*txn, t, row, pk)? {
-            txn.delete(&k)?;
+        for (i, k, unique) in keys.entries(&*txn, t, row, pk)? {
+            drop_entry(txn, defined, i, &k, unique, pk)?;
         }
         keys.keep(txn, t, Some((pk, row)), None)?;
     }
@@ -2148,6 +2169,7 @@ fn deletes_by_key(txn: &dyn KvTxn, t: &Table) -> Result<bool> {
         || t.partition_by.is_some()
         || t.primary_key.is_empty()
         || !t.indexes.is_empty()
+        || !t.building.is_empty()
         || !t.referenced_by.is_empty()
         || crate::embedding::columns_of(t).next().is_some()
     {
@@ -2240,6 +2262,28 @@ fn take_key(r: &mut Row, at: usize) -> Result<Vec<u8>> {
         Some(Value::Bytea(k)) => Ok(k.to_vec()),
         _ => Err(Error::internal("a stashed write without its key")),
     }
+}
+
+/// Removes index entry `k` of the row with primary key bytes `pk` from the
+/// `i`-th index of `t`'s writers (its indexes, then those being built
+/// online).  A unique entry of an index being built is removed only when
+/// it is the row's: it may be another row's of the same value, which the
+/// build has yet to find a duplicate (`crate::online_index`).  That look
+/// is validated: an entry the build writes after this transaction's
+/// snapshot — the row's, which this one would then leave — fails its
+/// commit, where a removal would have met the build's write.
+pub(crate) fn drop_entry(
+    txn: &mut dyn KvTxn,
+    t: &Table,
+    i: usize,
+    k: &[u8],
+    unique: bool,
+    pk: &[u8],
+) -> Result<()> {
+    if unique && i >= t.indexes.len() && txn.get_validated(k)?.as_deref() != Some(pk) {
+        return Ok(());
+    }
+    Ok(txn.delete(k)?)
 }
 
 /// Makes table `t`'s rows, as this transaction's snapshot has them, a

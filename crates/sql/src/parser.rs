@@ -1390,6 +1390,7 @@ impl<'a> Parser<'a> {
         }
         let unique = self.eat_kw("unique");
         if self.eat_kw("index") {
+            let concurrently = self.eat_kw("concurrently");
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = if self.peek_kw("on") {
                 None
@@ -1469,6 +1470,7 @@ impl<'a> Parser<'a> {
                 partition_by,
                 unique,
                 if_not_exists,
+                concurrently,
             });
         }
         if unique {

@@ -582,6 +582,7 @@ fn def_table(k: usize) -> Table {
         expiry: None,
         subject: Vec::new(),
         converting: None,
+        building: Vec::new(),
         memory: None,
         engine: Default::default(),
         relative_directory: true,

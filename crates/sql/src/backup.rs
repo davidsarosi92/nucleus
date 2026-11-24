@@ -1496,7 +1496,7 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     }
     let derived: HashMap<u32, HashSet<u32>> = tables
         .iter()
-        .map(|t| (t.id, t.indexes.iter().map(|i| i.id).collect()))
+        .map(|t| (t.id, t.index_ids().collect()))
         .collect();
     let mut nonces = Nonces {
         base: [0; aead::NONCE_LEN],
@@ -1557,7 +1557,7 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
             let derived_before: HashMap<u32, HashSet<u32>> = before
                 .tables
                 .iter()
-                .map(|t| (t.id, t.indexes.iter().map(|i| i.id).collect()))
+                .map(|t| (t.id, t.index_ids().collect()))
                 .collect();
             let ranges = snap
                 .changed_since(branch)?
@@ -2316,6 +2316,9 @@ fn rebuild(
     // Column type changes under way when the backup was made: settled
     // first (`crate::retype::settle`).
     crate::retype::settle(kv, reg)?;
+    // Indexes being built online: built with the others
+    // (`crate::online_index::settle`).
+    crate::online_index::settle(kv)?;
     let tables = {
         let txn = kv.begin(TxnOptions::read_only())?;
         catalog::tables(&*txn)?

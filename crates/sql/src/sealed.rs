@@ -757,11 +757,11 @@ pub fn check_table(txn: &dyn KvTxn, t: &Table) -> Result<()> {
     if t.storage != SEALED {
         return Ok(());
     }
-    if t.indexes.is_empty() {
+    if t.indexes.is_empty() && t.building.is_empty() {
         return Ok(());
     }
     let subjects = subject_columns(txn, t)?;
-    for ix in &t.indexes {
+    for ix in t.indexes.iter().chain(&t.building) {
         let bad = ix
             .columns
             .iter()
@@ -852,7 +852,7 @@ pub fn drop_dangling(
     let base = t.index_prefix(0);
     let mut seen = 0;
     // In key order: an index's prefix ends in its id.
-    let mut ids: Vec<u32> = t.indexes.iter().map(|ix| ix.id).collect();
+    let mut ids: Vec<u32> = t.index_ids().collect();
     ids.sort_unstable();
     for id in ids {
         let p = t.index_prefix(id);

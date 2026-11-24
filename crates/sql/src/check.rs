@@ -68,7 +68,7 @@ pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>>
             let ids = own
                 .unwrap_or_else(|_| vec![0])
                 .into_iter()
-                .chain(t.indexes.iter().map(|i| i.id))
+                .chain(t.index_ids())
                 .chain(converting);
             (t.id, ids.collect())
         })
@@ -119,13 +119,22 @@ fn check_table(
     // A column's type being changed (`crate::retype`): before the cutover
     // the shadow indexes hold the entries of the rows' hidden values.
     let shadow = crate::retype::Shadow::of(txn, reg, t)?;
+    // Indexes being built online (`crate::online_index`): their entries
+    // so far must be their rows', some rows may have none yet.
+    let building = (shadow.is_none() && !t.building.is_empty()).then(|| t.with_building());
+    let built = t.indexes.len();
     let table = t;
-    let t = shadow.as_ref().map_or(t, |s| &s.view);
+    let t = match (&shadow, &building) {
+        (Some(s), _) => &s.view,
+        (None, Some(b)) => b,
+        (None, None) => t,
+    };
     let keys = crate::dml::IndexKeys::new(txn, reg, t)?;
     let mut rows = Vec::new();
     // Rows by primary key bytes, for the registered methods' indexes.
     let mut keyed = Vec::new();
     let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); t.indexes.len()];
+    let mut duplicated = std::collections::BTreeSet::new();
     // A sealed table's rows read (one whose key is destroyed does not:
     // its index entries are not extra).
     let sealed = table.storage == crate::sealed::SEALED;
@@ -155,11 +164,19 @@ fn check_table(
             keyed.push((pk.to_vec(), row.clone()));
         }
         for (i, k, _) in keys.entries(txn, t, &row, pk)? {
-            if expected[i].insert(k, pk.to_vec()).is_some() {
-                problems.push(format!(
-                    "{}: row {row:?} duplicates another in unique index {}",
-                    t.name, t.indexes[i].name
-                ));
+            match expected[i].insert(k.clone(), pk.to_vec()) {
+                // A unique index being built may meet a duplicate (its
+                // build fails): either row's entry may be there.
+                Some(other) if building.is_some() && i >= built => {
+                    duplicated.insert((k, other));
+                }
+                Some(_) => {
+                    problems.push(format!(
+                        "{}: row {row:?} duplicates another in unique index {}",
+                        t.name, t.indexes[i].name
+                    ));
+                }
+                None => {}
             }
         }
         row.truncate(table.columns.len());
@@ -190,6 +207,24 @@ fn check_table(
             for k in unreadable {
                 got.remove(&k);
             }
+        }
+        let partial = building.is_some() && i >= built;
+        if partial {
+            let extra = got.keys().filter(|k| !want.contains_key(*k)).count();
+            let wrong = got
+                .iter()
+                .filter(|(k, v)| {
+                    want.get(*k).is_some_and(|w| w != *v)
+                        && !duplicated.contains(&((*k).clone(), (*v).clone()))
+                })
+                .count();
+            if extra + wrong > 0 {
+                problems.push(format!(
+                    "{}: index {} being built has {extra} extra and {wrong} wrong entries",
+                    t.name, t.indexes[i].name
+                ));
+            }
+            continue;
         }
         if &got != want {
             let missing = want.keys().filter(|k| !got.contains_key(*k)).count();

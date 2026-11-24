@@ -674,6 +674,12 @@ fn movable(t: &Table) -> Result<()> {
             t.columns[cv.column].name, t.name
         )));
     }
+    if let Some(ix) = t.building.first() {
+        return Err(Error::object_in_use(format!(
+            "index \"{}\" of \"{}\" is being built; its engine can change when that is done",
+            ix.name, t.name
+        )));
+    }
     Ok(())
 }
 
