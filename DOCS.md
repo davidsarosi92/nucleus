@@ -496,9 +496,13 @@ a frame's version moves with every write latch and every page put in it
 store's lock held for writing, which its readers exclude, so a copy
 found good stays so while the reader holds the tree.  The store's lock
 is striped (`striped::Striped`, 16 stripes): a reader takes its thread's
-stripe's read lock, a writer every stripe's (tried all at once, let go
-and tried again later if one is held, so a reader that reads again never
-waits for a writer that waits for it); the tables sit in an `Arc` in
+stripe's read lock, a writer every stripe's — tried, never waited for:
+the stripes taken kept while the others are tried again, and readers
+holding no read guard wait meanwhile (else readers coming back at once
+starved the writer: CI's Windows and iOS runners hung), all let go after
+a while and taken again later (so a reader that reads again never waits
+for a writer, and one waiting for a thread that reads waits a while at
+most); the tables sit in an `Arc` in
 each stripe, which a writer holding them all takes out to change them.
 Ten threads' reads by key (`crates/kv/examples/lookups.rs`, 2,000,000
 keys cached) went from 1.6× one thread's speed to 5.7×: the one lock

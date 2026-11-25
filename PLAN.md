@@ -13692,9 +13692,25 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
      their slots collide, the copy itself 5 %), ten threads no faster
      than the root's alone.
   3. *The store's lock striped* (`striped::Striped`, 16 stripes, the
-     tables in an `Arc` a stripe; a writer tries every stripe at once and
-     never waits holding one).  The step that made the others count:
-     1.95 → 7.0 M reads a second on ten threads.
+     tables in an `Arc` a stripe; a writer tries the stripes, never
+     blocking on one).  The step that made the others count: 1.95 → 7.0
+     M reads a second on ten threads.  As first pushed, a writer let go
+     of every stripe whenever one was held and tried all again: readers
+     in a loop on CI's Windows and iOS runners (few cores, more threads)
+     always held one, and `striped`'s own test hung there (reproduced
+     here: one of 24 copies run at once).  Now a writer keeps the
+     stripes it took, readers that hold no read guard wait while it
+     takes the rest, and after 256 tries it lets all go for a pause (a
+     reader may wait for a thread that waits for the writer): 0 of 96
+     hung, the slowest 2 s; reads and writes as before (ABBA).  Test
+     `a_writer_is_not_starved_by_readers_that_come_back` (48 readers
+     holding their stripes nearly always, 1,000 writes within 10 s): the
+     fix 0.15 s, the lock as first pushed 19–34 s.  5 mutants: a writer
+     that never lets go and one that leaves readers waiting while it
+     pauses deadlock the tests (killed); either of the two remedies
+     alone keeps the writer going here (each removed survives, both
+     removed fail), and a reader holding a guard waiting too only waits
+     longer.
   All together (ABBA, two rounds against the commit before): ten threads
   1.95 M → 6.7–7.3 M reads a second (5.1 µs → 1.4 µs a read on a
   thread; 5.7× one thread), four 2.57 → 4.1 M; one thread 805 → 840 ns
