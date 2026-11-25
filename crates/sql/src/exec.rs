@@ -1673,6 +1673,19 @@ pub fn scan_some<'a>(
     let Some((start, end, index)) = key_range(table, access, &env(&[], ctx, outer))? else {
         return Ok(Box::new(std::iter::empty()));
     };
+    scan_range(table, start, end, index, ctx, wanted)
+}
+
+/// [`scan_some`]'s rows of the key range `[start, end)` of the primary
+/// index (`index` `None`) or a secondary one.
+fn scan_range<'a>(
+    table: &'a Table,
+    start: Vec<u8>,
+    end: Option<Vec<u8>>,
+    index: Option<usize>,
+    ctx: &'a Ctx<'a>,
+    wanted: Option<&'a [bool]>,
+) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>> + 'a>> {
     let storage = crate::storage::of(table)?;
     if index.is_none() {
         let rows = storage.rows(crate::storage::Scan {
@@ -2832,7 +2845,7 @@ fn probe_or_join<'a>(
 /// for it, its rows joined as a nested loop's — on worker threads when it
 /// can ([`OnWorkers`]).
 fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Result<Rows<'a>> {
-    let point = PointLookup::of(right);
+    let point = KeyLookup::of(right);
     if let Some((shared, workers)) = parallel_lookups(right, &spec) {
         let (kind, on, algo, left_width, right_width) = (
             spec.kind,
@@ -2931,48 +2944,55 @@ fn adaptive_lookups<'a>(
     })))
 }
 
-/// A lookup join's right side that reads one row by its whole primary
-/// key — a scan of the primary index at one key, under a projection
-/// perhaps: read with a `get` for each left row, its plan not built for
-/// each.  Built a left row, the scan's vectorized pipeline, the
-/// transaction's range scan with its buffers and the storage looked up
-/// by name were most of a lookup's work and its allocations — on ten
-/// workers serialized in the system allocator (PLAN.md, the perf phase's
-/// reads by key, step 2).
-pub(crate) struct PointLookup<'a> {
+/// A lookup join's right side that reads its rows by a key equal to the
+/// left row's values — a scan of the primary index or a secondary one at
+/// a key prefix, its range open beyond it, under a projection perhaps:
+/// read without its plan built for each left row.  The whole primary key
+/// reads its one row with a `get`; any other prefix its range, as the
+/// scan does ([`scan_range`]).  Built a left row, the scan's plan — its
+/// vectorized pipeline tried, its key range made twice, the storage looked
+/// up by name, the index's entry decoder made — and the transaction's
+/// range scan were most of a lookup's work and its allocations (PLAN.md,
+/// the perf phase's reads by key, steps 2 and 3).
+pub(crate) struct KeyLookup<'a> {
     scan: &'a Plan,
     table: &'a Table,
     access: &'a Access,
+    /// The index read (`None`: the primary one) and its id.
+    index: Option<usize>,
+    id: u32,
+    /// The whole primary key: a row at most, read by a `get`.
+    get: bool,
     /// The scan's filter less the conditions its key applies exactly
     /// ([`Access::rest`], as the scan has it when its key is exact).
     filter: Option<Expr>,
     exprs: Option<&'a [Expr]>,
     storage: std::sync::Arc<dyn crate::storage::TableStorage>,
     /// Whether a left row was read this way (counted when dropped:
-    /// [`point_lookups`]).
+    /// [`key_lookups`]).
     read: std::sync::atomic::AtomicBool,
 }
 
-/// Lookup joins that read a left row's right row by a `get`
-/// ([`PointLookup`]) — counted for the tests.
-static POINT_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Lookup joins that read a left row's right rows without the plan
+/// ([`KeyLookup`]) — counted for the tests.
+static KEY_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many lookup joins (or pipelines' lookup steps) read some left
-/// row's right row by its whole primary key with a `get`, no plan built.
-pub fn point_lookups() -> u64 {
-    POINT_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed)
+/// row's right rows by their key, no plan built.
+pub fn key_lookups() -> u64 {
+    KEY_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-impl Drop for PointLookup<'_> {
+impl Drop for KeyLookup<'_> {
     fn drop(&mut self) {
         if *self.read.get_mut() {
-            POINT_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            KEY_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
-impl<'a> PointLookup<'a> {
-    /// The point read `right` is, if it is one.
+impl<'a> KeyLookup<'a> {
+    /// The read by key `right` is, if it is one.
     pub(crate) fn of(right: &'a Plan) -> Option<Self> {
         let (scan, exprs) = match right {
             Plan::Project { input, exprs } => (&**input, Some(exprs.as_slice())),
@@ -2988,7 +3008,7 @@ impl<'a> PointLookup<'a> {
             return None;
         };
         let Access::Key {
-            index: None,
+            index,
             prefix,
             lower: Bound::Unbounded,
             upper: Bound::Unbounded,
@@ -2997,7 +3017,11 @@ impl<'a> PointLookup<'a> {
         else {
             return None;
         };
-        if prefix.is_empty() || prefix.len() != table.primary_key.len() {
+        let columns = match index {
+            None => table.primary_key.len(),
+            Some(i) => table.indexes.get(*i)?.columns.len(),
+        };
+        if prefix.is_empty() || prefix.len() > columns {
             return None;
         }
         let filter = if exact.is_empty() {
@@ -3009,6 +3033,9 @@ impl<'a> PointLookup<'a> {
             scan,
             table,
             access,
+            index: *index,
+            id: index.map_or(0, |i| table.indexes[i].id),
+            get: index.is_none() && prefix.len() == columns,
             filter,
             exprs,
             storage: crate::storage::of(table).ok()?,
@@ -3016,101 +3043,138 @@ impl<'a> PointLookup<'a> {
         })
     }
 
-    /// The right row for left row `l` (at most one), as the plan built
-    /// for it would give — `None` where it is to be built after all: a
-    /// read validated at commit, a hash join's key filter on the scan, a
-    /// key value not of its column's type.
-    fn row(&self, l: &[Value], ctx: &Ctx, outer: Option<&Env>) -> Result<Option<Option<Row>>> {
+    /// The key left row `l` reads (its range's start) — `Ok(None)` where
+    /// the plan is to be built after all (a read validated at commit,
+    /// `EXPLAIN ANALYZE`, a hash join's key filter on the scan, a value not
+    /// its key column's type exactly), `Ok(Some(None))` where it reads
+    /// nothing (a `NULL`).
+    fn key(&self, l: &[Value], ctx: &Ctx, outer: Option<&Env>) -> Result<Option<Option<Vec<u8>>>> {
         if ctx.validated
             || ctx.profile.is_some()
             || !crate::keyfilter::of_scan(ctx, self.scan).is_empty()
         {
             return Ok(None);
         }
-        let left = env(l, ctx, outer);
-        // The key as `key_range_exact` makes a range's start — the end not
-        // wanted, the buffer made once at its size.
+        // The key as `key_range_exact` makes a range's start, the buffer
+        // made once at its size.
         let Access::Key { prefix, .. } = self.access else {
             return Ok(None);
         };
         let mut key = Vec::with_capacity(crate::catalog::INDEX_PREFIX_LEN + 9 * prefix.len() + 8);
-        self.table.push_index_prefix(&mut key, 0);
+        self.table.push_index_prefix(&mut key, self.id);
+        let left = env(l, ctx, outer);
         let at = env(&[], ctx, Some(&left));
-        for (p, &c) in prefix.iter().zip(&self.table.primary_key) {
+        for (pos, p) in prefix.iter().enumerate() {
             let v = p.eval(&at)?;
             if v.is_null() {
                 return Ok(Some(None)); // `col = NULL` matches nothing
             }
+            let ty = match self.index {
+                None => self.table.columns[self.table.primary_key[pos]].ty,
+                Some(i) => self.table.indexes[i].key_type(self.table, pos),
+            };
             // A value its column's type does not hold exactly: read as
             // the plan reads it.
-            let Some(v) = key_bound(v, self.table.columns[c].ty) else {
+            let Some(v) = key_bound(v, ty) else {
                 return Ok(None);
             };
             encode_key_value(&mut key, &v);
         }
-        let wanted = ctx.needed.get(&(self.scan as *const Plan as usize));
-        let mut labels = crate::enums::Labels::default();
-        let Some(row) = self.storage.get(
-            ctx.txn,
-            self.table,
-            &key,
-            wanted.map(Vec::as_slice),
-            &mut labels,
-        )?
-        else {
-            return Ok(Some(None));
-        };
-        crate::budget::charge_scan()?;
-        // (Read before it is written: the workers write the line once.)
-        if !self.read.load(std::sync::atomic::Ordering::Relaxed) {
-            self.read.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        Ok(Some(Some(key)))
+    }
+
+    /// Right row `row` of left row `l`, through the scan's filter and
+    /// projection.
+    fn through(
+        &self,
+        l: &[Value],
+        row: Row,
+        ctx: &Ctx,
+        outer: Option<&Env>,
+    ) -> Result<Option<Row>> {
+        let left = env(l, ctx, outer);
         let e = env(&row, ctx, Some(&left));
         if let Some(f) = &self.filter
             && !f.holds(&e)?
         {
-            return Ok(Some(None));
+            return Ok(None);
         }
-        Ok(Some(Some(match self.exprs {
+        Ok(Some(match self.exprs {
             None => row,
             Some(exprs) => exprs.iter().map(|x| x.eval(&e)).collect::<Result<Row>>()?,
-        })))
+        }))
     }
-}
 
-impl PointLookup<'_> {
-    /// What left row `l` gives (its joined row, or a semi or anti join's
+    /// What left row `l` gives (its joined rows, or a semi or anti join's
     /// row itself, or nothing), pushed onto `out` — `Ok(Some(l))`, the row
     /// back, where the right side's plan is to be built for it after all
-    /// ([`row`](Self::row)'s `None`).
+    /// ([`key`](Self::key)'s `None`).
     fn join(&self, l: Row, spec: &JoinSpec, out: &mut Vec<Row>) -> Result<Option<Row>> {
-        let Some(found) = self.row(&l, spec.ctx, spec.outer)? else {
-            return Ok(Some(l));
+        let (ctx, outer) = (spec.ctx, spec.outer);
+        let key = match self.key(&l, ctx, outer)? {
+            None => return Ok(Some(l)),
+            Some(key) => key,
         };
-        let width = l.len();
-        let mut l = l;
-        if let Some(r) = found {
-            let mut combined = l;
-            combined.extend(r);
-            if spec.matches(&combined)? {
-                if spec.kind == JoinType::Anti {
-                    return Ok(None);
-                }
-                if spec.kind == JoinType::Semi {
-                    combined.truncate(width);
-                }
-                out.push(combined);
-                return Ok(None);
+        let wanted = ctx
+            .needed
+            .get(&(self.scan as *const Plan as usize))
+            .map(Vec::as_slice);
+        let mut matched = false;
+        if let Some(key) = key {
+            // (Read before it is written: the workers write the line once.)
+            if !self.read.load(std::sync::atomic::Ordering::Relaxed) {
+                self.read.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            combined.truncate(width);
-            l = combined;
+            if self.get {
+                let mut labels = crate::enums::Labels::default();
+                if let Some(row) =
+                    self.storage
+                        .get(ctx.txn, self.table, &key, wanted, &mut labels)?
+                {
+                    crate::budget::charge_scan()?;
+                    if let Some(r) = self.through(&l, row, ctx, outer)? {
+                        matched = self.matched(&l, r, spec, out)?;
+                    }
+                }
+            } else {
+                let end = prefix_end(&key);
+                for r in scan_range(self.table, key, end, self.index, ctx, wanted)? {
+                    let (_, row) = r?;
+                    if let Some(r) = self.through(&l, row, ctx, outer)?
+                        && self.matched(&l, r, spec, out)?
+                    {
+                        matched = true;
+                        if spec.existence() {
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        match spec.kind {
-            JoinType::Semi => {}
-            JoinType::Anti => out.push(l),
-            _ => out.extend(spec.unmatched(l)),
+        match (spec.kind, matched) {
+            (JoinType::Semi, true) => out.push(l),
+            (JoinType::Anti, false) => out.push(l),
+            (JoinType::Semi | JoinType::Anti, _) => {}
+            (_, true) => {}
+            (_, false) => out.extend(spec.unmatched(l)),
         }
         Ok(None)
+    }
+
+    /// Whether right row `r` matches left row `l` by the join's condition
+    /// — its joined row pushed onto `out` where the join gives it (not a
+    /// semi or anti join's: those give `l` alone, or nothing).
+    fn matched(&self, l: &[Value], r: Row, spec: &JoinSpec, out: &mut Vec<Row>) -> Result<bool> {
+        let mut combined = Vec::with_capacity(l.len() + r.len());
+        combined.extend_from_slice(l);
+        combined.extend(r);
+        if !spec.matches(&combined)? {
+            return Ok(false);
+        }
+        if !spec.existence() {
+            out.push(combined);
+        }
+        Ok(true)
     }
 }
 
@@ -3120,7 +3184,7 @@ fn lookup_one(
     l: Row,
     right: &Plan,
     spec: &JoinSpec,
-    point: Option<&PointLookup>,
+    point: Option<&KeyLookup>,
 ) -> Vec<Result<Row>> {
     // A right side read by its whole primary key: its row, if one.
     let l = match point {
@@ -3265,7 +3329,7 @@ pub(crate) fn look_up<'a>(
     widths: (usize, usize),
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
-    point: Option<&PointLookup>,
+    point: Option<&KeyLookup>,
 ) -> Vec<Result<Row>> {
     let spec = JoinSpec {
         kind,
@@ -3289,7 +3353,7 @@ pub(crate) fn look_up_into<'a>(
     algo: &'a JoinAlgo,
     widths: (usize, usize),
     ctx: &'a Ctx<'a>,
-    point: Option<&PointLookup>,
+    point: Option<&KeyLookup>,
     out: &mut Vec<Row>,
 ) -> Result<()> {
     let spec = JoinSpec {

@@ -2674,8 +2674,8 @@ struct Lookup<'a> {
     algo: &'a JoinAlgo,
     widths: (usize, usize),
     /// The right side as a read by its whole primary key, if it is one
-    /// (a `get` a left row, no plan built: [`crate::exec::PointLookup`]).
-    point: Option<crate::exec::PointLookup<'a>>,
+    /// (a `get` a left row, no plan built: [`crate::exec::KeyLookup`]).
+    point: Option<crate::exec::KeyLookup<'a>>,
 }
 
 impl Lookup<'_> {
@@ -2920,7 +2920,7 @@ fn chain<'p>(
                 on: on.as_ref(),
                 algo,
                 widths: (left.width(), right.width()),
-                point: crate::exec::PointLookup::of(right),
+                point: crate::exec::KeyLookup::of(right),
             };
             steps.push((Step::Lookup(Box::new(lookup)), plan));
             Some((scan, steps))

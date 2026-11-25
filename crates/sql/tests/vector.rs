@@ -1193,10 +1193,11 @@ fn parallel_lookups_agree() {
     }
 }
 
-/// A lookup join whose right side is read by its whole primary key reads
-/// each left row's row with a `get`, no plan built for it (PLAN.md, the
-/// perf phase's reads by key, step 2) — and gives what the same join of
-/// a copy without the key gives: inner, left (its condition on the right
+/// A lookup join whose right side is read by a key — the whole primary
+/// key (a `get`), a prefix of it, or a secondary index — reads each left
+/// row's rows without its plan built (PLAN.md, the perf phase's reads by
+/// key, steps 2 and 3), and gives what the same join of a copy without
+/// the keys gives: inner, left (its condition on the right
 /// row), semi and anti joins, a filter and a projection on the right
 /// side, `NULL` and missing keys, key values no `int` holds (too big, or
 /// with a fraction: read as the plan would), a two-column key (and its
@@ -1205,7 +1206,7 @@ fn parallel_lookups_agree() {
 /// counts the lookups as the plan's.
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
-fn lookups_by_the_whole_key_read_each_row_by_a_get() {
+fn lookups_by_key_read_without_their_plan() {
     for storage in ["row", "column"] {
         let db = Database::open_on(
             Arc::new(SimPlatform::new(19)),
@@ -1215,14 +1216,17 @@ fn lookups_by_the_whole_key_read_each_row_by_a_get() {
         .unwrap();
         let mut s = session(&db, 1024);
         s.execute(&format!(
-            "CREATE TABLE big (id INT PRIMARY KEY, v INT, s TEXT) WITH (storage = {storage}); \
-             CREATE TABLE plain (id INT, v INT, s TEXT); \
+            "CREATE TABLE big (id INT PRIMARY KEY, v INT, s TEXT, g INT, t TEXT) \
+               WITH (storage = {storage}); \
+             CREATE TABLE plain (id INT, v INT, s TEXT, g INT, t TEXT); \
              CREATE TABLE pair (a INT, b INT, v INT, PRIMARY KEY (a, b)) \
                WITH (storage = {storage}); \
              CREATE TABLE pair_plain (a INT, b INT, v INT); \
              CREATE TABLE few (k INT PRIMARY KEY, ref BIGINT, half NUMERIC, w INT); \
-             INSERT INTO big SELECT i, i * 7 % 1000, 's' || (i % 13) \
-               FROM generate_series(1, 40000) i; \
+             INSERT INTO big SELECT i, i * 7 % 1000, 's' || (i % 13), i * 7919 % 30011, \
+               't' || (i * 7919 % 30011) FROM generate_series(1, 40000) i; \
+             CREATE INDEX big_g ON big (g); \
+             CREATE INDEX big_t ON big (t); \
              INSERT INTO plain SELECT * FROM big; \
              INSERT INTO pair SELECT i % 200, i / 200, i FROM generate_series(1, 40000) i; \
              INSERT INTO pair_plain SELECT * FROM pair; \
@@ -1244,6 +1248,13 @@ fn lookups_by_the_whole_key_read_each_row_by_a_get() {
             "SELECT * FROM few WHERE EXISTS (SELECT 1 FROM {t} x WHERE x.id = few.ref)",
             "SELECT k FROM few WHERE NOT EXISTS (SELECT 1 FROM {t} x WHERE x.id = few.ref AND x.v < 500)",
             "SELECT few.k, x.v FROM few JOIN {p} x ON x.a = few.w AND x.b = few.k",
+            // A secondary index: a key's rows, one or two.
+            "SELECT few.k, x.id, x.s FROM few JOIN {t} x ON x.g = few.ref",
+            "SELECT few.k, x.id FROM few LEFT JOIN {t} x ON x.g = few.ref AND x.v > 300",
+            "SELECT k FROM few WHERE EXISTS (SELECT 1 FROM {t} x WHERE x.g = few.ref AND x.v < 500)",
+            "SELECT k FROM few WHERE NOT EXISTS (SELECT 1 FROM {t} x WHERE x.g = few.ref AND x.v < 500)",
+            // A text key.
+            "SELECT few.k, x.id FROM few JOIN {t} x ON x.t = 't' || few.ref",
             "SELECT few.k, count(*) FROM few JOIN {p} x ON x.a = few.k WHERE few.k < 20 GROUP BY few.k",
         ];
         let sorted = |s: &mut Session, q: &str| {
@@ -1277,18 +1288,17 @@ fn lookups_by_the_whole_key_read_each_row_by_a_get() {
                     let plan = outcome(&mut s, &format!("EXPLAIN {keyed}")).unwrap();
                     let looked_up = plan.iter().any(|l| l[0].contains("Index Nested Loop"));
                     loops += usize::from(looked_up);
-                    let before = nucleus_sql::exec::point_lookups();
+                    let before = nucleus_sql::exec::key_lookups();
                     let got = sorted(&mut s, &keyed);
-                    let read = nucleus_sql::exec::point_lookups() - before;
+                    let read = nucleus_sql::exec::key_lookups() - before;
                     assert_eq!(
                         got,
                         sorted(&mut s, &plain),
                         "{storage}, {workers} workers, changed {changed}: {keyed}"
                     );
                     assert!(!got.is_empty(), "{keyed}");
-                    // The first column of a two-column key is a range; a
-                    // numeric key is not an `int` column's exactly.
-                    if looked_up && !keyed.contains("count(*)") && !keyed.contains("half") {
+                    // A numeric key is not an `int` column's exactly.
+                    if looked_up && !keyed.contains("half") {
                         assert!(read > 0, "{storage}: {keyed}: read by a get");
                     }
                 }
@@ -1311,7 +1321,7 @@ fn lookups_by_the_whole_key_read_each_row_by_a_get() {
             assert!(scan.contains("loops=300"), "{storage}: {scan}");
             assert!(!scan.contains("actual rows=0 "), "{storage}: {scan}");
         }
-        let want = if storage == "row" { 40 } else { 8 };
+        let want = if storage == "row" { 56 } else { 8 };
         assert!(loops >= want, "{storage}: {loops} index nested loops");
     }
 }

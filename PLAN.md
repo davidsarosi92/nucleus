@@ -13748,8 +13748,9 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
   scan and its buffers, the storage looked up by name — for its one row;
   and on ten workers half the time was waiting and the system
   allocator's small blocks.  Taken, in order:
-  1. *A point read* (`exec::PointLookup`): a right side that reads one
-     row by the table's whole primary key — a scan of the primary index
+  1. *A point read* (`exec::PointLookup`, step 3's `KeyLookup`): a
+     right side that reads one row by the table's whole primary key —
+     a scan of the primary index
      at one key, under a projection perhaps — encodes the key from the
      left row and reads the row with the storage's `get`, its filter and
      projection applied; the plan is built after all where a value is
@@ -13785,6 +13786,7 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
   server vacuums such intents in the background; the embedded `nucleus
   sql` does not, so the measurements above load, then `VACUUM`.
   Tests: `tests/vector.rs` `lookups_by_the_whole_key_read_each_row_by_a_get`
+  (step 3's `lookups_by_key_read_without_their_plan`)
   (inner, left with conditions on the right row and on both, semi and
   anti joins, a filter and a projection, `NULL`, missing, too big and
   fractional keys, a two-column key and its first column alone, the
@@ -13802,9 +13804,35 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
   before; the walk it falls back to has the same checks).  Taken: HyPer's morsel-driven parallelism (Leis et al.,
   SIGMOD 2014), already the executor's, its morsels now sized by what a
   row costs.
-- **Step 3 — a secondary index's lookups** ⬜: a left row's entries'
-  range and its rows' fetch (50 ms for 20,000 keys on one worker, twice
-  the primary key's).
+- **Step 3 — a secondary index's lookups** ✅.  Against PostgreSQL 18
+  first (Homebrew, the same tables, `VACUUM ANALYZE`; it hashes these
+  joins — 96 ms, 31 on eight workers — so its index nested loop forced,
+  serial, median of six): primary key 27 ms (nucleus 24 on one worker),
+  secondary index 31 ms (nucleus 50).  Profiled: a left row's lookup
+  built the right side's plan (a quarter of its time: the pipeline
+  tried, the key range made twice, the storage looked up by name, the
+  index's entry decoder made), then the transaction's scan of the
+  entries (its descent 30 %, inherent; the scan made and filled
+  another 20 %) — the query reads its index alone (`id` is in every
+  entry).  Taken: the point read of step 2 made a read by any key
+  (`exec::KeyLookup`): a key equal to the left row's values, its range
+  open beyond them — the whole primary key by a `get` as before, a
+  prefix of it or a secondary index's columns by their range, read as
+  the scan reads it (`scan_range`, split out of `scan_some`), the
+  filter and projection applied, the join's rows given (several a left
+  row; a semi or anti join stops at the first match).  Secondary index
+  52–54 → 38 ms on one worker, 15–27 → 12.6–15 on ten; 2,047
+  descendants (their rounds read the `parent` index) 3.5 → 2.9 ms;
+  primary key and the whole tree as they were (ABBA).  Left: 1.2×
+  PostgreSQL's serial lookup by a secondary index — the transaction's
+  scan made for a range of one or two entries (GitHub issue).
+  Tests: `lookups_by_key_read_without_their_plan` grown by secondary
+  indexes (inner, left with a condition on the right row, semi and
+  anti; an integer key and a text one) and the first column of a
+  two-column key.  9 mutants, all killed (the key of a secondary index
+  typed as the primary key's only once a text index was read, and a
+  lookup counted as read by its key only when a key is read, not for a
+  `NULL`).
 
 ## §F2 — NoSQL layer
 

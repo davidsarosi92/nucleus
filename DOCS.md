@@ -3250,21 +3250,25 @@ arguments alone (`TableFunction::parallel_safe`, false unless a function
 says so): each left row's call runs on a worker.  A lookup's own scan,
 by its one key value, runs a row at a time (`vector::rows` declines a
 scan by an enclosing row's key: a pipeline made for each lookup cost
-more than its few rows) — and where it reads one row by the table's
-whole primary key, of the key columns' own types (`exec::PointLookup`),
-not even that: the key is encoded from the left row and the row read by
-the storage's `get`, the scan's filter and projection applied to it, no
-plan built and no range made (the right side's plan is built for a left
-row after all where a value is not its column's type exactly, under
+more than its few rows) — and where it reads by a key equal to the left
+row's values, its range open beyond them (the whole primary key, a
+prefix of it, or a secondary index's columns: `exec::KeyLookup`), not
+even that: the key is encoded from the left row once and its rows read —
+the whole primary key's one row by the storage's `get`, any other key's
+range as the scan reads it — the scan's filter and projection applied
+to them, no plan built (the right side's plan is built for a left row
+after all where a value is not its key column's type exactly, under
 `EXPLAIN ANALYZE`, for a validated read, or with a hash join's key
 filter on the scan).  A pipeline with a lookup step is cut into morsels
 as small as two leaves' rows (`KvRead::split_points_fine`, where others
 take 64 leaves at least): a lookup costs a hundred times a row's read,
 so a left table of a few thousand rows runs on the workers once rather
 than starting the lookups' threads batch by batch.  On a probe of 20,000
-keys into 2,000,000 rows the three took a primary-key join from 46 to
-24 ms on one worker and 27.5 to 7 ms on ten, a secondary index's from
-27 to 15 ms on ten (PLAN.md, the perf phase's reads by key, step 2).
+keys into 2,000,000 rows they took a primary-key join from 46 to 24 ms
+on one worker and 27.5 to 7 ms on ten (PostgreSQL 18's index nested
+loop: 27 ms, not run in parallel), a secondary index's from 52 to 38 ms
+on one and 28 to 13 on ten (PostgreSQL's: 31) (PLAN.md, the perf
+phase's reads by key, steps 2 and 3).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -8834,11 +8838,12 @@ checks `psql` with and without TLS.
   lock striped, the page table read without a lock, the root read from
   the thread's own copy (ten threads' reads by key 1.95 → 7 M a
   second); a lookup join's right side read by its whole primary key with
-  a `get` (`exec::PointLookup`), a get's first version found without a
+  a `get`, a secondary index's range without its plan (`exec::KeyLookup`),
+  a get's first version found without a
   range (`BTree::seek_one`), and a pipeline with a lookup step cut into
   morsels of two leaves (`KvRead::split_points_fine`): 20,000 keys
   joined to 2,000,000 rows by primary key 46 → 24 ms on one worker, 27.5
-  → 7 ms on ten.
+  → 7 ms on ten, by a secondary index 52 → 38 ms on one, 28 → 13 on ten.
 - **2026-11-20 — found rows looked up a group at a time (the sweep):**
   where the rows an index method finds lie far apart, `entries_at`
   looks them up `GET_MANY` at a time, their descents' cache misses
