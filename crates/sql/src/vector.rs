@@ -2501,7 +2501,14 @@ fn decode_into(
     let n = h.n;
     let mut r = h.reader();
     let mut at = 0;
-    for (c, col) in cols.iter_mut().enumerate().take(n) {
+    // Columns dropped in the stored row ([`Table::gone`]): each column read
+    // at its place, theirs passed over.
+    let gone = !t.gone.is_empty();
+    for (l, col) in cols.iter_mut().enumerate() {
+        let c = if gone { t.stored_at(l) } else { l };
+        if c >= n {
+            break;
+        }
         // Columns not read are passed over, to the offset before the next
         // one read when the row has one (stored past the columns wanted, or
         // the table's: not read).
@@ -2624,8 +2631,17 @@ fn decode_into(
         }
     }
     // Columns added since the row was stored: their value for it.
-    for (c, col) in cols.iter_mut().enumerate().skip(n) {
-        col.push(t.missing_value(n, c));
+    if gone {
+        for (l, col) in cols.iter_mut().enumerate() {
+            let c = t.stored_at(l);
+            if c >= n {
+                col.push(t.missing_value(n, c));
+            }
+        }
+    } else {
+        for (c, col) in cols.iter_mut().enumerate().skip(n) {
+            col.push(t.missing_value(n, c));
+        }
     }
     Ok(true)
 }

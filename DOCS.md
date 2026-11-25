@@ -3448,8 +3448,8 @@ column that may be `NULL`: they read `NULL`), or a default the same for
 every row — immutable, of a type whose stored value is the value itself
 (booleans, numbers, text, `char`, `bytea`, dates and times) — without a
 `CHECK` or `REFERENCES` of its own.  The default's value, made once, is
-kept in the table's record (`Table::missing`, by column position): a row
-stored with fewer values than the column's position reads it there — in
+kept in the table's record (`Table::missing`, by the column's place in a
+stored row): a row stored with fewer values than the column's place reads it there — in
 the row decoder (`large::read_some`), the vectorized one, and a column
 segment written before (`column_store`); a row written after holds its
 own; a later `SET DEFAULT` changes neither.  No row read, no row is a
@@ -3462,8 +3462,32 @@ NULL` without a default) every row is rewritten, its default made for it
 the row checked.  The design is PostgreSQL 11's fast `ADD COLUMN` (a
 non-volatile default kept as the attribute's missing value).
 
+**`DROP COLUMN`** (issue #18, step 2b) of a table stored in rows alone
+(not a column copy's, not partitioned, a memory store or a chunk table,
+no column's type being changed) reads and rewrites no row: the column
+leaves the definition, its place stays in the stored rows
+(`Table::gone`, the places ascending, record version 28).  A row is
+stored with a value in every place — `NULL` in a dropped column's, for a
+row written after (`Table::to_stored`) — and read by places, the dropped
+ones taken out (`large::read_some`, the vectorized decoder by each
+column's place, `Table::stored_at`).  A dropped column's value stored out
+of line keeps its chunks until its row is rewritten or deleted (a delete
+reads the stored row for them); its indexes' entries are removed after
+the drop commits, as `DROP INDEX`'s.  No row read, none is a premise: a
+write committed meanwhile under the old definition stored a row in the
+old places, which read as the others.  The places go when the rows are
+written again whole — a `DROP COLUMN` or a type change that rewrites
+them (`Table::compact`); the online type change (`… CONCURRENTLY`, the
+fallback of one meeting writes) is refused while rows keep a dropped
+column's place, its transactional form compacting them.  A column copy
+(`column`, `row,column`) holds its columns by number, so its `DROP
+COLUMN` rewrites the rows, and an `ADD COLUMN` with a default on such a
+table whose rows keep dropped places writes the value into them.  The
+design is PostgreSQL's `attisdropped` (a dropped attribute stays in the
+tuples, as its documentation describes `DROP COLUMN`).
+
 **DDL over a table's rows** — an index built, an `ADD COLUMN` that
-rewrites them, `DROP COLUMN`, `ALTER COLUMN … TYPE`, `SET NOT NULL`, `ADD CONSTRAINT` — makes
+rewrites them, a `DROP COLUMN` that does, `ALTER COLUMN … TYPE`, `SET NOT NULL`, `ADD CONSTRAINT` — makes
 the rows as its snapshot has them a premise of its commit
 (`dml::rows_are_premise`: the table's whole key range validated, at any
 isolation level).  A write the table's validated definition does not

@@ -13238,6 +13238,41 @@ did not run on the workers without statistics (`rows=1000` estimated).
   no row a premise; under writes that do not pause); 11 of 13 mutants
   killed — the 2 left (`DROP COLUMN` moving the kept values' positions)
   are equivalent while `DROP COLUMN` rewrites every row.
+- Issue #18, step 2b — `DROP COLUMN` without reading or rewriting the
+  rows.  After step 4, `DROP COLUMN IF EXISTS extra` failed `40001` 8
+  and 9 times a run (1 and 6 succeeding): it took the rows as a premise
+  and rewrote every one.  Now, for a table stored in rows alone (not a
+  column copy's, not partitioned, a memory store or a chunk table, no
+  type change under way), the column leaves the definition and its
+  place stays in the stored rows (`Table::gone`, record version 28):
+  rows are written with `NULL` there (`Table::to_stored` — the row
+  encoder, a load's workers', a sealed row's body) and read by places,
+  the dropped ones taken out (`large::read_some`; the vectorized decoder
+  by each column's place, `Table::stored_at`); `Table::missing` keys by
+  place too.  A dropped value stored out of line keeps its chunks until
+  its row is rewritten or deleted (a delete then reads the stored row);
+  the column's indexes' entries go after the commit (`Table::dropped`,
+  as step 1b's).  A rewrite of every row — a `DROP COLUMN` or type
+  change that rewrites — writes them whole and forgets the places
+  (`Table::compact`); the online type change refuses a table with them
+  (a row's hidden value would follow them), its transactional form
+  compacting.  A column copy holds columns by number, so a column
+  table's `DROP COLUMN` still rewrites (next: its segments by place), and
+  its `ADD COLUMN` with a default writes the value when rows keep
+  dropped places.  Taken: PostgreSQL's `attisdropped` (its
+  documentation).  Measured (as step 1, `DDL=1`, seeds 2 and 4): `DROP
+  COLUMN` 8 and 7 succeeding, 2 and 8 failing `40001` — every failure
+  the column table's (`bc`), none on the row and LSM tables; checks
+  clean.  `tests/ddl_race.rs`'s `DROP COLUMN` case now commits on row
+  and LSM tables (the write's row, in the old places, reads right).
+  Tests: `tests/drop_column.rs` (a twin rewritten — a column table —
+  answering the same through reads a row at a time and vectorized,
+  values out of line, updates, deletes, inserts, a load, columns added
+  and dropped after, a reopen, a change to columns and back, a type
+  change that compacts; an update of values out of line past a dropped
+  place; a write committed under the drop; drops under writes that do
+  not pause), `tests/sealed.rs` (a table keeping a dropped place
+  sealed and opened); 16 of 16 mutants killed.
 - Issue #18, step 3 — constraints under writes.  A second DDL mix in the
   bank tool (`DDL=2`: `SET`/`DROP NOT NULL`, `ADD`/`DROP CONSTRAINT …
   CHECK`, `… UNIQUE`) measured before: `ADD UNIQUE` 1 and 3 succeeding,

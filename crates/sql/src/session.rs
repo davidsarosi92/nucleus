@@ -3738,7 +3738,8 @@ fn add_column(
     // old definition is one of them.
     if column.references.is_none() && column.check.is_none() && missing_fits(&*txn, reg, &t, &fill)?
     {
-        let c = t.columns.len() - 1;
+        // By its place in a stored row ([`Table::stored_at`]).
+        let c = t.stored_width() - 1;
         if !fill.is_null() {
             t.missing.push((c, fill));
         }
@@ -3791,6 +3792,14 @@ fn add_column(
 fn missing_fits(txn: &dyn KvTxn, reg: &Registry, t: &Table, fill: &Value) -> Result<bool> {
     let col = &t.columns[t.columns.len() - 1];
     if t.memory.is_some() || t.chunks.is_some() {
+        return Ok(false);
+    }
+    // A column copy's segments hold the columns by number, not by their
+    // places in a stored row ([`Table::gone`]).
+    if !t.gone.is_empty()
+        && !fill.is_null()
+        && (t.storage != crate::storage::ROW || !t.columnar.is_empty())
+    {
         return Ok(false);
     }
     if fill.is_null() {
@@ -4317,6 +4326,7 @@ pub(crate) fn create_table(
         dropped: Vec::new(),
         validating: Vec::new(),
         missing: Vec::new(),
+        gone: Vec::new(),
         memory: None,
         engine: opts.engine,
         relative_directory: true,
@@ -4755,6 +4765,11 @@ fn alter_column_type(
         if new.columns[c].default.is_some() {
             w.default_of(c, &ctx)?;
         }
+    }
+    // Every row written again whole (a partitioned table's are its
+    // partitions').
+    if new.partition_by.is_none() {
+        new.compact();
     }
     dml::replace_rows(txn, reg, &new, rows)?;
     // Embedding columns: their texts and keys may have changed with the

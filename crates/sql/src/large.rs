@@ -81,7 +81,7 @@ pub fn insert(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<b
 /// A new row's stored value when none of its values is long enough to go
 /// out of line (`None` when one is): what [`insert`] stores, made without
 /// the transaction — on any thread (a load's workers).
-pub fn encode_inline(row: &Row) -> Option<Vec<u8>> {
+pub fn encode_inline(row: &[Value]) -> Option<Vec<u8>> {
     let mut w = RowWriter::new(row.len());
     for v in row {
         let at = w.value(v);
@@ -101,6 +101,11 @@ fn encode(
     old: Option<&Row>,
 ) -> Result<Vec<u8>> {
     let pk = pk_suffix(t, key);
+    // In the stored row's places: the columns dropped keep theirs, `NULL`.
+    let row_stored = t.to_stored(row);
+    let row: &[Value] = &row_stored;
+    let old_stored = old.map(|o| t.to_stored(o));
+    let old: Option<&[Value]> = old_stored.as_deref();
     let stored = match old {
         Some(_) => match txn.get(key)? {
             Some(b) => out_of_line(&b)?,
@@ -160,7 +165,9 @@ fn encode(
 /// unless a column's type is being changed, when the stored row may hold
 /// values `row` does not (`crate::retype`).
 pub fn remove_row(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<()> {
-    if t.converting.is_some() {
+    // The stored row may hold more than `row`: a hidden value, or a
+    // dropped column's ([`Table::gone`]) stored out of line.
+    if t.converting.is_some() || !t.gone.is_empty() {
         return remove(txn, t, key);
     }
     let mut enc = Vec::new();
@@ -312,6 +319,24 @@ pub fn read_some(
     wanted: Option<&[bool]>,
 ) -> Result<Row> {
     let mut resolve = |c, len| fetch(txn, t, pk_suffix(t, key), c, len);
+    if !t.gone.is_empty() {
+        // Columns dropped in the stored row ([`Table::gone`]): read by
+        // their places, those taken out.  (Not while a type changes:
+        // `crate::retype` refuses a table with them.)
+        let wanted = wanted.map(|w| t.stored_wanted(w));
+        let wanted = wanted.as_deref();
+        let mut row = crate::encoding::decode_some(bytes, t.stored_width(), wanted, &mut resolve)?;
+        if !t.missing.is_empty() {
+            t.fill_missing(crate::encoding::row_header(bytes)?.n, &mut row, wanted);
+        }
+        let mut row = t.from_stored(row);
+        for (v, c) in row.iter_mut().zip(&t.columns) {
+            if matches!(c.ty, DataType::Enum(_)) {
+                labels.fill(txn, c.ty, v)?;
+            }
+        }
+        return Ok(row);
+    }
     let mut row = match &t.converting {
         // A column's type being changed: a row's hidden value
         // (`crate::retype`).

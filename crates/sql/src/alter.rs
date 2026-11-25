@@ -557,7 +557,13 @@ fn drop_column(
     cascade: bool,
 ) -> Result<()> {
     let old = catalog::table(&*txn, table)?;
-    crate::dml::rows_are_premise(&*txn, &old)?;
+    // Dropped where it is stored, no row read or written, or the rows
+    // rewritten without it — read, a premise of the commit: a write
+    // committed meanwhile was made under the old definition.
+    let in_place = drops_in_place(&old);
+    if !in_place {
+        crate::dml::rows_are_premise(&*txn, &old)?;
+    }
     let c = column_of(&old, column)?;
     refuse_kept(&old, c, "drop")?;
     let depends = |what: String| -> Result<()> {
@@ -672,6 +678,16 @@ fn drop_column(
             i += 1;
         }
     }
+    if in_place {
+        // Its indexes' entries removed after the drop commits (the rows
+        // are not rewritten, which would remove them).
+        for ix in new.indexes.iter().filter(|ix| ix.uses(c)) {
+            new.dropped.push(ix.id);
+        }
+        if new.indexes.iter().any(|ix| ix.uses(c)) {
+            crate::online_index::mark_dropped();
+        }
+    }
     new.indexes.retain(|ix| !ix.uses(c));
     new.checks = new
         .checks
@@ -706,9 +722,18 @@ fn drop_column(
         s.columns.iter_mut().for_each(down);
     }
     new.columnar.iter_mut().for_each(down);
-    new.missing.retain(|(m, _)| *m != c);
-    for (m, _) in &mut new.missing {
-        down(m);
+    if in_place {
+        // Its place stays in the stored rows ([`Table::gone`]); the other
+        // columns' places, the missing values' too, do not move.
+        let at = old.stored_at(c);
+        new.missing.retain(|(m, _)| *m != at);
+        new.gone.push(at);
+        new.gone.sort_unstable();
+    } else {
+        new.missing.retain(|(m, _)| *m != c);
+        for (m, _) in &mut new.missing {
+            down(m);
+        }
     }
     new.subject.iter_mut().for_each(down);
     new.expiry.iter_mut().for_each(down);
@@ -743,8 +768,10 @@ fn drop_column(
         catalog::update_table(txn, &ct)?;
     }
     privileges::rename_column(txn, table, column, None)?;
-    // The rows, without it (a partitioned table's are its partitions').
-    if new.partition_by.is_none() {
+    // The rows, without it (a partitioned table's are its partitions'),
+    // written again whole.
+    if !in_place && new.partition_by.is_none() {
+        new.compact();
         let rows = {
             let ctx = Ctx::new(&*txn, reg, &[]);
             let mut rows = crate::spill::Stash::new();
@@ -763,6 +790,20 @@ fn drop_column(
     txn.delete(&catalog::stats_key(&new))?;
     catalog::delete_stats_sample(txn, &new)?;
     catalog::update_table(txn, &new)
+}
+
+/// Whether a column of `t` is dropped where it is stored, no row read or
+/// rewritten ([`Table::gone`]; issue #18): a table stored in rows alone
+/// (a column copy's segments hold columns by number), not partitioned,
+/// nor a memory store or a chunk table, no column's type being changed.
+fn drops_in_place(t: &Table) -> bool {
+    t.storage == crate::storage::ROW
+        && t.columnar.is_empty()
+        && t.partition_by.is_none()
+        && t.partition_of.is_none()
+        && t.memory.is_none()
+        && t.chunks.is_none()
+        && t.converting.is_none()
 }
 
 // ------------------------------------------------ defaults, NOT NULL

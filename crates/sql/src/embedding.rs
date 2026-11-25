@@ -1015,6 +1015,11 @@ fn swap(kv: &Arc<dyn Kv>, reg: &Registry, table_id: u32, column: usize) -> Resul
         }
         rows.seal()?
     };
+    // Every row written again whole (a partitioned table's are its
+    // partitions').
+    if new.partition_by.is_none() {
+        new.compact();
+    }
     crate::dml::replace_rows(txn.as_mut(), reg, &new, rows)?;
     // The old model's jobs are moot: a changed text's vector is made.
     delete_prefix(txn.as_mut(), &slot_prefix(table_id, column))?;

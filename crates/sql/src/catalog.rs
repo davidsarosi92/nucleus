@@ -97,8 +97,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// the dropped indexes whose entries are left to remove
 /// ([`Table::dropped`]); version 26 the type changes being validated
 /// ([`Table::validating`]); version 27 the values of columns added since
-/// rows were stored ([`Table::missing`]); older versions still read.
-const TABLE_VERSION: u8 = 27;
+/// rows were stored ([`Table::missing`]); version 28 the places of
+/// columns dropped that rows still store ([`Table::gone`]); older versions
+/// still read.
+const TABLE_VERSION: u8 = 28;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -452,8 +454,15 @@ pub struct Table {
     /// Columns added with a default whose value is one for every row:
     /// a row stored before (shorter than the table) reads it there, as
     /// if it held it — the column added without the rows rewritten
-    /// ([`Table::fill_missing`]).  By column position.
+    /// ([`Table::fill_missing`]).  By the column's place in the stored
+    /// row ([`Table::stored_at`]).
     pub missing: Vec<(usize, Value)>,
+    /// The places in a stored row of columns dropped without the rows
+    /// rewritten, ascending: rows keep a value there (`NULL` in those
+    /// written since) that readers pass over — the column dropped without
+    /// reading a row (issue #18; PostgreSQL's `attisdropped`).  Empty once
+    /// the rows are rewritten whole ([`Table::compact`]).
+    pub gone: Vec<usize>,
     /// The engine holding its keys, `WITH (engine = …)`.
     pub engine: TableEngine,
     /// Its column copy's directory keys each segment by the suffix of its
@@ -836,6 +845,76 @@ impl Table {
         }
     }
 
+    /// The values a row stored now holds: its columns and the places of
+    /// those dropped ([`Table::gone`]).
+    pub fn stored_width(&self) -> usize {
+        self.columns.len() + self.gone.len()
+    }
+
+    /// The place in a stored row of column `c`: past the places of the
+    /// columns dropped before it ([`Table::gone`]).
+    pub fn stored_at(&self, c: usize) -> usize {
+        let mut at = c;
+        for &g in &self.gone {
+            if g <= at {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        at
+    }
+
+    /// `row` as stored: `NULL` in the places of the columns dropped
+    /// ([`Table::gone`]).  Values past the table's columns (a type
+    /// change's hidden one) stay after them.
+    pub fn to_stored<'a>(&self, row: &'a [Value]) -> std::borrow::Cow<'a, [Value]> {
+        if self.gone.is_empty() {
+            return std::borrow::Cow::Borrowed(row);
+        }
+        let mut out = Vec::with_capacity(row.len() + self.gone.len());
+        let mut gone = self.gone.iter().peekable();
+        for v in row {
+            while gone.next_if(|&&g| g == out.len()).is_some() {
+                out.push(Value::Null);
+            }
+            out.push(v.clone());
+        }
+        while gone.next_if(|&&g| g == out.len()).is_some() {
+            out.push(Value::Null);
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    /// A stored row (decoded to [`Table::stored_width`]) as the table's
+    /// columns: the places of those dropped taken out.
+    pub fn from_stored(&self, mut row: Vec<Value>) -> Vec<Value> {
+        for &g in self.gone.iter().rev() {
+            if g < row.len() {
+                row.remove(g);
+            }
+        }
+        row
+    }
+
+    /// `wanted` (by column) as places in a stored row.
+    pub fn stored_wanted(&self, wanted: &[bool]) -> Vec<bool> {
+        let mut out = vec![false; self.stored_width().max(wanted.len() + self.gone.len())];
+        for (c, &w) in wanted.iter().enumerate() {
+            if w {
+                out[self.stored_at(c)] = true;
+            }
+        }
+        out
+    }
+
+    /// Forgets the places of columns dropped and the values of columns
+    /// added: for a table whose rows are all written again, whole.
+    pub fn compact(&mut self) {
+        self.gone.clear();
+        self.missing.clear();
+    }
+
     /// The value a row stored with `stored` values reads for column `c`,
     /// when it holds none: added since with a value ([`Table::missing`]),
     /// else `NULL`.
@@ -1070,6 +1149,10 @@ impl Table {
         w.u32(self.missing.len() as u32);
         for (c, v) in &self.missing {
             w.u32(*c as u32).value(v);
+        }
+        w.u32(self.gone.len() as u32);
+        for &g in &self.gone {
+            w.u32(g as u32);
         }
         w.0
     }
@@ -1342,6 +1425,13 @@ impl Table {
         } else {
             Vec::new()
         };
+        let gone = if version >= 28 {
+            (0..r.u32()?)
+                .map(|_| Ok(r.u32()? as usize))
+                .collect::<Result<_>>()?
+        } else {
+            Vec::new()
+        };
         let building = if version >= 24 {
             let n = building_n;
             if n > indexes.len() {
@@ -1381,6 +1471,7 @@ impl Table {
             dropped,
             validating,
             missing,
+            gone,
             engine,
             relative_directory,
         })
@@ -2381,6 +2472,7 @@ mod tests {
             }],
             dropped: vec![5, 6],
             missing: vec![(1, Value::Int(5)), (2, Value::Text("x".into()))],
+            gone: vec![0, 3],
             validating: vec![
                 Validating::Type {
                     column: 0,

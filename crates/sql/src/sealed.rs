@@ -480,7 +480,9 @@ fn kept<T>(f: impl FnOnce(&mut Kept) -> T) -> T {
 /// chunks past [`crate::large::CHUNK`].
 fn seal(txn: &dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     let (kids, aes_key) = keys_for(txn, t, row)?;
-    let mut body = crate::encoding::encode_row(row);
+    // In the stored row's places, as a row of its table is read
+    // ([`Table::to_stored`]).
+    let mut body = crate::encoding::encode_row(&t.to_stored(row));
     let nonce = nonce();
     let len = body.len() + aes::TAG_LEN;
     // Who the row is: its subject columns' values, sealed apart.

@@ -252,6 +252,11 @@ fn refuse(
     if t.converting.is_some() {
         return no("another column's type is being changed");
     }
+    if !t.gone.is_empty() {
+        // A row's hidden value goes after its stored places; the
+        // transactional form rewrites the rows whole, without them.
+        return no("its rows still store a dropped column's place");
+    }
     if !t.building.is_empty() {
         return no("an index of the table is being built");
     }

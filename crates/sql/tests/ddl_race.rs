@@ -10,7 +10,9 @@
 //! insert kept it (its value read as the next column's), a `CHECK` and a
 //! `NOT NULL` that rows broke, a column added whose new row had no default
 //! (since, a default the same for every row is the rows' without reading
-//! them, issue #18 — its case here is a volatile one's).
+//! them, issue #18 — its case here is a volatile one's; and a column of a
+//! table stored in rows is dropped where it is stored, its place left in
+//! the rows).
 
 use std::sync::Arc;
 
@@ -120,7 +122,19 @@ fn ddl_fails_over_a_write_committed_under_it() {
             a.execute(&format!("BEGIN ISOLATION LEVEL REPEATABLE READ; {ddl}"))
                 .unwrap_or_else(|e| panic!("{what}: {e:?}"));
             b.execute(write).unwrap_or_else(|e| panic!("{what}: {e:?}"));
-            let e = a.execute("COMMIT").map(|_| ()).unwrap_err();
+            let committed = a.execute("COMMIT").map(|_| ());
+            // A column of a table stored in rows is dropped where it is
+            // stored, no row read (issue #18): the write's row, stored
+            // under the old definition, keeps the column's place, which
+            // readers pass over.
+            if ddl.contains("DROP COLUMN") && !kind.contains("column") {
+                assert_eq!(committed.map_err(|e| e.code), Ok(()), "{what}");
+                if let Some((sql, want)) = after {
+                    assert_eq!(one(&mut b, sql), *want, "{what}: {sql}");
+                }
+                continue;
+            }
+            let e = committed.unwrap_err();
             assert_eq!(e.code, "40001", "{what}: {e:?}");
             // Run again, it sees the write.
             let got = a.execute(ddl).map(|_| ()).map_err(|e| e.code);

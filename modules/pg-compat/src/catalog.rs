@@ -586,6 +586,7 @@ fn def_table(k: usize) -> Table {
         dropped: Vec::new(),
         validating: Vec::new(),
         missing: Vec::new(),
+        gone: Vec::new(),
         memory: None,
         engine: Default::default(),
         relative_directory: true,

@@ -248,6 +248,45 @@ fn forgetting_leaves_no_copy_readable() {
     );
 }
 
+/// A table whose rows keep a dropped column's place (issue #18) sealed
+/// and opened again: its rows sealed in their stored places, read without
+/// it.
+#[test]
+fn a_table_whose_rows_keep_a_dropped_column_is_sealed() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Arc::new(SimPlatform::new(4));
+    let kv = open(&p, "/db");
+    keys(&kv);
+    let mut s = Session::new(Arc::clone(&kv) as Arc<dyn Kv>);
+    run(
+        &mut s,
+        "CREATE TABLE d (id int PRIMARY KEY, who text, x text, v text, w int)",
+    );
+    run(
+        &mut s,
+        &format!(
+            "INSERT INTO d SELECT i, 'p' || (i % 3), 'x' || i, '{NEEDLE} ' || i, i \
+             FROM generate_series(1, 300) i"
+        ),
+    );
+    run(&mut s, "ALTER TABLE d DROP COLUMN x");
+    run(&mut s, "ALTER TABLE d SET SUBJECT (who)");
+    run(&mut s, "ALTER TABLE d SET STORAGE sealed");
+    let all = "SELECT count(*), sum(w), min(v), max(who) FROM d";
+    let want = [format!("300 45150 {NEEDLE} 1 p2")];
+    assert_eq!(texts(&mut s, all), want);
+    run(&mut s, "UPDATE d SET w = w + 1 WHERE id <= 10");
+    run(&mut s, "INSERT INTO d VALUES (301, 'p1', 'v', 0)");
+    let want = [format!("301 45160 {NEEDLE} 1 p2")];
+    assert_eq!(texts(&mut s, all), want);
+    assert_eq!(
+        texts(&mut s, "SELECT * FROM d WHERE id IN (5, 301) ORDER BY id"),
+        [format!("5 p2 {NEEDLE} 5 6"), "301 p1 v 0".to_string()]
+    );
+    run(&mut s, "ALTER TABLE d SET STORAGE row");
+    assert_eq!(texts(&mut s, all), want);
+}
+
 #[test]
 fn a_table_is_sealed_and_opened_online() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

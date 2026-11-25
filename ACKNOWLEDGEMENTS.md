@@ -210,6 +210,7 @@ checked against.
 - **PostgreSQL `CREATE INDEX CONCURRENTLY` (as its documentation describes it); F1's write-only state (Rae et al., VLDB 2013)** — an index kept by writers before it is read, filled in parts, then made ready. Issue #18 (`online_index`).
 - **PostgreSQL's binary-coercible type changes and `NOT VALID` / `VALIDATE CONSTRAINT` (as its documentation describes them); F1's states writers obey before the data is known to (Rae et al., VLDB 2013)** — a column type that keeps the values changed in the catalog alone, a narrower one checked online after writers obey it, and `NOT NULL` and checks the same way. Issue #18 steps 2 and 3 (`validating`).
 - **PostgreSQL 11's fast `ADD COLUMN` (a non-volatile default kept as the attribute's missing value, as its documentation and release notes describe it)** — a column added without rewriting the rows, which read the kept value. Issue #18 step 4 (`Table::missing`).
+- **PostgreSQL's `DROP COLUMN` (a dropped attribute left in the stored tuples, `attisdropped`, as its documentation describes it)** — a column dropped without rewriting the rows, which keep its place for readers to pass over. Issue #18 step 2b (`Table::gone`).
 - **`pg_dump`'s dependency sort; Flyway checksums; dbmate; golang-migrate / sqlx names; Rails `schema_migrations`; sqlc** — migrations and code generation. §M14.16.
 - **rustup's, Deno's and DuckDB's install scripts; shell.duckdb.org, the PGlite REPL, SQLite fiddle** — install and playground. §M14.17.
 

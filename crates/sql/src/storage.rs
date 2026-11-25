@@ -550,8 +550,8 @@ impl TableStorage for RowStorage {
         crate::large::insert(txn, t, key, row)
     }
 
-    fn encode_new(&self, _: &Table, row: &Row) -> Option<Vec<u8>> {
-        crate::large::encode_inline(row)
+    fn encode_new(&self, t: &Table, row: &Row) -> Option<Vec<u8>> {
+        crate::large::encode_inline(&t.to_stored(row))
     }
 
     fn insert_encoded(
