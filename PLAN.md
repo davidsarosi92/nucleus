@@ -7906,7 +7906,13 @@ would use against a server.
   issues' fixes since: the parallel sweep and the vacuum's in-place
   rekey, the index builds' pipeline, the column store's directory and
   grouped fetches, deletes by key) — CI's iOS job failed on it at
-  a8b652c.
+  a8b652c.  *Grown on purpose to 11 MiB on Android* (2026-11-25):
+  10,498,976 bytes, 13 KB past 10 MiB (CI's Android job failed on it at
+  7a415eb), +1.04 MB since 2026-11-17: 9.97 MB on 2026-11-21 (the open
+  issues' fixes and the sweep, §M14.15's JSON paths' speed-ups), 10.39
+  MB on 2026-11-23 (+420 KB: §M14.34's recursive queries and graphs,
+  G1–G4), 10.50 MB now (+60
+  KB: issue #18's online DDL).  iOS keeps its 10 MiB while it fits.
 - **Tested** on the iOS simulator (iOS 18) and an Android emulator
   (API 35, arm64 with 16 KB pages; x86_64 in CI): the Swift suite (19
   tests: the conformance cases on a database in memory and in a
