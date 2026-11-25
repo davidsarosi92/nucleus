@@ -306,6 +306,31 @@ impl<'a> Parser<'a> {
         self.toks.get(self.pos + n).map(|(t, _)| t)
     }
 
+    /// At `(`: whether the parentheses hold, at their own depth, one of
+    /// the keywords `kws` or the operators `ops` — a call's special form
+    /// (`trim(… FROM …)`, `position(… IN …)`) told from a plain call
+    /// without parsing it.  Trying the form and parsing the call again
+    /// when it was not one doubled the work at each depth of calls nested
+    /// in calls: a fuzzer's 768 bytes of nested `trim(` took 6 s.
+    fn holds_at_depth(&self, kws: &[&str], ops: &[&str]) -> bool {
+        let mut depth = 0usize;
+        for (t, _) in &self.toks[self.pos.min(self.toks.len())..] {
+            match t {
+                Token::Op("(" | "[") => depth += 1,
+                Token::Op(")" | "]") => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Token::Op(o) if depth == 1 && ops.contains(o) => return true,
+                Token::Word(w) if depth == 1 && kws.contains(&w.as_str()) => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn offset(&self) -> usize {
         self.toks.get(self.pos).map_or(self.sql.len(), |(_, o)| *o)
     }
@@ -4679,14 +4704,15 @@ impl<'a> Parser<'a> {
     }
 
     /// After `trim(`: the function and arguments of SQL's trim forms up to
-    /// the `)`, or `None` for a plain `trim(s)`.
-    fn trim_form(&mut self) -> Result<Option<(&'static str, Vec<Expr>)>> {
-        let (name, keyword) = if self.eat_kw("leading") {
-            ("ltrim", true)
+    /// the `)` (a plain `trim(s)` is not one: `name_or_call` looks first).
+    fn trim_form(&mut self) -> Result<(&'static str, Vec<Expr>)> {
+        let name = if self.eat_kw("leading") {
+            "ltrim"
         } else if self.eat_kw("trailing") {
-            ("rtrim", true)
+            "rtrim"
         } else {
-            ("btrim", self.eat_kw("both"))
+            self.eat_kw("both");
+            "btrim"
         };
         let list = |p: &mut Self| -> Result<Vec<Expr>> {
             let mut v = vec![p.expr()?];
@@ -4715,10 +4741,7 @@ impl<'a> Parser<'a> {
             }
         };
         self.expect_op(")")?;
-        if !keyword && !from && args.len() == 1 {
-            return Ok(None);
-        }
-        Ok(Some((name, args)))
+        Ok((name, args))
     }
 
     fn name_or_call(&mut self, first: String) -> Result<Expr> {
@@ -4761,49 +4784,44 @@ impl<'a> Parser<'a> {
             within_group: false,
             filter: None,
         };
-        // position(sub IN s): strpos(s, sub).
-        if first == "position" && self.peek_op("(") {
-            let save = self.pos;
+        // position(sub IN s): strpos(s, sub).  (Each special form only
+        // when its keyword is there: [`Parser::holds_at_depth`].)
+        if first == "position" && self.peek_op("(") && self.holds_at_depth(&["in"], &[]) {
             self.pos += 1;
             let sub = self.expr_prec(PREC_IN + 1)?;
-            if self.eat_kw("in") {
-                let s = self.expr()?;
-                self.expect_op(")")?;
-                return Ok(call("strpos", vec![s, sub]));
-            }
-            self.pos = save;
+            self.expect_kw("in")?;
+            let s = self.expr()?;
+            self.expect_op(")")?;
+            return Ok(call("strpos", vec![s, sub]));
         }
         // overlay(s PLACING r FROM start [FOR count]).
-        if first == "overlay" && self.peek_op("(") {
-            let save = self.pos;
+        if first == "overlay" && self.peek_op("(") && self.holds_at_depth(&["placing"], &[]) {
             self.pos += 1;
             let s = self.expr()?;
-            if self.eat_kw("placing") {
-                let r = self.expr()?;
-                self.expect_kw("from")?;
-                let mut args = vec![s, r, self.expr()?];
-                if self.eat_kw("for") {
-                    args.push(self.expr()?);
-                }
-                self.expect_op(")")?;
-                return Ok(call("overlay", args));
+            self.expect_kw("placing")?;
+            let r = self.expr()?;
+            self.expect_kw("from")?;
+            let mut args = vec![s, r, self.expr()?];
+            if self.eat_kw("for") {
+                args.push(self.expr()?);
             }
-            self.pos = save;
+            self.expect_op(")")?;
+            return Ok(call("overlay", args));
         }
         // trim([LEADING | TRAILING | BOTH] [chars] FROM s), and
         // trim([LEADING | TRAILING | BOTH] [FROM] s [, chars]): ltrim,
         // rtrim or btrim(s [, chars]).  A plain trim(s) is left as it is.
-        if first == "trim" && self.peek_op("(") {
-            let save = self.pos;
+        if first == "trim"
+            && self.peek_op("(")
+            && (matches!(self.peek_at(1), Some(t) if ["leading", "trailing", "both", "from"].iter().any(|k| t.is(k)))
+                || self.holds_at_depth(&["from"], &[","]))
+        {
             self.pos += 1;
-            match self.trim_form() {
-                Ok(Some((name, args))) => return Ok(call(name, args)),
-                Ok(None) | Err(_) => self.pos = save,
-            }
+            let (name, args) = self.trim_form()?;
+            return Ok(call(name, args));
         }
         // substring(s FROM start [FOR count]), substring(s FOR count).
-        if first == "substring" && self.peek_op("(") {
-            let save = self.pos;
+        if first == "substring" && self.peek_op("(") && self.holds_at_depth(&["from", "for"], &[]) {
             self.pos += 1;
             let s = self.expr()?;
             let from = if self.eat_kw("from") {
@@ -4816,14 +4834,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            if from.is_some() || count.is_some() {
-                self.expect_op(")")?;
-                let start = from.unwrap_or(Expr::Literal(Value::Int(1)));
-                let mut args = vec![s, start];
-                args.extend(count);
-                return Ok(call("substr", args));
+            if from.is_none() && count.is_none() {
+                return Err(self.error("expected FROM or FOR"));
             }
-            self.pos = save;
+            self.expect_op(")")?;
+            let start = from.unwrap_or(Expr::Literal(Value::Int(1)));
+            let mut args = vec![s, start];
+            args.extend(count);
+            return Ok(call("substr", args));
         }
         if self.eat_op("(") {
             let mut args = Vec::new();
@@ -5317,7 +5335,16 @@ impl<'a> Parser<'a> {
     /// constructor.
     fn json_object(&mut self) -> Result<Option<Expr>> {
         let mut args = Vec::new();
+        // A key and its value — `VALUE` or `:` at the call's depth — or
+        // none: else not the constructor, told before parsing (as
+        // [`Parser::holds_at_depth`] tells the other forms).
+        self.pos -= 1;
+        let pairs = self.holds_at_depth(&["value"], &[":"]);
+        self.pos += 1;
         if !self.peek_op(")") && !self.json_options_next() {
+            if !pairs {
+                return Ok(None);
+            }
             loop {
                 let k = self.expr()?;
                 if !(self.eat_kw("value") || self.eat_op(":")) {
@@ -6104,6 +6131,81 @@ mod tests {
 
     fn ok(sql: &str) -> Statement {
         parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"))
+    }
+
+    /// Calls with a special form nested in themselves parse in time linear
+    /// in their depth (each was tried as its form, then parsed again as a
+    /// plain call — twice the work a depth: the `sql_parse` fuzzer's
+    /// nested `trim(` ran 6 s), and the forms still parse as they did.
+    #[test]
+    fn calls_with_special_forms_nested_parse_once() {
+        for (open, close) in [
+            ("trim(", ")"),
+            ("position(", ")"),
+            ("substring(", ", 1)"),
+            ("overlay(", ")"),
+            ("trim(", " , 'x')"),
+            ("position('a' in ", ")"),
+            ("json_object(", ")"),
+            ("json_object('k' : ", ")"),
+        ] {
+            let sql = format!("SELECT {}x{}", open.repeat(40), close.repeat(40));
+            let _ = parse_one(&sql);
+        }
+        let expr = |sql: &str| parse_expr(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let call = |name: &str, args: Vec<Expr>| Expr::Function {
+            name: name.into(),
+            args,
+            distinct: false,
+            star: false,
+            order_by: vec![],
+            within_group: false,
+            filter: None,
+        };
+        let col = |c: &str| expr(c);
+        let text = |t: &str| Expr::Literal(Value::Text(t.into()));
+        let int = |i: i64| Expr::Literal(Value::Int(i));
+        for (sql, want) in [
+            ("trim(s)", call("trim", vec![col("s")])),
+            ("trim(s, 'x')", call("btrim", vec![col("s"), text("x")])),
+            (
+                "trim(both 'x' from s)",
+                call("btrim", vec![col("s"), text("x")]),
+            ),
+            ("trim(leading from s)", call("ltrim", vec![col("s")])),
+            (
+                "trim(trailing 'x' from s)",
+                call("rtrim", vec![col("s"), text("x")]),
+            ),
+            (
+                "trim('x' from trim(s))",
+                call("btrim", vec![call("trim", vec![col("s")]), text("x")]),
+            ),
+            (
+                "position('a' in s)",
+                call("strpos", vec![col("s"), text("a")]),
+            ),
+            ("position(s)", call("position", vec![col("s")])),
+            (
+                "substring(s from 2 for 3)",
+                call("substr", vec![col("s"), int(2), int(3)]),
+            ),
+            (
+                "substring(s for 3)",
+                call("substr", vec![col("s"), int(1), int(3)]),
+            ),
+            ("substring(s, 2)", call("substring", vec![col("s"), int(2)])),
+            (
+                "overlay(s placing 'x' from 2 for 1)",
+                call("overlay", vec![col("s"), text("x"), int(2), int(1)]),
+            ),
+            (
+                "overlay(s, 'x')",
+                call("overlay", vec![col("s"), text("x")]),
+            ),
+        ] {
+            assert_eq!(expr(sql), want, "{sql}");
+        }
     }
 
     #[test]

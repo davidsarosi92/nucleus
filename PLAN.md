@@ -13272,7 +13272,15 @@ did not run on the workers without statistics (`rows=1000` estimated).
   change that compacts; an update of values out of line past a dropped
   place; a write committed under the drop; drops under writes that do
   not pause), `tests/sealed.rs` (a table keeping a dropped place
-  sealed and opened); 16 of 16 mutants killed.
+  sealed and opened); 16 of 16 mutants killed.  *Found on the way*
+  (the `sql_parse` fuzz target, CI of 58ca8ac, a timeout): `trim(`,
+  `position(`, `overlay(`, `substring(` and `json_object(` were tried as
+  their special forms and, when not one, parsed again as a plain call —
+  twice the work at each depth of such calls nested in each other (768
+  bytes took 6.3 s).  Each form is now told before parsing by its
+  keyword at the call's own depth (`Parser::holds_at_depth`: `FROM`,
+  `IN`, `PLACING`, `FOR`, `VALUE` or `:`), parsed once
+  (`calls_with_special_forms_nested_parse_once`, 40 deep).
 - Issue #18, step 3 — constraints under writes.  A second DDL mix in the
   bank tool (`DDL=2`: `SET`/`DROP NOT NULL`, `ADD`/`DROP CONSTRAINT …
   CHECK`, `… UNIQUE`) measured before: `ADD UNIQUE` 1 and 3 succeeding,
