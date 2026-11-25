@@ -13777,7 +13777,14 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
      processor from the writer, once for a lock, up to sixteen times
      for the stripes) — issue #21; holding the flag until the guard
      drops, tried, helped Windows little (109 → 81 s) and slowed Linux
-     tenfold.  Reads and
+     tenfold.  Then macOS's runner failed the new test: a 2 ms sleep took 9 ms
+     there, past the writer's 5 ms window, so every write gave up and
+     slept the coarse timer out (median 127 ms).  The test now sets the
+     writer's first window from the measured hold (four holds at least;
+     the window a field of the lock, 5 ms but for tests) and bounds the
+     median by four holds against a timer of twelve; under twelve busy
+     processes here it passes, the polling and never-woken mutants still
+     fail.  Reads and
      writes as before (ABBA, three rounds: ten threads 7.25–7.84 M reads
      a second, before 7.50–7.80; group commits 10.3–13.8 k a second,
      before 11.7–14.5 k).  9 mutants, 7 killed: readers left spinning

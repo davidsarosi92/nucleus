@@ -70,6 +70,9 @@ pub struct Striped<T> {
     /// The shortest sleep: zero, but for a test making the system's timer
     /// coarse (as Windows's) everywhere.
     timer_floor: Duration,
+    /// The first hold window: [`HOLD_WINDOW`], but for a test on a
+    /// machine whose sleeps run longer than it.
+    hold_window: Duration,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for Striped<T> {
@@ -110,15 +113,18 @@ impl<T> Striped<T> {
             readers: Condvar::new(),
             writer_wait: Condvar::new(),
             timer_floor: Duration::ZERO,
+            hold_window: HOLD_WINDOW,
         }
     }
 
-    /// A lock whose every sleep and timed wait lasts `floor` at least: a
-    /// coarse system timer, for tests.
+    /// A lock whose every sleep and timed wait lasts `floor` at least (a
+    /// coarse system timer) and whose writer's first hold window is
+    /// `window`, for tests.
     #[cfg(test)]
-    fn with_timer_floor(value: T, floor: Duration) -> Self {
+    fn with_timer_floor(value: T, floor: Duration, window: Duration) -> Self {
         Self {
             timer_floor: floor,
+            hold_window: window,
             ..Self::new(value)
         }
     }
@@ -200,7 +206,7 @@ impl<T> Striped<T> {
                 }
                 continue;
             }
-            let window = HOLD_WINDOW * (1 << rounds.min(5));
+            let window = self.hold_window * (1 << rounds.min(5));
             let left = window.checked_sub(since.get_or_insert_with(Instant::now).elapsed());
             if let Some(left) = left.filter(|l| !l.is_zero()) {
                 // Tried again under the gate: a reader letting go after
@@ -396,8 +402,7 @@ mod tests {
     #[test]
     #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     fn a_writer_is_woken_when_its_stripes_are_let_go_not_by_a_timer() {
-        // Longer than a writer's spinning, even on a loaded machine;
-        // shorter than its hold window.
+        // Longer than a writer's spinning, even on a loaded machine.
         const HOLD: Duration = Duration::from_millis(2);
         const WRITES: u32 = 100;
         // This system's sleep of HOLD: a reader's hold.
@@ -406,8 +411,12 @@ mod tests {
             std::thread::sleep(HOLD);
         }
         let hold = t.elapsed() / 10;
-        let floor = (hold * 8).max(Duration::from_millis(16));
-        let lock = Striped::with_timer_floor(0u64, floor);
+        let floor = (hold * 12).max(Duration::from_millis(16));
+        // The writer's window longer than a hold, wherever sleeps run
+        // long (a loaded runner's 2 ms sleep took 9 ms: past the 5 ms
+        // window, every write gave up and slept the timer out).
+        let window = (hold * 4).max(HOLD_WINDOW);
+        let lock = Striped::with_timer_floor(0u64, floor, window);
         let stop = AtomicBool::new(false);
         std::thread::scope(|s| {
             for _ in 0..3 * STRIPES {
