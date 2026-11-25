@@ -546,9 +546,12 @@ impl Batch {
                 if same > prev.len() {
                     return Err(past("WAL key shares past the key before"));
                 }
-                let mut key = Vec::with_capacity(same + rest);
+                // The rest taken first: a damaged length fails as
+                // truncated, not as an allocation of its size.
+                let rest = take(&mut b, rest)?;
+                let mut key = Vec::with_capacity(same + rest.len());
                 key.extend_from_slice(&prev[..same]);
-                key.extend_from_slice(take(&mut b, rest)?);
+                key.extend_from_slice(rest);
                 key
             } else {
                 let klen = u32_of(take(&mut b, 4)?);
@@ -629,6 +632,11 @@ impl Batch {
             }
             let n = leb(&mut b)?;
             let len = leb(&mut b)?;
+            // Old ends are distinct ([`Tails::new`]): of length 0, one
+            // pair at most — a damaged count would loop taking nothing.
+            if (len == 0 && n > 1) || n.saturating_mul(len.saturating_mul(2)) > b.len() {
+                return Err(past("WAL rekeying's pairs past the batch"));
+            }
             let mut pairs = Vec::with_capacity(n.min(1 << 16));
             for _ in 0..n {
                 let old = take(&mut b, len)?.to_vec();
@@ -3027,6 +3035,36 @@ mod tests {
         let e = long.encode();
         assert_eq!(Batch::decode(&e).unwrap(), long);
         assert!(e.len() < long.encode_legacy(&[], &[], &[]).len() / 2);
+    }
+
+    /// Damaged lengths in a logged batch fail as damage: a key's rest of a
+    /// huge length is not allocated first (the disk fuzzer's allocation
+    /// of 0x30e5ffffffffffff bytes), a rekeying's count of empty pairs
+    /// does not loop.
+    #[test]
+    fn damaged_batch_lengths_fail_without_allocating_or_looping() {
+        let head = |version: u8, ops: u32| {
+            let mut e = vec![version];
+            e.extend_from_slice(&0u64.to_le_bytes());
+            e.extend_from_slice(&ops.to_le_bytes());
+            e
+        };
+        let mut key = head(BATCH_VERSION_PACKED, 1);
+        key.push(OP_PUT);
+        put_leb(&mut key, 0);
+        put_leb(&mut key, usize::MAX >> 2);
+        key.extend_from_slice(b"short");
+        assert!(Batch::decode_full(&key).is_err());
+        for len in [0, 3] {
+            let mut tails = head(BATCH_VERSION_REKEYING, 0);
+            tails.extend_from_slice(&0u32.to_le_bytes()); // covered
+            tails.extend_from_slice(&0u32.to_le_bytes()); // deferred
+            put_leb(&mut tails, 0); // ranges
+            put_leb(&mut tails, usize::MAX >> 1); // pairs
+            put_leb(&mut tails, len);
+            tails.extend_from_slice(b"abcdef");
+            assert!(Batch::decode_full(&tails).is_err(), "tails of {len}");
+        }
     }
 
     /// A file system whose directories above `/apps/me` may not be

@@ -13272,7 +13272,11 @@ did not run on the workers without statistics (`rows=1000` estimated).
   failing (fails with the whole segment's markers validated); a row
   deleted under a backfill's part leaves no entry (the part's write of
   the row's entry conflicts too, so markers not validated at all pass
-  it).
+  it).  *Found on the way* (the `disk` fuzz target, CI of 32baab4): a
+  logged batch's damaged key length was allocated before the bytes were
+  taken (0x30e5ffffffffffff bytes, an abort), and a rekeying's damaged
+  count of pairs of length 0 looped taking nothing; both fail as
+  damage now (`damaged_batch_lengths_fail_without_allocating_or_looping`).
 
 ### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 
