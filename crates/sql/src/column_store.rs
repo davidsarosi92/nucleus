@@ -1121,15 +1121,11 @@ fn stored_column(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Resul
 }
 
 /// The rows of `seg` marked deleted, by place.
-fn deleted(txn: &dyn KvTxn, t: &Table, seg: &Segment, validated: bool) -> Result<BTreeSet<u32>> {
+fn deleted(txn: &dyn KvTxn, t: &Table, seg: &Segment) -> Result<BTreeSet<u32>> {
     let from = marker_key(t, &seg.first);
     let mut to = marker_key(t, &seg.last);
     to.push(0);
-    let scan = if validated {
-        txn.scan_validated(Bound::Included(&from), Bound::Excluded(&to))?
-    } else {
-        txn.scan(Bound::Included(&from), Bound::Excluded(&to))?
-    };
+    let scan = txn.scan(Bound::Included(&from), Bound::Excluded(&to))?;
     let keys = keys_of(txn, t, seg)?;
     let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let mut out = BTreeSet::new();
@@ -1483,7 +1479,7 @@ fn columns_of(rows: Vec<(Vec<u8>, Row)>, cols: &[usize]) -> (Vec<Vec<u8>>, Vec<V
 fn drop_segment(txn: &mut dyn KvTxn, t: &Table, seg: &Segment) -> Result<()> {
     let keys = keys_of(&*txn, t, seg)?;
     let prefix = t.index_prefix(0);
-    for i in deleted(&*txn, t, seg, false)? {
+    for i in deleted(&*txn, t, seg)? {
         let mut k = prefix.clone();
         k.extend_from_slice(keys.get(i as usize));
         txn.delete(&marker_key(t, &k))?;
@@ -1673,7 +1669,7 @@ fn merge_with(
         let vectors = (0..t.columns.len())
             .map(|c| stored_column(&*txn, t, seg, c))
             .collect::<Result<Vec<_>>>()?;
-        let gone = deleted(&*txn, t, seg, false)?;
+        let gone = deleted(&*txn, t, seg)?;
         drop_segment(txn, t, seg)?;
         for i in 0..seg.rows {
             let mut key = start.clone();
@@ -1785,10 +1781,30 @@ impl<'a> Merged<'a> {
                 _ => keys.len(),
             };
             if from < to {
-                let gone = deleted(self.txn, self.t, &seg, self.validated)?;
+                // Read unvalidated: a validated scan validates each run's
+                // markers alone ([`Merged::validate_run`]).
+                let gone = deleted(self.txn, self.t, &seg)?;
                 self.cur = Some((Rc::new(seg), keys, gone, from, to));
                 return Ok(());
             }
+        }
+        Ok(())
+    }
+
+    /// A validated scan's run of a segment's rows `from..to`: their
+    /// deletion markers read validated — a row deleted or updated by a
+    /// commit meanwhile fails the scan's transaction.  The run's alone, not
+    /// the segment's: a backfill's part (issue #18) failed on every write
+    /// to any row of the segments it read.
+    fn validate_run(&self, keys: &Keys, from: usize, to: usize) -> Result<()> {
+        let start = marker_key(self.t, &self.key_at(keys, from));
+        let mut end = marker_key(self.t, &self.key_at(keys, to - 1));
+        end.push(0);
+        for e in self
+            .txn
+            .scan_validated(Bound::Included(&start), Bound::Excluded(&end))?
+        {
+            e?;
         }
         Ok(())
     }
@@ -1875,6 +1891,9 @@ impl<'a> Merged<'a> {
             let live: Vec<u32> = (pos as u32..stop as u32)
                 .filter(|i| !gone.contains(i))
                 .collect();
+            if self.validated {
+                self.validate_run(keys, pos, stop)?;
+            }
             let seg = Rc::clone(seg);
             if let Some(c) = &mut self.cur {
                 c.3 = stop;
@@ -2248,7 +2267,7 @@ fn check_segments(
                 }
             }
         }
-        if deleted(txn, t, &seg, false)?
+        if deleted(txn, t, &seg)?
             .iter()
             .any(|&r| r as usize >= seg.rows)
         {
@@ -2871,7 +2890,7 @@ pub fn scrub(txn: &mut dyn KvTxn, t: &Table) -> Result<usize> {
     let cols = copy_columns(t);
     let mut rewritten = 0;
     for seg in segments(&*txn, t, &start, end.as_deref())? {
-        let gone = deleted(&*txn, t, &seg, false)?;
+        let gone = deleted(&*txn, t, &seg)?;
         if gone.is_empty() {
             continue;
         }
@@ -2938,7 +2957,7 @@ pub fn copy_segment_rows(
     let mut copied = 0;
     for seg in segments(&*txn, t, &from, end.as_deref())? {
         let keys = keys_of(&*txn, t, &seg)?;
-        let gone = deleted(&*txn, t, &seg, false)?;
+        let gone = deleted(&*txn, t, &seg)?;
         let vectors = (0..t.columns.len())
             .map(|c| column_of(&*txn, t, &seg, c))
             .collect::<Result<Vec<_>>>()?;
@@ -3021,7 +3040,7 @@ pub fn segment_info(txn: &dyn KvTxn, t: &Table) -> Result<Vec<(u64, usize, usize
     let end = prefix_end(&start);
     let mut out = Vec::new();
     for seg in segments(txn, t, &start, end.as_deref())? {
-        let gone = deleted(txn, t, &seg, false)?.len();
+        let gone = deleted(txn, t, &seg)?.len();
         let mut bytes = 0;
         for c in (0..seg.stats.len() as u16).chain([KEYS]) {
             bytes += txn.get(&chunk_key(t, seg.id, c))?.map_or(0, |b| b.len());

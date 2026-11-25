@@ -3474,7 +3474,29 @@ instead the DDL's commit fails (`40001`), an autocommit DDL running again
 (up to ten times) and then seeing the write.  On a table written without
 pause such a DDL can fail every time; the forms that work in parts of
 their own do not: an index built online (below), `ALTER COLUMN … TYPE …
-CONCURRENTLY` and storage conversions (§M14.20).
+CONCURRENTLY` and storage conversions (§M14.20).  A statement run alone
+falls back to one of them when its transaction met a write (issue #18):
+`CREATE INDEX` and `ADD [CONSTRAINT name] UNIQUE (…)` to an index built
+online, `ALTER COLUMN … TYPE` to a type checked online (below) or a
+conversion online, and `SET NOT NULL` and `ADD [CONSTRAINT name] CHECK
+(…)` to a constraint checked online.
+
+**Constraints checked online** (`validating`, issue #18, step 3): one
+transaction records the constraint as being validated
+(`Table::validating`: `NOT NULL` of a column, or a check) — from then on
+every writer obeys it (`23502`, `23514`; a check bound with the table's
+own), its transaction reading the table's record validated, so one begun
+before fails and runs again — then one read-only snapshot, taken after,
+holds every row written without obeying it and is checked whole
+(`23502` "contains null values", `23514` "is violated by some row"), and
+a last transaction makes the constraint the table's.  A row that breaks
+it abandons it: the record cleared, the statement failing with what was
+found.  While one is validated the table's other changes wait
+(`55006`); one cut short is taken over by the same statement run again
+(in its transaction or online), else abandoned by the maintenance
+thread or a restore.  It is PostgreSQL's `ADD CONSTRAINT … NOT VALID`
+followed by `VALIDATE CONSTRAINT`, made one statement that needs no
+lock, and F1's write-only state for constraints.
 
 **Indexes built online** (`online_index`, issue #18): `CREATE [UNIQUE]
 INDEX CONCURRENTLY name ON t (…)` — and a `CREATE INDEX` run alone whose
@@ -4430,7 +4452,10 @@ that range, and a statement that stores rows in the delta store reads the
 directory the same way for its keys.  A segment another transaction
 commits over those keys meanwhile, or a delta row among them, fails the
 later commit with a retryable `40001`, and no committed row is lost;
-small writes to different keys never conflict.  A write past the last
+small writes to different keys never conflict.  A scan read validated
+(a backfill's part, issue #18) validates the deletion markers of the
+rows it read alone, a batch at a time, not its segments' whole: a write
+to another row of the segment does not fail it.  A write past the last
 segment claims the directory to its end, so two writers appending there
 at once may conflict even with different keys (one retries); tested for
 every pair of large and small writes, overlapping or not, in either order

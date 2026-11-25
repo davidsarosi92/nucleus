@@ -13238,6 +13238,41 @@ did not run on the workers without statistics (`rows=1000` estimated).
   no row a premise; under writes that do not pause); 11 of 13 mutants
   killed — the 2 left (`DROP COLUMN` moving the kept values' positions)
   are equivalent while `DROP COLUMN` rewrites every row.
+- Issue #18, step 3 — constraints under writes.  A second DDL mix in the
+  bank tool (`DDL=2`: `SET`/`DROP NOT NULL`, `ADD`/`DROP CONSTRAINT …
+  CHECK`, `… UNIQUE`) measured before: `ADD UNIQUE` 1 and 3 succeeding,
+  16 and 7 failing `40001`; `ADD CHECK` 9 and 13, failing once each; `SET
+  NOT NULL` 27 and 16, never failing (a scan of one column is short).
+  Now, a statement run alone whose transaction met a write falls back
+  (`online_index::instead`): `ADD UNIQUE` to the index built online (a
+  unique constraint is a unique index of its name), `SET NOT NULL` and
+  `ADD CHECK` to a check online (`validating::constrain`) — the
+  constraint recorded as validated (`Validating::NotNull`,
+  `Validating::Check`; writers obey it, a check bound with the table's
+  own), the rows of a snapshot taken after checked, the constraint made
+  the table's.  A statement in a block keeps its premise.  Taken:
+  PostgreSQL's `NOT VALID` / `VALIDATE CONSTRAINT` (documentation), F1's
+  write-only states.  Measured (`DDL=2`, seeds 2 and 4): `ADD UNIQUE` 9
+  and 8 succeeding, none failing; `ADD CHECK` 9 and 14, none failing
+  (the rest `42710`/`42P07`: there already); commits 774k and 766k (517k
+  and 583k before: the failed statements' scans ran ten times each);
+  checks clean.  Tests:
+  `tests/constraint_online.rs` (writers obey a constraint being checked;
+  a row that breaks it abandons it, a condition that does not bind is
+  refused first; one cut short is taken over in a transaction or online,
+  or abandoned; a unique constraint built online; constraints added and
+  dropped under writes that do not pause; three storages).  Found by
+  the last test under the full suite's load: a column table's validated
+  scan validated the deletion markers of each segment it opened whole,
+  so a backfill's part failed on a write to any row of the segment (a
+  unique index built online retried ~2000 times on 6000 rows, its limit
+  1000 a part); now each run's markers alone (`Merged::validate_run`):
+  ~70.  Tests (`tests/column.rs`): a cascade's validated read of a few
+  children meets a write to another row of their segment without
+  failing (fails with the whole segment's markers validated); a row
+  deleted under a backfill's part leaves no entry (the part's write of
+  the row's entry conflicts too, so markers not validated at all pass
+  it).
 
 ### §M14.34 — Recursive queries and graphs ✅ (agreed 2026-11-22: all four steps, chosen adaptively where they overlap; done 2026-11-23)
 

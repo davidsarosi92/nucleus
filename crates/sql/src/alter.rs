@@ -810,6 +810,16 @@ fn set_not_null(
         )));
     }
     refuse_kept(&t, c, "change")?;
+    // Being checked online (its statement cut short): checked here, the
+    // record cleared.
+    if not_null
+        && crate::validating::same_as_pending(
+            &t,
+            &crate::catalog::Validating::NotNull { column: c },
+        )?
+    {
+        t.validating.clear();
+    }
     if not_null && t.columns[c].nullable && t.partition_by.is_none() {
         crate::dml::rows_are_premise(&*txn, &t)?;
         let ctx = Ctx::new(&*txn, reg, &[]);

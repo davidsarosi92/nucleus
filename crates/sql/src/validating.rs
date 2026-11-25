@@ -1,4 +1,5 @@
-//! Column type changes that keep every stored value (issue #18, step 2).
+//! Column type changes that keep every stored value, and constraints,
+//! checked online (issue #18, steps 2 and 3).
 //!
 //! A type change that leaves each stored value as it is needs no row
 //! rewritten — the values are encoded by what they are, not by the
@@ -24,6 +25,12 @@
 //!
 //! Every other change rewrites the rows (in the statement's transaction,
 //! or online by [`crate::retype`]).
+//!
+//! **Constraints** (step 3) are checked online the same way: `SET NOT
+//! NULL` and `ADD CHECK` run alone whose rows met a write
+//! ([`constrain`]) are recorded as validated — writers obey them (a
+//! check bound with the table's own) — then the rows of a snapshot taken
+//! after are checked, then they are made the table's.
 //!
 //! The online check is PostgreSQL's `NOT VALID` constraint and `VALIDATE
 //! CONSTRAINT` made one statement, and F1's schema change through a
@@ -132,12 +139,23 @@ pub(crate) fn fits(txn: &dyn KvTxn, v: &Value, col: &Column) -> Result<()> {
     Ok(())
 }
 
-/// A writer's row checked against the type changes being validated on
-/// its table.
+/// A writer's row checked against what is being validated on its table
+/// (a check being validated is bound with the table's own, `dml::Bound`).
 pub(crate) fn obeyed(txn: &dyn KvTxn, t: &Table, row: &Row) -> Result<()> {
     for v in &t.validating {
         match v {
-            Validating::Type { column, .. } => fits(txn, &row[*column], &v.column(t))?,
+            Validating::Type { column, .. } => {
+                let mut to = t.clone();
+                v.apply(&mut to);
+                fits(txn, &row[*column], &to.columns[*column])?
+            }
+            Validating::NotNull { column } if row[*column].is_null() => {
+                return Err(Error::not_null_violation(format!(
+                    "null value in column \"{}\" of relation \"{}\" violates not-null constraint",
+                    t.columns[*column].name, t.name
+                )));
+            }
+            Validating::NotNull { .. } | Validating::Check { .. } => {}
         }
     }
     Ok(())
@@ -160,6 +178,52 @@ pub(crate) fn check_rows(
     Ok(())
 }
 
+/// Checks every row of `t` (as `txn` sees it) against `v`: the error a
+/// row that breaks it gives the statement.
+pub(crate) fn holds(txn: &dyn KvTxn, reg: &Registry, t: &Table, v: &Validating) -> Result<()> {
+    match v {
+        Validating::Type { column, .. } => {
+            let mut to = t.clone();
+            v.apply(&mut to);
+            check_rows(txn, reg, t, *column, &to.columns[*column])
+        }
+        Validating::NotNull { column } => {
+            let ctx = crate::expr::Ctx::new(txn, reg, &[]);
+            for r in crate::exec::matching(t, &crate::plan::Access::Full, None, &ctx)? {
+                if r?.1.get(*column).is_none_or(Value::is_null) {
+                    return Err(Error::not_null_violation(format!(
+                        "column \"{}\" of relation \"{}\" contains null values",
+                        t.columns[*column].name, t.name
+                    )));
+                }
+            }
+            Ok(())
+        }
+        Validating::Check { name, text } => {
+            let check = crate::binder::Binder::new(txn, reg).condition(
+                &crate::parser::parse_expr(text)?,
+                &crate::dml::table_scope(t),
+            )?;
+            let ctx = crate::expr::Ctx::new(txn, reg, &[]);
+            for r in crate::exec::matching(t, &crate::plan::Access::Full, None, &ctx)? {
+                let (_, row) = r?;
+                let env = crate::expr::Env {
+                    row: &row,
+                    outer: None,
+                    ctx: &ctx,
+                };
+                if check.eval(&env)?.truth()? == Some(false) {
+                    return Err(Error::check_violation(format!(
+                        "check constraint \"{name}\" of relation \"{}\" is violated by some row",
+                        t.name
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// The table with column `c` given its new definition `col`; its
 /// statistics (the old type's) removed.
 pub(crate) fn give_type(txn: &mut dyn KvTxn, mut t: Table, c: usize, col: Column) -> Result<()> {
@@ -169,6 +233,34 @@ pub(crate) fn give_type(txn: &mut dyn KvTxn, mut t: Table, c: usize, col: Column
     catalog::delete_stats_sample(txn, &t)?;
     catalog::note_stored_types(txn, &t.columns)?;
     catalog::update_table(txn, &t)
+}
+
+/// `v` made to hold on `t` (its rows checked): the record cleared.
+fn finish(txn: &mut dyn KvTxn, mut t: Table, v: &Validating) -> Result<()> {
+    if let Validating::Type { column, .. } = v {
+        let mut to = t.clone();
+        v.apply(&mut to);
+        let col = to.columns[*column].clone();
+        return give_type(txn, t, *column, col);
+    }
+    v.apply(&mut t);
+    t.validating.clear();
+    catalog::update_table(txn, &t)
+}
+
+/// In a statement's transaction, `v` found being validated on `t` is the
+/// statement's own (cut short): `Ok(true)`, to finish there; another:
+/// `55006`.
+pub(crate) fn same_as_pending(t: &Table, v: &Validating) -> Result<bool> {
+    match t.validating.first() {
+        None => Ok(false),
+        Some(w) if w == v => Ok(true),
+        Some(w) => Err(Error::object_in_use(format!(
+            "{} of \"{}\" is being checked; wait for it to finish",
+            w.what(t),
+            t.name
+        ))),
+    }
 }
 
 /// The key a validation runs under in this process.
@@ -205,13 +297,128 @@ pub fn alter_watched(
     else {
         return Ok(false);
     };
+    online(kv, reg, table, between, &mut |txn| {
+        begin_type(txn, reg, table, column, ty, typmod)
+    })
+}
+
+/// `ALTER TABLE … ALTER COLUMN … SET NOT NULL` or `ALTER TABLE … ADD
+/// [CONSTRAINT name] CHECK (…)` (`stmt`) whose rows, read in the
+/// statement's transaction, met a write committed meanwhile: the rows
+/// checked online (see the module).  `Ok(false)`: not one this does.
+pub fn constrain(kv: &Arc<dyn Kv>, reg: &Registry, stmt: &crate::ast::Statement) -> Result<bool> {
+    constrain_watched(kv, reg, stmt, &mut || Ok(()))
+}
+
+/// [`constrain`], `between` run as [`alter_watched`]'s.
+pub fn constrain_watched(
+    kv: &Arc<dyn Kv>,
+    reg: &Registry,
+    stmt: &crate::ast::Statement,
+    between: &mut dyn FnMut() -> Result<()>,
+) -> Result<bool> {
+    use crate::ast::{Statement, TableChange, TableConstraint};
+    let (table, make): (
+        &str,
+        Box<dyn Fn(&dyn KvTxn, &Table) -> Result<Option<Validating>>>,
+    ) = match stmt {
+        Statement::AlterTable {
+            table,
+            change:
+                TableChange::SetNotNull {
+                    column,
+                    not_null: true,
+                },
+        } => (
+            table,
+            Box::new(move |_, t: &Table| {
+                let Some(c) = t.column(column) else {
+                    return Ok(None);
+                };
+                Ok(t.columns[c]
+                    .nullable
+                    .then_some(Validating::NotNull { column: c }))
+            }),
+        ),
+        Statement::AddConstraint {
+            table,
+            constraint: TableConstraint::Check(name, text),
+        } => (
+            table,
+            Box::new(move |txn, t: &Table| {
+                let name = check_name(t, name.as_deref());
+                if t.checks.iter().any(|(n, _)| *n == name) {
+                    return Ok(None);
+                }
+                // Bound now: a condition that does not bind is the
+                // statement's error.
+                crate::binder::Binder::new(txn, reg).condition(
+                    &crate::parser::parse_expr(text)?,
+                    &crate::dml::table_scope(t),
+                )?;
+                Ok(Some(Validating::Check {
+                    name,
+                    text: text.clone(),
+                }))
+            }),
+        ),
+        _ => return Ok(false),
+    };
+    online(kv, reg, table, between, &mut |txn| {
+        let mut t = catalog::table(&*txn, table)?;
+        if t.partition_by.is_some() || t.partition_of.is_some() {
+            return Ok(None);
+        }
+        let Some(v) = make(&*txn, &t)? else {
+            return Ok(None);
+        };
+        record(txn, &mut t, v).map(Some)
+    })
+}
+
+/// The name of a check `ADD CHECK` adds to `t`: `name`, else the next
+/// free one.
+pub(crate) fn check_name(t: &Table, name: Option<&str>) -> String {
+    name.map_or_else(
+        || format!("{}_check{}", t.name, t.checks.len() + 1),
+        str::to_string,
+    )
+}
+
+/// Records `v` on `t` as being validated, unless it is already (its
+/// statement cut short: taken over).
+fn record(txn: &mut dyn KvTxn, t: &mut Table, v: Validating) -> Result<Validating> {
+    if same_as_pending(t, &v)? {
+        return Ok(v);
+    }
+    if t.converting.is_some() || !t.building.is_empty() {
+        return Err(Error::object_in_use(format!(
+            "\"{}\" is being changed online; {} can be checked when that is done",
+            t.name,
+            v.what(t)
+        )));
+    }
+    t.validating.push(v.clone());
+    catalog::update_table(txn, t)?;
+    Ok(v)
+}
+
+/// Runs a validation of `table` online: `begin` records it (`None`: not
+/// one to run so), `between` runs, the rows of a snapshot taken after are
+/// checked, and it is made to hold — or, a row breaking it, abandoned.
+fn online(
+    kv: &Arc<dyn Kv>,
+    reg: &Registry,
+    table: &str,
+    between: &mut dyn FnMut() -> Result<()>,
+    begin: &mut dyn FnMut(&mut dyn KvTxn) -> Result<Option<Validating>>,
+) -> Result<bool> {
     let Some(_running) = crate::retype::Running::claim(kv, &claim_key(table)) else {
         return Err(Error::object_in_use(format!(
-            "a column of \"{table}\" is having its type changed by another session"
+            "\"{table}\" is being checked by another session"
         )));
     };
-    let begun = crate::convert::attempt(kv, |txn| begin(txn, reg, table, column, ty, typmod))?;
-    let Some((c, col)) = begun else {
+    let Some(v) = crate::convert::attempt(kv, &mut *begin)? else {
         return Ok(false);
     };
     between()?;
@@ -220,7 +427,7 @@ pub fn alter_watched(
     let checked = {
         let txn = kv.begin(TxnOptions::read_only())?;
         let t = catalog::table(&*txn, table)?;
-        check_rows(&*txn, reg, &t, c, &col)
+        holds(&*txn, reg, &t, &v)
     };
     if let Err(e) = checked {
         crate::convert::attempt(kv, |txn| {
@@ -232,27 +439,27 @@ pub fn alter_watched(
     }
     crate::convert::attempt(kv, |txn| {
         let t = catalog::table(&*txn, table)?;
-        if t.validating.first().map(|v| v.column(&t)).as_ref() != Some(&col) {
+        if t.validating.first() != Some(&v) {
             return Err(Error::object_in_use(format!(
-                "the type change of column \"{column}\" of \"{table}\" was abandoned"
+                "{} of \"{table}\" was abandoned",
+                v.what(&t)
             )));
         }
-        give_type(txn, t, c, col.clone())
+        finish(txn, t, &v)
     })?;
     Ok(true)
 }
 
-/// Records the new type as validated (writers obey it); the column and
-/// its new definition, or `None` when the change is not one checked
-/// online.
-fn begin(
+/// Records a narrower type as validated (writers obey it), or `None` when
+/// the change is not one checked online.
+fn begin_type(
     txn: &mut dyn KvTxn,
     reg: &Registry,
     table: &str,
     column: &str,
     ty: &crate::ast::SqlType,
     typmod: &crate::ast::TypeMod,
-) -> Result<Option<(usize, Column)>> {
+) -> Result<Option<Validating>> {
     let mut t = catalog::table(&*txn, table)?;
     let Some(c) = t.column(column) else {
         return Ok(None);
@@ -267,50 +474,36 @@ fn begin(
     {
         return Ok(None);
     }
-    let col = retyped(&t.columns[c], to, typmod.max_len, typmod.numeric);
     let v = Validating::Type {
         column: c,
         ty: to,
         max_len: typmod.max_len,
         numeric: typmod.numeric,
     };
-    match t.validating.first() {
-        // Cut short (its session gone): taken over.
-        Some(w) if *w == v => return Ok(Some((c, col))),
-        Some(w) => {
-            return Err(Error::object_in_use(format!(
-                "the type of column \"{}\" of \"{table}\" is being changed",
-                t.columns[w.column_index()].name
-            )));
-        }
-        None => {}
-    }
     // Its default must fit the new type.
-    let mut new = t.clone();
-    new.columns[c] = col.clone();
-    if new.columns[c].default.is_some() {
+    if !same_as_pending(&t, &v)? && t.columns[c].default.is_some() {
+        let mut new = t.clone();
+        v.apply(&mut new);
         let w = crate::dml::Writer::new(&*txn, reg, new)?;
         w.default_of(c, &crate::expr::Ctx::new(&*txn, reg, &[]))?;
     }
-    t.validating.push(v);
-    catalog::update_table(txn, &t)?;
-    Ok(Some((c, col)))
+    record(txn, &mut t, v).map(Some)
 }
 
-/// While a type change is validated, the table's other changes wait for
-/// it (`55006`), but for the validation's own.
+/// While something is validated on a table, its other changes wait for
+/// it (`55006`), but for the validation's own end: the record cleared,
+/// with or without what it validated made to hold.
 pub(crate) fn allows_change(old: &Table, new: &Table) -> Result<()> {
     let Some(v) = old.validating.first() else {
         return Ok(());
     };
-    // Its end: the record cleared, the column given its type or not.
     if new.validating.is_empty() {
         let mut same = old.clone();
         same.validating.clear();
-        let c = v.column_index();
-        if let (Some(to), Some(col)) = (same.columns.get_mut(c), new.columns.get(c)) {
-            *to = col.clone();
+        if same == *new {
+            return Ok(());
         }
+        v.apply(&mut same);
         if same == *new {
             return Ok(());
         }
@@ -330,8 +523,8 @@ pub(crate) fn allows_change(old: &Table, new: &Table) -> Result<()> {
         return Ok(());
     }
     Err(Error::object_in_use(format!(
-        "the type of column \"{}\" of \"{}\" is being changed; the table can change when that is done",
-        old.columns[v.column_index()].name,
+        "{} of \"{}\" is being checked; the table can change when that is done",
+        v.what(old),
         old.name
     )))
 }

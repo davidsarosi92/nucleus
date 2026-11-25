@@ -825,6 +825,12 @@ impl Bound {
         for (name, text) in &table.checks {
             checks.push((name.clone(), binder.condition(&parse_expr(text)?, &scope)?));
         }
+        // A check being validated (`crate::validating`): obeyed already.
+        for v in &table.validating {
+            if let crate::catalog::Validating::Check { name, text } = v {
+                checks.push((name.clone(), binder.condition(&parse_expr(text)?, &scope)?));
+            }
+        }
         let empty = Scope::default();
         let mut defaults = Vec::new();
         for c in &table.columns {

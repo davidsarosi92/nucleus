@@ -542,25 +542,53 @@ pub enum Validating {
         /// `numeric(precision, scale)`.
         numeric: Option<(u32, u32)>,
     },
+    /// Column `column` to be `NOT NULL`.
+    NotNull {
+        /// The column, by position.
+        column: usize,
+    },
+    /// A `CHECK` constraint to hold.
+    Check {
+        /// Its name.
+        name: String,
+        /// Its condition, as written.
+        text: String,
+    },
 }
 
 impl Validating {
-    /// The column it is about, by position.
-    pub fn column_index(&self) -> usize {
+    /// The column it is about, by position (a check: none).
+    pub fn column_index(&self) -> Option<usize> {
         match self {
-            Validating::Type { column, .. } => *column,
+            Validating::Type { column, .. } | Validating::NotNull { column } => Some(*column),
+            Validating::Check { .. } => None,
         }
     }
 
-    /// The column's definition once it holds, in table `t`.
-    pub fn column(&self, t: &Table) -> Column {
+    /// What it is, in a message about table `t`.
+    pub fn what(&self, t: &Table) -> String {
+        let name = |c: &usize| t.columns.get(*c).map_or("?", |c| c.name.as_str());
+        match self {
+            Validating::Type { column, .. } => format!("the type of column \"{}\"", name(column)),
+            Validating::NotNull { column } => format!("NOT NULL of column \"{}\"", name(column)),
+            Validating::Check { name, .. } => format!("check constraint \"{name}\""),
+        }
+    }
+
+    /// Table `t` with it holding.
+    pub fn apply(&self, t: &mut Table) {
         match self {
             Validating::Type {
                 column,
                 ty,
                 max_len,
                 numeric,
-            } => crate::validating::retyped(&t.columns[*column], *ty, *max_len, *numeric),
+            } => {
+                t.columns[*column] =
+                    crate::validating::retyped(&t.columns[*column], *ty, *max_len, *numeric)
+            }
+            Validating::NotNull { column } => t.columns[*column].nullable = false,
+            Validating::Check { name, text } => t.checks.push((name.clone(), text.clone())),
         }
     }
 
@@ -577,6 +605,12 @@ impl Validating {
                 w.u32(max_len.map_or(0, |n| n + 1));
                 let (p, s) = numeric.map_or((0, 0), |(p, s)| (p + 1, s));
                 w.u32(p).u32(s);
+            }
+            Validating::NotNull { column } => {
+                w.u8(1).u32(*column as u32);
+            }
+            Validating::Check { name, text } => {
+                w.u8(2).str(name).str(text);
             }
         }
     }
@@ -601,6 +635,13 @@ impl Validating {
                     numeric,
                 })
             }
+            1 => Ok(Validating::NotNull {
+                column: r.u32()? as usize,
+            }),
+            2 => Ok(Validating::Check {
+                name: r.str()?,
+                text: r.str()?,
+            }),
             _ => Err(Error::internal("unknown validation in a table record")),
         }
     }
@@ -1719,8 +1760,8 @@ pub fn rename_table(txn: &mut dyn KvTxn, from: &str, table: &Table) -> Result<()
         && let Some(v) = t.validating.first()
     {
         return Err(Error::object_in_use(format!(
-            "the type of column \"{}\" of \"{from}\" is being changed; the table can be renamed when that is done",
-            t.columns[v.column_index()].name
+            "{} of \"{from}\" is being checked; the table can be renamed when that is done",
+            v.what(&t)
         )));
     }
     txn.delete(&table_key(from))?;
@@ -2340,12 +2381,19 @@ mod tests {
             }],
             dropped: vec![5, 6],
             missing: vec![(1, Value::Int(5)), (2, Value::Text("x".into()))],
-            validating: vec![Validating::Type {
-                column: 0,
-                ty: DataType::SmallInt,
-                max_len: None,
-                numeric: None,
-            }],
+            validating: vec![
+                Validating::Type {
+                    column: 0,
+                    ty: DataType::SmallInt,
+                    max_len: None,
+                    numeric: None,
+                },
+                Validating::NotNull { column: 1 },
+                Validating::Check {
+                    name: "c".into(),
+                    text: "a > 0".into(),
+                },
+            ],
             engine: TableEngine::Lsm,
             relative_directory: true,
         };

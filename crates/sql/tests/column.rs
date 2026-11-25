@@ -4,10 +4,12 @@
 //! delta store — and after each, the same rows and query results (a row and
 //! a batch at a time, in parallel), and a consistent integrity check.
 
+use std::ops::Bound;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
-use nucleus_kv::{Database, Kv, Options, TxnOptions};
+use nucleus_kv::{Database, Kv, KvIter, KvTxn, Options, Timestamp, TxnOptions};
 use nucleus_platform::sim::SimPlatform;
 use nucleus_platform::{Rng, SplitMix64};
 use nucleus_sql::{Output, Session};
@@ -208,6 +210,184 @@ fn a_delete_and_a_merge_of_one_segment_both_hold() {
             Vec::<String>::new()
         );
     }
+}
+
+/// A validated read of a few segment rows (a cascade's, finding a
+/// deleted parent's children) fails only on a write to those rows, not on
+/// one to another row of their segment: the deletion markers of the rows
+/// read are validated, not the segment's (a backfill's part under writes
+/// retried on every write, issue #18).
+#[test]
+fn a_validated_read_of_segment_rows_meets_writes_to_them_alone() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(7)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut setup = Session::new(Arc::clone(&db));
+    setup
+        .execute(
+            "CREATE TABLE p (id INT PRIMARY KEY); \
+             INSERT INTO p SELECT i FROM generate_series(1, 60) i; \
+             CREATE TABLE c (pid INT REFERENCES p ON DELETE CASCADE, n INT, v INT, \
+               PRIMARY KEY (pid, n)) WITH (storage = column); \
+             INSERT INTO c SELECT i / 100 + 1, i % 100, i FROM generate_series(0, 5999) i",
+        )
+        .unwrap();
+    let mut parent = Session::new(Arc::clone(&db));
+    let mut writer = Session::new(Arc::clone(&db));
+    for (deleted, written, conflicts) in [(3, 50, false), (4, 4, true)] {
+        parent.execute("BEGIN").unwrap();
+        parent
+            .execute(&format!("DELETE FROM p WHERE id = {deleted}"))
+            .unwrap();
+        writer
+            .execute(&format!(
+                "UPDATE c SET v = 0 WHERE pid = {written} AND n = 1"
+            ))
+            .unwrap();
+        let r = outcome(&mut parent, "COMMIT");
+        if conflicts {
+            assert!(r.as_ref().is_err_and(|e| e.starts_with("40001")), "{r:?}");
+        } else {
+            assert_eq!(r, Ok(Vec::new()), "a write to children of {written}");
+        }
+    }
+    assert_eq!(
+        outcome(&mut setup, "SELECT count(*) FROM c WHERE pid IN (3, 4)").unwrap(),
+        [["100"]]
+    );
+    let txn = db.begin(TxnOptions::read_only()).unwrap();
+    assert_eq!(
+        nucleus_sql::check::check(&*txn, setup.registry()).unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+/// A store whose next commit of a transaction that wrote many keys (a
+/// backfill's part) first runs `hook` against the store beneath.
+struct Hooked {
+    inner: Arc<dyn Kv>,
+    hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+}
+
+struct HookedTxn {
+    inner: Box<dyn KvTxn>,
+    hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    puts: usize,
+}
+
+impl Kv for Hooked {
+    fn begin(&self, opts: TxnOptions) -> nucleus_kv::Result<Box<dyn KvTxn>> {
+        Ok(Box::new(HookedTxn {
+            inner: self.inner.begin(opts)?,
+            hook: Arc::clone(&self.hook),
+            puts: 0,
+        }))
+    }
+    fn wall_clock(&self) -> SystemTime {
+        self.inner.wall_clock()
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.inner.elapsed()
+    }
+    fn back_off(&self, attempt: u32) {
+        self.inner.back_off(attempt)
+    }
+    fn random_bytes(&self, buf: &mut [u8]) {
+        self.inner.random_bytes(buf)
+    }
+}
+
+impl KvTxn for HookedTxn {
+    fn read_ts(&self) -> Timestamp {
+        self.inner.read_ts()
+    }
+    fn get(&self, key: &[u8]) -> nucleus_kv::Result<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn scan<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> nucleus_kv::Result<KvIter<'a>> {
+        self.inner.scan(start, end)
+    }
+    fn get_validated(&self, key: &[u8]) -> nucleus_kv::Result<Option<Vec<u8>>> {
+        self.inner.get_validated(key)
+    }
+    fn scan_validated<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> nucleus_kv::Result<KvIter<'a>> {
+        self.inner.scan_validated(start, end)
+    }
+    fn put(&mut self, key: &[u8], value: &[u8]) -> nucleus_kv::Result<()> {
+        self.puts += 1;
+        self.inner.put(key, value)
+    }
+    fn delete(&mut self, key: &[u8]) -> nucleus_kv::Result<()> {
+        self.inner.delete(key)
+    }
+    fn commit(self: Box<Self>) -> nucleus_kv::Result<Timestamp> {
+        if self.puts >= 100 {
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.inner.commit()
+    }
+    fn rollback(self: Box<Self>) {
+        self.inner.rollback()
+    }
+}
+
+/// A segment row deleted while a part of an index's build that read it
+/// commits: the part fails (it read the row's deletion marker validated)
+/// and runs again without it — no entry of the deleted row is left.
+#[test]
+fn a_row_deleted_under_a_backfill_part_leaves_no_entry() {
+    let inner: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(8)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let hook = Arc::new(Mutex::new(None));
+    let kv: Arc<dyn Kv> = Arc::new(Hooked {
+        inner: Arc::clone(&inner),
+        hook: Arc::clone(&hook),
+    });
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute(
+        "CREATE TABLE c (id INT PRIMARY KEY, x INT) WITH (storage = column); \
+         INSERT INTO c SELECT i, i FROM generate_series(1, 6000) i",
+    )
+    .unwrap();
+    let writer = Arc::clone(&inner);
+    *hook.lock().unwrap() = Some(Box::new(move || {
+        Session::new(writer)
+            .execute("DELETE FROM c WHERE id = 2")
+            .unwrap();
+    }) as Box<dyn FnOnce() + Send>);
+    s.execute("CREATE INDEX CONCURRENTLY c_x ON c (x)").unwrap();
+    assert!(hook.lock().unwrap().is_none(), "the hook ran");
+    assert_eq!(
+        outcome(&mut s, "SELECT count(*) FROM c WHERE x < 10").unwrap(),
+        [["8"]]
+    );
+    let txn = inner.begin(TxnOptions::read_only()).unwrap();
+    assert_eq!(
+        nucleus_sql::check::check(&*txn, s.registry()).unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 /// Two transactions write a column table at once — each many rows (they

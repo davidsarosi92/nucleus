@@ -4697,8 +4697,8 @@ fn alter_column_type(
     }
     if let Some(v) = old.validating.first() {
         return Err(Error::object_in_use(format!(
-            "the type of column \"{}\" of \"{table}\" is being changed; wait for it to finish",
-            old.columns[v.column_index()].name
+            "{} of \"{table}\" is being checked; wait for it to finish",
+            v.what(&old)
         )));
     }
     dml::rows_are_premise(&*txn, &old)?;
@@ -4791,15 +4791,13 @@ fn type_in_place(
 ) -> Result<()> {
     use crate::validating::Fit;
     let col = crate::validating::retyped(&old.columns[c], to, typmod.max_len, typmod.numeric);
-    if let Some(v) = old.validating.first()
-        && (v.column_index() != c || v.column(&old) != col)
-    {
-        return Err(Error::object_in_use(format!(
-            "the type of column \"{}\" of \"{}\" is being changed; wait for it to finish",
-            old.columns[v.column_index()].name,
-            old.name
-        )));
-    }
+    let v = crate::catalog::Validating::Type {
+        column: c,
+        ty: to,
+        max_len: typmod.max_len,
+        numeric: typmod.numeric,
+    };
+    crate::validating::same_as_pending(&old, &v)?;
     if fit == Fit::Same {
         return Ok(());
     }
@@ -4961,9 +4959,16 @@ fn add_constraint(
             crate::fk::attach(txn, &mut t, fk)?;
         }
         TableConstraint::Check(name, text) => {
-            let name = name
-                .clone()
-                .unwrap_or_else(|| format!("{table}_check{}", t.checks.len() + 1));
+            let name = crate::validating::check_name(&t, name.as_deref());
+            // Being checked online (its statement cut short): checked
+            // here, the record cleared.
+            let pending = crate::catalog::Validating::Check {
+                name: name.clone(),
+                text: text.clone(),
+            };
+            if crate::validating::same_as_pending(&t, &pending)? {
+                t.validating.clear();
+            }
             if t.checks.iter().any(|(n, _)| *n == name) {
                 return Err(Error::duplicate_object(format!(
                     "constraint \"{name}\" for relation \"{table}\" already exists"

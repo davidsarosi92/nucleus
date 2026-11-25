@@ -73,16 +73,24 @@ pub(crate) fn refusal(t: &Table, ix: &Index) -> Option<&'static str> {
 
 /// Whether `stmt` is DDL that, failing in one transaction over a
 /// concurrent write, may run online instead ([`instead`]): a `CREATE
-/// INDEX`, an `ALTER COLUMN … TYPE`.
+/// INDEX`, an `ALTER COLUMN … TYPE`, a `SET NOT NULL`, an `ADD CHECK` or
+/// `ADD UNIQUE`.
 pub fn may_fall_back(stmt: &crate::ast::Statement) -> bool {
+    use crate::ast::{Statement, TableChange, TableConstraint};
     matches!(
         stmt,
-        crate::ast::Statement::CreateIndex {
+        Statement::CreateIndex {
             concurrently: false,
             method: None,
             ..
-        } | crate::ast::Statement::AlterColumnType {
+        } | Statement::AlterColumnType {
             concurrently: false,
+            ..
+        } | Statement::AlterTable {
+            change: TableChange::SetNotNull { not_null: true, .. },
+            ..
+        } | Statement::AddConstraint {
+            constraint: TableConstraint::Check(..) | TableConstraint::Unique(..),
             ..
         }
     )
@@ -105,7 +113,31 @@ pub fn instead(
         crate::ast::Statement::AlterColumnType { .. } => (crate::validating::alter(kv, reg, stmt)?
             || crate::retype::fall_back(kv, reg, stmt)?)
         .then_some("ALTER TABLE"),
-        _ => None,
+        // A unique constraint is a unique index of its name.
+        crate::ast::Statement::AddConstraint {
+            table,
+            constraint: crate::ast::TableConstraint::Unique(name, columns),
+        } => {
+            let index = crate::ast::Statement::CreateIndex {
+                name: Some(
+                    name.clone()
+                        .unwrap_or_else(|| format!("{table}_{}_key", columns.join("_"))),
+                ),
+                table: table.clone(),
+                columns: columns.clone(),
+                exprs: vec![None; columns.len()],
+                orderings: vec![None; columns.len()],
+                method: None,
+                opclasses: vec![None; columns.len()],
+                options: Vec::new(),
+                partition_by: Vec::new(),
+                unique: true,
+                if_not_exists: false,
+                concurrently: false,
+            };
+            create(kv, reg, &index, true)?.then_some("ALTER TABLE")
+        }
+        _ => crate::validating::constrain(kv, reg, stmt)?.then_some("ALTER TABLE"),
     })
 }
 
