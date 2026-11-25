@@ -13992,13 +13992,16 @@ result, a profile), and the shape models write best.
    `json_*` functions applied in place of the row, one rewrite), delete;
    an upsert is `INSERT … ON CONFLICT (_id)`.  All of them SQL first
    (§M16 gives them messages on `ncp` and driver APIs).
-8. **The query language is decided at M15's end** (as the plan says),
-   with D1–D4 built: the candidates are SQL/JSON over `doc` (what
+8. **The query language is decided at §M16's start** (moved from M15's
+   end, 2026-11-25: it is used there), with D1–D5 built: the candidates are SQL/JSON over `doc` (what
    exists) and a JSON filter document (`{"age": {"$gt": 30}}`, the
    operators models write fluently), compiled to the same `Expr` —
    the second a front end, never a second planner.
 
-*Steps (agreed 2026-11-20, in this order; built after F1's whole run):*
+*Steps (agreed 2026-11-20, in this order; built after F1's whole run;
+split 2026-11-25 with the user into pieces closed one by one — the
+upsert its own SQL step first, the path index apart from the
+multi-valued one, the language decision moved to §M16's start):*
 
 - **D1 — the form measured**: field reads, path reads and whole-document
   output from `json`'s form against a BSON walk (the `bson` crate,
@@ -14037,26 +14040,49 @@ result, a profile), and the shape models write best.
   the form's 13.9 at 16 KB) — a matter of how large values are stored,
   not of the form; `-37.0` reads back `-37` (the canonical form keeps
   no scale, as agreed), so the bench writes odd thousandths.
-- **D2 — collections**: `CREATE / DROP / ALTER COLLECTION`, the catalog
+- **D2 — upsert in SQL** (`INSERT … ON CONFLICT`), a step of its own
+  before collections: nucleus has neither `ON CONFLICT` nor `MERGE`
+  yet, and a collection's upsert (item 7) is this statement.  `ON
+  CONFLICT (cols) | ON CONSTRAINT name | (no target)`, `DO NOTHING`,
+  `DO UPDATE SET … [WHERE …]` with `EXCLUDED`, `RETURNING`; the
+  conflict found by the primary key or any unique index (expression
+  and partial unique indexes included); concurrent writers on the same
+  key give one insert and the others' updates or no-ops, never a
+  unique violation (PostgreSQL's guarantee), under every isolation
+  level; a row updated twice in one statement an error (`21000`, as
+  PostgreSQL).  Useful without documents (pg-compat, ORMs, migrations).
+  slt against PostgreSQL 18; a concurrency test (writers racing on
+  keys, the invariant counted, as `bank.py` does).
+- **D3 — collections**: `CREATE / DROP / ALTER COLLECTION`, the catalog
   kind and `nc_catalog.collections`, `_id` as the stored key (made
   where absent), `WITH (schema = …)`; insert, replace, update by
-  operators, delete and upsert in SQL; pg-compat sees a table; slt
-  against PostgreSQL where the SQL is the same.
-- **D3 — path and multi-valued indexes**: `CREATE INDEX ON c (a.b.c)`,
-  the multi-valued expression index and its planner rules; measured
-  against PostgreSQL's GIN and MongoDB's multikey index (in Docker).
-- **D4 — the decision on the query language**, with a prototype of the
-  JSON filter compiled to `Expr`, judged on what developers and models
-  write; recorded here, then §M16.
+  operators, delete and upsert (D2's statement) in SQL; pg-compat sees a
+  table; slt against PostgreSQL where the SQL is the same.
+- **D4 — path indexes**: `CREATE INDEX ON c (a.b.c)` for a collection —
+  an expression index on the path's value (`doc #> '{a,b,c}'`) under
+  another spelling, chosen by the planner as expression indexes are;
+  a small step.
+- **D5 — multi-valued indexes**: a key part an expression giving a set
+  (item 6), an entry per distinct element kept on every write, the
+  planner's rules for `@>`, `= ANY`, `[*]` paths and `JSON_EXISTS`, a
+  scan reading a row once per match; measured against PostgreSQL's GIN
+  and MongoDB's multikey index (in Docker).  The largest piece of
+  engine work in M15.
 
-**Done when:** collections exist in the catalog and SQL, with ids as
-keys, path and array indexes chosen by the planner and measured, the
-form's choice measured, and §M16's query language decided.
+**Done when:** `INSERT … ON CONFLICT` behaves as PostgreSQL's under
+concurrent writers; collections exist in the catalog and SQL, with ids
+as keys; path and array indexes are chosen by the planner and measured;
+the form's choice measured (D1).  The query language is decided at
+§M16's start.
 
 ### §M16 — Document queries + document server ⬜
 
-- Filter language (Mongo-style) **and/or** SQL/JSON functions — decided at
-  the end of M15.
+- **First, the decision on the query language** (moved here from M15,
+  2026-11-25): SQL/JSON over `doc` and a JSON filter document compiled
+  to the same `Expr` (§M15 item 8), with a prototype of the filter,
+  judged on what developers and models write; recorded in §M15's study.
+- Filter language (Mongo-style) **and/or** SQL/JSON functions — as that
+  decision says.
 - Compiles to the same logical plan as SQL.
 - A transaction can span SQL tables and document collections.
 - **Document server:** documents travel over `ncp` (D8): new messages for
