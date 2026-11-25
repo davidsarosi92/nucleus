@@ -25,14 +25,21 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::sync::{
+    Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
+};
+use std::time::{Duration, Instant};
 
 /// Stripes: more than the threads that usually read at once.
 const STRIPES: usize = 16;
 
-/// Tries (a yield each) a writer keeps the stripes it took while it waits
-/// for the others before it lets them all go.
-const HOLD_TRIES: u32 = 256;
+/// How long a writer keeps the stripes it took while it waits for the
+/// others before it lets them all go: [`SPIN_TRIES`] tries a yield each,
+/// then a pause of [`HOLD_PAUSE`] a try until [`HOLD_WINDOW`] is over — a
+/// time, not a count of tries (the system's sleeps may be coarse).
+const SPIN_TRIES: u32 = 32;
+const HOLD_PAUSE: Duration = Duration::from_micros(20);
+const HOLD_WINDOW: Duration = Duration::from_millis(5);
 
 /// A stripe, a cache line of its own (128 bytes on Apple's cores).
 #[repr(align(128))]
@@ -43,8 +50,12 @@ pub struct Striped<T> {
     stripes: Box<[Stripe<T>]>,
     /// Writers one at a time (a writer waiting holds no stripe).
     writer: Mutex<()>,
-    /// A writer is taking the stripes: a reader holding none waits for it.
+    /// A writer is taking the stripes: a reader holding none waits for it
+    /// — asleep on `gate` (a reader spinning took the processor from the
+    /// readers the writer waits for: on a few cores, CI's Windows and
+    /// Android runners, writes stalled).
     pending: AtomicBool,
+    gate: (Mutex<()>, Condvar),
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for Striped<T> {
@@ -81,15 +92,29 @@ impl<T> Striped<T> {
                 .collect(),
             writer: Mutex::new(()),
             pending: AtomicBool::new(false),
+            gate: (Mutex::new(()), Condvar::new()),
+        }
+    }
+
+    /// `pending` set or cleared; readers waiting for it woken when cleared.
+    fn set_pending(&self, on: bool) {
+        if on {
+            self.pending.store(true, Ordering::Release);
+        } else {
+            let g = self.gate.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.pending.store(false, Ordering::Release);
+            drop(g);
+            self.gate.1.notify_all();
         }
     }
 
     /// Locked for reading: this thread's stripe — once a writer taking
     /// the stripes is done, unless this thread holds a read guard already.
     pub fn read(&self) -> ReadGuard<'_, T> {
-        if HOLDING.with(Cell::get) == 0 {
+        if HOLDING.with(Cell::get) == 0 && self.pending.load(Ordering::Acquire) {
+            let mut g = self.gate.0.lock().unwrap_or_else(|e| e.into_inner());
             while self.pending.load(Ordering::Acquire) {
-                std::thread::yield_now();
+                g = self.gate.1.wait(g).unwrap_or_else(|e| e.into_inner());
             }
         }
         let g = self.stripes[stripe()]
@@ -107,7 +132,8 @@ impl<T> Striped<T> {
         let mut held: Vec<Option<RwLockWriteGuard<'_, Option<Arc<T>>>>> =
             (0..n).map(|_| None).collect();
         let (mut count, mut tries, mut rounds) = (0, 0u32, 0u32);
-        self.pending.store(true, Ordering::Release);
+        let mut since: Option<Instant> = None;
+        self.set_pending(true);
         while count < n {
             for (s, g) in self.stripes.iter().zip(&mut held) {
                 if g.is_some() {
@@ -130,20 +156,24 @@ impl<T> Striped<T> {
             // let go, and taken again after a pause growing with the
             // rounds.
             tries += 1;
-            if tries < HOLD_TRIES {
+            if tries < SPIN_TRIES {
                 std::thread::yield_now();
                 continue;
             }
-            self.pending.store(false, Ordering::Release);
+            if since.get_or_insert_with(Instant::now).elapsed() < HOLD_WINDOW {
+                std::thread::sleep(HOLD_PAUSE);
+                continue;
+            }
+            self.set_pending(false);
             held.iter_mut().for_each(|g| *g = None);
-            (count, tries) = (0, 0);
+            (count, tries, since) = (0, 0, None);
             rounds += 1;
             let us = u64::from(rounds.min(20)) * 50;
-            std::thread::sleep(std::time::Duration::from_micros(us));
-            self.pending.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_micros(us));
+            self.set_pending(true);
         }
         // Every stripe held: readers wait on them now.
-        self.pending.store(false, Ordering::Release);
+        self.set_pending(false);
         let mut guards: Vec<_> = held.into_iter().flatten().collect();
         // Every copy out: the last one is then the only one.
         let mut value = None;
@@ -249,7 +279,10 @@ mod tests {
     /// A writer is not starved by readers that hold their stripes nearly
     /// all the time and take them again at once — more readers than
     /// stripes and, as on a small machine, than cores: its writes are done
-    /// within a deadline while they read.
+    /// within a deadline while they read.  The deadline grows on a few
+    /// cores: each write waits for every reader holding a stripe to be run
+    /// again (on two, 5–40 ms a write with the readers asleep while they
+    /// wait; the writer never let go).
     #[test]
     #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     fn a_writer_is_not_starved_by_readers_that_come_back() {
@@ -276,14 +309,18 @@ mod tests {
                     done.fetch_add(1, Ordering::Relaxed);
                 }
             });
-            let start = std::time::Instant::now();
-            while done.load(Ordering::Relaxed) < 1000
-                && start.elapsed() < std::time::Duration::from_secs(10)
-            {
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let deadline = Duration::from_secs(10 * (STRIPES / cores).max(1) as u64);
+            let start = Instant::now();
+            while done.load(Ordering::Relaxed) < 1000 && start.elapsed() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             stop.store(true, Ordering::Relaxed);
-            assert_eq!(done.load(Ordering::Relaxed), 1000, "writes done in 10 s");
+            assert_eq!(
+                done.load(Ordering::Relaxed),
+                1000,
+                "writes done in {deadline:?}"
+            );
         });
     }
 

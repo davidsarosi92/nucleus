@@ -13711,6 +13711,32 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
      alone keeps the writer going here (each removed survives, both
      removed fail), and a reader holding a guard waiting too only waits
      longer.
+     That fix still failed CI's Windows and Android jobs (the test past
+     10 s; on Windows `readers_see_a_writers_change_whole` past 60 s).
+     Reproduced in a container held to two cores (the test's Linux
+     binary): every run past 10 s.  Measured there, the writer never let
+     go: each write waited for every reader holding a stripe to be run
+     again — 5–40 ms a write with 48 readers on two cores, 0.4 ms with
+     eight — and readers waiting by spinning took the processor from
+     them.  Now a waiting reader sleeps on a condition variable (woken
+     when the writer has every stripe or lets go), and the writer's hold
+     is bounded by time (5 ms; a count of tries, each a sleep, was up to
+     seconds where sleeps are coarse).  The test's deadline grows on a
+     few cores (10 s × stripes ÷ cores, 10 s here): its measure is that
+     writes go on, not how fast a small machine schedules 48 busy
+     threads.  The test now (debug build, as
+     CI runs it): two cores 18–40 s (deadline 80 s), four 2–19 s (40 s),
+     one 0.5–0.9 s, ten here 0.2–0.5 s; `readers_see_a_writers_change_whole`
+     0.1–1.6 s on each.  Why a write waits 18–40 ms on two cores, not the
+     microseconds some 46 switches to readers that each let go and sleep
+     should take, is open (issue #19).  Reads and
+     writes as before (ABBA, three rounds: ten threads 7.25–7.84 M reads
+     a second, before 7.50–7.80; group commits 10.3–13.8 k a second,
+     before 11.7–14.5 k).  9 mutants, 7 killed: readers left spinning
+     survive here (they cost only on a few cores) and the flag cleared
+     outside the condition's lock (a lost wake-up, a window of a few
+     instructions); readers not waiting, and a writer keeping no stripe,
+     are each killed alone now.
   All together (ABBA, two rounds against the commit before): ten threads
   1.95 M → 6.7–7.3 M reads a second (5.1 µs → 1.4 µs a read on a
   thread; 5.7× one thread), four 2.57 → 4.1 M; one thread 805 → 840 ns
