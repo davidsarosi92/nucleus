@@ -3462,9 +3462,9 @@ NULL` without a default) every row is rewritten, its default made for it
 the row checked.  The design is PostgreSQL 11's fast `ADD COLUMN` (a
 non-volatile default kept as the attribute's missing value).
 
-**`DROP COLUMN`** (issue #18, step 2b) of a table stored in rows alone
-(not a column copy's, not partitioned, a memory store or a chunk table,
-no column's type being changed) reads and rewrites no row: the column
+**`DROP COLUMN`** (issue #18, steps 2b and 2c) of a table stored in
+rows, in columns or in both (not partitioned, a memory store or a chunk
+table, no column's type being changed) reads and rewrites no row: the column
 leaves the definition, its place stays in the stored rows
 (`Table::gone`, the places ascending, record version 28).  A row is
 stored with a value in every place — `NULL` in a dropped column's, for a
@@ -3479,10 +3479,13 @@ old places, which read as the others.  The places go when the rows are
 written again whole — a `DROP COLUMN` or a type change that rewrites
 them (`Table::compact`); the online type change (`… CONCURRENTLY`, the
 fallback of one meeting writes) is refused while rows keep a dropped
-column's place, its transactional form compacting them.  A column copy
-(`column`, `row,column`) holds its columns by number, so its `DROP
-COLUMN` rewrites the rows, and an `ADD COLUMN` with a default on such a
-table whose rows keep dropped places writes the value into them.  The
+column's place, its transactional form compacting them.  A column
+copy's segments (`column`, `row,column`) hold each column by its place
+in a stored row too (`column_store::place`: the chunk's key, the
+segment's list of columns, its cache entries, its zone-map bounds), so a
+dropped column's chunk stays in the segments written before, passed
+over, and goes when a merge writes them again; its delta store's rows
+are rows.  The
 design is PostgreSQL's `attisdropped` (a dropped attribute stays in the
 tuples, as its documentation describes `DROP COLUMN`).
 

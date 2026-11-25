@@ -123,11 +123,11 @@ fn ddl_fails_over_a_write_committed_under_it() {
                 .unwrap_or_else(|e| panic!("{what}: {e:?}"));
             b.execute(write).unwrap_or_else(|e| panic!("{what}: {e:?}"));
             let committed = a.execute("COMMIT").map(|_| ());
-            // A column of a table stored in rows is dropped where it is
-            // stored, no row read (issue #18): the write's row, stored
+            // A column is dropped where it is stored, no row read (issue
+            // #18; in rows or columns alike): the write's row, stored
             // under the old definition, keeps the column's place, which
             // readers pass over.
-            if ddl.contains("DROP COLUMN") && !kind.contains("column") {
+            if ddl.contains("DROP COLUMN") {
                 assert_eq!(committed.map_err(|e| e.code), Ok(()), "{what}");
                 if let Some((sql, want)) = after {
                     assert_eq!(one(&mut b, sql), *want, "{what}: {sql}");

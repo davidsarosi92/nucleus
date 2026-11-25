@@ -3794,14 +3794,6 @@ fn missing_fits(txn: &dyn KvTxn, reg: &Registry, t: &Table, fill: &Value) -> Res
     if t.memory.is_some() || t.chunks.is_some() {
         return Ok(false);
     }
-    // A column copy's segments hold the columns by number, not by their
-    // places in a stored row ([`Table::gone`]).
-    if !t.gone.is_empty()
-        && !fill.is_null()
-        && (t.storage != crate::storage::ROW || !t.columnar.is_empty())
-    {
-        return Ok(false);
-    }
     if fill.is_null() {
         return Ok(col.nullable);
     }

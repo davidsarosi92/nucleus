@@ -13287,6 +13287,32 @@ did not run on the workers without statistics (`rows=1000` estimated).
   keyword at the call's own depth (`Parser::holds_at_depth`: `FROM`,
   `IN`, `PLACING`, `FOR`, `VALUE` or `:`), parsed once
   (`calls_with_special_forms_nested_parse_once`, 40 deep).
+- Issue #18, step 2c — `DROP COLUMN` in place on column tables too.
+  After step 2b every `DROP COLUMN` failing `40001` was the column
+  table's (`bc`): a column copy held its columns by number, so its drop
+  still read and rewrote the rows.  Now a segment holds each column by
+  its place in a stored row (`column_store::place`, `Table::stored_at`):
+  the chunk's key, the segment's list of columns, its cache entries, the
+  bound a zone map prunes by, the missing value of a column added after;
+  a dropped column's chunk stays in the segments written before, passed
+  over, and goes with them when a merge writes them again.  `column` and
+  `row,column` tables drop in place (`alter::drops_in_place`); the
+  `ADD COLUMN` that wrote a default into such a table's rows when they
+  kept dropped places writes none now.  *Found on the way*:
+  `nc_catalog.segments` counted a segment's bytes over columns
+  `0..n`, not the ones it holds — wrong for a segment written after a
+  drop.  Measured (bank tool, `DDL=1 BYTABLE=1`, seeds 2 and 4, 120 s, 8
+  clients): `DROP COLUMN` 10 and 15 succeeding, none failing (before: 8
+  and 7 succeeding, 2 and 8 failing, all on `bc`); checks clean.  Tests:
+  `tests/drop_column.rs` over four storages (`column` and `row,column`
+  added; the twin rewritten is now a partitioned table, a part in rows
+  and a part in columns; a type change checked against the table itself
+  before), and segments written before and after a drop (a zone-map
+  bound past the dropped place, a column added after read in a few rows
+  and through an index, the bytes of a segment with a gap);
+  `tests/ddl_race.rs`'s `DROP COLUMN` commits on every kind.  11 of 12
+  mutants killed; the one left (whether a column is already decoded,
+  by number) changes only which read path is taken.
 - Issue #18, step 3 — constraints under writes.  A second DDL mix in the
   bank tool (`DDL=2`: `SET`/`DROP NOT NULL`, `ADD`/`DROP CONSTRAINT …
   CHECK`, `… UNIQUE`) measured before: `ADD UNIQUE` 1 and 3 succeeding,

@@ -286,6 +286,14 @@ fn bad(what: &str) -> Error {
 
 // ------------------------------------------------------------------- keys
 
+/// The number a segment holds column `col` of `t` under: its place in a
+/// stored row ([`Table::stored_at`]) — a dropped column's place is not
+/// taken again, so a segment written before the drop holds the others
+/// under the same numbers.
+fn place(t: &Table, col: usize) -> u16 {
+    t.stored_at(col) as u16
+}
+
 fn chunk_key(t: &Table, seg: u64, col: u16) -> Vec<u8> {
     let mut k = t.index_prefix(SEGMENTS);
     k.extend_from_slice(&seg.to_be_bytes());
@@ -414,10 +422,11 @@ impl Segment {
         })
     }
 
-    /// Whether `bounds` rule out every row of it.
-    fn excluded(&self, bounds: &[ColumnBound]) -> bool {
+    /// Whether `bounds` (on columns of `t`) rule out every row of it.
+    fn excluded(&self, t: &Table, bounds: &[ColumnBound]) -> bool {
         bounds.iter().any(|b| {
-            let Some(at) = self.cols.iter().position(|&c| usize::from(c) == b.column) else {
+            let col = place(t, b.column);
+            let Some(at) = self.cols.iter().position(|&c| c == col) else {
                 return false;
             };
             let (lo, hi, nulls) = &self.stats[at];
@@ -1008,8 +1017,11 @@ fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> 
 }
 
 /// Whether column `col` of `seg` is in the cache decoded.
-fn decoded(seg: &Segment, col: usize) -> bool {
-    matches!(cache_get(&(seg.id, col as u16)), Some(Decoded::Column(_)))
+fn decoded(t: &Table, seg: &Segment, col: usize) -> bool {
+    matches!(
+        cache_get(&(seg.id, place(t, col))),
+        Some(Decoded::Column(_))
+    )
 }
 
 /// [`value_of`] for each of `rows`: the column looked up in the cache, and
@@ -1021,19 +1033,20 @@ fn values_of(
     col: usize,
     rows: &[usize],
 ) -> Result<Vec<Value>> {
-    let mut values = if !seg.cols.contains(&(col as u16)) {
+    let at = place(t, col);
+    let mut values = if !seg.cols.contains(&at) {
         // A column added after the segment was written: its value for
         // the rows before (`Table::missing`), else NULL.
-        vec![t.missing_value(0, col); rows.len()]
-    } else if let Some(Decoded::Column(v)) = cache_get(&(seg.id, col as u16)) {
+        vec![t.missing_value(0, usize::from(at)); rows.len()]
+    } else if let Some(Decoded::Column(v)) = cache_get(&(seg.id, at)) {
         rows.iter().map(|&i| v.value(i)).collect()
     } else {
-        let key = (seg.id, col as u16 | RAW);
+        let key = (seg.id, at | RAW);
         let raw = match cache_get(&key) {
             Some(Decoded::Raw(b)) => b,
             _ => {
                 let b = Arc::new(
-                    txn.get(&chunk_key(t, seg.id, col as u16))?
+                    txn.get(&chunk_key(t, seg.id, at))?
                         .ok_or_else(|| bad("a column is missing"))?,
                 );
                 cache_insert(key, Decoded::Raw(Arc::clone(&b)));
@@ -1057,20 +1070,21 @@ fn values_of(
 
 /// [`value_of`] as stored (an enum's value without its label).
 fn stored_value(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> Result<Value> {
-    if !seg.cols.contains(&(col as u16)) {
-        return Ok(t.missing_value(0, col));
+    let at = place(t, col);
+    if !seg.cols.contains(&at) {
+        return Ok(t.missing_value(0, usize::from(at)));
     }
-    let decoded = cache_get(&(seg.id, col as u16));
+    let decoded = cache_get(&(seg.id, at));
     if let Some(Decoded::Column(v)) = decoded {
         return Ok(v.value(i));
     }
-    let key = (seg.id, col as u16 | RAW);
+    let key = (seg.id, at | RAW);
     let raw = cache_get(&key);
     let raw = match raw {
         Some(Decoded::Raw(b)) => b,
         _ => {
             let b = Arc::new(
-                txn.get(&chunk_key(t, seg.id, col as u16))?
+                txn.get(&chunk_key(t, seg.id, at))?
                     .ok_or_else(|| bad("a column is missing"))?,
             );
             cache_insert(key, Decoded::Raw(Arc::clone(&b)));
@@ -1109,12 +1123,13 @@ fn column_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Ar
 
 /// [`column_of`] as stored (an enum's values without their labels).
 fn stored_column(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Arc<Vector>> {
-    if !seg.cols.contains(&(col as u16)) {
+    let at = place(t, col);
+    if !seg.cols.contains(&at) {
         // A column added after the segment was written: its value for the
         // rows before (`Table::missing`), else NULL.
-        return Ok(Arc::new(Vector::Const(t.missing_value(0, col))));
+        return Ok(Arc::new(Vector::Const(t.missing_value(0, usize::from(at)))));
     }
-    match cached(txn, t, seg, col as u16)? {
+    match cached(txn, t, seg, at)? {
         Decoded::Column(v) => Ok(v),
         Decoded::Keys(_) | Decoded::Raw(_) | Decoded::Entry(_) => Err(bad("a column")),
     }
@@ -1438,15 +1453,16 @@ fn write_segment(
     }
     let id = segment_id(t, &chunks);
     txn.put(&chunk_key(t, id, KEYS), &chunks[0])?;
+    // Each column under its place ([`place`]).
     for (&c, chunk) in cols.iter().zip(&chunks[1..]) {
-        txn.put(&chunk_key(t, id, c as u16), chunk)?;
+        txn.put(&chunk_key(t, id, place(t, c)), chunk)?;
     }
     let seg = Segment {
         id,
         first: keys[0].clone(),
         last: keys[n - 1].clone(),
         rows: n,
-        cols: cols.iter().map(|&c| c as u16).collect(),
+        cols: cols.iter().map(|&c| place(t, c)).collect(),
         stats,
     };
     txn.put(&dir_key(t, &seg.last), &seg.encode(t))?;
@@ -1742,7 +1758,7 @@ impl<'a> Merged<'a> {
         } = scan;
         let segs = segments(txn, t, &start, end.as_deref())?
             .into_iter()
-            .filter(|s| !s.excluded(&bounds))
+            .filter(|s| !s.excluded(t, &bounds))
             .collect();
         let delta =
             delta_items(txn, t, &start, end.as_deref(), wanted, validated, delta)?.peekable();
@@ -2065,7 +2081,7 @@ impl BatchSource for Merged<'_> {
                 Rc::new(v.undict(&Sel::All(k)).unwrap_or(v))
             } else if !self.wants(c) || k == 0 {
                 null()
-            } else if k * SPARSE <= len && !decoded(&seg, c) {
+            } else if k * SPARSE <= len && !decoded(self.t, &seg, c) {
                 // A few rows of a column not decoded: read where they lie.
                 Rc::new(Vector::typed(values_of(self.txn, self.t, &seg, c, &rows)?))
             } else {
@@ -2255,8 +2271,14 @@ fn check_segments(
             ));
         }
         last = Some(seg.last.clone());
+        // By the numbers it holds them under (a dropped column's too).
         for &c in &seg.cols {
-            match column_of(txn, t, &seg, usize::from(c)) {
+            let column = match cached(txn, t, &seg, c) {
+                Ok(Decoded::Column(v)) => Ok(v),
+                Ok(_) => Err(bad("a column")),
+                Err(e) => Err(e),
+            };
+            match column {
                 Ok(v) if vector_len(&v) == seg.rows => {}
                 Ok(_) => problems.push(format!(
                     "{}: segment {:x} column {c} has the wrong length",
@@ -3042,7 +3064,7 @@ pub fn segment_info(txn: &dyn KvTxn, t: &Table) -> Result<Vec<(u64, usize, usize
     for seg in segments(txn, t, &start, end.as_deref())? {
         let gone = deleted(txn, t, &seg)?.len();
         let mut bytes = 0;
-        for c in (0..seg.stats.len() as u16).chain([KEYS]) {
+        for &c in seg.cols.iter().chain(&[KEYS]) {
             bytes += txn.get(&chunk_key(t, seg.id, c))?.map_or(0, |b| b.len());
         }
         out.push((seg.id, seg.rows, gone, bytes));

@@ -793,12 +793,17 @@ fn drop_column(
 }
 
 /// Whether a column of `t` is dropped where it is stored, no row read or
-/// rewritten ([`Table::gone`]; issue #18): a table stored in rows alone
-/// (a column copy's segments hold columns by number), not partitioned,
-/// nor a memory store or a chunk table, no column's type being changed.
+/// rewritten ([`Table::gone`]; issue #18): a table stored in rows, in
+/// columns or in both (segments hold columns by their places in a stored
+/// row too), not partitioned, nor a memory store or a chunk table, no
+/// column's type being changed.
 fn drops_in_place(t: &Table) -> bool {
-    t.storage == crate::storage::ROW
-        && t.columnar.is_empty()
+    [
+        crate::storage::ROW,
+        crate::column_store::COLUMN,
+        crate::column_store::ROW_COLUMN,
+    ]
+    .contains(&t.storage.as_str())
         && t.partition_by.is_none()
         && t.partition_of.is_none()
         && t.memory.is_none()

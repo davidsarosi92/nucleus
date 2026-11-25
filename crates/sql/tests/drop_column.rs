@@ -1,7 +1,7 @@
-//! A column dropped where it is stored (issue #18, step 2b): the rows keep
-//! its place, readers pass over it, none rewritten — compared with the
-//! same changes on a twin table whose rows are rewritten (a column
-//! table's), through the read paths (a row at a time and vectorized,
+//! A column dropped where it is stored (issue #18, steps 2b and 2c): the
+//! rows keep its place, a column table's segments its column, readers
+//! pass over it, none rewritten — compared with the same changes on a
+//! twin table whose rows are rewritten (a partitioned table's), through the read paths (a row at a time and vectorized,
 //! indexes, values stored out of line), the writes that follow, columns
 //! added after, a change of storage and a reopen; and a write committed
 //! while the drop runs does not fail it.
@@ -15,7 +15,12 @@ use nucleus_platform::sim::SimPlatform;
 use nucleus_sql::{Output, Session, parse};
 
 /// The storages whose columns are dropped in place.
-const IN_PLACE: &[&str] = &["", "WITH (engine = lsm)"];
+const IN_PLACE: &[&str] = &[
+    "",
+    "WITH (engine = lsm)",
+    "WITH (storage = column)",
+    "WITH (storage = 'row,column')",
+];
 
 fn open_on(p: &Arc<SimPlatform>) -> Arc<dyn Kv> {
     Arc::new(Database::open_on(p.clone(), Path::new("/db"), Options::default()).unwrap())
@@ -67,7 +72,13 @@ fn compare(s: &mut Session, queries: &[&str], what: &str) {
 fn setup(s: &mut Session, storage: &str) {
     s.execute("DROP TABLE IF EXISTS x; DROP TABLE IF EXISTS r")
         .unwrap();
-    for (t, with) in [("x", storage), ("r", "WITH (storage = column)")] {
+    // `r` partitioned, a part in rows and a part in columns: its parts'
+    // rows are rewritten.
+    let r = " PARTITION BY RANGE (id); \
+             CREATE TABLE r1 PARTITION OF r FOR VALUES FROM (MINVALUE) TO (3000); \
+             CREATE TABLE r2 PARTITION OF r FOR VALUES FROM (3000) TO (MAXVALUE) \
+               WITH (storage = column)";
+    for (t, with) in [("x", storage), ("r", r)] {
         s.execute(&format!(
             "CREATE TABLE {t} (id int PRIMARY KEY, a int, b text, c text, d numeric(8, 2)) {with}; \
              CREATE INDEX {t}_a ON {t} (a); CREATE INDEX {t}_ai ON {t} (a, id); \
@@ -151,13 +162,25 @@ fn a_column_dropped_in_place_reads_and_writes_as_one_rewritten() {
         let kv = open_on(&p);
         let mut s = Session::new(Arc::clone(&kv));
         compare(&mut s, after, &format!("{storage} reopened"));
-        // To a column table and back: its segments hold the columns.
+        // To rows, to a column table and back: segments hold the columns
+        // by their places too.
+        s.execute("ALTER TABLE x SET STORAGE row").unwrap();
+        compare(&mut s, after, &format!("{storage} as rows"));
         s.execute("ALTER TABLE x SET STORAGE column").unwrap();
         compare(&mut s, after, &format!("{storage} as columns"));
-        // A column added there: its segments hold columns by number, so
-        // the rows take its value written.
+        // A column added there: its value left for the segments' rows.
         both(&mut s, "ALTER TABLE TT ADD COLUMN g int DEFAULT 9");
         compare(&mut s, after, &format!("{storage} as columns, added"));
+        both(&mut s, "UPDATE TT SET g = 10 WHERE id % 5 = 0");
+        both(&mut s, "ALTER TABLE TT DROP COLUMN c");
+        assert_eq!(gone(&kv, "x"), [1, 2, 3], "{storage}");
+        let after: &[&str] = &[
+            "SELECT * FROM TT ORDER BY id",
+            "SELECT e, f, g, count(*), sum(d) FROM TT GROUP BY e, f, g ORDER BY e, f, g",
+            "SELECT id, e, g FROM TT WHERE e = 5 AND id BETWEEN 100 AND 130 ORDER BY id",
+            "SELECT id, f, g FROM TT WHERE id = 6050",
+        ];
+        compare(&mut s, after, &format!("{storage} as columns, dropped"));
         s.execute("ALTER TABLE x SET STORAGE row").unwrap();
         compare(&mut s, after, &format!("{storage} as rows again"));
         check(&kv, &s, &format!("{storage} converted"));
@@ -173,9 +196,20 @@ fn a_column_dropped_in_place_reads_and_writes_as_one_rewritten() {
             Err("0A000".into()),
             "{storage}"
         );
-        both(&mut s, "ALTER TABLE TT ALTER COLUMN e TYPE numeric(6, 1)");
+        // (A partitioned table's types are not changed: `x` against
+        // itself before.)
+        let typed: &[&str] = &[
+            "SELECT id, d, e::int, f, g FROM x ORDER BY id",
+            "SELECT e::int, g, count(*), sum(d) FROM x GROUP BY 1, 2 ORDER BY 1, 2",
+            "SELECT id, g FROM x WHERE e = 5 AND id BETWEEN 100 AND 130 ORDER BY id",
+        ];
+        let before: Vec<_> = typed.iter().map(|q| outcome(&mut s, q).unwrap()).collect();
+        s.execute("ALTER TABLE x ALTER COLUMN e TYPE numeric(6, 1)")
+            .unwrap();
         assert_eq!(gone(&kv, "x"), Vec::<usize>::new(), "{storage}");
-        compare(&mut s, after, &format!("{storage} rewritten"));
+        for (q, b) in typed.iter().zip(&before) {
+            assert_eq!(outcome(&mut s, q).unwrap(), *b, "{storage} rewritten: {q}");
+        }
         check(&kv, &s, &format!("{storage} rewritten"));
     }
 }
@@ -294,6 +328,64 @@ fn columns_dropped_under_writes_that_do_not_pause() {
             [[rounds.to_string()]],
             "{storage}: every write kept"
         );
+        check(&kv, &s, storage);
+    }
+}
+
+/// A column table's segments written before a drop and after: each holds
+/// its columns by their places — a bound on a column past the dropped
+/// place prunes by that column's range, a column added after reads its
+/// value in a few rows and in one, and a segment's bytes count every
+/// column it holds.
+#[test]
+fn segments_written_before_and_after_a_drop_read_by_place() {
+    for storage in ["WITH (storage = column)", "WITH (storage = 'row,column')"] {
+        let kv = open_on(&Arc::new(SimPlatform::new(8)));
+        let mut s = Session::new(Arc::clone(&kv));
+        s.execute(&format!(
+            "CREATE TABLE z (id int PRIMARY KEY, a int, b int, t text) {storage}; \
+             CREATE INDEX z_t ON z (t); \
+             INSERT INTO z SELECT i, i, i + 1000000, md5(i::text) FROM generate_series(1, 40000) i"
+        ))
+        .unwrap();
+        s.execute("ALTER TABLE z DROP COLUMN a; ALTER TABLE z ADD COLUMN e text DEFAULT 'x'")
+            .unwrap();
+        assert_eq!(gone(&kv, "z"), [1], "{storage}");
+        s.execute(
+            "INSERT INTO z (id, b, t, e) SELECT i, i + 1000000, md5(i::text), md5((-i)::text) \
+             FROM generate_series(40001, 80000) i",
+        )
+        .unwrap();
+        for (q, want) in [
+            ("SELECT id FROM z WHERE b = 1000005", vec![vec!["5"]]),
+            (
+                "SELECT id, e FROM z WHERE b = 1000005",
+                vec![vec!["5", "x"]],
+            ),
+            // Through the index: the rows read a key at a time.
+            (
+                "SELECT id, e FROM z WHERE t = md5('7')",
+                vec![vec!["7", "x"]],
+            ),
+            (
+                "SELECT id, e = md5('-50005') FROM z WHERE b = 1050005",
+                vec![vec!["50005", "t"]],
+            ),
+        ] {
+            assert_eq!(outcome(&mut s, q).unwrap(), want, "{storage}: {q}");
+        }
+        if !storage.contains("row") {
+            // A full segment written after holds a second text column.
+            assert_eq!(
+                outcome(
+                    &mut s,
+                    "SELECT count(*), max(bytes) * 2 > 3 * min(bytes) FROM nc_catalog.segments \
+                     WHERE table_name = 'z' AND rows = 32768"
+                )
+                .unwrap(),
+                [["2", "t"]]
+            );
+        }
         check(&kv, &s, storage);
     }
 }
