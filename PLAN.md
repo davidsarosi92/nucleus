@@ -13729,7 +13729,33 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
      one 0.5–0.9 s, ten here 0.2–0.5 s; `readers_see_a_writers_change_whole`
      0.1–1.6 s on each.  Why a write waits 18–40 ms on two cores, not the
      microseconds some 46 switches to readers that each let go and sleep
-     should take, is open (issue #19).  Reads and
+     should take, is open (issue #19).
+     That still failed CI's Windows job: 52 of 1,000 writes in 40 s.
+     The writer slept a pause between its tries, and a sleep there
+     lasts a system timer's tick (a millisecond or more), so its 5 ms
+     window held a try or a few, and each time it let go every reader
+     took its stripe again.  Reproduced without Windows: the lock's
+     sleeps made coarse (15 ms at least, a floor set only by tests) and
+     readers holding their stripes while asleep, as readers taken off a
+     few cores do.  Now the writer sleeps on a condition variable, woken
+     by a reader that lets a stripe go while it waits (the stripes tried
+     again under the condition's lock first, so no wake-up is lost), and
+     its window doubles each time it lets go, up to 32 times (readers
+     holding longer than a window took their stripes back each time: on
+     four cores 20 writes 10–14 s, doubling 0.1–0.3 s — ten cores hid
+     it).  Tests: `a_writer_is_woken_when_its_stripes_are_let_go_not_by_a_timer`
+     (100 writes under the coarse timer; each must wait a reader's hold,
+     not a tick) and `a_writer_outwaits_readers_holding_longer_than_its_window`
+     (20 writes within 5 s).  On one, two and four cores (a container,
+     three runs each) all pass: the starvation test 0.1–19 s (deadlines
+     160, 80, 40 s), the new ones 1 s and 0.02–0.13 s.  Reads and writes
+     as before (ABBA, three rounds: ten threads 7.22–7.64 M reads a
+     second, before 7.24–7.88).  Mutants: the writer polling (as
+     before), never woken, no try under the condition's lock — killed;
+     the window not growing past its 5 s on four cores in 5 of 6 runs
+     (0.02–13.7 s; CI's runners have four), not here on ten; woken
+     before the stripe is let go survives (a race of a few
+     instructions, costing a timeout).  Reads and
      writes as before (ABBA, three rounds: ten threads 7.25–7.84 M reads
      a second, before 7.50–7.80; group commits 10.3–13.8 k a second,
      before 11.7–14.5 k).  9 mutants, 7 killed: readers left spinning

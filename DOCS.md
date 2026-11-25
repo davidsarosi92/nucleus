@@ -501,10 +501,13 @@ the stripes taken kept while the others are tried again, and readers
 holding no read guard wait meanwhile, asleep on a condition variable
 (else readers coming back at once starved the writer: CI's Windows and
 iOS runners hung; and readers waiting by spinning took the processor from
-those the writer waited for: Windows and Android stalled), all let go
-after 5 ms and taken again later (so a reader that reads again never
-waits for a writer, and one waiting for a thread that reads waits a
-while at most); the tables sit in an `Arc` in
+those the writer waited for: Windows and Android stalled); the writer
+itself sleeps until a reader letting a stripe go wakes it (a writer
+polling with sleeps waited a timer's tick a try — on Windows a
+millisecond or more: 52 writes in 40 s), and lets all go after 5 ms —
+a window doubled each time — to take them again later (so a reader
+that reads again never waits for a writer, and one waiting for a
+thread that reads waits a while at most); the tables sit in an `Arc` in
 each stripe, which a writer holding them all takes out to change them.
 Ten threads' reads by key (`crates/kv/examples/lookups.rs`, 2,000,000
 keys cached) went from 1.6× one thread's speed to 5.7×: the one lock
