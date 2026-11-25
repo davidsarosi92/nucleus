@@ -2673,6 +2673,9 @@ struct Lookup<'a> {
     on: Option<&'a Expr>,
     algo: &'a JoinAlgo,
     widths: (usize, usize),
+    /// The right side as a read by its whole primary key, if it is one
+    /// (a `get` a left row, no plan built: [`crate::exec::PointLookup`]).
+    point: Option<crate::exec::PointLookup<'a>>,
 }
 
 impl Lookup<'_> {
@@ -2687,6 +2690,23 @@ impl Lookup<'_> {
             self.widths,
             cx.ctx,
             cx.outer,
+            self.point.as_ref(),
+        )
+    }
+
+    /// A left row's rows pushed onto `out` (no enclosing row), then the
+    /// error that stopped them.
+    fn into(&self, l: Row, ctx: &Ctx, out: &mut Vec<Row>) -> Result<()> {
+        crate::exec::look_up_into(
+            l,
+            self.right,
+            self.kind,
+            self.on,
+            self.algo,
+            self.widths,
+            ctx,
+            self.point.as_ref(),
+            out,
         )
     }
 
@@ -2697,7 +2717,7 @@ impl Lookup<'_> {
     /// join does (`exec::OnWorkers`): a lateral item's searches cost
     /// more than many rows' scan.
     fn apply(&self, b: Batch, cx: Cx) -> Result<Batch> {
-        let left: Vec<Row> = b.sel.iter().map(|i| b.row(i)).collect();
+        let mut left: Vec<Row> = b.sel.iter().map(|i| b.row(i)).collect();
         let mut out = Vec::new();
         let workers = crate::exec::threads_for(left.len(), crate::budget::workers());
         let shared = (workers > 1
@@ -2709,22 +2729,29 @@ impl Lookup<'_> {
         if let Some(shared) = shared {
             note_parallel_run();
             let per = left.len().div_ceil((workers * 4).min(left.len()));
-            let pieces: Vec<&[Row]> = left.chunks(per).collect();
+            // Each piece's rows taken by the worker that looks them up
+            // (each piece is run once).
+            let mut pieces = Vec::new();
+            while !left.is_empty() {
+                let rest = left.split_off(per.min(left.len()));
+                pieces.push(std::sync::Mutex::new(std::mem::replace(&mut left, rest)));
+            }
             let done = on_workers(cx.ctx, shared, workers, pieces.len(), true, &|wctx, m| {
-                let wcx = Cx {
-                    ctx: wctx,
-                    outer: None,
-                };
-                let mut rows = Vec::new();
-                for l in pieces[m] {
-                    for r in self.rows(l.clone(), wcx) {
-                        rows.push(r?);
-                    }
+                let piece =
+                    std::mem::take(&mut *pieces[m].lock().unwrap_or_else(|e| e.into_inner()));
+                let mut rows = Vec::with_capacity(piece.len());
+                for l in piece {
+                    self.into(l, wctx, &mut rows)?;
                 }
                 Ok(rows)
             });
             for piece in done {
                 out.extend(piece.ok_or_else(|| Error::internal("a piece of rows not run"))??);
+            }
+        } else if cx.outer.is_none() {
+            out.reserve(left.len());
+            for l in left {
+                self.into(l, cx.ctx, &mut out)?;
             }
         } else {
             for l in left {
@@ -2893,6 +2920,7 @@ fn chain<'p>(
                 on: on.as_ref(),
                 algo,
                 widths: (left.width(), right.width()),
+                point: crate::exec::PointLookup::of(right),
             };
             steps.push((Step::Lookup(Box::new(lookup)), plan));
             Some((scan, steps))
@@ -4349,12 +4377,16 @@ impl<'a> Morsels<'a> {
         else {
             return Ok(None);
         };
+        // A lookup a row: morsels of a few pages' rows are worth a thread
+        // (starting the lookups' threads a batch at a time cost more).
+        let fine = steps.iter().any(|(s, _)| matches!(s, Step::Lookup(_)));
         let splits = crate::storage::of(table)?.split_points(
             ctx.txn,
             table,
             &start,
             end.as_deref(),
             workers * per_worker,
+            fine,
         )?;
         if splits.is_empty() {
             return Ok(None);

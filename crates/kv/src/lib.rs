@@ -889,6 +889,18 @@ pub trait KvTxn: Send {
         Ok(Vec::new())
     }
 
+    /// [`split_points`](Self::split_points) with parts as small as a few
+    /// of the store's pages: for a scan each of whose rows costs far more
+    /// than reading it (a lookup each).  By default `split_points`'.
+    fn split_points_fine(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.split_points(start, end, parts)
+    }
+
     /// Sets `key` to `value`.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
 
@@ -1640,6 +1652,10 @@ struct LocalTxn(nucleus_txn::Transaction, u64);
 /// thousand small rows — less is not worth a thread.
 const SPLIT_MIN_LEAVES: usize = 64;
 
+/// [`SPLIT_MIN_LEAVES`] of a scan whose rows each cost a lookup: two
+/// leaves' rows — a few hundred lookups — are well worth a thread.
+const SPLIT_FINE_MIN_LEAVES: usize = 2;
+
 impl KvRead for LocalTxn {
     fn read_ts(&self) -> Timestamp {
         self.0.read_ts()
@@ -1758,6 +1774,17 @@ impl KvTxn for LocalTxn {
 
     fn split_points(&self, start: &[u8], end: Option<&[u8]>, parts: usize) -> Result<Vec<Vec<u8>>> {
         Ok(self.0.split_points(start, end, parts, SPLIT_MIN_LEAVES)?)
+    }
+
+    fn split_points_fine(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        Ok(self
+            .0
+            .split_points(start, end, parts, SPLIT_FINE_MIN_LEAVES)?)
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {

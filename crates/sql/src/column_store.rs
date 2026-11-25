@@ -2565,7 +2565,9 @@ impl TableStorage for ColumnStorage {
         start: &[u8],
         end: Option<&[u8]>,
         parts: usize,
+        fine: bool,
     ) -> Result<Vec<Vec<u8>>> {
+        let _ = fine; // a segment's rows at least
         segment_splits(txn, t, start, end, parts)
     }
 
@@ -2805,9 +2807,10 @@ impl TableStorage for HtapStorage {
         start: &[u8],
         end: Option<&[u8]>,
         parts: usize,
+        fine: bool,
     ) -> Result<Vec<Vec<u8>>> {
         if t.copy == CopyState::BuildingColumns {
-            return Ok(txn.split_points(start, end, parts)?);
+            return RowStorage.split_points(txn, t, start, end, parts, fine);
         }
         segment_splits(txn, t, start, end, parts)
     }

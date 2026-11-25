@@ -765,3 +765,41 @@ fn a_queue_s_range_vacuum_survives_a_crash_at_every_io_point() {
         });
     }
 }
+
+/// Reads by key at snapshots old and new give the model's value: keys
+/// written, overwritten and deleted at several snapshots, keys never
+/// written between them (of the same length: the entry after one is the
+/// next key's), and keys whose every version is newer than the snapshot
+/// — each read's first version found without a range where it settles
+/// the read, the versions walked where not.
+#[test]
+fn reads_by_key_at_snapshots_follow_the_model() {
+    let (_p, e) = engine();
+    let key = |i: u32| format!("k{i:05}");
+    let mut model: BTreeMap<String, String> = BTreeMap::new();
+    let mut snapshots = Vec::new();
+    let rng = SplitMix64::new(9);
+    for round in 0..5u32 {
+        let mut t = e.begin();
+        for _ in 0..600 {
+            // Even keys only: the odd ones are never written.
+            let k = key(rng.below(1000) as u32 * 2);
+            if rng.below(5) == 0 {
+                t.delete(k.as_bytes()).unwrap();
+                model.remove(&k);
+            } else {
+                let v = format!("v{round}-{}", rng.below(1000));
+                t.put(k.as_bytes(), v.as_bytes()).unwrap();
+                model.insert(k, v);
+            }
+        }
+        t.commit().unwrap();
+        snapshots.push((e.begin(), model.clone()));
+    }
+    for (t, at) in &snapshots {
+        for i in 0..2000 {
+            let k = key(i);
+            assert_eq!(get(t, &k), at.get(&k).cloned(), "{k}");
+        }
+    }
+}

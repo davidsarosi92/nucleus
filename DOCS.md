@@ -505,7 +505,12 @@ keys cached) went from 1.6× one thread's speed to 5.7×: the one lock
 word, the root's pin and latch and its shard's lock, written by every
 read, had been most of their time (the Linux kernel's big-reader lock
 and BRAVO's reader slots; LeanStore's and Umbra's version-checked
-reads, safely, as a validated copy).  A miss reads
+reads, safely, as a validated copy).  A read by key that needs only the
+first entry at or after a key — a row's newest version at a snapshot,
+where no intent is in sight — descends without a cursor
+(`BTree::seek_one`: no path kept, the entry read into buffers its thread
+keeps), a range made only where that entry does not settle it: one
+thread's reads 860 → 780 ns.  A miss reads
 the page without any (and reads again if a page was written back
 meanwhile), so threads reading cold pages do not wait on each other.
 `read_ahead(ids)` reads a run of consecutive page ids (up to 16, 128 KiB —
@@ -3241,7 +3246,21 @@ arguments alone (`TableFunction::parallel_safe`, false unless a function
 says so): each left row's call runs on a worker.  A lookup's own scan,
 by its one key value, runs a row at a time (`vector::rows` declines a
 scan by an enclosing row's key: a pipeline made for each lookup cost
-more than its few rows).
+more than its few rows) — and where it reads one row by the table's
+whole primary key, of the key columns' own types (`exec::PointLookup`),
+not even that: the key is encoded from the left row and the row read by
+the storage's `get`, the scan's filter and projection applied to it, no
+plan built and no range made (the right side's plan is built for a left
+row after all where a value is not its column's type exactly, under
+`EXPLAIN ANALYZE`, for a validated read, or with a hash join's key
+filter on the scan).  A pipeline with a lookup step is cut into morsels
+as small as two leaves' rows (`KvRead::split_points_fine`, where others
+take 64 leaves at least): a lookup costs a hundred times a row's read,
+so a left table of a few thousand rows runs on the workers once rather
+than starting the lookups' threads batch by batch.  On a probe of 20,000
+keys into 2,000,000 rows the three took a primary-key join from 46 to
+24 ms on one worker and 27.5 to 7 ms on ten, a secondary index's from
+27 to 15 ms on ten (PLAN.md, the perf phase's reads by key, step 2).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -8807,6 +8826,15 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-25 — reads by key (the perf phase, steps 1–2):** the store's
+  lock striped, the page table read without a lock, the root read from
+  the thread's own copy (ten threads' reads by key 1.95 → 7 M a
+  second); a lookup join's right side read by its whole primary key with
+  a `get` (`exec::PointLookup`), a get's first version found without a
+  range (`BTree::seek_one`), and a pipeline with a lookup step cut into
+  morsels of two leaves (`KvRead::split_points_fine`): 20,000 keys
+  joined to 2,000,000 rows by primary key 46 → 24 ms on one worker, 27.5
+  → 7 ms on ten.
 - **2026-11-20 — found rows looked up a group at a time (the sweep):**
   where the rows an index method finds lie far apart, `entries_at`
   looks them up `GET_MANY` at a time, their descents' cache misses

@@ -1193,6 +1193,172 @@ fn parallel_lookups_agree() {
     }
 }
 
+/// A lookup join whose right side is read by its whole primary key reads
+/// each left row's row with a `get`, no plan built for it (PLAN.md, the
+/// perf phase's reads by key, step 2) — and gives what the same join of
+/// a copy without the key gives: inner, left (its condition on the right
+/// row), semi and anti joins, a filter and a projection on the right
+/// side, `NULL` and missing keys, key values no `int` holds (too big, or
+/// with a fraction: read as the plan would), a two-column key (and its
+/// first column alone, a range), and the transaction's own changes; on
+/// row and column tables, on one worker and on four.  `EXPLAIN ANALYZE`
+/// counts the lookups as the plan's.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn lookups_by_the_whole_key_read_each_row_by_a_get() {
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(19)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE big (id INT PRIMARY KEY, v INT, s TEXT) WITH (storage = {storage}); \
+             CREATE TABLE plain (id INT, v INT, s TEXT); \
+             CREATE TABLE pair (a INT, b INT, v INT, PRIMARY KEY (a, b)) \
+               WITH (storage = {storage}); \
+             CREATE TABLE pair_plain (a INT, b INT, v INT); \
+             CREATE TABLE few (k INT PRIMARY KEY, ref BIGINT, half NUMERIC, w INT); \
+             INSERT INTO big SELECT i, i * 7 % 1000, 's' || (i % 13) \
+               FROM generate_series(1, 40000) i; \
+             INSERT INTO plain SELECT * FROM big; \
+             INSERT INTO pair SELECT i % 200, i / 200, i FROM generate_series(1, 40000) i; \
+             INSERT INTO pair_plain SELECT * FROM pair; \
+             INSERT INTO few SELECT i, CASE WHEN i % 9 = 0 THEN NULL \
+               WHEN i % 31 = 0 THEN 5000000000 + i ELSE i * 137 % 45000 END, \
+               i * 137 % 45000 + CASE WHEN i % 5 = 0 THEN 0.5 ELSE 0 END, i % 4 \
+               FROM generate_series(1, 300) i; \
+             ANALYZE"
+        ))
+        .unwrap();
+        // `{t}` the keyed table, `{p}` the two-column keyed one.
+        let queries = [
+            "SELECT few.k, x.v * 2, x.s FROM few JOIN {t} x ON x.id = few.ref",
+            "SELECT few.k, x.v FROM few LEFT JOIN {t} x ON x.id = few.ref AND x.v > 300",
+            "SELECT few.k, x.v FROM few LEFT JOIN {t} x ON x.id = few.ref AND x.v + few.w > 400",
+            "SELECT few.k, x.v FROM few JOIN {t} x ON x.id = few.half WHERE few.k < 40",
+            "SELECT few.k, x.s FROM few JOIN {t} x ON x.id = few.ref WHERE x.v % 3 = 0",
+            "SELECT k FROM few WHERE EXISTS (SELECT 1 FROM {t} x WHERE x.id = few.ref AND x.v < 500)",
+            "SELECT * FROM few WHERE EXISTS (SELECT 1 FROM {t} x WHERE x.id = few.ref)",
+            "SELECT k FROM few WHERE NOT EXISTS (SELECT 1 FROM {t} x WHERE x.id = few.ref AND x.v < 500)",
+            "SELECT few.k, x.v FROM few JOIN {p} x ON x.a = few.w AND x.b = few.k",
+            "SELECT few.k, count(*) FROM few JOIN {p} x ON x.a = few.k WHERE few.k < 20 GROUP BY few.k",
+        ];
+        let sorted = |s: &mut Session, q: &str| {
+            let mut rows = outcome(s, q).unwrap();
+            rows.sort();
+            rows
+        };
+        // (The planner may join a column table's few rows by a hash.)
+        let mut loops = 0;
+        for workers in [1, 4] {
+            let mut s = session(&db, 1024);
+            s.execute(&format!("SET parallel_workers = {workers}"))
+                .unwrap();
+            for changed in [false, true] {
+                if changed {
+                    s.execute(
+                        "BEGIN; \
+                         UPDATE big SET v = v + 1 WHERE id % 10 = 0; \
+                         UPDATE plain SET v = v + 1 WHERE id % 10 = 0; \
+                         DELETE FROM big WHERE id % 11 = 0; \
+                         DELETE FROM plain WHERE id % 11 = 0; \
+                         INSERT INTO big VALUES (45001, 1, 'new'); \
+                         INSERT INTO plain VALUES (45001, 1, 'new'); \
+                         UPDATE few SET ref = 45001 WHERE k = 5",
+                    )
+                    .unwrap();
+                }
+                for q in queries {
+                    let keyed = q.replace("{t}", "big").replace("{p}", "pair");
+                    let plain = q.replace("{t}", "plain").replace("{p}", "pair_plain");
+                    let plan = outcome(&mut s, &format!("EXPLAIN {keyed}")).unwrap();
+                    let looked_up = plan.iter().any(|l| l[0].contains("Index Nested Loop"));
+                    loops += usize::from(looked_up);
+                    let before = nucleus_sql::exec::point_lookups();
+                    let got = sorted(&mut s, &keyed);
+                    let read = nucleus_sql::exec::point_lookups() - before;
+                    assert_eq!(
+                        got,
+                        sorted(&mut s, &plain),
+                        "{storage}, {workers} workers, changed {changed}: {keyed}"
+                    );
+                    assert!(!got.is_empty(), "{keyed}");
+                    // The first column of a two-column key is a range; a
+                    // numeric key is not an `int` column's exactly.
+                    if looked_up && !keyed.contains("count(*)") && !keyed.contains("half") {
+                        assert!(read > 0, "{storage}: {keyed}: read by a get");
+                    }
+                }
+                if changed {
+                    s.execute("ROLLBACK").unwrap();
+                }
+            }
+        }
+        // Profiled, the plan built a left row, its rows counted.
+        let profiled = outcome(
+            &mut s,
+            "EXPLAIN ANALYZE SELECT few.k, x.v FROM few JOIN big x ON x.id = few.ref",
+        )
+        .unwrap();
+        let scan = profiled
+            .iter()
+            .find(|l| l[0].contains("Index Scan using primary key on big"))
+            .map(|l| l[0].clone());
+        if let Some(scan) = scan {
+            assert!(scan.contains("loops=300"), "{storage}: {scan}");
+            assert!(!scan.contains("actual rows=0 "), "{storage}: {scan}");
+        }
+        let want = if storage == "row" { 40 } else { 8 };
+        assert!(loops >= want, "{storage}: {loops} index nested loops");
+    }
+}
+
+/// A pipeline whose rows each cost a lookup (an index nested loop) is
+/// cut into morsels of a few pages' rows: a few thousand left rows — a
+/// scan too small for morsels of its own — run on the workers once, not
+/// a batch at a time (each batch's lookups started their threads again).
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn lookup_pipelines_cut_few_rows_into_morsels() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(23)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE big (id INT PRIMARY KEY, v INT); \
+         CREATE TABLE few (k INT PRIMARY KEY, ref INT); \
+         INSERT INTO big SELECT i, i % 1000 FROM generate_series(1, 200000) i; \
+         INSERT INTO few SELECT i, i * 67 % 200000 + 1 FROM generate_series(1, 3000) i; \
+         ANALYZE",
+    )
+    .unwrap();
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    for q in [
+        "SELECT count(*), sum(big.v) FROM few JOIN big ON big.id = few.ref",
+        "SELECT few.k, big.v FROM few JOIN big ON big.id = few.ref WHERE big.v < 10 ORDER BY 1",
+    ] {
+        let plan = outcome(&mut many, &format!("EXPLAIN {q}")).unwrap();
+        assert!(
+            plan.iter().any(|l| l[0].contains("Index Nested Loop")),
+            "{q}: {plan:?}"
+        );
+        let before = nucleus_sql::vector::parallel_runs_here();
+        let got = outcome(&mut many, q);
+        let runs = nucleus_sql::vector::parallel_runs_here() - before;
+        assert_eq!(got, outcome(&mut one, q), "{q}");
+        assert_eq!(runs, 1, "{q}: the lookups ran on the workers once");
+    }
+}
+
 /// An index nested loop's blocks of few left rows run on the calling
 /// thread — a recursive query's rounds of a row or two each started
 /// threads — with the rows and the errors they would have on workers.

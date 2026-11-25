@@ -995,3 +995,65 @@ fn a_root_read_from_a_copy_follows_its_changes() {
         }
     }
 }
+
+/// A read of the first entry at or after a key without a range
+/// (`BTree::seek_one`) finds what a range's first entry is — its key and
+/// its value, inline or overflowing its leaf — or says its leaf has none
+/// past the key; on a tree of one leaf, and on one of many levels whose
+/// root is read from the thread's copy, as it changes.
+#[test]
+fn a_first_entry_read_alone_is_a_ranges_first() {
+    let p = platform(37);
+    let mut tree = new_tree(&p, 4096);
+    let k = |i: u32| format!("key{i:08}").into_bytes();
+    let value = |i: u32| {
+        let n = if i.is_multiple_of(61) {
+            9000
+        } else {
+            (i % 40) as usize
+        };
+        vec![(i % 251) as u8; n]
+    };
+    let check = |tree: &BTree, probe: &[u8]| -> bool {
+        let mut found = nucleus_storage::btree::Found::default();
+        tree.seek_one(probe, &mut found).unwrap();
+        let first = tree
+            .range(Bound::Included(probe), Bound::Unbounded)
+            .unwrap()
+            .next()
+            .map(|e| e.unwrap());
+        if found.at {
+            assert_eq!(Some((found.key.clone(), found.value.clone())), first);
+        }
+        found.at
+    };
+    let rng = SplitMix64::new(5);
+    let mut keys = 0u32;
+    for round in 0..4u32 {
+        let n = if round == 0 { 20 } else { 15_000 };
+        for _ in 0..n {
+            let i = rng.below(1_000_000) as u32 * 2;
+            tree.insert(&k(i), &value(i)).unwrap();
+            keys += 1;
+        }
+        if round == 2 {
+            commit(&tree).unwrap();
+        }
+        let (mut at, mut tried) = (0, 0);
+        for _ in 0..3000 {
+            // Keys present, and keys between (odd: never inserted).
+            let i = rng.below(2_000_001) as u32;
+            at += usize::from(check(&tree, &k(i)));
+            tried += 1;
+        }
+        // Past the last key: none, anywhere.
+        let mut found = nucleus_storage::btree::Found::default();
+        tree.seek_one(b"z", &mut found).unwrap();
+        assert!(!found.at);
+        // Most probes end in a leaf with an entry past them.
+        assert!(
+            at * 10 > tried * 9,
+            "round {round}: {at} of {tried} ({keys} keys)"
+        );
+    }
+}

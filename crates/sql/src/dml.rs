@@ -2380,9 +2380,14 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
         let workers = crate::budget::workers();
         let shared = ro.shared().filter(|_| workers > 1);
         let cuts = match shared {
-            Some(_) => {
-                storage.split_points(ro, table, &rows_prefix, rows_end.as_deref(), BUILD_PARTS)?
-            }
+            Some(_) => storage.split_points(
+                ro,
+                table,
+                &rows_prefix,
+                rows_end.as_deref(),
+                BUILD_PARTS,
+                false,
+            )?,
             None => Vec::new(),
         };
         if let (Some(shared), false) = (shared, cuts.is_empty()) {

@@ -4652,6 +4652,53 @@ impl Iterator for Scan<'_> {
     }
 }
 
+/// [`versions_at`]'s answer from the first entry at or after `from` (the
+/// version key of `user` at the snapshot, `own` its bytes before the
+/// timestamp) — `None` where that entry does not settle it (an intent, a
+/// version newer than `ts`, an entry past its leaf, a tree with routes):
+/// the versions are then walked.  Its buffers a thread keeps.
+#[allow(clippy::type_complexity)]
+fn one(
+    tree: &Tables,
+    from: &[u8],
+    own: usize,
+    ts: u64,
+    conflict_only: bool,
+) -> Result<Option<(bool, Option<Option<Vec<u8>>>)>> {
+    thread_local! {
+        static FOUND: std::cell::RefCell<nucleus_storage::btree::Found> =
+            std::cell::RefCell::new(Default::default());
+    }
+    FOUND.with(|f| {
+        let mut fresh = Default::default();
+        let mut held = f.try_borrow_mut();
+        let found = match held.as_deref_mut() {
+            Ok(f) => f,
+            Err(_) => &mut fresh, // a look inside a look: its own
+        };
+        if !tree.seek_one(from, found)? || !found.at {
+            return Ok(None);
+        }
+        let key = &found.key;
+        if key.len() < own || key[..own] != from[..own] {
+            // Another key's entry: no version of `user` from `from` on.
+            return Ok(Some((false, None)));
+        }
+        if key.len() != own + 8 {
+            return Err(Error::Corrupt("undecodable version key"));
+        }
+        let vts = u64::MAX - u64::from_be_bytes(key[own..].try_into().expect("eight bytes"));
+        if intent_of(vts).is_some() || (!conflict_only && vts > ts) {
+            return Ok(None);
+        }
+        if conflict_only {
+            return Ok(Some((vts > ts, None)));
+        }
+        let v = decode_value(&found.value).ok_or(Error::Corrupt("bad version value"))?;
+        Ok(Some((false, Some(v.map(<[u8]>::to_vec)))))
+    })
+}
+
 /// [`Inner::look`] where no intent is in sight and no gap is wanted — every
 /// read of a key by its primary key outside a writing transaction: the
 /// newest version of `user` at or below `ts` (`conflict_only`: whether a
@@ -4687,6 +4734,12 @@ fn versions_at(
         let start = if conflict_only { u64::MAX } else { ts };
         from.extend_from_slice(&[0, 0]);
         from.extend_from_slice(&(u64::MAX - start).to_be_bytes());
+        // The first entry from `from` alone, where it is the answer: no
+        // range made (its cursor and buffers were most of a read's
+        // allocations).
+        if let Some(found) = one(tree, from, own, ts, conflict_only)? {
+            return Ok(found);
+        }
         let mut scan = tree.range(Bound::Included(from), Bound::Excluded(to))?;
         while scan.next_key_into(key)? {
             if key.len() != own + 8 || key[..own] != from[..own] {

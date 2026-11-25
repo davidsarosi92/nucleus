@@ -578,6 +578,62 @@ impl BTree {
         }
     }
 
+    /// The first entry at or after `key`, into `found` (its buffers
+    /// reused): `found.at` false where the leaf the key's descent ends in
+    /// has none past it (a caller then reads a range).  A cursor's descent
+    /// without its path — nothing allocated, where a range's cursor, its
+    /// end and its buffers were most of a read by key's allocations
+    /// (PLAN.md, the perf phase's reads by key, step 2).
+    pub fn seek_one(&self, key: &[u8], found: &mut Found) -> Result<()> {
+        let mut id = self.root;
+        loop {
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            // An internal node from this thread's copy, if it has one.
+            let step = |page: &Page| -> Result<Option<PageId>> {
+                let v = View::new(page).map_err(corrupt)?;
+                if v.is_leaf() {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    v.child(v.child_index(key).map_err(corrupt)?)
+                        .map_err(corrupt)?,
+                ))
+            };
+            if let Some(Some(child)) = self.pool.read_copy(id, step).transpose()? {
+                id = child;
+                continue;
+            }
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let v = View::new(&page).map_err(corrupt)?;
+            if !v.is_leaf() {
+                let child = v
+                    .child(v.child_index(key).map_err(corrupt)?)
+                    .map_err(corrupt)?;
+                if id == self.root {
+                    self.pool.remember(&r, &page);
+                }
+                id = child;
+                continue;
+            }
+            let i = v.search(key, false).map_err(corrupt)?;
+            found.at = i < v.len();
+            if !found.at {
+                return Ok(());
+            }
+            found.key.clear();
+            v.key(i).map_err(corrupt)?.append_to(&mut found.key);
+            found.value.clear();
+            return match v.value(i).map_err(corrupt)? {
+                ValRef::Overflow { first, len, raw } => {
+                    drop(page);
+                    self.read_ref(id, ValRef::Overflow { first, len, raw }, &mut found.value)
+                }
+                other => self.read_ref(id, other, &mut found.value),
+            };
+        }
+    }
+
     /// Up to `parts - 1` keys inside `(start, end)` (`end` `None`: no
     /// upper bound) that cut the range into parts of about as many leaves
     /// each — none smaller than `min_leaves` leaves; ascending.  Read from

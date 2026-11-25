@@ -13722,11 +13722,73 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
   BRAVO's reader slots (Dice & Kogan, USENIX ATC 2019), LeanStore's and
   Umbra's version-checked reads (as a validated copy: unsafe is not
   used).
-- **Step 2 — a lookup's allocations** ⬜: the SQL lookup's own costs
-  (G1 item 3 — a `BTree::range` cursor and `refill_where`'s buffers, two
-  `Transaction::get`s with `other_spans` collected, the right side's scan
-  built for each left row, malloc and free a third of the samples), and
-  ten workers' allocations serialized in the system allocator.
+- **Step 2 — an SQL lookup's own costs** ✅.  Measured on a probe of
+  20,000 keys joined to 2,000,000 rows (`count(*)` and a column's sum)
+  by the primary key and by a secondary index, on one worker and ten,
+  and the walks of G1 (a script loading the tables in a database, then
+  each query five times warm; each change alone against the binary
+  before it, ABBA).  Profiled first (`sample`): a left row's lookup built
+  the right side's plan — a vectorized pipeline, the transaction's range
+  scan and its buffers, the storage looked up by name — for its one row;
+  and on ten workers half the time was waiting and the system
+  allocator's small blocks.  Taken, in order:
+  1. *A point read* (`exec::PointLookup`): a right side that reads one
+     row by the table's whole primary key — a scan of the primary index
+     at one key, under a projection perhaps — encodes the key from the
+     left row and reads the row with the storage's `get`, its filter and
+     projection applied; the plan is built after all where a value is
+     not its column's type exactly, under `EXPLAIN ANALYZE`, for a
+     validated read or with a hash join's key filter on the scan.  The
+     primary-key join 46 → 28 ms on one worker, 27.5 → 15.6 on ten.
+  2. *A lookup's rows pushed straight into the batch* (the key in one
+     buffer of its size, no range end; a left row moved, not cloned, to
+     the worker that looks it up): about 5 % on one worker, nothing
+     measurable on ten — kept for the allocations it spares.
+  3. *Morsels of two leaves for a pipeline with a lookup step*
+     (`KvRead::split_points_fine`; others keep 64 leaves): the probe's
+     20,000 rows were one morsel, so its lookups started ten threads for
+     each batch of 1,024 rows (`on_workers`: scoped threads, 10–17 µs a
+     start) — half of ten workers' time waiting.  Ten workers: primary
+     key 15.8 → 7.4 ms, secondary index 26.5 → 16.6.
+  4. *A read's first version without a range* (`BTree::seek_one`, used
+     by `engine::versions_at`: a descent without a cursor's path, the
+     entry into buffers its thread keeps; the versions walked only where
+     the first entry does not settle it).  `lookups.rs`: one thread 861
+     and 963 → 780 ns a read (two rounds), ten threads 6.7–7.0 → 7.1–7.4
+     M reads a second; the primary-key join about 7 % on one worker,
+     7.4 → 7.0 ms on ten.
+  All together: the primary-key join 46 → 24 ms on one worker (1.9×),
+  27.5 → 7.0 on ten (3.9×; ten workers 3.4× one, was 1.7×); the
+  secondary index's 28 → 15 ms on ten, 50 on one (unchanged: its own
+  range of entries and the rows' group fetch, the next step); the walks
+  as they were (2,047 descendants 3.4 ms, the whole tree 640 ms).
+  Found on the way: a database reopened while a committed transaction's
+  intents are not yet made versions (one that spilled — a bulk load)
+  reads every key by the general look (its spans unknown after the
+  reopen: every key overlaps) — the join 36 ms where 28 vacuumed.  The
+  server vacuums such intents in the background; the embedded `nucleus
+  sql` does not, so the measurements above load, then `VACUUM`.
+  Tests: `tests/vector.rs` `lookups_by_the_whole_key_read_each_row_by_a_get`
+  (inner, left with conditions on the right row and on both, semi and
+  anti joins, a filter and a projection, `NULL`, missing, too big and
+  fractional keys, a two-column key and its first column alone, the
+  transaction's own changes; row and column tables, one worker and four;
+  against the same joins of copies without keys, and `EXPLAIN ANALYZE`'s
+  counts) and `lookup_pipelines_cut_few_rows_into_morsels`;
+  `tests/btree.rs` `a_first_entry_read_alone_is_a_ranges_first`;
+  `txn/tests/mvcc.rs` `reads_by_key_at_snapshots_follow_the_model`.
+  26 mutants, 21 killed; left: the conditions the key applies exactly
+  kept in the point read's filter (checked again, true), its validated
+  reads and its hash join's key filter (no join runs validated; a key
+  filter only spares work), and in the first-version read a version
+  newer than the snapshot and an intent taken as versions (the read
+  starts at the snapshot's key, which newer versions and intents sort
+  before; the walk it falls back to has the same checks).  Taken: HyPer's morsel-driven parallelism (Leis et al.,
+  SIGMOD 2014), already the executor's, its morsels now sized by what a
+  row costs.
+- **Step 3 — a secondary index's lookups** ⬜: a left row's entries'
+  range and its rows' fetch (50 ms for 20,000 keys on one worker, twice
+  the primary key's).
 
 ## §F2 — NoSQL layer
 

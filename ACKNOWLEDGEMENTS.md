@@ -48,7 +48,7 @@ checked against.
 ## Executor and vectorization
 
 - **Graefe's Volcano** — the first executor model. §M9.
-- **HyPer's morsel-driven parallelism (Leis et al., SIGMOD 2014); DuckDB's thread-local hash tables** — pipelines over morsels on the workers, one table per worker. §M14.20 W6; §M14.33.
+- **HyPer's morsel-driven parallelism (Leis et al., SIGMOD 2014); DuckDB's thread-local hash tables** — pipelines over morsels on the workers, one table per worker. §M14.20 W6; §M14.33; the perf phase's reads by key, step 2 (morsels sized by a row's cost: two leaves for a pipeline of lookups).
 - **Kuiper et al., "Robust External Hash Aggregation in the Solid State Age" (ICDE 2024, DuckDB); ClickHouse two-level tables** — one memory bound for an aggregate, groups spilled by hash parts. §M14.20 W6.
 - **DuckDB's salted hash table and perfect hashing; ClickHouse two-level tables** — `keytable`. §M14.20 V13.
 - **DuckDB join-filter pushdown** — a hash join's key range, list or Bloom filter narrowing the probe side's scans. §M14.20 V13.

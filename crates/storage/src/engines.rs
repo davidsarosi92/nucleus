@@ -696,6 +696,16 @@ impl Tables {
         Ok(true)
     }
 
+    /// [`BTree::seek_one`] where no route is (true); false where there
+    /// are, `found` untouched: a caller reads a range.
+    pub fn seek_one(&self, key: &[u8], found: &mut btree::Found) -> Result<bool> {
+        if !self.routes.is_empty() {
+            return Ok(false);
+        }
+        self.tree.seek_one(key, found)?;
+        Ok(true)
+    }
+
     /// The entries with keys in `(start, end)`, ascending.
     pub fn range(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Scan<'_>> {
         if self.routes.is_empty() {

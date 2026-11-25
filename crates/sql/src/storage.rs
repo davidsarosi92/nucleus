@@ -291,8 +291,9 @@ pub trait TableStorage: Send + Sync {
     }
 
     /// Up to `parts - 1` row keys inside `[start, end)` that cut it into
-    /// parts of about equal size, ascending (parallel scans).  By default
-    /// the KV's split points of the range.
+    /// parts of about equal size, ascending (parallel scans) — `fine`:
+    /// parts as small as a few pages' rows, for a scan each of whose rows
+    /// costs a lookup.  By default the KV's split points of the range.
     fn split_points(
         &self,
         txn: &dyn KvTxn,
@@ -300,9 +301,14 @@ pub trait TableStorage: Send + Sync {
         start: &[u8],
         end: Option<&[u8]>,
         parts: usize,
+        fine: bool,
     ) -> Result<Vec<Vec<u8>>> {
         let _ = t;
-        Ok(txn.split_points(start, end, parts)?)
+        Ok(if fine {
+            txn.split_points_fine(start, end, parts)?
+        } else {
+            txn.split_points(start, end, parts)?
+        })
     }
 
     /// Called after a statement wrote rows of `t` (a storage that keeps

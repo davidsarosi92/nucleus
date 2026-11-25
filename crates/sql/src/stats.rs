@@ -555,7 +555,7 @@ fn sample_table(txn: &dyn KvTxn, table: &Table, seed: u64) -> Result<Sample> {
     let workers = crate::budget::workers();
     let cuts = match txn.shared() {
         Some(_) if workers > 1 && storage.samples_in_parts() => {
-            storage.split_points(txn, table, &start, end.as_deref(), workers)?
+            storage.split_points(txn, table, &start, end.as_deref(), workers, false)?
         }
         _ => Vec::new(),
     };
