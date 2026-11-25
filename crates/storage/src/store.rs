@@ -43,7 +43,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use crate::striped::{ReadGuard, Striped};
 
 use nucleus_platform::{FileSystem, OpenMode, Platform};
 
@@ -883,8 +885,9 @@ impl Shared {
 /// One branch: its tree, its log, its writer.
 struct Branch {
     info: BranchInfo,
-    /// Its B+tree and the engines of the store's routes (§M14.28 L1).
-    tree: RwLock<Tables>,
+    /// Its B+tree and the engines of the store's routes (§M14.28 L1),
+    /// under a lock whose readers write nothing they share ([`Striped`]).
+    tree: Striped<Tables>,
     /// Writers waiting for the tree: new readers let them go first (a
     /// while), so a stream of scans does not keep a writer out.
     writers_waiting: std::sync::atomic::AtomicUsize,
@@ -1116,7 +1119,7 @@ fn open_branch(
     redo.flush(&mut tree)?;
     Ok(Branch {
         info,
-        tree: RwLock::new(tree),
+        tree: Striped::new(tree),
         writers_waiting: std::sync::atomic::AtomicUsize::new(0),
         filter: Mutex::new(None),
         wal,
@@ -1689,7 +1692,7 @@ impl Store {
         self.check()?;
         let result = b.wal.append(encoded).and_then(|lsn| {
             b.writers_waiting.fetch_add(1, Ordering::AcqRel);
-            let mut tree = b.tree.write().unwrap_or_else(|e| e.into_inner());
+            let mut tree = b.tree.write();
             b.writers_waiting.fetch_sub(1, Ordering::AcqRel);
             // The deferred puts first, while the batch's keys are at hand:
             // they are not the tree's, and no reader sees either before
@@ -1731,7 +1734,7 @@ impl Store {
         let _w = b.writer();
         self.check()?;
         b.writers_waiting.fetch_add(1, Ordering::AcqRel);
-        let mut tree = b.tree.write().unwrap_or_else(|e| e.into_inner());
+        let mut tree = b.tree.write();
         b.writers_waiting.fetch_sub(1, Ordering::AcqRel);
         // (The deferred entries first, the tree's lock held: no reader
         // sees either before it goes.)
@@ -1781,7 +1784,7 @@ impl Store {
     }
 
     /// The tree, for reading.  Hold the guard briefly: writers wait for it.
-    pub fn read(&self) -> Result<RwLockReadGuard<'_, Tables>> {
+    pub fn read(&self) -> Result<ReadGuard<'_, Tables>> {
         self.check()?;
         // A writer waiting goes first — for a few hundred yields at most
         // (a reader that holds the tree already, reading again, must not
@@ -1792,7 +1795,7 @@ impl Store {
             }
             std::thread::yield_now();
         }
-        let tree = self.b.tree.read().unwrap_or_else(|e| e.into_inner());
+        let tree = self.b.tree.read();
         // Dropped meanwhile: its pages are not its own any more.
         self.check_dropped()?;
         Ok(tree)
@@ -1837,10 +1840,7 @@ impl Store {
             let _running = self.running();
             let list: Vec<Arc<Branch>> = sh.branches().values().cloned().collect();
             let _writers: Vec<_> = list.iter().map(|b| b.writer()).collect();
-            let mut all: Vec<_> = list
-                .iter()
-                .map(|b| b.tree.write().unwrap_or_else(|e| e.into_inner()))
-                .collect();
+            let mut all: Vec<_> = list.iter().map(|b| b.tree.write()).collect();
             // Every branch has the store's routes.
             let routes = all.first().map(|t| t.routes.clone()).unwrap_or_default();
             if routes
@@ -2134,7 +2134,7 @@ impl Store {
         let sh = &*self.shared;
         let b = &self.b;
         let job = {
-            let t = b.tree.read().unwrap_or_else(|e| e.into_inner());
+            let t = b.tree.read();
             t.routes
                 .iter()
                 .zip(&t.engines)
@@ -2158,7 +2158,7 @@ impl Store {
         let mut in_flight = sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
         let installed = match result {
             Ok(Some(d)) => {
-                let mut t = b.tree.write().unwrap_or_else(|e| e.into_inner());
+                let mut t = b.tree.write();
                 let at = t.routes.iter().position(|r| r.id == route);
                 match at {
                     Some(i) if !b.dropped.load(Ordering::Acquire) => {
@@ -2278,7 +2278,7 @@ impl Store {
         for s in &mut states {
             // The deferred puts into the tree: the WAL before the
             // checkpoint, which logged them, goes.
-            let mut tree = s.0.tree.write().unwrap_or_else(|e| e.into_inner());
+            let mut tree = s.0.tree.write();
             let mut d = s.0.deferred.lock().unwrap_or_else(|e| e.into_inner());
             settle(&mut tree, &mut d)?;
             tree.prepare_engines()?;
@@ -2334,7 +2334,7 @@ impl Store {
         // without the writers held (L4a): in `Checkpoint::finish`.
         let mut saves = Vec::new();
         for (b, _, lsn, _) in &states {
-            let tables = b.tree.read().unwrap_or_else(|e| e.into_inner());
+            let tables = b.tree.read();
             for (route, engine) in tables.routes.iter().zip(&tables.engines) {
                 saves.push(Save {
                     saver: engine.saver(),
@@ -2386,7 +2386,7 @@ impl Store {
         // Its engines a copy of its parent's now (its tree shares the
         // parent's pages; an engine's state is copied).
         let engines = {
-            let pt = p.0.tree.read().unwrap_or_else(|e| e.into_inner());
+            let pt = p.0.tree.read();
             let forks: Vec<Box<dyn Engine>> = pt.engines.iter().map(|e| e.fork()).collect();
             (pt.routes.clone(), forks)
         };
@@ -2455,7 +2455,7 @@ impl Store {
         {
             // Under its tree's write lock: no reader of it meanwhile, and
             // none after (it is marked dropped first).
-            let tree = b.tree.write().unwrap_or_else(|e| e.into_inner());
+            let tree = b.tree.write();
             b.dropped.store(true, Ordering::Release);
             tree.tree.release_younger(Some(origin))?;
         }
@@ -2513,7 +2513,7 @@ impl Store {
         pager.check()?;
         let mut used = BTreeSet::new();
         for b in &list {
-            let tree = b.tree.read().unwrap_or_else(|e| e.into_inner());
+            let tree = b.tree.read();
             used.extend(tree.tree.check()?.pages);
         }
         if let Some(t) = sh.system.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -2808,7 +2808,7 @@ fn remove_stale_engine_files<'a>(
     let in_flight = sh.in_flight.lock().unwrap_or_else(|e| e.into_inner());
     let mut live = HashSet::new();
     for b in branches {
-        let tables = b.tree.read().unwrap_or_else(|e| e.into_inner());
+        let tables = b.tree.read();
         live.extend(tables.engine_files());
     }
     if !fs.exists(&edir)? {

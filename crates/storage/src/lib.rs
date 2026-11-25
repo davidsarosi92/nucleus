@@ -19,6 +19,7 @@ pub mod pager;
 pub mod scan;
 pub mod sealed;
 pub mod store;
+pub mod striped;
 pub mod wal;
 
 pub use btree::{BTree, Tails};

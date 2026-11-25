@@ -476,13 +476,36 @@ writes every dirty frame, `sync` = flush + pager commit.  The frames are
 split into up to 16 shards (at least 256 frames each; a page always in the
 shard of its id), each with its own page table, free frames, clock hand and
 reader/writer lock, so a parallel scan's workers do not queue on one lock.
-A hit only reads its shard's page table (threads whose lookups all descend
-from one root share it), a change writes it; a frame's pin count and
-reference bit are atomics, the bit written only when it changes, and the
-page table hashes a page id with one multiplication.  Each shard (with
-its hit counter) and each frame takes a 128-byte cache line of its own,
-so threads pinning neighbouring frames or finding pages in neighbouring
-shards do not write one line.  A miss reads
+A hit takes no lock: it finds the frame in its shard's index (an
+open-addressed table of atomic words, written under the shard's lock,
+read without it), pins it, and checks the frame's owner is still the
+page — an eviction (or a free) clears the owner before it looks at the
+pins, a hit pins before it looks at the owner, so one of the two sees
+the other; a page not in the index (or found changing) is looked for
+under the shard's read lock.  Hits are counted on stripes, a cache line
+each, a thread adding to its own; a frame's pin count and reference bit
+are atomics, the bit written only when it changes, and the page table
+hashes a page id with one multiplication.  Each shard and each frame
+takes a 128-byte cache line of its own, so threads pinning neighbouring
+frames or finding pages in neighbouring shards do not write one line.
+A tree's root, read by every descent, is read from the thread's own copy
+(`read_copy`; a few a thread, made the second time a root is met
+unchanged): good while its frame holds the page with the same version —
+a frame's version moves with every write latch and every page put in it
+— two loads, no pin, no latch.  A tree's pages change only under its
+store's lock held for writing, which its readers exclude, so a copy
+found good stays so while the reader holds the tree.  The store's lock
+is striped (`striped::Striped`, 16 stripes): a reader takes its thread's
+stripe's read lock, a writer every stripe's (tried all at once, let go
+and tried again later if one is held, so a reader that reads again never
+waits for a writer that waits for it); the tables sit in an `Arc` in
+each stripe, which a writer holding them all takes out to change them.
+Ten threads' reads by key (`crates/kv/examples/lookups.rs`, 2,000,000
+keys cached) went from 1.6× one thread's speed to 5.7×: the one lock
+word, the root's pin and latch and its shard's lock, written by every
+read, had been most of their time (the Linux kernel's big-reader lock
+and BRAVO's reader slots; LeanStore's and Umbra's version-checked
+reads, safely, as a validated copy).  A miss reads
 the page without any (and reads again if a page was written back
 meanwhile), so threads reading cold pages do not wait on each other.
 `read_ahead(ids)` reads a run of consecutive page ids (up to 16, 128 KiB —

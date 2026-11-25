@@ -957,3 +957,41 @@ fn a_rekeying_on_workers_rewrites_key_tails() {
     let (_, four) = run(4);
     assert_eq!(four, want);
 }
+
+/// A root a thread reads from its own copy (`BufferPool::read_copy`)
+/// follows the root's changes: one changed in place (allocated since the
+/// last commit), one replaced by a copy, a new root grown.
+#[test]
+fn a_root_read_from_a_copy_follows_its_changes() {
+    let p = platform(31);
+    let mut tree = new_tree(&p, 4096);
+    let k = |i: u32| format!("key{i:08}").into_bytes();
+    let found = |tree: &BTree, i: u32| {
+        tree.range(Bound::Included(&k(i)[..]), Bound::Unbounded)
+            .unwrap()
+            .next()
+            .map(|e| e.unwrap().0)
+            == Some(k(i))
+    };
+    for round in 0..6u32 {
+        // Every other key, then a commit (the root durable: a change
+        // copies it), then the keys between (in place: splits add
+        // children to the root as it is).
+        for i in (0..20_000).step_by(2) {
+            tree.insert(&k(round * 20_000 + i), b"v").unwrap();
+        }
+        // Read twice: copied the second time.
+        for _ in 0..3 {
+            assert!(found(&tree, round * 20_000 + 10_000));
+        }
+        if round % 2 == 0 {
+            commit(&tree).unwrap();
+        }
+        for i in (1..20_000).step_by(2) {
+            tree.insert(&k(round * 20_000 + i), b"w").unwrap();
+        }
+        for i in (0..(round + 1) * 20_000).step_by(97) {
+            assert!(found(&tree, i), "round {round}: key {i}");
+        }
+    }
+}

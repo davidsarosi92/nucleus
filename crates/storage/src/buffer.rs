@@ -20,7 +20,27 @@
 //! id: each shard's page table, free frames and clock hand behind its own
 //! lock, so threads reading different pages (a parallel scan's workers) do
 //! not queue on one.  A pool too small to split has one shard.  A miss
-//! reads the page without any lock; hits only touch their shard's briefly.
+//! reads the page without any lock.
+//!
+//! A hit takes no lock and writes nothing every thread writes: it finds
+//! the frame in the shard's index ([`Shard::find`], atomic words read,
+//! none written), pins it, and checks the frame still holds the page
+//! ([`Frame::owner`]) — an eviction clears the owner before it looks at
+//! the pins, and a hit pins before it looks at the owner, so one of the
+//! two sees the other (both sequentially consistent).  The hits are
+//! counted on a line of the thread's own ([`Stripes`]).  A lookup's
+//! threads all descend from the same root: its shard's lock and counter,
+//! written by every hit, were a third of ten threads' time.
+//!
+//! An internal node a thread descends through often is read from a copy
+//! of its own ([`BufferPool::read_copy`]), not pinned and latched — the
+//! pin and the latch of the root, written by every descent, are the next
+//! lines every thread writes.  The copy is good while the frame holds
+//! the same page unchanged: its owner and its version ([`Frame::version`],
+//! moved by every write latch and every page put in it) as when copied,
+//! two loads.  A tree's pages change only under its writer's lock, which
+//! its readers exclude, so a copy found good stays so while a reader
+//! holds the tree.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -47,7 +67,16 @@ struct Frame {
     /// out at its next hit, the buffer then left to the rest (a page in
     /// use kept, the scan's others evicted, holds 8 KiB, not 128).
     unshare: AtomicBool,
+    /// The page it holds, [`NONE`] while it holds none or is being
+    /// emptied: what a hit found in the index checks after pinning it.
+    owner: AtomicU64,
+    /// Moved by every write latch taken and every page put in it: a
+    /// thread's copy of its page is good while it is the same.
+    version: AtomicU64,
 }
+
+/// [`Frame::owner`] of a frame that holds no page.
+const NONE: u64 = u64::MAX;
 
 impl Frame {
     fn new(page: Page) -> Self {
@@ -57,16 +86,167 @@ impl Frame {
             dirty: AtomicBool::new(false),
             referenced: AtomicBool::new(false),
             unshare: AtomicBool::new(false),
+            owner: AtomicU64::new(NONE),
+            version: AtomicU64::new(0),
         }
     }
 }
 
-/// A shard's lock, and the hits found in it — counted on the line the
-/// lock already writes, not on one every thread's hits write.
+/// A thread's copies of internal nodes ([`BufferPool::read_copy`]), by a
+/// hash of their pool and page: a few, so a thread's memory stays small
+/// (a tree's root and the nodes under it are what every descent reads).
+const COPIES: usize = 16;
+
+/// A copy, or a page seen once (copied when seen again unchanged).
+struct Copy {
+    pool: u64,
+    id: PageId,
+    frame: usize,
+    version: u64,
+    page: Option<Box<Page>>,
+}
+
+thread_local! {
+    static THREAD_COPIES: std::cell::RefCell<Vec<Option<Copy>>> =
+        std::cell::RefCell::new((0..COPIES).map(|_| None).collect());
+}
+
+/// A number of its own for each pool, so copies of another pool's pages
+/// are not taken for its.
+static POOLS: AtomicU64 = AtomicU64::new(0);
+
+/// A shard: its lock, guarding what it holds, and an index of its pages
+/// a hit reads without the lock.
 #[repr(align(128))]
 struct Shard {
     inner: RwLock<Inner>,
-    hits: AtomicU64,
+    /// Its first frame (by global index).
+    start: usize,
+    /// Open addressing, linear probing: a page's entry is `(id + 1) << 24
+    /// | frame - start`, [`EMPTY`] or [`GONE`] — written under the lock
+    /// held for writing, read without it.  Only a guide: an entry read
+    /// while it changes, or one gone stale, is caught by the frame's
+    /// owner, and a page not found is looked for under the lock.  A page
+    /// id or a frame too large to encode is not entered.
+    index: Box<[AtomicU64]>,
+}
+
+const EMPTY: u64 = 0;
+const GONE: u64 = u64::MAX;
+const FRAME_BITS: u32 = 24;
+
+impl Shard {
+    /// Where `id`'s probe starts.
+    fn home(&self, id: PageId) -> usize {
+        (id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29) as usize) & (self.index.len() - 1)
+    }
+
+    /// The entry of `id`, `None` if it cannot have one.
+    fn entry(&self, id: PageId, frame: usize) -> Option<u64> {
+        let off = (frame - self.start) as u64;
+        (id.0 < (1 << (64 - FRAME_BITS)) - 2 && off < 1 << FRAME_BITS)
+            .then(|| (id.0 + 1) << FRAME_BITS | off)
+    }
+
+    /// The frame the index says holds `id`, without the lock.
+    fn find(&self, id: PageId) -> Option<usize> {
+        let key = id.0.wrapping_add(1);
+        let mask = self.index.len() - 1;
+        let mut at = self.home(id);
+        for _ in 0..self.index.len() {
+            let e = self.index[at].load(Ordering::Acquire);
+            if e == EMPTY {
+                return None;
+            }
+            if e != GONE && e >> FRAME_BITS == key {
+                return Some(self.start + (e & ((1 << FRAME_BITS) - 1)) as usize);
+            }
+            at = (at + 1) & mask;
+        }
+        None
+    }
+
+    /// Enters `id` in `frame`; the lock held for writing.
+    fn enter(&self, inner: &mut Inner, id: PageId, frame: usize) {
+        let Some(e) = self.entry(id, frame) else {
+            return;
+        };
+        let mask = self.index.len() - 1;
+        let mut at = self.home(id);
+        loop {
+            let old = self.index[at].load(Ordering::Relaxed);
+            if old == EMPTY || old == GONE {
+                if old == GONE {
+                    inner.gone -= 1;
+                }
+                self.index[at].store(e, Ordering::Release);
+                return;
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
+    /// Takes `id` out; the lock held for writing.
+    fn leave(&self, inner: &mut Inner, id: PageId) {
+        let key = id.0.wrapping_add(1);
+        let mask = self.index.len() - 1;
+        let mut at = self.home(id);
+        for _ in 0..self.index.len() {
+            let e = self.index[at].load(Ordering::Relaxed);
+            if e == EMPTY {
+                break;
+            }
+            if e != GONE && e >> FRAME_BITS == key {
+                self.index[at].store(GONE, Ordering::Release);
+                inner.gone += 1;
+                break;
+            }
+            at = (at + 1) & mask;
+        }
+        // Too many marks lengthen the probes: entered again from the table
+        // (a hit meanwhile may miss, and is looked for under the lock).
+        if inner.gone > self.index.len() / 4 {
+            for e in &*self.index {
+                e.store(EMPTY, Ordering::Release);
+            }
+            inner.gone = 0;
+            let pages: Vec<(PageId, usize)> = inner.table.iter().map(|(&i, &f)| (i, f)).collect();
+            for (i, f) in pages {
+                self.enter(inner, i, f);
+            }
+        }
+    }
+}
+
+/// A counter each thread adds to on a line of its own (by its stripe), so
+/// counting writes no line other threads write.
+struct Stripes(Box<[Stripe]>);
+
+#[repr(align(128))]
+#[derive(Default)]
+struct Stripe(AtomicU64);
+
+const STRIPES: usize = 32;
+
+impl Stripes {
+    fn new() -> Self {
+        Stripes((0..STRIPES).map(|_| Stripe::default()).collect())
+    }
+
+    fn add(&self, n: u64) {
+        thread_local! {
+            static STRIPE: usize = {
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+                NEXT.fetch_add(1, Ordering::Relaxed) % STRIPES
+            };
+        }
+        let at = STRIPE.with(|s| *s);
+        self.0[at].0.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn sum(&self) -> u64 {
+        self.0.iter().map(|s| s.0.load(Ordering::Relaxed)).sum()
+    }
 }
 
 impl std::ops::Deref for Shard {
@@ -86,6 +266,8 @@ struct Inner {
     ids: Vec<Option<PageId>>,
     free_frames: Vec<usize>,
     hand: usize,
+    /// [`GONE`] marks in the shard's index.
+    gone: usize,
 }
 
 impl Inner {
@@ -163,6 +345,9 @@ pub struct BufferPool {
     /// Locked for reading to find a page and pin it (a hit), for writing
     /// to change what the shard holds.
     shards: Box<[Shard]>,
+    /// Its number ([`POOLS`]).
+    uid: u64,
+    hits: Stripes,
     misses: AtomicU64,
     evictions: AtomicU64,
     writebacks: AtomicU64,
@@ -226,6 +411,7 @@ impl<'a> PageRef<'a> {
             return Err(Error::Immutable(self.id));
         }
         let guard = self.frame().page.write().unwrap_or_else(|e| e.into_inner());
+        self.frame().version.fetch_add(1, Ordering::Release);
         self.frame().dirty.store(true, Ordering::Release);
         Ok(guard)
     }
@@ -264,8 +450,12 @@ impl BufferPool {
                         ids: vec![None; end - start],
                         free_frames: (start..end).rev().collect(),
                         hand: start,
+                        gone: 0,
                     }),
-                    hits: AtomicU64::new(0),
+                    start,
+                    index: (0..(2 * (end - start)).next_power_of_two())
+                        .map(|_| AtomicU64::new(EMPTY))
+                        .collect(),
                 }
             })
             .collect();
@@ -273,6 +463,8 @@ impl BufferPool {
             pager,
             frames,
             shards,
+            uid: POOLS.fetch_add(1, Ordering::Relaxed),
+            hits: Stripes::new(),
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             writebacks: AtomicU64::new(0),
@@ -323,11 +515,7 @@ impl BufferPool {
     /// The counters so far.
     pub fn stats(&self) -> PoolStats {
         PoolStats {
-            hits: self
-                .shards
-                .iter()
-                .map(|s| s.hits.load(Ordering::Relaxed))
-                .sum(),
+            hits: self.hits.sum(),
             misses: self.misses.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             writebacks: self.writebacks.load(Ordering::Relaxed),
@@ -353,11 +541,21 @@ impl BufferPool {
 
     fn pin(&self, frame: usize, id: PageId) -> PageRef<'_> {
         let f = self.frame(frame);
-        f.pins.fetch_add(1, Ordering::Acquire);
+        f.pins.fetch_add(1, Ordering::SeqCst);
+        self.pinned(f, frame, id)
+    }
+
+    fn pinned(&self, f: &Frame, frame: usize, id: PageId) -> PageRef<'_> {
         // Written only when it changes: a hot page's frame is not written
         // by every thread that pins it.
         if !f.referenced.load(Ordering::Relaxed) {
             f.referenced.store(true, Ordering::Relaxed);
+        }
+        if f.unshare.load(Ordering::Relaxed)
+            && let Ok(mut page) = f.page.try_write()
+        {
+            page.unshare();
+            f.unshare.store(false, Ordering::Relaxed);
         }
         PageRef {
             pool: self,
@@ -366,25 +564,32 @@ impl BufferPool {
         }
     }
 
+    /// Page `id` pinned if the shard's index finds it — no lock taken.
+    fn hit(&self, shard: &Shard, id: PageId) -> Option<PageRef<'_>> {
+        let frame = shard.find(id)?;
+        let f = self.frames.get(frame)?.get()?;
+        f.pins.fetch_add(1, Ordering::SeqCst);
+        if f.owner.load(Ordering::SeqCst) != id.0 {
+            // Emptied, or another page's now.
+            f.pins.fetch_sub(1, Ordering::Release);
+            return None;
+        }
+        self.hits.add(1);
+        Some(self.pinned(f, frame, id))
+    }
+
     /// Pins page `id`, reading it from the pager on a miss.
     pub fn fetch(&self, id: PageId) -> Result<PageRef<'_>> {
+        let shard = self.shard(id);
+        if let Some(r) = self.hit(shard, id) {
+            return Ok(r);
+        }
         loop {
             let epoch = {
-                // A hit only reads the shard: many threads find their pages
-                // in it at once (a parallel join's lookups all descend from
-                // the same root).  Pins grow under either lock, and an
-                // eviction, which takes it for writing, sees them.
-                let shard = self.shard(id);
+                // Not in the index (or found changing): under the lock.
                 let inner = shard.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(&frame) = inner.table.get(&id) {
-                    shard.hits.fetch_add(1, Ordering::Relaxed);
-                    let f = self.frame(frame);
-                    if f.unshare.load(Ordering::Relaxed)
-                        && let Ok(mut page) = f.page.try_write()
-                    {
-                        page.unshare();
-                        f.unshare.store(false, Ordering::Relaxed);
-                    }
+                    self.hits.add(1);
                     return Ok(self.pin(frame, id));
                 }
                 self.writebacks.load(Ordering::Acquire)
@@ -395,7 +600,7 @@ impl BufferPool {
             let inner = self.lock(id);
             if let Some(&frame) = inner.table.get(&id) {
                 // Another thread read it meanwhile.
-                self.shard(id).hits.fetch_add(1, Ordering::Relaxed);
+                self.hits.add(1);
                 return Ok(self.pin(frame, id));
             }
             if self.writebacks.load(Ordering::Acquire) != epoch {
@@ -406,6 +611,73 @@ impl BufferPool {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return self.load(inner, id, page);
         }
+    }
+
+    /// `read` of this thread's copy of page `id`, if it has one still
+    /// good ([`remember`](Self::remember)); `None` otherwise — the page
+    /// is then to be fetched.  The caller holds the page's tree for
+    /// reading.
+    pub fn read_copy<R>(&self, id: PageId, read: impl FnOnce(&Page) -> R) -> Option<R> {
+        THREAD_COPIES.with(|c| {
+            let c = c.borrow();
+            let e = c[self.slot(id)].as_ref()?;
+            if e.pool != self.uid || e.id != id {
+                return None;
+            }
+            let page = e.page.as_deref()?;
+            let f = self.frames.get(e.frame)?.get()?;
+            if f.owner.load(Ordering::Acquire) != id.0
+                || f.version.load(Ordering::Acquire) != e.version
+            {
+                return None;
+            }
+            if !f.referenced.load(Ordering::Relaxed) {
+                f.referenced.store(true, Ordering::Relaxed);
+            }
+            self.hits.add(1);
+            Some(read(page))
+        })
+    }
+
+    /// Notes `page`, pinned by `r` and latched for reading, as one this
+    /// thread reads often (an internal node): copied for
+    /// [`read_copy`](Self::read_copy) the second time it is seen
+    /// unchanged — a page changed between two descents (a writer's) is
+    /// not copied each time.
+    pub fn remember(&self, r: &PageRef<'_>, page: &Page) {
+        let id = r.id;
+        let version = r.frame().version.load(Ordering::Acquire);
+        let at = self.slot(id);
+        THREAD_COPIES.with(|c| {
+            let mut c = c.borrow_mut();
+            match &mut c[at] {
+                Some(e)
+                    if e.pool == self.uid
+                        && e.id == id
+                        && e.frame == r.frame
+                        && e.version == version =>
+                {
+                    if e.page.is_none() {
+                        e.page = Some(Box::new(page.copied()));
+                    }
+                }
+                slot => {
+                    *slot = Some(Copy {
+                        pool: self.uid,
+                        id,
+                        frame: r.frame,
+                        version,
+                        page: None,
+                    });
+                }
+            }
+        });
+    }
+
+    /// The slot of page `id`'s copy.
+    fn slot(&self, id: PageId) -> usize {
+        ((id.0 ^ self.uid.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize
+            % COPIES
     }
 
     /// Whether page `id` is in a frame.
@@ -496,7 +768,25 @@ impl BufferPool {
     fn install(&self, inner: &mut Inner, frame: usize, id: PageId, dirty: bool) {
         inner.table.insert(id, frame);
         *inner.id(frame) = Some(id);
-        self.frame(frame).dirty.store(dirty, Ordering::Release);
+        let f = self.frame(frame);
+        f.dirty.store(dirty, Ordering::Release);
+        f.version.fetch_add(1, Ordering::Release);
+        f.owner.store(id.0, Ordering::SeqCst);
+        self.shard(id).enter(inner, id, frame);
+    }
+
+    /// Empties `frame` of `id` unless a hit pinned it meanwhile (whether
+    /// it did): the owner cleared first, then the pins looked at — a hit
+    /// pins first, then looks at the owner.  The shard's lock held for
+    /// writing, `frame` seen unpinned.
+    fn empty(&self, frame: usize, id: PageId) -> bool {
+        let f = self.frame(frame);
+        f.owner.store(NONE, Ordering::SeqCst);
+        if f.pins.load(Ordering::SeqCst) != 0 {
+            f.owner.store(id.0, Ordering::SeqCst);
+            return false;
+        }
+        true
     }
 
     /// Frees page `id` (see [`Pager::free`]) and drops it from the cache.
@@ -537,7 +827,7 @@ impl BufferPool {
         let mut inner = self.lock(id);
         if let Some(&frame) = inner.table.get(&id) {
             let f = self.frame(frame);
-            if f.pins.load(Ordering::Acquire) != 0 {
+            if f.pins.load(Ordering::Acquire) != 0 || !self.empty(frame, id) {
                 return Err(Error::Pinned(id));
             }
             // A page of a commit in flight, copied since: the frozen state
@@ -553,12 +843,17 @@ impl BufferPool {
                 } else {
                     drop(orphans);
                     let mut page = f.page.write().unwrap_or_else(|e| e.into_inner());
-                    self.pager.write_page(id, &mut page)?;
+                    if let Err(e) = self.pager.write_page(id, &mut page) {
+                        // Not emptied after all.
+                        f.owner.store(id.0, Ordering::SeqCst);
+                        return Err(e);
+                    }
                     self.writebacks.fetch_add(1, Ordering::Relaxed);
                 }
                 f.dirty.store(false, Ordering::Release);
             }
             inner.table.remove(&id);
+            self.shard(id).leave(&mut inner, id);
             *inner.id(frame) = None;
             self.frame(frame).dirty.store(false, Ordering::Release);
             inner.free_frames.push(frame);
@@ -582,8 +877,6 @@ impl BufferPool {
             let frame = inner.hand;
             inner.hand = if frame + 1 == end { start } else { frame + 1 };
             let f = self.frame(frame);
-            // Pins only grow under the shard's lock, which we hold for
-            // writing, so a zero seen here stays zero until we are done.
             if f.pins.load(Ordering::Acquire) != 0 {
                 continue;
             }
@@ -593,13 +886,22 @@ impl BufferPool {
             let id = inner
                 .id(frame)
                 .expect("a frame outside the free list holds a page");
+            // A hit pins without the lock: once emptied, none can.
+            if !self.empty(frame, id) {
+                continue;
+            }
             if f.dirty.load(Ordering::Acquire) {
                 let mut page = f.page.write().unwrap_or_else(|e| e.into_inner());
-                self.pager.write_page(id, &mut page)?;
+                if let Err(e) = self.pager.write_page(id, &mut page) {
+                    // Not emptied after all.
+                    f.owner.store(id.0, Ordering::SeqCst);
+                    return Err(e);
+                }
                 f.dirty.store(false, Ordering::Release);
                 self.writebacks.fetch_add(1, Ordering::Relaxed);
             }
             inner.table.remove(&id);
+            self.shard(id).leave(inner, id);
             *inner.id(frame) = None;
             self.evictions.fetch_add(1, Ordering::Relaxed);
             return Ok(frame);

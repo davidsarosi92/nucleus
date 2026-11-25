@@ -170,6 +170,58 @@ fn stress_with(
     assert!(pool.stats().evictions > evictions, "{:?}", pool.stats());
 }
 
+/// Threads reading the same pages while each read evicts another: a hit
+/// found without the lock in a frame being emptied, or holding another
+/// page by then, is not taken — every read sees its own page.  Two of
+/// the threads write each page they fetch (its own tag again), so most
+/// evictions write a page back first, a while in which a hit may come.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn shared_pages_read_under_evictions_are_their_own() {
+    // 1024 frames in four shards, 3000 pages.
+    let (_p, pool) = pool(1024);
+    let ids = make_pages(&pool, 3000);
+    pool.flush().unwrap();
+    let pool = Arc::new(pool);
+    let before = pool.stats();
+    std::thread::scope(|s| {
+        for t in 0..8u64 {
+            let (pool, ids) = (Arc::clone(&pool), &ids);
+            s.spawn(move || {
+                let rng = SplitMix64::new(t + 100);
+                for _ in 0..30_000 {
+                    // Half the reads on a few hot pages, half anywhere.
+                    let id = if rng.below(2) == 0 {
+                        ids[rng.below(8) as usize]
+                    } else {
+                        ids[rng.below(ids.len() as u64) as usize]
+                    };
+                    let r = loop {
+                        match pool.fetch(id) {
+                            Ok(r) => break r,
+                            Err(Error::PoolExhausted) => std::thread::yield_now(),
+                            Err(e) => panic!("{e}"),
+                        }
+                    };
+                    if t < 2 {
+                        write_u64_at(r.write().unwrap().payload_mut(), 0, id.0);
+                    } else {
+                        assert_eq!(read_u64_at(r.read().payload(), 0), id.0);
+                    }
+                }
+            });
+        }
+    });
+    let s = pool.stats();
+    assert!(s.evictions - before.evictions > 10_000, "{s:?}");
+    assert!(s.writebacks - before.writebacks > 5_000, "{s:?}");
+    assert_eq!(
+        s.hits + s.misses - before.hits - before.misses,
+        8 * 30_000,
+        "{s:?}"
+    );
+}
+
 #[test]
 #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn concurrent_stress_sharded() {

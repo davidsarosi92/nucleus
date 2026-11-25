@@ -72,6 +72,8 @@ checked against.
 - **FoundationDB; CockroachDB and TiDB** — SQL and other layers on an ordered transactional KV. Principle 1.
 - **LMDB and copy-on-write B-trees** — a copy-on-write B+tree with logical redo; checkpoints frozen per epoch. §M4; §M14.20 W4.
 - **LeanStore key heads (Leis et al., ICDE 2018)** — four key bytes in each slot, searched as integers. §M14.33 issue #1.
+- **Big-reader locks (Linux `brlock`, per-CPU rw-semaphores) and BRAVO (Dice & Kogan, USENIX ATC 2019)** — a reader lock a stripe, a writer taking every stripe: `striped::Striped`, the store's tree lock. Perf phase, point reads.
+- **Optimistic, version-checked reads (LeanStore, Leis et al., ICDE 2018; Umbra's versioned latches)** — a page read without its latch, checked by a version: in safe Rust as a thread's copy of a tree's root, good while its frame's owner and version are unchanged (`BufferPool::read_copy`). Perf phase, point reads.
 - **Bayer & Unterauer, prefix B-trees (1977); Graefe, *Modern B-Tree Techniques*** — a node's shared prefix stored once. §M14.20 V5.
 - **Chen, Gibbons & Mowry, pB+-trees (SIGMOD 2001)** — a leaf's cache lines touched together. §M14.33 issue #1.
 - **Group prefetching (Chen, Ailamaki, Gibbons & Mowry, ICDE 2004); AMAC (Kocberber, Falsafi & Grot, VLDB 2015); MySQL MRR** — `BTree::seek_group`. §M14.33 issue #1.

@@ -120,6 +120,11 @@ impl Page {
             if std::sync::Arc::strong_count(run) * 2 <= run.len() / PAGE_SIZE)
     }
 
+    /// A copy of its bytes, its own.
+    pub(crate) fn copied(&self) -> Self {
+        Self::from_bytes(self.raw())
+    }
+
     /// Its bytes its own (a run's page copied out).
     pub(crate) fn unshare(&mut self) {
         self.raw_mut();

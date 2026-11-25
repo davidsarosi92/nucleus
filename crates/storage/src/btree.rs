@@ -1991,9 +1991,23 @@ impl<'t> Cursor<'t> {
         at: impl Fn(&View) -> std::result::Result<usize, &'static str>,
     ) -> Result<()> {
         loop {
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            // An internal node from this thread's copy, if it has one.
+            let step = |page: &Page| -> Result<Option<(usize, PageId, usize)>> {
+                let v = View::new(page).map_err(corrupt)?;
+                if v.is_leaf() {
+                    return Ok(None);
+                }
+                let i = pick(&v).map_err(corrupt)?;
+                Ok(Some((i, v.child(i).map_err(corrupt)?, v.len() + 1)))
+            };
+            if let Some(Some((i, child, n))) = self.tree.pool.read_copy(id, step).transpose()? {
+                self.path.push((id, i, n));
+                id = child;
+                continue;
+            }
             let r = self.tree.pool.fetch(id)?;
             let page = r.read();
-            let corrupt = |reason| Error::Corrupt { page: id, reason };
             let v = View::new(&page).map_err(corrupt)?;
             if v.is_leaf() {
                 self.leaf_len = v.len();
@@ -2004,6 +2018,9 @@ impl<'t> Cursor<'t> {
             }
             let i = pick(&v).map_err(corrupt)?;
             let child = v.child(i).map_err(corrupt)?;
+            if self.path.is_empty() {
+                self.tree.pool.remember(&r, &page);
+            }
             self.path.push((id, i, v.len() + 1));
             id = child;
         }

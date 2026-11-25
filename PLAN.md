@@ -13660,6 +13660,74 @@ The planner chooses among them where they overlap (a fixed-depth pattern
 as joins, a variable one as rounds, by key when a key is given), so a
 query states what it wants, not how it is walked.
 
+### Perf phase — reads by key (started 2026-11-25)
+
+Chosen with the user after issue #18 (no GitHub issue open): reads by
+key first — a lookup 2.1 µs on one thread against PostgreSQL's 0.65,
+and lookups that did not scale over workers (§M14.34 G1, items 2–3).
+
+- **Step 1 — a read writes nothing every thread writes** ✅ (storage).
+  Measured on its own (`crates/kv/examples/lookups.rs`, new: 2,000,000
+  cached keys of a table's shape, a transaction's reads shared by
+  threads, random keys): one thread 812 ns a read; ten threads 5.1 µs a
+  read each — 1.59× one thread's reads a second, fewer than four
+  threads'.  Profiled (`sample`): every read took the store's tree lock,
+  then for each page of the descent its shard's read lock, a hit
+  counter, a pin and the page's latch — some thirty atomic writes to
+  lines every thread writes (the root's above all); `BufferPool::fetch`
+  alone 32 % of ten threads' time.  Taken apart, each measured with the
+  others in (one binary each, alternated):
+  1. *The page table read without a lock*: a shard's index of atomic
+     words beside its table, a frame's owner checked after the pin (an
+     eviction clears it before looking at the pins: Dekker's order);
+     hits counted on per-thread stripes.  Ten threads 6.3 → 6.8 M reads
+     a second (+8 %), four +2 %.
+  2. *The root from the thread's own copy* (`BufferPool::read_copy`,
+     good while its frame's owner and version are unchanged; a frame's
+     version moves with every write latch and every page put in it).
+     Without it ten threads fall back to 1.9 M reads a second: once the
+     store's lock was striped, the root's pin and latch were the line
+     every read wrote.  Copies of every internal node were tried, not
+     taken: one thread 800 → 925 ns (nodes copied again and again where
+     their slots collide, the copy itself 5 %), ten threads no faster
+     than the root's alone.
+  3. *The store's lock striped* (`striped::Striped`, 16 stripes, the
+     tables in an `Arc` a stripe; a writer tries every stripe at once and
+     never waits holding one).  The step that made the others count:
+     1.95 → 7.0 M reads a second on ten threads.
+  All together (ABBA, two rounds against the commit before): ten threads
+  1.95 M → 6.7–7.3 M reads a second (5.1 µs → 1.4 µs a read on a
+  thread; 5.7× one thread), four 2.57 → 4.1 M; one thread 805 → 840 ns
+  (within the run-to-run spread of 830–920 seen in the ablations).
+  Writes unchanged (`crates/kv/examples/bench.rs`, three ABBA rounds:
+  single-row commits 6,766 → 6,772 a second, group commits of eight
+  threads 16.7 k → 17.1 k, 500-row commits 1.28 M → 1.27 M rows a
+  second).  On SQL (`probe` of 20,000 keys joined to 2,000,000 rows by
+  an index nested loop, the walks of G1) nothing measurable yet: one
+  worker 50 ms, ten 30 ms (1.7×) before and after — profiled, ten
+  workers spend most of their time in the system allocator's small
+  blocks (`xzm_xzone_malloc_tiny`, `xzm_free`), a lookup's allocations
+  serialized across threads.  That is the next step.
+  Tests: `striped`'s own (readers see a writer's change whole; a reader
+  reading again while a writer waits), `tests/buffer.rs`
+  `shared_pages_read_under_evictions_are_their_own` (eight threads, two
+  writing, on 3,000 pages through 1,024 frames), `tests/btree.rs`
+  `a_root_read_from_a_copy_follows_its_changes`.  7 mutants: 5 killed;
+  left, the frame's version moved when a page is put in it (the owner
+  check catches a frame holding another page, and a page put back is
+  the same until written, which moves the version) and the pins looked
+  at again after the owner is cleared (the window is the few
+  instructions since the eviction's first look at them — a guard no
+  stress test reaches).  Taken: the Linux kernel's big-reader lock and
+  BRAVO's reader slots (Dice & Kogan, USENIX ATC 2019), LeanStore's and
+  Umbra's version-checked reads (as a validated copy: unsafe is not
+  used).
+- **Step 2 — a lookup's allocations** ⬜: the SQL lookup's own costs
+  (G1 item 3 — a `BTree::range` cursor and `refill_where`'s buffers, two
+  `Transaction::get`s with `other_spans` collected, the right side's scan
+  built for each left row, malloc and free a third of the samples), and
+  ten workers' allocations serialized in the system allocator.
+
 ## §F2 — NoSQL layer
 
 On the same KV contract and transaction machinery as SQL.  The query layer
