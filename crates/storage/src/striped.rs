@@ -34,14 +34,16 @@ use std::time::{Duration, Instant};
 const STRIPES: usize = 16;
 
 /// How long a writer keeps the stripes it took while it waits for the
-/// others before it lets them all go: [`SPIN_TRIES`] tries a yield each,
+/// others before it lets them all go: [`SPIN_TRIES`] tries, a short spin
+/// between them — not a yield: on Windows a yield hands the processor to
+/// a busy thread for its whole time slice (CI's runner, 48 busy readers
+/// on four cores: ~390 ms a write, the stripes free at the second try) —
 /// then asleep until a reader lets a stripe go (it wakes the writer) or
-/// [`HOLD_WINDOW`] is over — doubled each time it lets go, up to 32
-/// times (readers holding their stripes longer than a window took them
-/// again each time: on four cores 20 writes took 10–14 s, doubling
-/// 0.1–0.3 s).  Woken, not polling: a writer that slept a pause between
-/// tries waited a system timer's tick a try — on Windows a millisecond or
-/// more — and CI's Windows runner did 52 writes in 40 s.
+/// [`HOLD_WINDOW`] is over, doubled each time it lets go, up to 32 times
+/// (readers holding their stripes longer than a window took them again
+/// each time: on four cores 20 writes took 10–14 s, doubling 0.1–0.3 s).
+/// Woken, not polling with sleeps: a sleep lasts a timer's tick on some
+/// systems, and a timed wait on a condition 10–15 ms on Windows.
 const SPIN_TRIES: u32 = 32;
 const HOLD_WINDOW: Duration = Duration::from_millis(5);
 
@@ -193,7 +195,9 @@ impl<T> Striped<T> {
             // rounds.
             tries += 1;
             if tries < SPIN_TRIES {
-                std::thread::yield_now();
+                for _ in 0..16 {
+                    std::hint::spin_loop();
+                }
                 continue;
             }
             let window = HOLD_WINDOW * (1 << rounds.min(5));
@@ -416,19 +420,24 @@ mod tests {
                 });
             }
             // Each write after a pause longer than a hold, so that every
-            // reader holds its stripe again; the writes' own time summed.
-            let mut took = Duration::ZERO;
-            for _ in 0..WRITES {
-                std::thread::sleep(hold * 2);
-                let start = Instant::now();
-                *lock.write() += 1;
-                took += start.elapsed();
-            }
+            // reader holds its stripe again; the writes' own times.
+            let mut took: Vec<Duration> = (0..WRITES)
+                .map(|_| {
+                    std::thread::sleep(hold * 2);
+                    let start = Instant::now();
+                    *lock.write() += 1;
+                    start.elapsed()
+                })
+                .collect();
             stop.store(true, Ordering::Relaxed);
-            // A tick a write would be `floor` each.
+            // A tick a write would be `floor` each; the median, as a
+            // loaded machine (other tests running) makes some writes wait
+            // out a give-up's pause.
+            took.sort();
+            let median = took[took.len() / 2];
             assert!(
-                took < floor / 3 * WRITES,
-                "{WRITES} writes took {took:?}, a reader's hold {hold:?}, the timer {floor:?}"
+                median < floor / 3,
+                "a write's median {median:?}, a reader's hold {hold:?}, the timer {floor:?}"
             );
         });
         assert_eq!(*lock.read(), u64::from(WRITES));

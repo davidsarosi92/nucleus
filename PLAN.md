@@ -13755,7 +13755,29 @@ and lookups that did not scale over workers (§M14.34 G1, items 2–3).
      the window not growing past its 5 s on four cores in 5 of 6 runs
      (0.02–13.7 s; CI's runners have four), not here on ten; woken
      before the stripe is let go survives (a race of a few
-     instructions, costing a timeout).  Reads and
+     instructions, costing a timeout).
+     And that failed CI too: on Linux and macOS the new test's sum of
+     write times under load (other tests running: a writer giving up
+     waits out the coarse timer's pause), and Windows still slow (73 of
+     1,000 writes in 40 s).  Measured on Windows itself, by a branch
+     whose workflow ran the striped tests alone with counters (deleted
+     after): `sleep` is precise there (20 µs → 0.53 ms), a timed wait on
+     a condition is not (100 µs → 12 ms) — and each write took ~390 ms
+     with *one* failed try: after it the writer called `yield_now`,
+     which on Windows hands the processor to a busy reader for its whole
+     time slice (48 busy readers on four cores: a round of ~390 ms).
+     So the earlier cause was half the story.  Now the writer spins
+     (`spin_loop`, 32 tries) before it sleeps on the condition, never
+     yields: on Windows 1,000 writes in 0.73 s; one, two and four cores
+     here (three runs each, all striped tests pass): the starvation test
+     0.03–0.2, 0.2–4.1, 5.5–17 s.  The new test checks the median write
+     (a polling writer makes every write slow, load only some).  Left:
+     on Windows letting a write go costs 36–55 ms a write under eight
+     busy readers (`std::sync::RwLock` 10 ms: woken readers take the
+     processor from the writer, once for a lock, up to sixteen times
+     for the stripes) — issue #21; holding the flag until the guard
+     drops, tried, helped Windows little (109 → 81 s) and slowed Linux
+     tenfold.  Reads and
      writes as before (ABBA, three rounds: ten threads 7.25–7.84 M reads
      a second, before 7.50–7.80; group commits 10.3–13.8 k a second,
      before 11.7–14.5 k).  9 mutants, 7 killed: readers left spinning
