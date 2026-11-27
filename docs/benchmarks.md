@@ -1791,27 +1791,26 @@ value each: `tag` — `doc @> '{"tags": ["t…"]}'`, about 600 documents;
 collection with `tags[*]`, `items[*].sku`, `items[*].qty` indexes, as a
 server (its Python client, a round trip a lookup); PostgreSQL 18 native
 and tuned, one GIN index (`jsonb_path_ops`; it serves no range, so
-`qty range` is its full scan), `\timing`:
+`qty range` is its full scan), `\timing`; MongoDB 8 (`mongo:8` in Docker, its multikey indexes on
+the three fields, mongosh inside the container, its clock):
 
-| multikey | nucleus (s) | postgresql (s) |
-|---|---:|---:|
-| load | 3.00 [2.98–3.09] ±11% ⚠ | 2.22 [2.08–2.25] ±6% |
-| tag | 0.131 [0.127–0.151] ±11% ⚠ | 0.038 [0.037–0.040] ±15% ⚠ |
-| sku | 0.033 [0.033–0.039] ±43% ⚠ | 0.017 [0.016–0.017] ±10% |
-| qty range | 2.29 [2.26–2.34] ±6% | 2.93 [2.93–2.95] ±0% |
+| multikey | nucleus (s) | postgresql (s) | mongodb (s) |
+|---|---:|---:|---:|
+| load | 2.96 [2.91–3.00] ±3% | 2.28 [2.25–2.28] ±1% | 3.58 [3.45–3.85] ±6% |
+| tag | 0.137 [0.133–0.147] ±10% | 0.038 [0.037–0.039] ±7% | 0.048 [0.045–0.053] ±8% |
+| sku | 0.034 [0.032–0.047] ±42% ⚠ | 0.017 [0.016–0.019] ±17% ⚠ | 0.043 [0.042–0.044] ±7% |
+| qty range | 2.41 [2.23–2.45] ±6% | 2.92 [2.90–2.93] ±1% | 0.115 [0.113–0.118] ±5% |
 
-Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-27.2.1-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus 00fa28eff+changes — 2026-11-27T08:33:41+00:00
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-27.2.1-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew), mongodb 8 (Docker) — nucleus 7fb2d82d4 — 2026-11-27T08:39:42+00:00
 
-A lookup 3.4× PostgreSQL's time by a tag, 1.9× by a sku; a range 0.78×
-(PostgreSQL has no index for it).  MongoDB 8 (`mongo:8` in Docker, its
-multikey indexes, mongosh inside the container), one run of the script
-the same day — not through the method: Docker's VM could not hold it
-beside other containers for a second — load 20.7 s, tag 0.052 s, sku
-0.068 s, qty range 0.124 s (its index answers the range; nucleus keeps
-the condition and checks it again on each row).  Where nucleus's time
-goes: the row behind each entry fetched by its primary key, about 0.9
-µs a row (the cost of any secondary index), and a strict path's
-re-check, about 1.5 µs a row — gh #22.
+A lookup 3.6× PostgreSQL's time by a tag, 2.0× by a sku; a range 0.83×
+(PostgreSQL has no index for it), 21× MongoDB's (its index answers the
+range; nucleus keeps the condition and checks it again on each row).
+MongoDB needs about 1.5 GB free in Docker's VM: with less, mongosh is
+killed (`137`).  Where nucleus's time goes: the row behind each entry
+fetched by its primary key, about 0.9 µs a row (the cost of any
+secondary index), and a strict path's re-check, about 1.5 µs a row —
+gh #22.
 
 ## Write amplification
 

@@ -14260,10 +14260,11 @@ multi-valued one, the language decision moved to §M16's start):*
   300 random writes and an online build, `check` whole); 22 mutants,
   all killed (four after new tests).  Measured (`bench/multikey.py`,
   200,000 documents, 100 lookups, ms, nucleus / PostgreSQL 18 GIN
-  `jsonb_path_ops` / MongoDB 8 in Docker): load with the indexes 3133 /
-  2305 / 20650; a tag (~600 documents) 126 / 37 / 52; an item's sku
-  (~120) 36 / 17 / 68; a quantity range (~1,800) 2286 / 2919 (GIN
-  serves no range) / 124.  Behind the gap (gh #22): the row behind each
+  `jsonb_path_ops` / MongoDB 8 in Docker): load with the indexes 2960 /
+  2280 / 3580; a tag (~600 documents) 137 / 38 / 48; an item's sku
+  (~120) 34 / 17 / 43; a quantity range (~1,800) 2410 / 2920 (GIN
+  serves no range) / 115.  (MongoDB needs ~1.5 GB free in Docker's VM;
+  a first run beside other containers had mongosh killed, `137`.)  Behind the gap (gh #22): the row behind each
   entry fetched by its primary key, ~0.9 µs a row, the general cost of
   a secondary index (`g = 37 AND doc IS NOT NULL` 0.70 ms for 601 rows,
   0.16 ms with no fetch) where PostgreSQL's bitmap heap scan reads the
