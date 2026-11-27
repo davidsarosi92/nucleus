@@ -62,6 +62,23 @@ for (auto& doc : people.find(R"({"age": {"$gte": 30}})", o)) std::cout << doc.te
 people.update_one(R"({"name": "ann"})", R"({"$inc": {"age": 1}})", true);
 ```
 
+## Streams
+
+A stream's entries (`CREATE STREAM`; nucleus DOCS.md §8.43): appended in a
+transaction, numbered by its commit; a consumer group's next batch
+handled exactly once — the work's writes and the group's position
+committed together, a conflict with another consumer run again; a wait
+for the next entry that holds no transaction on the server:
+
+```cpp
+auto jobs = db.stream_of("jobs");
+jobs.append({"name", "image"}, {"resize", 42});
+jobs.process("workers", 100, 30000, [&](const nucleus::Result& entries) {  // seq first
+    for (auto& e : entries.rows) db.query("INSERT INTO done VALUES ($1)", {e[0]});
+});                                                                         // entries processed
+jobs.wait(0, 1000);                                                         // the newest seq
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

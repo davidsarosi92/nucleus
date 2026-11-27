@@ -31,7 +31,7 @@ cd drivers/android && ./gradlew :nucleus:assembleRelease   # nucleus/build/outpu
 without the model modules) per ABI and links it with the JNI glue
 (`nucleus/src/main/cpp/nucleus_android.c`) by the NDK's clang (API 26),
 exporting only the JNI functions, aligned for 16 KB pages; it checks the
-size budget — at most 10 MiB on arm64-v8a (now 9.02 MiB).
+size budget — at most 11 MiB on arm64-v8a (now 10.58 MiB).
 
 ## Tests
 

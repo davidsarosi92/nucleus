@@ -8,8 +8,13 @@ told another, a branch's name (`CREATE BRANCH`, DOCS.md §8.32) for a
 branch —, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
 parameters, errors with their SQLSTATE, transactions, passwords, a
-collection's documents).  They
-speak protocol version 9 (a subject's key presented for the rows its
+collection's documents, streams).  They
+speak protocol version 10 (a stream's entries — `stream_of(name)`:
+`append`, `consume` by a consumer group in the connection's
+transaction, `position`, `wait` (one `w` message, the server waiting
+without holding a transaction) and `process`, a group's next batch done
+exactly once with the work on it, in each language's case; C's
+`nc_wait_stream` and `nc_stream_process` —, DOCS.md §8.43; a subject's key presented for the rows its
 user holds the key of — `present_subject_key`, DOCS.md §8.40 — a message
 of its own, never a statement; a collection's documents by MongoDB's
 requests — `collection(name)`: `find`, `count_documents`, `insert_one`

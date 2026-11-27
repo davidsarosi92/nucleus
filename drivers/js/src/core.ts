@@ -40,8 +40,9 @@ export type { PlainValue } from "./columns.ts";
 // 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
 // a hint; 6: results stream, fetched in batches; 7: columnar results; 8: a
 // subject's key presented (presentSubjectKey); 9: requests on a
-// collection's documents (collection).
-export const PROTOCOL_VERSION = 9;
+// collection's documents (collection); 10: waiting on a stream
+// (waitStream, streamOf).
+export const PROTOCOL_VERSION = 10;
 /** Rows a stream asks the server for at a time. */
 export const DEFAULT_FETCH = 1000;
 /** Rows a columnar batch holds when none is given. */
@@ -1244,6 +1245,35 @@ export class Client {
     return new Collection(this, name);
   }
 
+  /** A stream's entries (`CREATE STREAM`, nucleus DOCS.md section 8.43):
+   * appended, consumed by a group in this connection's transaction,
+   * waited for. */
+  streamOf(name: string): StreamOf {
+    return new StreamOf(this, name);
+  }
+
+  /** Waits until stream `stream` has an entry after `after`, or
+   * `timeoutMs` has passed — one message, the server waiting without
+   * holding a transaction.  The stream's newest `seq`. */
+  waitStream(stream: string, after: number | bigint, timeoutMs: number): Promise<number> {
+    if (this.version < 10) {
+      return Promise.reject(
+        new NucleusError(`the server speaks version ${this.version} of the protocol; waiting on a stream needs 10`, "0A000"),
+      );
+    }
+    void this.active?.close();
+    const run = async (): Promise<number> => {
+      const w = new Writer().str(stream).i64(BigInt(after)).u32(timeoutMs);
+      this.socket.write(frame("w", w.bytes()));
+      const [results, error] = await this.replies();
+      if (error) throw error;
+      return Number(results[results.length - 1].rows[0][0]);
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
   /** Sends a document request (`O`) and reads its result. */
   document(op: number, name: string, parts: DocumentParts): Promise<Result> {
     if (this.version < 9) {
@@ -1598,6 +1628,89 @@ export interface UpdateResult {
   modified: number;
   /** The `_id` of the document an upsert inserted, else `null`. */
   upsertedId: Value;
+}
+
+/** A stream's entries (`Client.streamOf(name)`): `append` a row (an
+ * object by column), `consume` a group's next entries in the connection's
+ * transaction, `position`, `wait`, and `process` — a group's next batch
+ * handled exactly once. */
+export class StreamOf {
+  readonly client: Client;
+  readonly name: string;
+
+  constructor(client: Client, name: string) {
+    this.client = client;
+    this.name = name;
+  }
+
+  /** Appends an entry: `values` by column; its `seq` and `time` are the
+   * commit's.  In the connection's transaction. */
+  async append(values: Record<string, Value>): Promise<void> {
+    const names = Object.keys(values);
+    const marks = names.map((_, i) => "$" + (i + 1)).join(", ");
+    const columns = names.map((n) => ident(n)).join(", ");
+    await this.client.query(
+      "INSERT INTO " + ident(this.name) + " (" + columns + ") VALUES (" + marks + ")",
+      names.map((n) => values[n]),
+    );
+  }
+
+  /** Group `group`'s next entries, at most `limit`, as objects (`seq`
+   * first); its position moves past them in the connection's transaction
+   * — committed with the work done on them, or not at all. */
+  async consume(group: string, limit = 100): Promise<Record<string, Value>[]> {
+    const r = await this.client.query("CONSUME FROM " + ident(this.name) + " GROUP " + ident(group) + " LIMIT $1", [
+      limit,
+    ]);
+    return r.records();
+  }
+
+  /** Group `group`'s position: the last `seq` it consumed. */
+  async position(group: string): Promise<number> {
+    const r = await this.client.query("SELECT stream_position($1, $2)", [this.name, group]);
+    return Number(r.rows[0][0]);
+  }
+
+  /** `Client.waitStream` on this stream. */
+  wait(after: number | bigint, timeoutMs: number): Promise<number> {
+    return this.client.waitStream(this.name, after, timeoutMs);
+  }
+
+  /** One batch for `group`, exactly once: in a transaction, its next
+   * entries (waiting up to `timeoutMs` for one when there is none) given
+   * to `work`, which does its work on this connection; then the commit,
+   * the group's position with it.  A conflict (another consumer of the
+   * group took them) runs it again; an error of `work` rolls all back and
+   * is thrown.  How many entries were processed (0: none came in time).
+   * Not inside a transaction of the caller's. */
+  async process(
+    group: string,
+    work: (entries: Record<string, Value>[]) => Promise<void> | void,
+    options: { limit?: number; timeoutMs?: number } = {},
+  ): Promise<number> {
+    const timeout = options.timeoutMs ?? 0;
+    let waited = false;
+    for (;;) {
+      await this.client.query("BEGIN");
+      try {
+        const entries = await this.consume(group, options.limit ?? 100);
+        if (entries.length === 0) {
+          const at = await this.position(group);
+          await this.client.query("ROLLBACK");
+          if (waited || timeout === 0) return 0;
+          await this.wait(at, timeout);
+          waited = true;
+          continue;
+        }
+        await work(entries);
+        await this.client.query("COMMIT");
+        return entries.length;
+      } catch (e) {
+        if (this.client.status !== "idle") await this.client.query("ROLLBACK");
+        if (!(e instanceof NucleusError && e.code === "40001")) throw e;
+      }
+    }
+  }
 }
 
 /** A collection's documents (`Client.collection(name)`).  Filters,

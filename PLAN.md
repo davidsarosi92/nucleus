@@ -7917,6 +7917,12 @@ would use against a server.
   MB on 2026-11-23 (+420 KB: §M14.34's recursive queries and graphs,
   G1–G4), 10.50 MB now (+60
   KB: issue #18's online DDL).  iOS keeps its 10 MiB while it fits.
+  *Grown on purpose to 11 MiB on iOS too* (2026-11-28): 10,527,152
+  bytes, 41 KB past 10 MiB (+1.08 MB since 2026-11-22: §M16's
+  documents — filter documents, `find`'s forms, the `O` message — and
+  §M16.5's streams, changefeeds and the `w` wait, with the open
+  issues' fixes between); Android arm64 11,093,120 bytes the same day,
+  430 KB under its 11 MiB.
 - **Tested** on the iOS simulator (iOS 18) and an Android emulator
   (API 35, arm64 with 16 KB pages; x86_64 in CI): the Swift suite (19
   tests: the conformance cases on a database in memory and in a
@@ -14810,6 +14816,27 @@ pgmq / River (leases, visibility, dead letters).
 - **S4 — clients:** `ncp` messages to wait on a stream; every driver's
   consumer API (a group's next batch processed in a transaction, the
   offset moved with it) and producer; `ncsql`.
+  *Done:* one message, `w` (protocol version 10): the session reads the
+  stream's newest `seq` as a statement (`stream_wait(s, after, 0)`: its
+  privileges), then waits on the engine holding no transaction — `SELECT
+  stream_wait(…)` keeps its snapshot open while it waits, which holds
+  back what MVCC may clean up; appending and consuming need no message
+  (`INSERT`, `CONSUME`).  Every driver has `stream_of(name)` (Rust,
+  Python, C++; JavaScript, Java and Swift `streamOf`; `stream` was their
+  streamed results' already): `append`, `consume`, `position`, `wait`,
+  and `process` — one batch exactly once: `BEGIN`, the group's next
+  entries (waiting when there are none), the caller's work on the same
+  connection, `COMMIT` with the position; `40001` runs it again, the
+  work's error rolls all back.  C has `nc_wait_stream` and
+  `nc_stream_process` (a callback, 0 to commit).  `ncsql` has `\wait
+  <stream> [<after> [<ms>]]`.  On WebAssembly without threads the engine
+  answers a wait at once (nothing else could commit meanwhile).  The
+  iOS size budget grew to 11 MiB on the way (§M14.23 step 3).  Tests:
+  `crates/client/tests/client.rs` (two consumers over the protocol
+  processing 30 entries exactly once, a wait woken by another
+  connection's commit, the work failing, refusals), each driver's
+  `streams` conformance case (on Android and the embedded editions too)
+  and a wake-up test where a driver has threads.
 - **S5 — task queues:** `CREATE QUEUE` — tasks with priorities and a
   time they become available (delays); taking a task leases it (its own
   short transaction), finishing it in the transaction of its work,

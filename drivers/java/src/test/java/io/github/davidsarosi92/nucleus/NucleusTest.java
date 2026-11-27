@@ -524,6 +524,80 @@ public final class NucleusTest {
         }
     }
 
+    /** A stream appended, a group's batches processed exactly once with their work, waits (protocol 10). */
+    static void streams() {
+        String t = table();
+        try (NucleusClient db = db()) {
+            db.query("CREATE STREAM " + t + " (name TEXT NOT NULL, n INT)");
+            db.query("CREATE TABLE " + t + "_done (seq BIGINT PRIMARY KEY, name TEXT)");
+            StreamOf s = db.streamOf(t);
+            equal(s.await(0, 20), 0L, "nothing yet");
+            for (int i = 0; i < 5; i++) {
+                Map<String, Object> v = new java.util.LinkedHashMap<>();
+                v.put("name", "job" + i);
+                v.put("n", (long) i);
+                s.append(v);
+            }
+            equal(s.await(0, 20), 5L, "five");
+            List<Long> done = new java.util.ArrayList<>();
+            StreamOf.Work work = entries -> {
+                for (Map<String, Object> e : entries) {
+                    db.query("INSERT INTO " + t + "_done VALUES ($1, $2)", e.get("seq"), e.get("name"));
+                    done.add(((Number) e.get("seq")).longValue());
+                }
+            };
+            equal(s.process("workers", 3, 0, work), 3, "first batch");
+            equal(s.process("workers", 3, 0, work), 2, "second batch");
+            equal(s.process("workers", 3, 20, work), 0, "none in time");
+            equal(done, List.of(1L, 2L, 3L, 4L, 5L), "each once, in order");
+            equal(s.position("workers"), 5L, "position");
+            // The work failing: all rolled back, the error thrown.
+            s.append(Map.of("name", "bad"));
+            boolean threw = false;
+            try {
+                s.process("workers", 10, 0, entries -> {
+                    db.query("INSERT INTO " + t + "_done VALUES (99, 'x')");
+                    throw new IllegalStateException("the work failed");
+                });
+            } catch (IllegalStateException e) {
+                threw = true;
+            }
+            check(threw, "the work's error thrown");
+            equal(db.status(), NucleusClient.Status.IDLE, "rolled back");
+            equal(s.position("workers"), 5L, "position kept");
+            equal(db.query("SELECT count(*) FROM " + t + "_done").rows().get(0).get(0), 5L, "work rolled back");
+            // consume in the caller's transaction; another group apart.
+            db.query("BEGIN");
+            List<Map<String, Object>> two = s.consume("audit", 2);
+            equal(two.size(), 2, "consume");
+            db.query("ROLLBACK");
+            equal(s.position("audit"), 0L, "audit's position");
+            equal(errorCode(() -> db.waitStream("java_nosuch", 0, 10)), "42P01", "no stream");
+        }
+    }
+
+    /** A stream's wait woken by another connection's commit. */
+    static void streamWaitWakes() {
+        String t = table();
+        try (NucleusClient db = db(); NucleusClient w = db()) {
+            db.query("CREATE STREAM " + t + " (n INT)");
+            long[] got = new long[2];
+            Thread waiter = new Thread(() -> {
+                long began = System.nanoTime();
+                got[0] = w.waitStream(t, 0, 20000);
+                got[1] = System.nanoTime() - began;
+            });
+            waiter.start();
+            Thread.sleep(50);
+            db.streamOf(t).append(Map.of("n", 1L));
+            waiter.join();
+            equal(got[0], 1L, "woken");
+            check(got[1] < 10_000_000_000L, "in time");
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     /** A collection's documents by MongoDB's requests (the O message, protocol 9). */
     static void documents() {
         String t = table();
@@ -596,6 +670,7 @@ public final class NucleusTest {
         run("pipelines", NucleusTest::pipelines);
         run("encrypted columns", NucleusTest::encryptedColumns);
         run("documents", NucleusTest::documents);
+        run("streams", NucleusTest::streams);
         return passed;
     }
 
@@ -609,7 +684,8 @@ public final class NucleusTest {
         run("own transport", NucleusTest::ownTransport);
         run("encrypted columns' vectors", NucleusTest::encryptedColumnVectors);
         run("a subject's key", NucleusTest::subjectKey);
-        check(cases == 14 && passed == 22, "all tests ran");
+        run("a stream's wait wakes", NucleusTest::streamWaitWakes);
+        check(cases == 15 && passed == 24, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

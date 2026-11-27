@@ -84,6 +84,24 @@ q.limit = 10;
 nc_result *r = nc_document(db, &q, &err);   /* rows of one json column, doc */
 ```
 
+## Streams
+
+A stream's entries (`CREATE STREAM`; nucleus DOCS.md §8.43): appended in a
+transaction, numbered by its commit; a consumer group's next batch
+handled exactly once — the work's writes and the group's position
+committed together, a conflict with another consumer run again; a wait
+for the next entry that holds no transaction on the server:
+
+```c
+static int work(nc_conn *db, const nc_result *entries, void *arg) {
+    /* seq first; the writes on db; 0 commits them with the position */
+    return 0;
+}
+/* ... */
+int64_t n = nc_stream_process(db, "jobs", "workers", 100, 30000, work, NULL, &err);
+int64_t newest = nc_wait_stream(db, "jobs", 0, 1000, &err);
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

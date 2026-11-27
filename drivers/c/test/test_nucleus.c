@@ -1068,6 +1068,80 @@ static void documents(void) {
     nc_close(db);
 }
 
+/* The work on a batch: each entry's seq into the done table. */
+static int record_done(nc_conn *c, const nc_result *entries, void *arg) {
+    const char *done = arg;
+    char sql[160];
+    size_t i;
+    nc_error err;
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1)", done);
+    for (i = 0; i < nc_rows(entries); i++) {
+        nc_value p = *nc_value_at(entries, i, 0);
+        nc_result *r = nc_query(c, sql, &p, 1, &err);
+        if (!r) return 1;
+        nc_result_free(r);
+    }
+    return 0;
+}
+
+/* Work that does something, then fails. */
+static int failing_work(nc_conn *c, const nc_result *entries, void *arg) {
+    char sql[160];
+    nc_error err;
+    nc_result *r;
+    (void)entries;
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (99)", (const char *)arg);
+    r = nc_query(c, sql, NULL, 0, &err);
+    if (r) nc_result_free(r);
+    return 1;
+}
+
+/* A stream appended, a group's batches processed exactly once with their
+ * work, waits (the w message, protocol 10). */
+static void streams(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    nc_result *r;
+    char t[64], done[80], sql[256];
+    int i;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(done, sizeof done, "%s_done", t);
+    snprintf(sql, sizeof sql, "CREATE STREAM %s (n INT)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (seq BIGINT PRIMARY KEY)", done);
+    nc_result_free(must(db, sql, NULL, 0));
+    CHECK(nc_wait_stream(db, t, 0, 20, &err) == 0);
+    snprintf(sql, sizeof sql, "INSERT INTO %s (n) VALUES ($1)", t);
+    for (i = 0; i < 5; i++) {
+        nc_value p = nc_int(i);
+        nc_result_free(must(db, sql, &p, 1));
+    }
+    CHECK(nc_wait_stream(db, t, 0, 20, &err) == 5);
+    CHECK(nc_stream_process(db, t, "workers", 3, 0, record_done, done, &err) == 3);
+    CHECK(nc_stream_process(db, t, "workers", 3, 0, record_done, done, &err) == 2);
+    CHECK(nc_stream_process(db, t, "workers", 3, 20, record_done, done, &err) == 0);
+    snprintf(sql, sizeof sql, "SELECT count(*), min(seq), max(seq) FROM %s", done);
+    r = must(db, sql, NULL, 0);
+    CHECK(r && strcmp(text_of(r, 0, 0), "5") == 0 && strcmp(text_of(r, 0, 1), "1") == 0 &&
+          strcmp(text_of(r, 0, 2), "5") == 0);
+    nc_result_free(r);
+    /* The work failing: all rolled back. */
+    snprintf(sql, sizeof sql, "INSERT INTO %s (n) VALUES (9)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    CHECK(nc_stream_process(db, t, "workers", 10, 0, failing_work, done, &err) == -1 &&
+          strcmp(err.code, "38000") == 0);
+    CHECK(nc_status(db) == 0);
+    snprintf(sql, sizeof sql, "SELECT count(*), stream_position('%s', 'workers') FROM %s", t, done);
+    r = must(db, sql, NULL, 0);
+    CHECK(r && strcmp(text_of(r, 0, 0), "5") == 0 && strcmp(text_of(r, 0, 1), "5") == 0);
+    nc_result_free(r);
+    CHECK(nc_wait_stream(db, "c_nosuch", 0, 10, &err) == -1 && strcmp(err.code, "42P01") == 0);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -1089,6 +1163,7 @@ int main(void) {
     encrypted_columns();
     subject_key();
     documents();
+    streams();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

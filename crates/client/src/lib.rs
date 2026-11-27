@@ -41,8 +41,8 @@ use nucleus_wire::{
 /// sent; 5: errors carry a hint; 6: results stream, and a [`Cursor`]
 /// fetches them in batches; 7: columnar results, [`Client::batches`]; 8:
 /// subject keys; 9: requests on a collection's documents,
-/// [`Client::collection`]).
-pub const PROTOCOL_VERSION: u16 = 9;
+/// [`Client::collection`]; 10: waiting on a stream, [`Client::stream_of`]).
+pub const PROTOCOL_VERSION: u16 = 10;
 /// A [`Cursor`]'s batch when none is given: rows the server sends before
 /// it waits for the client.
 pub const DEFAULT_FETCH: u32 = 1000;
@@ -1590,6 +1590,41 @@ impl Client {
         }
     }
 
+    /// A stream's entries (PLAN.md §M16.5 S4): appended, consumed by a
+    /// group in this session's transaction, waited for.
+    pub fn stream_of(&mut self, name: &str) -> StreamHandle<'_> {
+        StreamHandle {
+            client: self,
+            name: name.to_string(),
+        }
+    }
+
+    /// Waits until stream `stream` has an entry after `after`, or
+    /// `timeout_ms` has passed (a `w` message: the server waits holding no
+    /// transaction); the stream's newest `seq`.
+    pub fn wait_stream(&mut self, stream: &str, after: i64, timeout_ms: u32) -> Result<i64, Error> {
+        if self.version < 10 {
+            return Err(Error::Protocol(format!(
+                "the server speaks version {} of the protocol; waiting on a stream needs 10",
+                self.version
+            )));
+        }
+        let mut body = Vec::new();
+        put_str(&mut body, stream);
+        body.extend_from_slice(&after.to_le_bytes());
+        body.extend_from_slice(&timeout_ms.to_le_bytes());
+        self.send(b'w', &body)?;
+        let reply = match self.replies()?.pop() {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => return Err(Error::Server(e)),
+            None => return Err(Error::Protocol("no result".into())),
+        };
+        match reply.rows.first().and_then(|r| r.first()) {
+            Some(Value::Int(n)) => Ok(*n),
+            other => Err(Error::Protocol(format!("a stream wait answered {other:?}"))),
+        }
+    }
+
     /// Sends a document request (`O`) and reads its one result.
     fn document(&mut self, r: &DocumentRequest<'_>) -> Result<Reply, Error> {
         if self.version < 9 {
@@ -1692,6 +1727,123 @@ pub struct UpdateResult {
     pub modified: u64,
     /// The `_id` of the document an upsert inserted.
     pub upserted_id: Option<Value>,
+}
+
+/// An identifier quoted for SQL.
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// A stream's entries, through a [`Client`]'s session (see
+/// [`Client::stream_of`]).
+pub struct StreamHandle<'c> {
+    client: &'c mut Client,
+    name: String,
+}
+
+impl StreamHandle<'_> {
+    /// Appends an entry (an `INSERT`, in the session's transaction): the
+    /// values of the columns named; its `seq` and `time` are the commit's.
+    pub fn append(&mut self, columns: &[&str], values: &[Value]) -> Result<(), Error> {
+        let names: Vec<String> = columns.iter().map(|c| quoted(c)).collect();
+        let marks: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            quoted(&self.name),
+            names.join(", "),
+            marks.join(", ")
+        );
+        self.client.execute(&sql, values).map(|_| ())
+    }
+
+    /// Group `group`'s next entries, at most `limit` (`CONSUME`): `seq`
+    /// first, then the stream's columns.  The group's position moves past
+    /// them in the session's transaction — committed with the work done
+    /// on them, or not at all.
+    pub fn consume(&mut self, group: &str, limit: u32) -> Result<Vec<Vec<Value>>, Error> {
+        let sql = format!(
+            "CONSUME FROM {} GROUP {} LIMIT $1",
+            quoted(&self.name),
+            quoted(group)
+        );
+        self.client.rows(&sql, &[Value::Int(i64::from(limit))])
+    }
+
+    /// Group `group`'s position: the last `seq` it consumed.
+    pub fn position(&mut self, group: &str) -> Result<i64, Error> {
+        let rows = self.client.rows(
+            "SELECT stream_position($1, $2)",
+            &[Value::Text(self.name.clone()), Value::Text(group.into())],
+        )?;
+        match rows.first().and_then(|r| r.first()) {
+            Some(Value::Int(n)) => Ok(*n),
+            other => Err(Error::Protocol(format!("stream_position gave {other:?}"))),
+        }
+    }
+
+    /// [`Client::wait_stream`] on this stream.
+    pub fn wait(&mut self, after: i64, timeout_ms: u32) -> Result<i64, Error> {
+        self.client.wait_stream(&self.name, after, timeout_ms)
+    }
+
+    /// One batch for group `group`, exactly once: in a transaction, its
+    /// next entries (at most `limit`, waiting up to `timeout_ms` for one
+    /// when there is none) given to `work`, which does what it does in
+    /// the same session; then the commit, the group's position with it.
+    /// A conflict (`40001`: another consumer of the group took them) runs
+    /// it again; an error of `work` rolls all back and is returned.  How
+    /// many entries were processed (0: none came in time).  Not in a
+    /// transaction of the caller's.
+    pub fn process<F>(
+        &mut self,
+        group: &str,
+        limit: u32,
+        timeout_ms: u32,
+        mut work: F,
+    ) -> Result<usize, Error>
+    where
+        F: FnMut(&mut Client, &[Vec<Value>]) -> Result<(), Error>,
+    {
+        let conflict = |e: &Error| matches!(e, Error::Server(s) if s.code == "40001");
+        let mut waited = false;
+        loop {
+            self.client.execute("BEGIN", &[])?;
+            let rows = match self.consume(group, limit) {
+                Ok(rows) => rows,
+                Err(e) if conflict(&e) => {
+                    self.client.execute("ROLLBACK", &[])?;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = self.client.execute("ROLLBACK", &[]);
+                    return Err(e);
+                }
+            };
+            if rows.is_empty() {
+                let at = self.position(group);
+                self.client.execute("ROLLBACK", &[])?;
+                if waited || timeout_ms == 0 {
+                    return Ok(0);
+                }
+                self.wait(at?, timeout_ms)?;
+                waited = true;
+                continue;
+            }
+            if let Err(e) = work(self.client, &rows) {
+                let _ = self.client.execute("ROLLBACK", &[]);
+                return Err(e);
+            }
+            match self.client.execute("COMMIT", &[]) {
+                Ok(_) => return Ok(rows.len()),
+                Err(e) if conflict(&e) => {
+                    if self.client.status() != TxnStatus::Idle {
+                        self.client.execute("ROLLBACK", &[])?;
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 /// A collection's documents, through a [`Client`]'s session (see

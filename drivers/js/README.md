@@ -149,6 +149,23 @@ await people.updateOne({ name: "ann" }, { $inc: { age: 1 } }, { upsert: true });
 await people.deleteMany({ age: { $lt: 18 } });
 ```
 
+## Streams
+
+A stream's entries (`CREATE STREAM`; nucleus DOCS.md §8.43): appended in a
+transaction, numbered by its commit; a consumer group's next batch
+handled exactly once — the work's writes and the group's position
+committed together, a conflict with another consumer run again; a wait
+for the next entry that holds no transaction on the server:
+
+```js
+const jobs = db.streamOf("jobs");
+await jobs.append({ name: "resize", image: 42 });
+await jobs.process("workers", async (entries) => {   // objects, seq first
+  for (const e of entries) await db.query("INSERT INTO done VALUES ($1)", [e.seq]);
+}, { limit: 100, timeoutMs: 30000 });                // entries processed
+await jobs.wait(0, 1000);                            // the newest seq
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The edition in WebAssembly (`wasm/nucleus.wasm`)

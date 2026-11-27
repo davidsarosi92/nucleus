@@ -2538,6 +2538,121 @@ nc_result *nc_document(nc_conn *c, const nc_document_request *req, nc_error *err
     return read_replies(c, err, &lost);
 }
 
+/* ---------------------------------------------------------------- streams */
+
+int64_t nc_wait_stream(nc_conn *c, const char *stream, int64_t after, uint32_t timeout_ms, nc_error *err) {
+    buf m = {0};
+    int lost;
+    nc_result *r;
+    const nc_value *v;
+    int64_t n;
+    if (c->version < 10) {
+        set_error(err, "0A000", "the server speaks version %d of the protocol; waiting on a stream needs 10",
+                  c->version);
+        return -1;
+    }
+    if (c->active) cursor_drain(c->active);
+    put_str(&m, stream);
+    put_le(&m, (uint64_t)after, 8);
+    put_le(&m, timeout_ms, 4);
+    if (m.failed || send_frame(c, 'w', &m) != 0) {
+        free(m.b);
+        set_error(err, "08006", "connection lost");
+        return -1;
+    }
+    free(m.b);
+    r = read_replies(c, err, &lost);
+    if (!r) return -1;
+    v = nc_rows(r) > 0 ? nc_value_at(r, 0, 0) : NULL;
+    n = v && v->type == NC_INT ? v->as.integer : -1;
+    nc_result_free(r);
+    if (n < 0) set_error(err, "08P01", "a stream wait answered no seq");
+    return n;
+}
+
+/* An identifier quoted for SQL, appended to b. */
+static void put_ident(buf *b, const char *s) {
+    put(b, "\"", 1);
+    for (; *s; s++) {
+        if (*s == '"') put(b, "\"", 1);
+        put(b, s, 1);
+    }
+    put(b, "\"", 1);
+}
+
+/* Runs sql alone (no rows wanted): 0, or -1 with err. */
+static int run_plain(nc_conn *c, const char *sql, const nc_value *params, size_t n, nc_error *err) {
+    nc_result *r = nc_query(c, sql, params, n, err);
+    if (!r) return -1;
+    nc_result_free(r);
+    return 0;
+}
+
+int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uint32_t limit,
+                          uint32_t timeout_ms, nc_stream_work work, void *arg, nc_error *err) {
+    buf consume = {0};
+    int waited = 0;
+    int64_t out = -1;
+    nc_value params[2];
+    put(&consume, "CONSUME FROM ", 13);
+    put_ident(&consume, stream);
+    put(&consume, " GROUP ", 7);
+    put_ident(&consume, group);
+    put(&consume, " LIMIT $1", 10); /* with its NUL */
+    if (consume.failed) {
+        free(consume.b);
+        set_error(err, "53200", "out of memory");
+        return -1;
+    }
+    for (;;) {
+        nc_result *entries;
+        size_t n;
+        if (run_plain(c, "BEGIN", NULL, 0, err) != 0) break;
+        params[0] = nc_int(limit);
+        entries = nc_query(c, (const char *)consume.b, params, 1, err);
+        if (!entries) {
+            if (nc_status(c) != 0) run_plain(c, "ROLLBACK", NULL, 0, NULL);
+            if (strcmp(err->code, "40001") == 0) continue;
+            break;
+        }
+        n = nc_rows(entries);
+        if (n == 0) {
+            nc_result *at;
+            int64_t pos = 0;
+            nc_result_free(entries);
+            params[0] = nc_text(stream);
+            params[1] = nc_text(group);
+            at = nc_query(c, "SELECT stream_position($1, $2)", params, 2, err);
+            if (at && nc_rows(at) > 0 && nc_value_at(at, 0, 0)->type == NC_INT)
+                pos = nc_value_at(at, 0, 0)->as.integer;
+            if (at) nc_result_free(at);
+            if (run_plain(c, "ROLLBACK", NULL, 0, err) != 0) break;
+            if (waited || timeout_ms == 0) {
+                out = 0;
+                break;
+            }
+            if (nc_wait_stream(c, stream, pos, timeout_ms, err) < 0) break;
+            waited = 1;
+            continue;
+        }
+        if (work(c, entries, arg) != 0) {
+            nc_result_free(entries);
+            if (nc_status(c) != 0) run_plain(c, "ROLLBACK", NULL, 0, NULL);
+            set_error(err, "38000", "the work on the stream's entries failed: rolled back");
+            break;
+        }
+        nc_result_free(entries);
+        if (run_plain(c, "COMMIT", NULL, 0, err) == 0) {
+            out = (int64_t)n;
+            break;
+        }
+        if (nc_status(c) != 0) run_plain(c, "ROLLBACK", NULL, 0, NULL);
+        if (strcmp(err->code, "40001") != 0) break;
+    }
+    free(consume.b);
+    return out;
+}
+
 /* ------------------------------------------------ encrypted columns (K5) */
 
 /* ChaCha20 and Poly1305 as RFC 8439 writes them, HChaCha20 as

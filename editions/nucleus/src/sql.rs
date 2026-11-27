@@ -69,6 +69,10 @@ Statements end with ;.  Commands (they read nc_catalog):
                      load a file (text or CSV) into a table: COPY FROM STDIN
   \\schemas           schemas (also \\dn)
   \\types             types (also \\dT)
+  \\wait <stream> [<after> [<ms>]]
+                     wait for a stream's entry after seq <after> (by default
+                     its newest now), at most <ms> (by default 30000): its
+                     newest seq — no transaction held while waiting
   \\timing [on|off]   show how long each command takes
   \\echo TEXT         print TEXT (a script's marker)
   \\conninfo          what this shell is connected to
@@ -295,6 +299,24 @@ impl Backend {
             "*"
         } else {
             ""
+        }
+    }
+
+    /// Waits until stream `stream` has an entry after `after` or `ms` have
+    /// passed, holding no transaction (PLAN.md §M16.5 S4): its newest seq.
+    fn wait_stream(&mut self, stream: &str, after: i64, ms: u32) -> Result<i64> {
+        match self {
+            Backend::Local { session, .. } => session
+                .wait_stream(
+                    stream,
+                    after,
+                    std::time::Duration::from_millis(u64::from(ms)),
+                )
+                .map_err(|e| format!("ERROR:  {} ({})", e.message, e.code)),
+            Backend::Remote(c) => c.wait_stream(stream, after, ms).map_err(|e| match e {
+                nucleus_client::Error::Server(e) => format!("ERROR:  {} ({})", e.message, e.code),
+                e => e.to_string(),
+            }),
         }
     }
 
@@ -552,6 +574,43 @@ impl Shell {
                 Some("Types"),
                 out,
             )?,
+            ("\\wait", Some(stream)) => {
+                let rest: Vec<&str> = line.split_whitespace().skip(2).collect();
+                let number = |i: usize| rest.get(i).map(|w| w.parse::<i64>());
+                let after = match number(0) {
+                    None => None,
+                    Some(Ok(n)) => Some(n),
+                    Some(Err(_)) => {
+                        writeln!(out, "\\wait <stream> [<after> [<ms>]]: numbers").map_err(|e| e.to_string())?;
+                        return Ok(Some(false));
+                    }
+                };
+                let ms = match number(1) {
+                    None => 30_000,
+                    Some(Ok(n)) if (0..=3_600_000).contains(&n) => n as u32,
+                    Some(_) => {
+                        writeln!(out, "\\wait: <ms> is 0 to 3600000").map_err(|e| e.to_string())?;
+                        return Ok(Some(false));
+                    }
+                };
+                // By default after its newest now: the next entry.
+                let after = match after {
+                    Some(n) => Ok(n),
+                    None => self.backend.wait_stream(stream, i64::MAX, 0),
+                };
+                match after.and_then(|a| self.backend.wait_stream(stream, a, ms).map(|n| (a, n))) {
+                    Ok((a, n)) => {
+                        let what = if n > a { "has an entry after" } else { "has none yet after" };
+                        writeln!(out, "Stream \"{stream}\" {what} {a}: its newest seq is {n}.")
+                            .map_err(|e| e.to_string())?;
+                        true
+                    }
+                    Err(e) => {
+                        writeln!(out, "{e}").map_err(|e| e.to_string())?;
+                        false
+                    }
+                }
+            }
             ("\\timing", _) => {
                 self.timing = match arg.as_deref() {
                     Some("on") => true,

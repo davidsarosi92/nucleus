@@ -77,6 +77,23 @@ people.updateOne("{\"name\": \"ann\"}", "{\"$inc\": {\"age\": 1}}", true);
 people.deleteMany("{\"age\": {\"$lt\": 18}}");
 ```
 
+## Streams
+
+A stream's entries (`CREATE STREAM`; nucleus DOCS.md §8.43): appended in a
+transaction, numbered by its commit; a consumer group's next batch
+handled exactly once — the work's writes and the group's position
+committed together, a conflict with another consumer run again; a wait
+for the next entry that holds no transaction on the server:
+
+```java
+StreamOf jobs = db.streamOf("jobs");
+jobs.append(Map.of("name", "resize", "image", 42L));
+jobs.process("workers", 100, 30000, entries -> {     // maps, seq first
+    for (var e : entries) db.query("INSERT INTO done VALUES ($1)", e.get("seq"));
+});                                                   // entries processed
+jobs.await(0, 1000);                                  // the newest seq
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

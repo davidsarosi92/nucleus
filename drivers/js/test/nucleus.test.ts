@@ -311,6 +311,68 @@ test("statements nested too deep", async () => {
   await db.close();
 });
 
+test("streams", async () => {
+  // A stream appended, a group's batches processed exactly once with their
+  // work, waits (protocol 10).
+  const db = await connect(options);
+  const t = table();
+  await db.query("CREATE STREAM " + t + " (name TEXT NOT NULL, n INT)");
+  await db.query("CREATE TABLE " + t + "_done (seq BIGINT PRIMARY KEY, name TEXT)");
+  const s = db.streamOf(t);
+  assert.equal(await s.wait(0, 20), 0);
+  for (let i = 0; i < 5; i++) await s.append({ name: "job" + i, n: i });
+  assert.equal(await s.wait(0, 20), 5);
+  const done: number[] = [];
+  const work = async (entries: Record<string, Value>[]) => {
+    for (const e of entries) {
+      await db.query("INSERT INTO " + t + "_done VALUES ($1, $2)", [e.seq, e.name]);
+      done.push(Number(e.seq));
+    }
+  };
+  assert.equal(await s.process("workers", work, { limit: 3 }), 3);
+  assert.equal(await s.process("workers", work, { limit: 3 }), 2);
+  assert.equal(await s.process("workers", work, { limit: 3, timeoutMs: 20 }), 0);
+  assert.deepEqual(done, [1, 2, 3, 4, 5]);
+  assert.equal(await s.position("workers"), 5);
+  // The work failing: all rolled back, the error thrown.
+  await s.append({ name: "bad" });
+  await assert.rejects(
+    s.process("workers", async () => {
+      await db.query("INSERT INTO " + t + "_done VALUES (99, 'x')");
+      throw new Error("the work failed");
+    }),
+    /the work failed/,
+  );
+  assert.equal(db.status, "idle");
+  assert.equal(await s.position("workers"), 5);
+  assert.equal(Number((await db.query("SELECT count(*) FROM " + t + "_done")).rows[0][0]), 5);
+  // consume in the caller's transaction; another group apart.
+  await db.query("BEGIN");
+  assert.deepEqual(
+    (await s.consume("audit", 2)).map((e) => Number(e.n)),
+    [0, 1],
+  );
+  await db.query("ROLLBACK");
+  assert.equal(await s.position("audit"), 0);
+  await assert.rejects(db.waitStream("js_nosuch", 0, 10), (e: NucleusError) => e.code === "42P01");
+  await db.close();
+});
+
+test("a stream's wait wakes on a commit", { skip: embedded && "one connection to a database in the process" }, async () => {
+  const db = await connect(options);
+  const w = await connect(options);
+  const t = table();
+  await db.query("CREATE STREAM " + t + " (n INT)");
+  const began = Date.now();
+  const waited = w.waitStream(t, 0, 20000);
+  await new Promise((r) => setTimeout(r, 50));
+  await db.streamOf(t).append({ n: 1 });
+  assert.equal(await waited, 1);
+  assert.ok(Date.now() - began < 10000);
+  await w.close();
+  await db.close();
+});
+
 test("documents", async () => {
   // A collection's documents by MongoDB's requests (protocol 9).
   const db = await connect(options);

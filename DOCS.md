@@ -1739,6 +1739,7 @@ work the same locally and remotely:
 | `\statements` | the 20 statements that took the most time (`nc_catalog.statements`) |
 | `\copy <table> [(<columns>)] FROM '<file>' [WITH (…)]` | loads the file (text, or CSV with `FORMAT csv`) through `COPY … FROM STDIN` (§8.7), locally or over the network |
 | `\schemas`, `\dn` · `\types`, `\dT` | schemas, types |
+| `\wait <stream> [<after> [<ms>]]` | waits for a stream's entry after `seq` `<after>` (by default its newest now: the next one), at most `<ms>` (30 s by default): its newest `seq` — no transaction held (the `w` message over the network, `Session::wait_stream` locally; §8.43) |
 | `\timing [on|off]` · `\echo TEXT` · `\conninfo` · `\?` · `\q` | timing, a printed marker, connection, help, quit |
 
 The network side is `nucleus-client` (`crates/client`), the Rust driver
@@ -8905,7 +8906,7 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (9; 1–8 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `H` Hello | client → server, first | `u16` version (10; 1–9 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
@@ -8926,6 +8927,7 @@ header bytes not included; at most 1 GiB), then the body.
 | `X` Bye | client → server | empty; the server closes |
 | `k` Subject key | client → server | version 8: `u8` action (0 present, 1 give into the user's keeping), string subject, bytes (`u32` 32, then the user's 32-byte secret) — a message of its own so no log or audit record holds the secret (§8.40); answered `E` on failure, then `R` |
 | `O` Document request | client → server | version 9: `u8` operation (1 find, 2 count, 3 insert, 4 update, 5 replace, 6 delete), `u8` flags (1 every match, 2 upsert), strings collection, filter, body (insert: a document or an array of them; update: the update document; replace: the replacement; find: the projection), sort (a sort document, read in its text's order) — JSON texts, empty where not given —, `u64` skip, `u64` limit (0: none).  Compiled to one statement (`nucleus_sql::documents`, below) and answered as a typed `Q` with it, fetched whole: find `C D* K` of one `json` column `doc`; count one row (`n`, `bigint`); insert a row per document (`_id`); update and replace one row (`matched`, `modified` — the documents the update changed —, `upserted`: the inserted document's `_id` or NULL); delete `K` (`DELETE n`) |
+| `w` Stream wait | client → server | version 10: string stream, `i64` the `seq` waited past, `u32` the longest wait in milliseconds.  The server reads the stream's newest `seq` as a statement would (`SELECT` on it), then waits on the engine outside any transaction, woken by the commit that makes an entry visible (§8.43); answered as a typed `Q`: `C D K` of one `bigint` column `seq` — the newest, past the one given unless the time ran out — then `R` |
 
 **Session.** The client sends Hello.  If the server wants a password and
 the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
@@ -8981,6 +8983,16 @@ sort document read, an update applied to an empty document, a
 projection too (`22023`, `0A000`).  An update document needs operators
 and a replacement has none (`22023`).  It runs in the session's
 transaction, beside its SQL.
+
+**Streams** (version 10, PLAN.md §M16.5 S4).  `w` waits for a stream's
+next entry without the transaction `SELECT stream_wait(…)` holds for as
+long as it waits (a snapshot kept open an hour holds back what MVCC
+may clean up): the session runs `stream_wait(s, after, 0)` — its
+privileges, the stream's newest `seq` now — and, when nothing is past
+`after`, waits on `Kv::wait_appended` holding nothing (`Session::
+wait_stream`); a connection's thread waits, the others go on.  Appending
+and consuming are statements (`INSERT`, `CONSUME`), so they need no
+message of their own.
 
 **Pipelining.**  A client may send Queries without waiting for the
 replies to those before: the server reads and answers them in order,
@@ -9162,7 +9174,24 @@ JavaScript `Collection`, objects; Java and Swift `DocumentCollection` —
 `Collection` is the standard library's —, C++ `nucleus::Collection`,
 JSON texts; C `nc_document` with an `nc_document_request`), and the
 same conformance case (`documents`: every request, the `22023`s, a
-transaction with a table rolled back and committed).  Every driver
+transaction with a table rolled back and committed).
+`stream_of(name)` (version 10, §8.43): a stream's entries — `append`
+(an `INSERT` of the columns given), `consume(group, limit)` (`CONSUME`,
+in the session's transaction), `position(group)`, `wait(after,
+timeout_ms)` (the `w` message; `Client::wait_stream` for a stream by
+name), and `process(group, limit, timeout_ms, work)`: one batch exactly
+once — `BEGIN`, the group's next entries (waiting for one when there is
+none), `work` doing its writes on the same connection, `COMMIT` with
+the position; a `40001` (another consumer of the group took the same
+entries) runs it again, `work`'s error rolls all back and is returned;
+the entries processed (0: none in time).  Every driver has it with the
+same names in its language's case (Python and JavaScript `stream_of` /
+`streamOf` — `stream` is their streamed results' —, entries as dicts and
+objects; Java `streamOf`, its wait `await`; C `nc_wait_stream` and
+`nc_stream_process`, the work a callback returning 0 to commit; C++
+and Swift `stream_of` / `streamOf`), and the same conformance case
+(`streams`: appends, three batches, a wait run out, the work failing,
+another group, a stream not there).  Every driver
 speaks protocol version 7 — results read as they arrive, a batch at a
 time (Rust `Client::cursor`, Python `Connection.stream` and a lazy DB-API
 cursor, JavaScript `Client.stream` with `for await`, Java
@@ -9451,7 +9480,7 @@ the Java driver's sources and Kotlin's `Database`) from them.
 (directory `files/nucleus/<name>` of the app's), `connect(user,
 database)` → the Java driver's `NucleusClient` over the session's
 streams, `close()` (`AutoCloseable`), `Database.engineVersion`.  Each
-build checks the size budget (arm64: 11 MiB on Android, 10 MiB on iOS; what the engine adds to
+build checks the size budget (arm64: 11 MiB on Android and on iOS; what the engine adds to
 an app: on iOS a program using the C API linked as an app is and
 stripped; on Android the `.so`).
 

@@ -1656,6 +1656,11 @@ impl Inner {
             let v = visible.entry(stream.to_vec()).or_insert(0);
             *v = (*v).max(n);
         }
+        // Without threads nothing else can commit while this waits: the
+        // number now is the answer (WebAssembly's single-threaded builds).
+        if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
+            return Ok(visible[stream]);
+        }
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let n = visible[stream];

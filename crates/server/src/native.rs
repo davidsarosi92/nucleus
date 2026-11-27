@@ -500,6 +500,49 @@ fn message<R: Read, W: Write>(
             out.write_all(&ready_msg(session.status()))?;
             Ok(Next::Go)
         }
+        b'w' if version >= 10 => {
+            // A wait on a stream: done outside any transaction, then its
+            // answer given as a `Q`'s.
+            let waited = (|| -> Result<i64, Error> {
+                let mut b = Body::new(body);
+                let stream = b.str()?;
+                let after = b.r.i64().map_err(malformed)?;
+                let ms = b.u32()?;
+                log("stream wait", &stream);
+                session.wait_stream(
+                    &stream,
+                    after,
+                    std::time::Duration::from_millis(u64::from(ms)),
+                )
+            })();
+            match waited {
+                Ok(n) => {
+                    let query = Query {
+                        sql: "SELECT $1::bigint AS seq",
+                        format: Format::Typed,
+                        fetch: 0,
+                        params: &[Value::Int(n)],
+                        stepped,
+                    };
+                    match run(session, &query, version, input, out)? {
+                        Ran::Done => {}
+                        Ran::Failed(e) => out.write_all(&error_msg(&e, version))?,
+                        Ran::Close(e) => {
+                            if let Some(e) = e {
+                                out.write_all(&error_msg(&e, version))?;
+                            }
+                            return Ok(Next::End);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log("error", &format!("{} {}", e.code, e.message));
+                    out.write_all(&error_msg(&e, version))?;
+                }
+            }
+            out.write_all(&ready_msg(session.status()))?;
+            Ok(Next::Go)
+        }
         b'k' if version >= 8 => {
             let parsed = (|| -> Result<(u8, String, [u8; 32]), Error> {
                 let mut b = Body::new(body);

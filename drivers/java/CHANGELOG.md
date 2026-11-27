@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Streams (nucleus PLAN.md §M16.5 S4, protocol version 10, the `w`
+  message): `db.streamOf(name)` → `StreamOf` — `append(Map)`,
+  `consume(group, limit)` (in the connection's transaction),
+  `position(group)`, `await(after, timeoutMs)`, `process(group, limit,
+  timeoutMs, work)`: a consumer group's next batch exactly once, the
+  work's writes and the position committed together, a conflict run
+  again, an exception rolling back; `db.waitStream(name, after,
+  timeoutMs)` (the server holds no transaction while it waits; Android
+  too).
 - A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
   9, the `O` message): `db.collection(name)` → `DocumentCollection` —
   `find(filter[, projection, sort, skip, limit])`, `findOne`,

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Streams (nucleus PLAN.md §M16.5 S4, protocol version 10):
+  `db.stream_of(name)` → `nucleus::StreamOf` — `append(columns,
+  values)`, `consume(group, limit)` (in the connection's transaction),
+  `position(group)`, `wait(after, timeout_ms)`, `process(group, limit,
+  timeout_ms, work)`: a consumer group's next batch exactly once, the
+  work's writes and the position committed together, a conflict run
+  again, an exception rolling back; `db.wait_stream(name, after,
+  timeout_ms)`.
 - A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
   9, through `nc_document`): `db.collection(name)` → `nucleus::Collection`
   — `find(filter, FindOptions)`, `find_one`, `count_documents`,

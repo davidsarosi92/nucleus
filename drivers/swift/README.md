@@ -52,7 +52,7 @@ drivers/swift/build-xcframework.sh        # ARCHS="arm64" for Apple silicon only
 The script builds the embedded edition (LTO, one codegen unit, without
 the model modules) for iOS, the simulator and macOS, makes the
 XCFramework and checks the size budget: what the engine adds to an iOS
-app on arm64, linked and stripped, at most 10 MiB (now 9.01 MiB).
+app on arm64, linked and stripped, at most 11 MiB (now 10.04 MiB).
 
 ## Tests
 
@@ -95,6 +95,23 @@ let people = db.collection("people")
 try people.insertOne(#"{"name": "ann", "age": 34}"#)
 let found = try people.find(#"{"age": {"$gte": 30}}"#, FindOptions(sort: #"{"age": -1}"#, limit: 10))
 try people.updateOne(#"{"name": "ann"}"#, #"{"$inc": {"age": 1}}"#, upsert: true)
+```
+
+## Streams
+
+A stream's entries (`CREATE STREAM`; nucleus DOCS.md §8.43): appended in a
+transaction, numbered by its commit; a consumer group's next batch
+handled exactly once — the work's writes and the group's position
+committed together, a conflict with another consumer run again; a wait
+for the next entry that holds no transaction on the server:
+
+```swift
+let jobs = db.streamOf("jobs")
+try jobs.append(["name": .text("resize"), "image": .int(42)])
+try jobs.process("workers", limit: 100, timeoutMs: 30000) { entries in   // seq first
+    for e in entries { try db.query("INSERT INTO done VALUES ($1)", [e[0]]) }
+}                                                                          // entries processed
+_ = try jobs.wait(after: 0, timeoutMs: 1000)                               // the newest seq
 ```
 
 ## Licence

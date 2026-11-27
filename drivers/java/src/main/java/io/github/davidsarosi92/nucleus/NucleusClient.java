@@ -75,9 +75,10 @@ public final class NucleusClient implements AutoCloseable {
      * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
      * SCRAM-SHA-256, never sent; 5: errors carry a hint; 6: results stream, fetched in batches;
      * 7: columnar results; 8: a subject's key presented ({@link #presentSubjectKey}); 9:
-     * requests on a collection's documents ({@link #collection}).
+     * requests on a collection's documents ({@link #collection}); 10: waiting on a stream
+     * ({@link #waitStream}, {@link #streamOf}).
      */
-    public static final int PROTOCOL_VERSION = 9;
+    public static final int PROTOCOL_VERSION = 10;
     /** Rows a cursor asks the server for at a time. */
     public static final int DEFAULT_FETCH = 1000;
     /** Rows a columnar batch holds when none is given. */
@@ -1215,6 +1216,37 @@ public final class NucleusClient implements AutoCloseable {
         return new DocumentCollection(this, name);
     }
 
+    /**
+     * A stream's entries (nucleus DOCS.md §8.43): appended, consumed by a group in this
+     * connection's transaction, waited for.
+     */
+    public StreamOf streamOf(String name) {
+        return new StreamOf(this, name);
+    }
+
+    /**
+     * Waits until stream {@code stream} has an entry after {@code after}, or {@code timeoutMs} has
+     * passed — one message, the server waiting without holding a transaction. The stream's newest
+     * {@code seq}.
+     */
+    public long waitStream(String stream, long after, int timeoutMs) {
+        if (version < 10) {
+            throw new NucleusException("the server speaks version " + version
+                    + " of the protocol; waiting on a stream needs 10", "0A000");
+        }
+        try {
+            if (active != null) active.close();
+            Writer w = new Writer().str(stream).i64(after).u32(timeoutMs);
+            send('w', w.bytes());
+            List<Result> results = new ArrayList<>();
+            NucleusException error = replies(results);
+            if (error != null) throw error;
+            return ((Number) results.get(results.size() - 1).rows().get(0).get(0)).longValue();
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
     /** Sends a document request (O) and reads its result. */
     Result document(int op, String name, String filter, String body, String sort, long skip, long limit,
             boolean many, boolean upsert) {
@@ -1308,6 +1340,7 @@ public final class NucleusClient implements AutoCloseable {
 
         Writer u8(int v) { b.write(v); return this; }
         Writer u16(int v) { return raw(ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort((short) v)); }
+        Writer u32(int v) { return raw(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v)); }
         Writer i32(int v) { return raw(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v)); }
         Writer i64(long v) { return raw(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(v)); }
         Writer f64(double v) { return raw(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putDouble(v)); }

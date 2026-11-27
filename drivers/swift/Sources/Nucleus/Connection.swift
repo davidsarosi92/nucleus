@@ -146,7 +146,7 @@ public final class Connection {
         return Connection(adopting: c)
     }
 
-    private func handle() throws -> OpaquePointer {
+    func handle() throws -> OpaquePointer {
         guard let c else { throw NucleusError(message: "the connection is closed") }
         return c
     }

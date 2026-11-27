@@ -131,6 +131,26 @@ people.update_one({"name": "ann"}, {"$inc": {"age": 1}}, upsert=True)
 people.delete_many({"age": {"$lt": 18}})
 ```
 
+## Streams
+
+A stream's entries (`CREATE STREAM`; nucleus DOCS.md §8.43): appended in a
+transaction, numbered by its commit; a consumer group's next batch
+handled exactly once — the work's writes and the group's position
+committed together, a conflict with another consumer run again; a wait
+for the next entry that holds no transaction on the server:
+
+```python
+jobs = conn.stream_of("jobs")
+jobs.append({"name": "resize", "image": 42})
+
+def work(entries):                      # dicts, seq first
+    for e in entries:
+        conn.execute("INSERT INTO done VALUES ($1)", [e["seq"]])
+
+jobs.process("workers", work, limit=100, timeout_ms=30000)  # entries processed
+jobs.wait(after=0, timeout_ms=1000)     # the newest seq
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's library in the wheel is the database,

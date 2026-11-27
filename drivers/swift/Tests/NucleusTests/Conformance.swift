@@ -193,6 +193,41 @@ enum Conformance {
         assertFails("42P01") { _ = try db.collection("swift_nosuch").countDocuments() }
     }
 
+    /// A stream appended, a group's batches processed exactly once with
+    /// their work, waits (the w message, protocol 10).
+    static func streams(_ db: Connection) throws {
+        let t = table()
+        try db.query("CREATE STREAM \(t) (name TEXT NOT NULL, n INT)")
+        try db.query("CREATE TABLE \(t)_done (seq BIGINT PRIMARY KEY, name TEXT)")
+        let s = db.streamOf(t)
+        XCTAssertEqual(try s.wait(after: 0, timeoutMs: 20), 0)
+        for i in 0..<5 { try s.append(["name": .text("job\(i)"), "n": .int(Int64(i))]) }
+        XCTAssertEqual(try s.wait(after: 0, timeoutMs: 20), 5)
+        var done: [Int64] = []
+        let work: ([Row]) throws -> Void = { entries in
+            for e in entries {
+                try db.query("INSERT INTO \(t)_done VALUES ($1, $2)", [e[0], e["name"] ?? .null])
+                if case .int(let n) = e[0] { done.append(n) }
+            }
+        }
+        XCTAssertEqual(try s.process("workers", limit: 3, work), 3)
+        XCTAssertEqual(try s.process("workers", limit: 3, work), 2)
+        XCTAssertEqual(try s.process("workers", limit: 3, timeoutMs: 20, work), 0)
+        XCTAssertEqual(done, [1, 2, 3, 4, 5])
+        XCTAssertEqual(try s.position("workers"), 5)
+        // The work failing: all rolled back, the error rethrown.
+        try s.append(["name": .text("bad")])
+        struct Failed: Error {}
+        XCTAssertThrowsError(try s.process("workers") { _ in
+            try db.query("INSERT INTO \(t)_done VALUES (99, 'x')")
+            throw Failed()
+        })
+        XCTAssertEqual(db.status, .idle)
+        XCTAssertEqual(try s.position("workers"), 5)
+        XCTAssertEqual(try db.query("SELECT count(*) FROM \(t)_done").rows[0][0].intValue, 5)
+        assertFails("42P01") { _ = try db.waitStream("swift_nosuch", after: 0, timeoutMs: 10) }
+    }
+
     static func cursors(_ db: Connection) throws {
         // Ten billion rows: only what is read is produced.
         let big = try db.cursor("SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b",

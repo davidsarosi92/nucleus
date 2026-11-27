@@ -904,6 +904,39 @@ impl Session {
         })
     }
 
+    /// Waits until stream `name` has an entry after `after` (its newest
+    /// `seq`), or `timeout` (at most an hour) has passed (PLAN.md §M16.5
+    /// S4) — as `stream_wait` would, but holding no transaction while it
+    /// waits: its newest `seq` is read as a statement (its privileges),
+    /// then the engine is waited on outside any snapshot.
+    pub fn wait_stream(
+        &mut self,
+        name: &str,
+        after: i64,
+        timeout: std::time::Duration,
+    ) -> Result<i64> {
+        let stmt = crate::parser::parse("SELECT stream_wait($1, $2, 0)")?.remove(0);
+        let now = match self.run(&stmt, &[Value::Text(name.into()), Value::Int(after)])? {
+            Output::Rows { rows, .. } => match rows.first().and_then(|r| r.first()) {
+                Some(Value::Int(n)) => *n,
+                _ => return Err(Error::internal("stream_wait gave no number")),
+            },
+            _ => return Err(Error::internal("stream_wait gave no rows")),
+        };
+        if now > after || timeout.is_zero() {
+            return Ok(now);
+        }
+        let head = {
+            let txn = self.kv.begin(TxnOptions {
+                read_only: true,
+                ..TxnOptions::default()
+            })?;
+            crate::stream::head_key(&crate::stream::of(&*txn, name)?)
+        };
+        let wait = timeout.min(std::time::Duration::from_secs(3600));
+        Ok(self.kv.wait_appended(&head, after.max(0) as u64, wait)? as i64)
+    }
+
     /// Runs one statement, `COPY … FROM STDIN`'s data read from `data`; its
     /// whole result.
     pub fn run_copy(

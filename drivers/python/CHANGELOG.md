@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Streams (nucleus PLAN.md §M16.5 S4, protocol version 10, the `w`
+  message): `conn.stream_of(name)` → `StreamOf` — `append(dict)`,
+  `consume(group, limit)` (dicts, in the connection's transaction),
+  `position(group)`, `wait(after, timeout_ms)`, `process(group, work,
+  limit=, timeout_ms=)`: a consumer group's next batch exactly once, the
+  work's writes and the position committed together, a conflict run
+  again, an exception rolling back; `conn.wait_stream(name, after,
+  timeout_ms)` (the server holds no transaction while it waits;
+  embedded too).
 - A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
   9, the `O` message): `conn.collection(name)` → `Collection` — `find(filter,
   projection, sort, skip, limit)`, `find_one`, `count_documents`,

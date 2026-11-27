@@ -36,8 +36,9 @@ extern "C" {
  * 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
  * a hint; 6: results stream, fetched in batches; 7: columnar results;
  * 8: a subject's key presented (nc_present_subject_key); 9: requests on a
- * collection's documents (nc_document). */
-#define NC_PROTOCOL_VERSION 9
+ * collection's documents (nc_document); 10: waiting on a stream
+ * (nc_wait_stream). */
+#define NC_PROTOCOL_VERSION 10
 /* Rows a cursor asks the server for at a time. */
 #define NC_DEFAULT_FETCH 1000
 /* Rows a columnar batch holds when none is given. */
@@ -308,6 +309,26 @@ typedef struct nc_document_request {
 } nc_document_request;
 /* Runs a document request: its result (above), or NULL (and err filled). */
 nc_result *nc_document(nc_conn *c, const nc_document_request *req, nc_error *err);
+
+/* Streams (protocol 10; nucleus DOCS.md 8.43).  Appending is an INSERT,
+ * a group's next entries CONSUME FROM s GROUP g LIMIT n (its position
+ * moved in the session's transaction).  nc_wait_stream waits until stream
+ * has an entry after `after`, or timeout_ms has passed -- one message, the
+ * server waiting without holding a transaction: the stream's newest seq,
+ * or -1 with err. */
+int64_t nc_wait_stream(nc_conn *c, const char *stream, int64_t after, uint32_t timeout_ms, nc_error *err);
+/* The work on a batch of entries (seq first, then the stream's columns),
+ * done on the same connection: 0 to commit it, anything else to roll it
+ * back. */
+typedef int (*nc_stream_work)(nc_conn *c, const nc_result *entries, void *arg);
+/* One batch for group, exactly once: in a transaction, its next entries
+ * (at most limit, waiting up to timeout_ms for one when there is none)
+ * given to work; then the commit, the group's position with it.  A
+ * conflict (40001: another consumer of the group took them) runs it
+ * again.  The entries processed (0: none came in time), or -1 with err
+ * (the work's refusal: 38000).  Not inside a transaction of the caller's. */
+int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uint32_t limit,
+                          uint32_t timeout_ms, nc_stream_work work, void *arg, nc_error *err);
 
 /* Client-side encrypted columns (nucleus PLAN.md M14.30 K5, DOCS.md 11): a
  * value encrypted before it is sent and decrypted after it arrives, so the

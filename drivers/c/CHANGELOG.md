@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Streams (nucleus PLAN.md §M16.5 S4, protocol version 10, the `w`
+  message): `nc_wait_stream(db, stream, after, timeout_ms, &err)` waits
+  for an entry past `after` (the server holds no transaction meanwhile)
+  and returns the newest `seq`; `nc_stream_process(db, stream, group,
+  limit, timeout_ms, work, arg, &err)` handles a consumer group's next
+  batch exactly once — `work(db, entries, arg)` does its writes on the
+  connection and returns 0 to commit them with the group's position;
+  a conflict runs it again.
 - A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
   9, the `O` message): `nc_document(db, &request, &err)` with an
   `nc_document_request` (`NC_DOC_FIND`, `_COUNT`, `_INSERT`, `_UPDATE`,

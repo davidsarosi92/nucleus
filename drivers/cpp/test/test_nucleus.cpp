@@ -389,6 +389,49 @@ int main() {
             CHECK(e.code() == "42P01");
         }
     }
+    {
+        // A stream appended, a group's batches processed exactly once with
+        // their work, waits (protocol 10).
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE STREAM " + t + " (name TEXT NOT NULL, n INT)");
+        db.query("CREATE TABLE " + t + "_done (seq BIGINT PRIMARY KEY, name TEXT)");
+        auto s = db.stream_of(t);
+        CHECK(s.wait(0, 20) == 0);
+        for (int i = 0; i < 5; i++) s.append({"name", "n"}, {Value("job" + std::to_string(i)), Value(i)});
+        CHECK(s.wait(0, 20) == 5);
+        std::vector<int64_t> done;
+        auto work = [&](const Result& entries) {
+            for (auto& e : entries.rows) {
+                db.query("INSERT INTO " + t + "_done VALUES ($1, $2)", {e[0], e[2]});
+                done.push_back(e[0].as<int64_t>());
+            }
+        };
+        CHECK(s.process("workers", 3, 0, work) == 3);
+        CHECK(s.process("workers", 3, 0, work) == 2);
+        CHECK(s.process("workers", 3, 20, work) == 0);
+        CHECK((done == std::vector<int64_t>{1, 2, 3, 4, 5}));
+        CHECK(s.position("workers") == 5);
+        // The work failing: all rolled back, the exception rethrown.
+        s.append({"name"}, {Value("bad")});
+        bool threw = false;
+        try {
+            s.process("workers", 10, 0, [&](const Result&) {
+                db.query("INSERT INTO " + t + "_done VALUES (99, 'x')");
+                throw std::runtime_error("the work failed");
+            });
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw && db.status() == 0 && s.position("workers") == 5);
+        CHECK(db.query("SELECT count(*) FROM " + t + "_done").rows[0][0].as<int64_t>() == 5);
+        try {
+            db.wait_stream("cpp_nosuch", 0, 10);
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "42P01");
+        }
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

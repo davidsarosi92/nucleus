@@ -518,6 +518,7 @@ inline std::string Value::str() const {
 
 /// A connection; closes when destroyed.  One thread at a time.
 class Collection;
+class StreamOf;
 
 class Connection {
 public:
@@ -694,6 +695,20 @@ public:
     /// as one statement in this connection's transaction.
     Collection collection(const std::string& name);
 
+    /// A stream's entries (protocol 10; nucleus DOCS.md §8.43): appended,
+    /// consumed by a group in this connection's transaction, waited for.
+    StreamOf stream_of(const std::string& name);
+
+    /// Waits until stream `stream` has an entry after `after`, or
+    /// `timeout_ms` has passed — one message, the server waiting without
+    /// holding a transaction (nc_wait_stream).  The stream's newest seq.
+    int64_t wait_stream(const std::string& stream, int64_t after, uint32_t timeout_ms) {
+        nc_error err;
+        int64_t n = nc_wait_stream(conn_, stream.c_str(), after, timeout_ms, &err);
+        if (n < 0) throw Error(err.message, err.code, err.hint);
+        return n;
+    }
+
     /// Runs a document request (nc_document): its result.
     Result document(const nc_document_request& request) {
         nc_error err;
@@ -858,6 +873,90 @@ private:
 };
 
 inline Collection Connection::collection(const std::string& name) { return Collection(*this, name); }
+
+/// A stream's entries (Connection::stream_of): `append` a row, `consume` a
+/// group's next entries in the connection's transaction, `position`,
+/// `wait`, and `process` — a group's next batch handled exactly once.
+class StreamOf {
+public:
+    StreamOf(Connection& db, std::string name) : db_(db), name_(std::move(name)) {}
+
+    /// Appends an entry: its columns' values, in order; its seq and time
+    /// are the commit's.  In the connection's transaction.
+    void append(const std::vector<std::string>& columns, const std::vector<Value>& values) {
+        std::string names, marks;
+        for (size_t i = 0; i < columns.size(); i++) {
+            names += (i ? ", " : "") + ident(columns[i]);
+            marks += (i ? ", $" : "$") + std::to_string(i + 1);
+        }
+        db_.query("INSERT INTO " + ident(name_) + " (" + names + ") VALUES (" + marks + ")", values);
+    }
+
+    /// Group `group`'s next entries, at most `limit` (seq first); its
+    /// position moves past them in the connection's transaction —
+    /// committed with the work done on them, or not at all.
+    Result consume(const std::string& group, int64_t limit = 100) {
+        return db_.query("CONSUME FROM " + ident(name_) + " GROUP " + ident(group) + " LIMIT $1", {Value(limit)});
+    }
+
+    /// Group `group`'s position: the last seq it consumed.
+    int64_t position(const std::string& group) {
+        return db_.query("SELECT stream_position($1, $2)", {Value(name_), Value(group)}).rows[0][0].as<int64_t>();
+    }
+
+    /// Connection::wait_stream on this stream.
+    int64_t wait(int64_t after, uint32_t timeout_ms) { return db_.wait_stream(name_, after, timeout_ms); }
+
+    /// One batch for `group`, exactly once: in a transaction, its next
+    /// entries (at most `limit`, waiting up to `timeout_ms` for one when
+    /// there is none) given to `work(entries)`, which does its work on this
+    /// connection; then the commit, the group's position with it.  A
+    /// conflict (another consumer of the group took them) runs it again;
+    /// an exception of `work` rolls all back and is rethrown.  How many
+    /// entries were processed (0: none came in time).  Not inside a
+    /// transaction of the caller's.
+    template <class F> size_t process(const std::string& group, int64_t limit, uint32_t timeout_ms, F work) {
+        bool waited = false;
+        for (;;) {
+            db_.query("BEGIN");
+            try {
+                Result entries = consume(group, limit);
+                if (entries.rows.empty()) {
+                    int64_t at = position(group);
+                    db_.query("ROLLBACK");
+                    if (waited || timeout_ms == 0) return 0;
+                    wait(at, timeout_ms);
+                    waited = true;
+                    continue;
+                }
+                work(entries);
+                db_.query("COMMIT");
+                return entries.rows.size();
+            } catch (const Error& e) {
+                if (db_.status() != 0) db_.query("ROLLBACK");
+                if (e.code() != "40001") throw;
+            } catch (...) {
+                if (db_.status() != 0) db_.query("ROLLBACK");
+                throw;
+            }
+        }
+    }
+
+private:
+    static std::string ident(const std::string& s) {
+        std::string out = "\"";
+        for (char c : s) {
+            if (c == '"') out += '"';
+            out += c;
+        }
+        return out + "\"";
+    }
+
+    Connection& db_;
+    std::string name_;
+};
+
+inline StreamOf Connection::stream_of(const std::string& name) { return StreamOf(*this, name); }
 
 /// A client-side encrypted column's keys (nucleus PLAN.md §M14.30 K5,
 /// DOCS.md §11; the C driver's nc_column_key): from a 32-byte master key the

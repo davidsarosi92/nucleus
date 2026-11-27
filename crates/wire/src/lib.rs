@@ -16,8 +16,8 @@ use std::io::{self, Read};
 /// (`S`, `F`, `c`) and a fetch size in `Q`; 7 columnar results (`B`) and
 /// `COPY … FROM STDIN` (`I`, `d`, `e`, `f`); 8 a subject's key presented
 /// or given into its user's keeping (`k`); 9 requests on a collection's
-/// documents (`O`).
-pub const VERSION: u16 = 9;
+/// documents (`O`); 10 waiting on a stream (`w`).
+pub const VERSION: u16 = 10;
 /// The oldest still spoken.
 pub const MIN_VERSION: u16 = 1;
 /// The largest body a frame may have.
@@ -75,6 +75,12 @@ pub mod kind {
     /// given), skip and limit (`u64`, limit 0 none).  Answered as a `Q`
     /// is: the statement it compiles to runs (PLAN.md §M16 Q4).
     pub const DOCUMENT: u8 = b'O';
+    /// A wait on a stream (client, from version 10): the stream, the
+    /// `seq` waited past (`i64`) and the longest wait in milliseconds
+    /// (`u32`).  Answered as a `Q` of one row and column, `seq bigint`
+    /// — the stream's newest, past the one given unless the time ran
+    /// out; the server waits holding no transaction (PLAN.md §M16.5 S4).
+    pub const STREAM_WAIT: u8 = b'w';
 }
 
 /// Value and type tags.

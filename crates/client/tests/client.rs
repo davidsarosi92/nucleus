@@ -2166,3 +2166,112 @@ fn documents_by_filter() {
     // No such collection: the server's error.
     assert!(matches!(c.collection("nope").count("{}"), Err(Error::Server(e)) if e.code == "42P01"));
 }
+
+/// Streams over the protocol (PLAN.md §M16.5 S4): a producer appending,
+/// two consumers of one group processing every entry exactly once with
+/// their work, a wait woken by another connection's commit (the `w`
+/// message, no transaction held), a consumer's error rolling back.
+#[test]
+fn streams_over_the_protocol() {
+    let addr = start(None);
+    let mut c = Client::connect(config(addr)).unwrap();
+    c.execute(
+        "CREATE STREAM jobs (name TEXT NOT NULL, n INT); \
+         CREATE TABLE done (seq BIGINT PRIMARY KEY, name TEXT, by_consumer INT)",
+        &[],
+    )
+    .unwrap();
+    // Nothing yet: the wait runs out, the newest seq 0.
+    assert_eq!(c.stream_of("jobs").wait(0, 30).unwrap(), 0);
+    // Woken by a commit on another connection.
+    let woken = std::thread::spawn(move || {
+        let mut w = Client::connect(config(addr)).unwrap();
+        let began = std::time::Instant::now();
+        let n = w.stream_of("jobs").wait(0, 20_000).unwrap();
+        (n, began.elapsed(), w.status())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    for i in 0..30 {
+        c.stream_of("jobs")
+            .append(
+                &["name", "n"],
+                &[Value::Text(format!("job{i}")), Value::Int(i)],
+            )
+            .unwrap();
+    }
+    let (n, took, status) = woken.join().unwrap();
+    assert!(n >= 1, "{n}");
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+    assert_eq!(status, TxnStatus::Idle);
+    // Two consumers of one group, each batch's work committed with it.
+    let consumers: Vec<_> = (0..2)
+        .map(|k| {
+            std::thread::spawn(move || {
+                let mut w = Client::connect(config(addr)).unwrap();
+                let mut seen = 0;
+                loop {
+                    let got = w
+                        .stream_of("jobs")
+                        .process("workers", 4, 50, |c, rows| {
+                            for r in rows {
+                                c.execute(
+                                    "INSERT INTO done VALUES ($1, $2, $3)",
+                                    &[r[0].clone(), r[2].clone(), Value::Int(k)],
+                                )?;
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    if got == 0 {
+                        return seen;
+                    }
+                    seen += got;
+                }
+            })
+        })
+        .collect();
+    let seen: usize = consumers.into_iter().map(|h| h.join().unwrap()).sum();
+    assert_eq!(seen, 30);
+    let rows = c
+        .rows(
+            "SELECT count(*), count(DISTINCT seq), min(seq), max(seq) FROM done",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        rows,
+        [[
+            Value::Int(30),
+            Value::Int(30),
+            Value::Int(1),
+            Value::Int(30)
+        ]]
+    );
+    assert_eq!(c.stream_of("jobs").position("workers").unwrap(), 30);
+    // A consumer's error: its work and the position rolled back.
+    c.stream_of("jobs")
+        .append(&["name"], &[Value::Text("bad".into())])
+        .unwrap();
+    let e = c
+        .stream_of("jobs")
+        .process("workers", 10, 0, |c, _| {
+            c.execute("INSERT INTO done VALUES (99, 'x', 0)", &[])?;
+            Err(Error::Protocol("the work failed".into()))
+        })
+        .unwrap_err();
+    assert!(matches!(e, Error::Protocol(_)), "{e:?}");
+    assert_eq!(c.status(), TxnStatus::Idle);
+    assert_eq!(c.stream_of("jobs").position("workers").unwrap(), 30);
+    assert_eq!(
+        c.rows("SELECT count(*) FROM done WHERE seq = 99", &[])
+            .unwrap(),
+        [[Value::Int(0)]]
+    );
+    // A stream that is not there, and a table that is not a stream.
+    let e = c.stream_of("nowhere").wait(0, 10).unwrap_err();
+    assert!(matches!(&e, Error::Server(s) if s.code == "42P01"), "{e:?}");
+    let e = c.stream_of("done").wait(0, 10).unwrap_err();
+    assert!(matches!(&e, Error::Server(s) if s.code == "42809"), "{e:?}");
+    // The session goes on.
+    assert_eq!(c.rows("SELECT 1::bigint", &[]).unwrap(), [[Value::Int(1)]]);
+}

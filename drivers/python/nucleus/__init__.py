@@ -74,8 +74,9 @@ paramstyle = "numeric"  # $1, $2, ...
 # 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
 # a hint; 6: results stream, fetched in batches; 7: columnar results; 8: a
 # subject's key presented (present_subject_key); 9: requests on a
-# collection's documents (collection).
-PROTOCOL_VERSION = 9
+# collection's documents (collection); 10: waiting on a stream
+# (wait_stream, stream_of).
+PROTOCOL_VERSION = 10
 DEFAULT_PORT = 20035
 # Rows a stream asks the server for at a time.
 DEFAULT_FETCH = 1000
@@ -1143,6 +1144,32 @@ class Connection:
             raise error
         return results[-1]
 
+    def stream_of(self, name):
+        """A stream's entries (``CREATE STREAM``, nucleus DOCS.md section
+        8.43): appended, consumed by a group in this connection's
+        transaction, waited for — ``StreamOf``."""
+        return StreamOf(self, name)
+
+    def wait_stream(self, stream, after, timeout_ms):
+        """Waits until stream ``stream`` has an entry after ``after``, or
+        ``timeout_ms`` has passed — one message, the server waiting
+        without holding a transaction.  Returns the stream's newest
+        ``seq``."""
+        if self._version < 10:
+            raise NotSupportedError(
+                f"the server speaks version {self._version} of the protocol; waiting on a stream needs 10",
+                "0A000", None)
+        if self._active is not None:
+            self._active.close()
+        out = bytearray()
+        _put_str(out, str(stream))
+        out += _struct.pack("<qI", int(after), int(timeout_ms))
+        self._send(b"w", out)
+        results, error = self._replies()
+        if error is not None:
+            raise error
+        return results[-1].rows[0][0]
+
     def cursor(self):
         return Cursor(self)
 
@@ -1206,6 +1233,80 @@ class UpdateResult:
 
     def __repr__(self):
         return f"UpdateResult(matched={self.matched}, modified={self.modified}, upserted_id={self.upserted_id!r})"
+
+
+def _ident(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+class StreamOf:
+    """A stream's entries (``Connection.stream_of(name)``): ``append`` a
+    row (a dict by column), ``consume`` a group's next entries in the
+    connection's transaction, ``position``, ``wait``, and ``process`` — a
+    group's next batch handled exactly once."""
+
+    def __init__(self, conn, name):
+        self._conn, self.name = conn, name
+
+    def append(self, values):
+        """Appends an entry: ``values`` a dict of its columns; its ``seq``
+        and ``time`` are the commit's.  In the connection's transaction."""
+        names = list(values)
+        marks = ", ".join(f"${i}" for i in range(1, len(names) + 1))
+        self._conn.execute(
+            f"INSERT INTO {_ident(self.name)} ({', '.join(_ident(n) for n in names)}) VALUES ({marks})",
+            [values[n] for n in names])
+
+    def consume(self, group, limit=100):
+        """Group ``group``'s next entries, at most ``limit``, as dicts
+        (``seq`` first); its position moves past them in the connection's
+        transaction — committed with the work done on them, or not at
+        all."""
+        return self._conn.execute(
+            f"CONSUME FROM {_ident(self.name)} GROUP {_ident(group)} LIMIT $1", [int(limit)]).records()
+
+    def position(self, group):
+        """Group ``group``'s position: the last ``seq`` it consumed."""
+        return self._conn.execute("SELECT stream_position($1, $2)", [self.name, group]).rows[0][0]
+
+    def wait(self, after, timeout_ms):
+        """``Connection.wait_stream`` on this stream."""
+        return self._conn.wait_stream(self.name, after, timeout_ms)
+
+    def process(self, group, work, limit=100, timeout_ms=0):
+        """One batch for ``group``, exactly once: in a transaction, its
+        next entries (waiting up to ``timeout_ms`` for one when there is
+        none) given to ``work(entries)``, which does its work on this
+        connection; then the commit, the group's position with it.  A
+        conflict (another consumer of the group took them) runs it again;
+        an exception of ``work`` rolls all back and is raised.  Returns how
+        many entries were processed (0: none came in time).  Not inside a
+        transaction of the caller's."""
+        conn, waited = self._conn, False
+        while True:
+            conn.execute("BEGIN")
+            try:
+                entries = self.consume(group, limit)
+                if not entries:
+                    at = self.position(group)
+                    conn.execute("ROLLBACK")
+                    if waited or not timeout_ms:
+                        return 0
+                    self.wait(at, timeout_ms)
+                    waited = True
+                    continue
+                work(entries)
+                conn.execute("COMMIT")
+                return len(entries)
+            except OperationalError as e:
+                if conn.status != 0:
+                    conn.execute("ROLLBACK")
+                if e.code != "40001":
+                    raise
+            except BaseException:
+                if conn.status != 0:
+                    conn.execute("ROLLBACK")
+                raise
 
 
 class Collection:

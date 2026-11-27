@@ -371,6 +371,75 @@ class Conformance(unittest.TestCase):
                 c.collection("py_nosuch").count_documents({})
             self.assertEqual(e.exception.code, "42P01")
 
+    def test_streams(self):
+        # A stream appended, a group's batches processed exactly once with
+        # their work, waits (protocol 10).
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE STREAM {t} (name TEXT NOT NULL, n INT)")
+            c.execute(f"CREATE TABLE {t}_done (seq BIGINT PRIMARY KEY, name TEXT)")
+            s = c.stream_of(t)
+            self.assertEqual(s.wait(0, 20), 0)
+            for i in range(5):
+                s.append({"name": f"job{i}", "n": i})
+            self.assertEqual(s.wait(0, 20), 5)
+            done = []
+
+            def work(entries):
+                for e in entries:
+                    c.execute(f"INSERT INTO {t}_done VALUES ($1, $2)", [e["seq"], e["name"]])
+                    done.append(e["seq"])
+
+            self.assertEqual(s.process("workers", work, limit=3), 3)
+            self.assertEqual(s.process("workers", work, limit=3), 2)
+            self.assertEqual(s.process("workers", work, limit=3, timeout_ms=20), 0)
+            self.assertEqual(done, [1, 2, 3, 4, 5])
+            self.assertEqual(s.position("workers"), 5)
+            # The work failing: all rolled back, the error raised.
+            s.append({"name": "bad"})
+
+            def failing(entries):
+                c.execute(f"INSERT INTO {t}_done VALUES (99, 'x')")
+                raise RuntimeError("the work failed")
+
+            with self.assertRaises(RuntimeError):
+                s.process("workers", failing)
+            self.assertFalse(c.in_transaction)
+            self.assertEqual(s.position("workers"), 5)
+            self.assertEqual(c.execute(f"SELECT count(*) FROM {t}_done").rows, [(5,)])
+            # consume in the caller's transaction; another group apart.
+            c.execute("BEGIN")
+            self.assertEqual([e["n"] for e in s.consume("audit", 2)], [0, 1])
+            c.execute("ROLLBACK")
+            self.assertEqual(s.position("audit"), 0)
+            with self.assertRaises(nucleus.ProgrammingError) as e:
+                c.wait_stream("py_nosuch", 0, 10)
+            self.assertEqual(e.exception.code, "42P01")
+
+    @server_only
+    def test_stream_wait_wakes(self):
+        import threading
+        import time
+
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE STREAM {t} (n INT)")
+            got = {}
+
+            def waiter():
+                with connect() as w:
+                    began = time.monotonic()
+                    got["n"] = w.wait_stream(t, 0, 20000)
+                    got["took"] = time.monotonic() - began
+
+            th = threading.Thread(target=waiter)
+            th.start()
+            time.sleep(0.05)
+            c.stream_of(t).append({"n": 1})
+            th.join()
+            self.assertEqual(got["n"], 1)
+            self.assertLess(got["took"], 10)
+
     def test_transactions(self):
         t = table()
         with connect() as c:
