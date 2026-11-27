@@ -7672,7 +7672,46 @@ arrays on the way to `[*]`, which the part's array does not, so a row
 could match the path with no entry.  Two conditions are never combined
 into one range on the part (two elements may meet them).  Not served:
 `a ? 'x'` (true of an object with key `x` too, which has no entry `x`),
-`JSON_EXISTS` (its `ON ERROR TRUE` would hold where the path fails).  `nc_catalog.collections` lists them (name, owner, schema,
+`JSON_EXISTS` (its `ON ERROR TRUE` would hold where the path fails).
+
+**Filter documents** (§M16 Q1, D22; `json::path::filter`):
+`json_filter(f)` compiles a MongoDB-style filter document to a lax
+SQL/JSON path, which `@?` applies — `doc @? json_filter('{"age": {"$gt":
+30}, "tags": "vip"}')` is `doc @? '$ ? (@.age > 30 && @.tags ==
+"vip")'`: the same operator, plan and evaluation; a constant filter is
+compiled once, where the statement is bound (`EXPLAIN` shows its path).
+The matching rules are MongoDB's, which are lax mode's: a field that is
+an array matches when it or an element does; values of other types
+never compare (`"40"` is not `> 30`); a missing field compares false.
+Where MongoDB goes further the path says so: `null` (in `$eq`, `$in`,
+`$gte`, `$lte` too) matches a missing field — a path missing at a step
+whose value is missing or a scalar, an array walked into through its
+objects only; `$ne`, `$nin`, `$not`, `$nor` hold where what they negate
+is false or unknown (`(p) is unknown || !(p)`); equality with an object
+or array is exact (keys, elements in order, types), of the field or an
+element; `$size`, `$elemMatch`, `$type: "array"` hold of arrays,
+`$type` of another type of the field or an element.  The operators:
+`$eq $ne $gt $gte $lt $lte $in $nin $exists $type $size $all $regex
+$options` (`i`, `m`, `s`) `$elemMatch $not $and $or $nor $comment`;
+dotted paths.  Errors: an unknown operator, an object mixing operators
+and fields, a filter that is not an object, an empty `$and` / `$or` /
+`$nor` (`22023`); `$expr`, `$where`, `$text`, `$jsonSchema`, `$mod`,
+bitwise and geospatial operators, a position in a path (`a.0`), an
+ordering comparison with an object or array (`0A000`); a bad pattern
+(`2201B`).  Differences from MongoDB, recorded: JSON has one number type
+(`$type` `"int"`, `"double"`, `"long"`, `"decimal"` all mean a number);
+keys are unordered (§M15 item 3), so object equality ignores their order
+and an object of operators and fields is an error, not read by its
+first key; `$elemMatch` over an element that is itself an array tests
+that array's elements (lax mode unwraps it) where MongoDB tests the
+array whole.  No index serves the path yet (§M16 Q2).  Checked against
+MongoDB 8: `slt/95_json_filter.slt` (every answer MongoDB's on the same
+documents but the `$elemMatch` difference, marked) and a differential fuzzer of random filters over random
+irregular documents (outside the repository, as the bug hunt's) —
+4,500 filters without nested arrays or without `$elemMatch`, every
+answer MongoDB's.
+
+`nc_catalog.collections` lists them (name, owner, schema,
 storage, engine); `nc_catalog.definitions` gives `CREATE COLLECTION …
 WITH (…)`, and schema diffs set or reset a changed schema in place
 (another storage is a note: the documents would go).  ncsql's `\d` says

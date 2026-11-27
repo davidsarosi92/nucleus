@@ -1,0 +1,298 @@
+# Filter documents (PLAN.md §M16 Q1, D22): a MongoDB-style filter compiled
+# to a lax SQL/JSON path by json_filter.  nucleus-only (PostgreSQL has no
+# json_filter); every expected answer is MongoDB 8's on the same documents
+# but one, marked ($elemMatch over an array in an array).
+
+statement ok
+CREATE COLLECTION people
+
+statement ok
+INSERT INTO people (doc) VALUES ('{"_id": 1, "name": "ann", "age": 34, "tags": ["vip", "a"], "address": {"city": "Budapest", "zip": "1011"}, "orders": [{"sku": "A1", "qty": 2}, {"sku": "B2", "qty": 1}], "score": 0.5}'), ('{"_id": 2, "name": "Bob", "age": "forty", "tags": "vip", "address": [{"city": "Wien"}, {"city": "Budapest"}], "orders": [], "score": null}'), ('{"_id": 3, "name": "cecil", "age": 19, "tags": [], "orders": [{"sku": "A1", "qty": 1}], "active": true}'), ('{"_id": 4, "name": "dora", "age": null, "tags": ["student", "b"], "address": {"city": "Graz"}, "orders": [{"sku": "C3", "qty": 5, "price": 120}]}'), ('{"_id": 5, "name": "anna", "tags": ["a", "b"], "address": "unknown", "score": 0.9, "point": [1, 2]}'), ('{"_id": 6, "age": 52, "tags": [["vip"]], "address": {"city": null}, "point": [[1, 2], [3, 4]], "meta": {"x": 1, "y": [1]}}')
+
+# equality with a scalar
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"name": "ann"}')
+----
+1
+
+# an array holds it, or it is the value
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": "vip"}')
+----
+1
+2
+
+# a dotted path, through an array of objects
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": "Budapest"}')
+----
+1
+2
+
+# ranges skip other types
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$gt": 30}}')
+----
+1
+6
+
+# two ranges, any elements
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$gte": 19, "$lt": 40}}')
+----
+1
+3
+
+# $in and $nin
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": {"$in": ["Wien", "Graz"]}}')
+----
+2
+4
+
+# $nin passes a missing field
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": {"$nin": ["Wien", "Graz"]}}')
+----
+1
+3
+5
+6
+
+# $ne passes another type and none
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$ne": "vip"}}')
+----
+3
+4
+5
+6
+
+# null: null or missing
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"score": null}')
+----
+2
+3
+4
+6
+
+# null on a path: missing at a step
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": null}')
+----
+3
+5
+6
+
+# $exists
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"score": {"$exists": false}}')
+----
+3
+4
+6
+
+# $type, of the value or an element
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$type": "string"}}')
+----
+2
+
+# $type array
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$type": "array"}}')
+----
+1
+3
+4
+5
+6
+
+# $size
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$size": 2}}')
+----
+1
+4
+5
+
+# $all
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$all": ["a", "b"]}}')
+----
+5
+
+# $regex with i
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"name": {"$regex": "^an", "$options": "i"}}')
+----
+1
+5
+
+# $elemMatch on fields
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"orders": {"$elemMatch": {"sku": "A1", "qty": {"$gte": 2}}}}')
+----
+1
+
+# $elemMatch on scalars
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$elemMatch": {"$eq": "a"}}}')
+----
+1
+5
+
+# $not
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$not": {"$gt": 30}}}')
+----
+2
+3
+4
+5
+
+# $or
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"$or": [{"age": {"$lt": 20}}, {"tags": "student"}]}')
+----
+3
+4
+
+# $nor
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"$nor": [{"tags": "vip"}, {"tags": "a"}]}')
+----
+3
+4
+6
+
+# $and
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"$and": [{"tags": "a"}, {"score": {"$gte": 0.5}}]}')
+----
+1
+5
+
+# equality with an array: whole or an element
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"point": [1, 2]}')
+----
+5
+6
+
+# equality with an array element of an array
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": ["vip"]}')
+----
+6
+
+# equality with an object, exactly
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"meta": {"x": 1, "y": [1]}}')
+----
+6
+
+# an object with a key less is not equal
+query I
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"meta": {"x": 1}}')
+----
+
+# null below an array of scalars: no object lacks it
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags.x": null}')
+----
+2
+
+# $type of an element
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$type": "string"}}')
+----
+1
+2
+4
+5
+
+# $gte null: null or missing
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"score": {"$gte": null}}')
+----
+2
+3
+4
+6
+
+# $regex, any case
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"name": {"$regex": "^b", "$options": "i"}}')
+----
+2
+
+# $elemMatch on fields: objects and arrays, not scalars.  The one
+# recorded difference: MongoDB answers 6 (its element ["vip"] lacks x);
+# lax mode unwraps that element and tests "vip", a scalar
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$elemMatch": {"x": {"$exists": false}}}}')
+----
+
+# ... and an array of objects
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address": {"$elemMatch": {"zip": {"$exists": false}}}}')
+----
+2
+
+# an empty filter: every document
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{}')
+----
+1
+2
+3
+4
+5
+6
+
+# The path it compiles to; a constant filter is folded when bound
+query T
+SELECT json_filter('{"age": {"$gt": 30}, "tags": "vip"}')
+----
+$?(@."age" > 30 && @."tags" == "vip")
+
+query T
+SELECT json_filter('{}')
+----
+$
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"name": "ann"}')
+----
+Project: #1
+  Seq Scan on people filter: @?(json,jsonpath)(#1, $?(@."name" == "ann"))
+
+# What a filter cannot say
+statement error 22023
+SELECT json_filter('{"age": {"$foo": 1}}')
+
+statement error 22023
+SELECT json_filter('{"age": {"$gt": 1, "x": 2}}')
+
+statement error 22023
+SELECT json_filter('[1]')
+
+statement error 22023
+SELECT json_filter('{"$or": []}')
+
+statement error 0A000
+SELECT json_filter('{"$where": "true"}')
+
+statement error 0A000
+SELECT json_filter('{"items.0.sku": "A1"}')
+
+statement error 0A000
+SELECT json_filter('{"age": {"$gt": [1]}}')
+
+statement error 2201B
+SELECT json_filter('{"name": {"$regex": "("}}')
+
+statement ok
+DROP COLLECTION people

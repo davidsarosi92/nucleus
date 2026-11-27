@@ -1030,7 +1030,7 @@ pub(super) fn num(d: Decimal) -> Expr {
 }
 
 /// `like_regex`'s pattern and flags, compiled.
-fn regex(pattern: String, flags: &str) -> Result<Regex> {
+pub(super) fn regex(pattern: String, flags: &str) -> Result<Regex> {
     let mut f = 0;
     for c in flags.chars() {
         f |= match c {

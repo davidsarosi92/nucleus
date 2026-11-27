@@ -14479,7 +14479,7 @@ found missing, and the open issues.
 
 *Steps (proposed 2026-11-27, each closed by itself):*
 
-- **Q1 — the filter compiler**: a filter document to a lax path
+- **Q1 — the filter compiler** ✅ (2026-11-27): a filter document to a lax path
   predicate (an AST, not text) — equality (a whole object or array
   too), `$eq $ne $gt $gte $lt $lte $in $nin $exists $type $size $all
   $regex $options $elemMatch $not $and $or $nor`, dotted paths; an
@@ -14487,6 +14487,25 @@ found missing, and the open issues.
   SQL, folded to a constant when its argument is one.  Checked against
   MongoDB 8 differentially (the prototype's tasks, then random filters
   over random documents, as the bug hunt's `docfuzz`).
+  *Done:* `json::path::filter` builds the path's tree (`Expr`, `Step`)
+  from the document and `json_filter(json)` gives it as a `jsonpath`,
+  compiled at bind time when constant (its `rewrite`).  What the
+  differential run taught, each fixed: `{"a.b": null}` — MongoDB counts
+  a step's scalar as missing but walks into an array through its
+  objects only (`[2]` has no missing `b`); `$elemMatch` with fields tests
+  objects and arrays, not scalars.  Recorded, not fixed: `$elemMatch`
+  over an element that is itself an array — lax mode's filter unwraps
+  that array and cannot test it whole; the alternative, strict paths
+  with every array step spelled out, gives up the lax form the indexes
+  of Q2 are designed for, for arrays of arrays (rare in documents).
+  Tests: `slt/95_json_filter.slt` (33 filters, MongoDB 8's answers but
+  the one difference, marked; errors; the folded plan), the compiler's unit tests, the prototype's
+  22 tasks again (22 of 22), `target/fz-tools/filterfuzz.py` (random
+  filters over random irregular documents against MongoDB 8 in a
+  container: 4,500 filters, no difference without arrays in arrays or
+  without `$elemMatch`); fifteen mutations, each failing (five only
+  after cases were added: `null` below an array of scalars, `$type` of
+  an element, `$gte: null`, `$regex` with `i`, `$elemMatch` on fields).
 - **Q2 — indexes for it**: a collection's path index multi-valued (its
   entries unwrap arrays along the path, lax mode's way; the exact value
   stays an expression index, `((doc -> 'a'))`); the planner probes one

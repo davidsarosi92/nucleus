@@ -11,6 +11,7 @@
 pub(crate) mod ast;
 pub(crate) mod datetime;
 pub(crate) mod eval;
+pub mod filter;
 mod parse;
 mod print;
 
@@ -353,6 +354,14 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
     ] {
         r.add_table_function(Arc::new(Query { name, tz }))?;
     }
+    // A filter document compiled (§M16 Q1): immutable, so a constant
+    // filter is folded to its path when the statement is bound.
+    r.add_function(
+        &["json_filter"],
+        Arc::new(JsonFilter(Func::new("json_filter", vec![u(j)], p, |a| {
+            filter_path(&a[0])
+        }))),
+    )?;
     r.add_operator(
         "@?",
         j,
@@ -370,6 +379,42 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
         })),
     )?;
     Ok(())
+}
+
+/// A filter document's path, as a `jsonpath` value.
+fn filter_path(f: &Value) -> Result<Value> {
+    let path = filter::compile(super::bytes(f)?)?;
+    Ok(Value::ext(path_type(), path.to_string().into_bytes()))
+}
+
+/// `json_filter(f)`: a filter document compiled ([`filter`]).  A constant
+/// one is compiled once, where the call is bound (its path a constant
+/// then, as a written one is); a filter that does not compile is left to
+/// the call, which raises the error when it runs.
+struct JsonFilter(Func);
+
+impl crate::ext::ScalarFunction for JsonFilter {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        crate::ext::ScalarFunction::arity(&self.0)
+    }
+    fn resolve(&self, args: &[ArgInfo]) -> Result<crate::ext::Signature> {
+        self.0.resolve(args)
+    }
+    fn volatility(&self) -> crate::ext::Volatility {
+        crate::ext::Volatility::Immutable
+    }
+    fn rewrite(&self, args: &[crate::expr::Expr]) -> Option<crate::expr::Expr> {
+        let [crate::expr::Expr::Literal(f)] = args else {
+            return None;
+        };
+        filter_path(f).ok().map(crate::expr::Expr::Literal)
+    }
+    fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        self.0.call(cx, args)
+    }
 }
 
 #[cfg(test)]
