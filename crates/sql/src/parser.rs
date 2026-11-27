@@ -2215,7 +2215,23 @@ impl<'a> Parser<'a> {
 
     fn column_spec(&mut self) -> Result<ColumnSpec> {
         let name = self.ident()?;
-        let (ty, typmod) = self.data_type()?;
+        // `serial` and its kin: an integer type, a sequence of its own.
+        let serial = match self.peek() {
+            Some(Token::Word(w)) => match w.as_str() {
+                "serial" | "serial4" => Some(DataType::Integer),
+                "bigserial" | "serial8" => Some(DataType::BigInt),
+                "smallserial" | "serial2" => Some(DataType::SmallInt),
+                _ => None,
+            },
+            _ => None,
+        };
+        let (ty, typmod) = match serial {
+            Some(ty) => {
+                self.pos += 1;
+                (SqlType::builtin(ty), TypeMod::default())
+            }
+            None => self.data_type()?,
+        };
         let mut c = ColumnSpec {
             name,
             ty,
@@ -2228,6 +2244,7 @@ impl<'a> Parser<'a> {
             check: None,
             references: None,
             generated: None,
+            auto: serial.map(|_| crate::ast::Auto::Serial),
         };
         let mut constraint_name = None;
         loop {
@@ -2241,6 +2258,12 @@ impl<'a> Parser<'a> {
                 c.unique = true;
             } else if self.eat_kw("default") {
                 let (_, text) = self.text_of(|p| p.expr_prec(PREC_ADD))?;
+                if c.default.is_some() || c.auto.is_some() {
+                    return Err(Error::syntax(format!(
+                        "multiple default values specified for column \"{}\"",
+                        c.name
+                    )));
+                }
                 c.default = Some(text);
             } else if self.eat_kw("check") {
                 self.expect_op("(")?;
@@ -2251,6 +2274,43 @@ impl<'a> Parser<'a> {
                 constraint_name = Some(self.ident()?);
             } else if self.eat_kw("references") {
                 c.references = Some((constraint_name.take(), self.references()?));
+            } else if self.peek_kws(&["generated", "always", "as", "identity"])
+                || self.peek_kws(&["generated", "by", "default", "as", "identity"])
+            {
+                self.pos += 1;
+                let always = self.eat_kw("always");
+                if !always {
+                    self.expect_kw("by")?;
+                    self.expect_kw("default")?;
+                }
+                self.expect_kw("as")?;
+                self.expect_kw("identity")?;
+                if c.default.is_some() || c.auto.is_some() {
+                    return Err(Error::syntax(format!(
+                        "multiple default values specified for column \"{}\"",
+                        c.name
+                    )));
+                }
+                let (mut name, mut options) = (None, Vec::new());
+                if self.eat_op("(") {
+                    loop {
+                        if self.eat_kws(&["sequence", "name"]) {
+                            name = Some(self.ident()?);
+                            continue;
+                        }
+                        let more = self.sequence_options(false)?;
+                        if more.is_empty() {
+                            break;
+                        }
+                        options.extend(more);
+                    }
+                    self.expect_op(")")?;
+                }
+                c.auto = Some(crate::ast::Auto::Identity {
+                    always,
+                    name,
+                    options,
+                });
             } else if self.eat_kw("generated") {
                 if c.generated.is_some() {
                     return Err(Error::syntax(format!(
@@ -2260,7 +2320,7 @@ impl<'a> Parser<'a> {
                 }
                 c.generated = Some(self.generated()?);
             } else {
-                if c.generated.is_some() && c.default.is_some() {
+                if c.generated.is_some() && (c.default.is_some() || c.auto.is_some()) {
                     return Err(Error::syntax(format!(
                         "both default and generation expression specified for column \"{}\"",
                         c.name
@@ -2287,18 +2347,8 @@ impl<'a> Parser<'a> {
                 next: None,
             });
         }
-        if self.eat_kws(&["by", "default"]) || self.peek_kws(&["always", "as", "identity"]) {
-            return Err(Error::feature(
-                "identity columns are not supported yet: a key by uuidv7() as the default (DEFAULT uuidv7()) is ordered by time",
-            ));
-        }
         self.expect_kw("always")?;
         self.expect_kw("as")?;
-        if self.peek_kws(&["identity"]) {
-            return Err(Error::feature(
-                "identity columns are not supported yet: a key by uuidv7() as the default (DEFAULT uuidv7()) is ordered by time",
-            ));
-        }
         self.expect_op("(")?;
         let (_, text) = self.text_of(|p| p.expr())?;
         self.expect_op(")")?;
@@ -3103,6 +3153,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let overriding = if self.eat_kw("overriding") {
+            let o = if self.eat_kw("system") {
+                crate::ast::Overriding::System
+            } else {
+                self.expect_kw("user")?;
+                crate::ast::Overriding::User
+            };
+            self.expect_kw("value")?;
+            Some(o)
+        } else {
+            None
+        };
         let source = if self.eat_kws(&["default", "values"]) {
             Query {
                 with: None,
@@ -3123,6 +3185,7 @@ impl<'a> Parser<'a> {
             table,
             alias,
             columns,
+            overriding,
             source,
             on_conflict,
             returning: self.returning()?,
@@ -3439,8 +3502,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `TRUNCATE [TABLE] [ONLY] name [*], … [CONTINUE | RESTART IDENTITY]
-    /// [CASCADE | RESTRICT]`.  `RESTART IDENTITY` has nothing to restart:
-    /// no column owns a sequence.
+    /// [CASCADE | RESTRICT]`.
     fn truncate(&mut self) -> Result<Statement> {
         self.expect_kw("truncate")?;
         self.eat_kw("table");
@@ -3453,7 +3515,8 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let _ = self.eat_kws(&["continue", "identity"]) || self.eat_kws(&["restart", "identity"]);
+        let restart =
+            !self.eat_kws(&["continue", "identity"]) && self.eat_kws(&["restart", "identity"]);
         let cascade = self.eat_kw("cascade");
         if !cascade {
             self.eat_kw("restrict");
@@ -3462,6 +3525,7 @@ impl<'a> Parser<'a> {
             tables,
             only,
             cascade,
+            restart,
         })
     }
 
@@ -4763,6 +4827,7 @@ impl<'a> Parser<'a> {
             }
             Token::Word(w) => match w.as_str() {
                 "null" => Expr::Literal(Value::Null),
+                "default" => Expr::Default,
                 "row" if self.peek_op("(") => {
                     self.pos += 1;
                     let mut fields = Vec::new();

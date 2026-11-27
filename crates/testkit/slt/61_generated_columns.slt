@@ -114,8 +114,12 @@ CREATE TABLE bad (a INT, b INT DEFAULT 1 GENERATED ALWAYS AS (a) STORED)
 statement error 0A000
 CREATE TABLE bad (a INT, b INT GENERATED ALWAYS AS (a) VIRTUAL)
 
-statement error 0A000
-CREATE TABLE bad (a INT GENERATED ALWAYS AS IDENTITY)
+# An identity column is not a generated one (93_identity.slt).
+statement ok
+CREATE TABLE bad_identity (a INT GENERATED ALWAYS AS IDENTITY)
+
+statement ok
+DROP TABLE bad_identity
 
 # Added to a table with rows: computed for each.
 statement ok

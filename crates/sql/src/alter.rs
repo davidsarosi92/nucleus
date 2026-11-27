@@ -58,13 +58,17 @@ pub(crate) fn alter_table(
         _ => {}
     }
     match change {
-        TableChange::Rename(to) => rename_table(txn, reg, table, to),
+        TableChange::Rename(to) => {
+            rename_table(txn, reg, table, to)?;
+            // The sequences its columns own follow.
+            crate::sequences::follow_rename(txn, table, None, to)
+        }
         TableChange::RenameConstraint { from, to } => rename_constraint(txn, table, from, to),
         TableChange::RenameColumn { from, to } => {
             for t in family(&*txn, table, "rename a column of")? {
                 rename_column(txn, reg, &t, from, to)?;
             }
-            Ok(())
+            crate::sequences::follow_rename(txn, table, Some(from), to)
         }
         TableChange::DropColumn {
             column,
@@ -78,7 +82,7 @@ pub(crate) fn alter_table(
             for t in family(&*txn, table, "drop a column of")? {
                 drop_column(txn, reg, &t, column, *cascade)?;
             }
-            Ok(())
+            crate::sequences::drop_owned(txn, table, Some(column), *cascade)
         }
         TableChange::SetDefault { column, default } => {
             for t in family(&*txn, table, "change a default of")? {
@@ -827,6 +831,12 @@ fn set_default(
     if t.columns[c].generated.is_some() {
         return Err(Error::invalid_object_definition(format!(
             "column \"{column}\" of table \"{table}\" is a generated column"
+        )));
+    }
+    // Its default is its sequence's.
+    if t.columns[c].identity.is_some() {
+        return Err(Error::syntax(format!(
+            "column \"{column}\" of relation \"{table}\" is an identity column"
         )));
     }
     refuse_kept(&t, c, "change the default of")?;

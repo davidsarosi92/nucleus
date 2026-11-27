@@ -559,6 +559,7 @@ fn def_table(k: usize) -> Table {
                 numeric: None,
                 comment: None,
                 generated: None,
+                identity: None,
             })
             .collect(),
         primary_key: Vec::new(),
@@ -1274,6 +1275,13 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     rel.cols.into_iter().enumerate()
                 {
                     let len = TYPES.iter().find(|t| t.0 == typ).map_or(-1, |t| t.2);
+                    // A table's identity column: `a` (ALWAYS), `d` (BY DEFAULT).
+                    let identity = rel
+                        .table
+                        .as_ref()
+                        .filter(|(_, ix)| ix.is_none())
+                        .and_then(|(t, _)| t.columns.get(i))
+                        .and_then(|c| c.identity.as_ref());
                     out.push(r(&[
                         ("attrelid", int(rel.oid)),
                         ("attname", text(name)),
@@ -1290,7 +1298,14 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         ("attnotnull", Value::Bool(notnull)),
                         ("atthasdef", Value::Bool(hasdef)),
                         ("atthasmissing", Value::Bool(false)),
-                        ("attidentity", text("")),
+                        (
+                            "attidentity",
+                            text(match identity {
+                                Some(i) if i.always => "a",
+                                Some(_) => "d",
+                                None => "",
+                            }),
+                        ),
                         ("attgenerated", text(generated)),
                         ("attisdropped", Value::Bool(false)),
                         ("attislocal", Value::Bool(true)),
@@ -1676,7 +1691,10 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                             },
                         ),
                         ("udt_name", text(udt)),
-                        ("is_identity", text("NO")),
+                        (
+                            "is_identity",
+                            text(if col.identity.is_some() { "YES" } else { "NO" }),
+                        ),
                         (
                             "is_generated",
                             text(if col.generated.is_some() {

@@ -101,7 +101,7 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// columns dropped that rows still store ([`Table::gone`]); version 29
 /// whether it is a collection ([`Table::collection`]); older versions
 /// still read.
-const TABLE_VERSION: u8 = 29;
+const TABLE_VERSION: u8 = 30;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -223,6 +223,20 @@ pub struct Column {
     pub comment: Option<String>,
     /// A generated column: how its value is made.
     pub generated: Option<crate::ast::Generated>,
+    /// An identity column (`GENERATED … AS IDENTITY`): its values its
+    /// sequence's (its default calls it).
+    pub identity: Option<Identity>,
+}
+
+/// An identity column's: `GENERATED ALWAYS` or `BY DEFAULT`, and the
+/// sequence (owned by the column) its values come from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Identity {
+    /// `ALWAYS`: a value given is `428C9`, unless `OVERRIDING SYSTEM
+    /// VALUE`.
+    pub always: bool,
+    /// The sequence.
+    pub sequence: String,
 }
 
 /// An index.
@@ -1169,6 +1183,16 @@ impl Table {
             w.u32(g as u32);
         }
         w.u8(u8::from(self.collection));
+        for c in &self.columns {
+            match &c.identity {
+                None => {
+                    w.u8(0);
+                }
+                Some(i) => {
+                    w.u8(if i.always { 1 } else { 2 }).str(&i.sequence);
+                }
+            }
+        }
         w.0
     }
 
@@ -1212,6 +1236,7 @@ impl Table {
                 numeric,
                 comment: None,
                 generated: None,
+                identity: None,
             });
         }
         let n = r.u32()? as usize;
@@ -1448,6 +1473,18 @@ impl Table {
             Vec::new()
         };
         let collection = version >= 29 && r.u8()? != 0;
+        if version >= 30 {
+            for c in &mut columns {
+                c.identity = match r.u8()? {
+                    0 => None,
+                    k @ (1 | 2) => Some(Identity {
+                        always: k == 1,
+                        sequence: r.str()?,
+                    }),
+                    _ => return Err(Error::internal("unknown kind of identity column")),
+                };
+            }
+        }
         let building = if version >= 24 {
             let n = building_n;
             if n > indexes.len() {
@@ -2354,11 +2391,15 @@ mod tests {
                     name: "id".into(),
                     ty: DataType::BigInt,
                     nullable: false,
-                    default: None,
+                    default: Some("nextval('people_id_seq')".into()),
                     max_len: None,
                     numeric: None,
                     comment: None,
                     generated: None,
+                    identity: Some(Identity {
+                        always: true,
+                        sequence: "people_id_seq".into(),
+                    }),
                 },
                 Column {
                     name: "name".into(),
@@ -2369,6 +2410,7 @@ mod tests {
                     numeric: None,
                     comment: Some("who".into()),
                     generated: None,
+                    identity: None,
                 },
                 Column {
                     name: "price".into(),
@@ -2379,6 +2421,7 @@ mod tests {
                     numeric: Some((10, 2)),
                     comment: None,
                     generated: Some(crate::ast::Generated::Stored("1".into())),
+                    identity: None,
                 },
             ],
             primary_key: vec![0],

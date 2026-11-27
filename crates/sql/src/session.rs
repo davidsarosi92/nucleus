@@ -2132,6 +2132,7 @@ impl Session {
                 table,
                 alias,
                 columns,
+                overriding,
                 source,
                 on_conflict,
                 returning,
@@ -2142,6 +2143,8 @@ impl Session {
                     None => (0..t.columns.len()).collect(),
                     Some(names) => names.iter().filter_map(|n| t.column(n)).collect(),
                 };
+                let (source, _) = dml::insert_source(&t, &targets, *overriding, source)?;
+                let source = &*source;
                 if let crate::ast::SetExpr::Values(rows) = &source.body {
                     for row in rows {
                         for (j, e) in row.iter().enumerate() {
@@ -2168,11 +2171,15 @@ impl Session {
                 let t = catalog::table(txn, table)?;
                 let scope = dml::table_scope(&t);
                 for (col, e) in assignments {
+                    let e = match t.column(col) {
+                        Some(c) => dml::assigned(&t, c, e)?,
+                        None => std::borrow::Cow::Borrowed(e),
+                    };
                     // A parameter assigned to a column takes its type.
-                    if let (crate::ast::Expr::Param(n), Some(c)) = (e, t.column(col)) {
+                    if let (crate::ast::Expr::Param(n), Some(c)) = (&*e, t.column(col)) {
                         binder.note_param(n - 1, Some(t.columns[c].ty));
                     }
-                    binder.expr(e, &scope)?;
+                    binder.expr(&e, &scope)?;
                 }
                 if let Some(f) = filter {
                     binder.condition(f, &scope)?;
@@ -2250,6 +2257,7 @@ fn modify(
             table,
             alias,
             columns,
+            overriding,
             source,
             on_conflict,
             returning,
@@ -2259,6 +2267,7 @@ fn modify(
             table,
             alias.as_deref(),
             columns,
+            *overriding,
             source,
             on_conflict.as_deref(),
             returning,
@@ -2831,13 +2840,27 @@ pub(crate) fn execute_statement(
                     check: None,
                     references: None,
                     generated: None,
+                    auto: None,
                 })
                 .collect();
             create_table(txn, reg, name, &specs, &[], &opts, None)?;
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             let n = if *with_data {
-                dml::insert(txn, reg, name, None, &None, query, None, &[], params, &[])?.count
+                dml::insert(
+                    txn,
+                    reg,
+                    name,
+                    None,
+                    &None,
+                    None,
+                    query,
+                    None,
+                    &[],
+                    params,
+                    &[],
+                )?
+                .count
             } else {
                 0
             };
@@ -3092,7 +3115,9 @@ pub(crate) fn execute_statement(
                         while let Some(i) = t.foreign_keys.iter().position(|f| f.table != t.name) {
                             crate::fk::detach(txn, &mut t, i)?;
                         }
-                        catalog::drop_table(txn, &t)?
+                        catalog::drop_table(txn, &t)?;
+                        // The sequences its columns own.
+                        crate::sequences::drop_owned(txn, name, None, *cascade)?;
                     }
                     None if *if_exists => {}
                     None => {
@@ -3576,8 +3601,9 @@ pub(crate) fn execute_statement(
             tables,
             only,
             cascade,
+            restart,
         } => {
-            truncate(txn, reg, tables, *only, *cascade, params)?;
+            truncate(txn, reg, tables, *only, *cascade, *restart, params)?;
             Output::Command("TRUNCATE TABLE".into())
         }
         Statement::Analyze(table) => {
@@ -3841,6 +3867,7 @@ fn truncate(
     tables: &[String],
     only: bool,
     cascade: bool,
+    restart: bool,
     params: &[Value],
 ) -> Result<()> {
     let mut all: Vec<catalog::Table> = Vec::new();
@@ -3903,6 +3930,11 @@ fn truncate(
     for j in order {
         dml::delete(txn, reg, &all[j].name, None, &[], params, &[])?;
     }
+    if restart {
+        for t in &all {
+            crate::sequences::restart_owned(&*txn, &t.name)?;
+        }
+    }
     Ok(())
 }
 
@@ -3924,16 +3956,28 @@ fn add_column(
             "ADD COLUMN with PRIMARY KEY or UNIQUE is not supported yet",
         ));
     }
+    let ty = crate::binder::column_type_with(&*txn, reg, &column.ty, column.max_len)?;
+    // `serial` or identity: its sequence made first, so the rows there
+    // take its values.
+    let mut column = column.clone();
+    let auto = crate::sequences::prepare_auto(&*txn, table, &mut column, ty)?;
+    let column = &column;
     t.columns.push(Column {
         name: column.name.clone(),
-        ty: crate::binder::column_type_with(&*txn, reg, &column.ty, column.max_len)?,
+        ty,
         nullable: !column.not_null,
         default: column.default.clone(),
         max_len: column.max_len,
         numeric: column.numeric,
         comment: None,
         generated: column.generated.clone(),
+        identity: auto
+            .clone()
+            .filter(|_| matches!(column.auto, Some(crate::ast::Auto::Identity { .. }))),
     });
+    if let Some(a) = &auto {
+        crate::sequences::make_auto(txn, table, column, ty, a)?;
+    }
     if let Some(check) = &column.check {
         t.checks
             .push((format!("{table}_{}_check", column.name), check.clone()));
@@ -4460,22 +4504,32 @@ pub(crate) fn create_table(
     let mut checks = Vec::new();
     let mut pk: Vec<usize> = Vec::new();
     let mut uniques: Vec<(String, Vec<usize>)> = Vec::new();
-    for (i, s) in specs.iter().enumerate() {
+    // `serial` and identity columns: their sequences, made once the
+    // table is there.
+    let mut specs = specs.to_vec();
+    let mut autos = Vec::new();
+    for (i, s) in specs.iter_mut().enumerate() {
         if columns.iter().any(|c: &Column| c.name == s.name) {
             return Err(Error::duplicate_column(format!(
                 "column \"{}\" specified more than once",
                 s.name
             )));
         }
+        let ty = crate::binder::column_type_with(&*txn, reg, &s.ty, s.max_len)?;
+        let auto = crate::sequences::prepare_auto(&*txn, name, s, ty)?;
+        if let Some(a) = &auto {
+            autos.push((i, ty, a.clone()));
+        }
         columns.push(Column {
             name: s.name.clone(),
-            ty: crate::binder::column_type_with(&*txn, reg, &s.ty, s.max_len)?,
+            ty,
             nullable: !s.not_null,
             default: s.default.clone(),
             max_len: s.max_len,
             numeric: s.numeric,
             comment: None,
             generated: s.generated.clone(),
+            identity: auto.filter(|_| matches!(s.auto, Some(crate::ast::Auto::Identity { .. }))),
         });
         if s.primary_key {
             if !pk.is_empty() {
@@ -4596,7 +4650,7 @@ pub(crate) fn create_table(
     let _ = Scope::default();
     // Foreign keys: from columns, then table constraints.
     let mut fks = Vec::new();
-    for s in specs {
+    for s in &specs {
         if let Some((n, r)) = &s.references {
             fks.push((n.clone(), vec![s.name.clone()], r.clone()));
         }
@@ -4627,6 +4681,9 @@ pub(crate) fn create_table(
         crate::fk::attach(txn, &mut table, fk)?;
     }
     catalog::update_table(txn, &table)?;
+    for (i, ty, identity) in autos {
+        crate::sequences::make_auto(txn, name, &specs[i], ty, &identity)?;
+    }
     Ok(())
 }
 

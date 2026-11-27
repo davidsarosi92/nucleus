@@ -397,6 +397,13 @@ pub fn definition(s: &Sequence) -> String {
     if s.ty != DataType::BigInt {
         sql += &format!(" AS {}", type_word(s.ty));
     }
+    sql + &options_sql(s)
+}
+
+/// The options of `s` a new one of its type does not have, each after a
+/// space (an identity column's, in its parentheses).
+pub fn options_sql(s: &Sequence) -> String {
+    let mut sql = String::new();
     // The bounds a new one of its type and direction has.
     let range = bounds_of(s.ty);
     let up = s.increment > 0;
@@ -555,6 +562,13 @@ pub fn drop(txn: &mut dyn KvTxn, names: &[String], if_exists: bool, cascade: boo
             return Err(missing(name));
         }
         Checker::new().require_owner(&*txn, Kind::Sequence, name)?;
+        // An identity column's: the column's to drop.
+        if let Some((t, c)) = identity_of(&*txn, name)? {
+            return Err(Error::dependent_objects(format!(
+                "cannot drop sequence {name} because column {c} of table {t} requires it"
+            ))
+            .with_hint(format!("You can drop column {c} of table {t} instead.")));
+        }
         let users = users(&*txn, name)?;
         if !users.is_empty() && !cascade {
             return Err(Error::dependent_objects(format!(
@@ -574,6 +588,224 @@ pub fn drop(txn: &mut dyn KvTxn, names: &[String], if_exists: bool, cascade: boo
         crate::privileges::forget(txn, Kind::Sequence, name)?;
     }
     Ok(())
+}
+
+// ------------------------------------------------- owned by columns
+
+/// The identity column (table, column) sequence `name` is the values of.
+fn identity_of(txn: &dyn KvTxn, name: &str) -> Result<Option<(String, String)>> {
+    for t in crate::catalog::tables(txn)? {
+        for c in &t.columns {
+            if c.identity.as_ref().is_some_and(|i| i.sequence == name) {
+                return Ok(Some((t.name.clone(), c.name.clone())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// A free name for column `column` of `table`'s sequence: `table_column_seq`,
+/// else with `1`, `2`, … after it (PostgreSQL's).
+fn free_name(txn: &dyn KvTxn, table: &str, column: &str) -> Result<String> {
+    let base = format!("{table}_{column}_seq");
+    let mut name = base.clone();
+    let mut n = 0;
+    while get(txn, &name)?.is_some() || crate::catalog::get_table(txn, &name)?.is_some() {
+        n += 1;
+        name = format!("{base}{n}");
+    }
+    Ok(name)
+}
+
+/// A column's `serial` or identity, before the table is made: its
+/// sequence's name chosen, its default calling it and the column `NOT
+/// NULL` — the sequence made by [`make_auto`] once the table is there.
+pub fn prepare_auto(
+    txn: &dyn KvTxn,
+    table: &str,
+    spec: &mut crate::ast::ColumnSpec,
+    ty: DataType,
+) -> Result<Option<crate::catalog::Identity>> {
+    let Some(auto) = &spec.auto else {
+        return Ok(None);
+    };
+    if !matches!(
+        ty,
+        DataType::SmallInt | DataType::Integer | DataType::BigInt
+    ) {
+        return Err(Error::invalid_parameter(
+            "identity column type must be smallint, integer, or bigint",
+        ));
+    }
+    let name = match auto {
+        crate::ast::Auto::Identity {
+            name: Some(name), ..
+        } => {
+            if get(txn, name)?.is_some() || crate::catalog::get_table(txn, name)?.is_some() {
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            name.clone()
+        }
+        _ => free_name(txn, table, &spec.name)?,
+    };
+    spec.default = Some(format!("nextval({})", literal_name(&name)));
+    spec.not_null = true;
+    Ok(Some(crate::catalog::Identity {
+        always: matches!(auto, crate::ast::Auto::Identity { always: true, .. }),
+        sequence: name,
+    }))
+}
+
+/// The sequence of a column [`prepare_auto`] prepared: of the column's
+/// type, owned by it (the column need not be stored yet).
+pub fn make_auto(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    spec: &crate::ast::ColumnSpec,
+    ty: DataType,
+    identity: &crate::catalog::Identity,
+) -> Result<()> {
+    let mut options = vec![SeqOption::As(type_word(ty).into())];
+    if let Some(crate::ast::Auto::Identity { options: o, .. }) = &spec.auto {
+        if o.iter()
+            .any(|o| matches!(o, SeqOption::OwnedBy(_) | SeqOption::As(_)))
+        {
+            return Err(Error::syntax(
+                "an identity column's sequence is of the column's type, owned by it",
+            ));
+        }
+        options.extend(o.iter().cloned());
+    }
+    create(txn, &identity.sequence, &options, false)?;
+    let mut s = existing(&*txn, &identity.sequence)?;
+    s.owned_by = Some((table.to_string(), spec.name.clone()));
+    put(txn, &s)
+}
+
+/// The sequences owned by `table`'s columns (by `column` only, given).
+pub fn owned(txn: &dyn KvTxn, table: &str, column: Option<&str>) -> Result<Vec<Sequence>> {
+    Ok(all(txn)?
+        .into_iter()
+        .filter(|s| {
+            s.owned_by
+                .as_ref()
+                .is_some_and(|(t, c)| t == table && column.is_none_or(|x| x == c))
+        })
+        .collect())
+}
+
+/// `table` dropped (or its `column`): the sequences they owned dropped
+/// too.  A default elsewhere calling one is `2BP01`, dropped with
+/// `CASCADE`.
+pub fn drop_owned(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    column: Option<&str>,
+    cascade: bool,
+) -> Result<()> {
+    for s in owned(&*txn, table, column)? {
+        let users = users(&*txn, &s.name)?;
+        if !users.is_empty() && !cascade {
+            return Err(Error::dependent_objects(format!(
+                "cannot drop {} because other objects depend on it: the default of {}",
+                match column {
+                    Some(c) => format!("column {c} of table {table}"),
+                    None => format!("table {table}"),
+                },
+                users
+                    .iter()
+                    .map(|(t, c)| format!("{t}.{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+        }
+        rewrite_defaults(txn, &s.name, None)?;
+        txn.delete(&def_key(&s.name))?;
+        crate::privileges::forget(txn, Kind::Sequence, &s.name)?;
+    }
+    Ok(())
+}
+
+/// A table (`column` `None`) or a column renamed: the sequences it owns
+/// follow.
+pub fn follow_rename(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    column: Option<&str>,
+    to: &str,
+) -> Result<()> {
+    for mut s in owned(&*txn, table, column)? {
+        if let Some((t, c)) = &mut s.owned_by {
+            match column {
+                None => *t = to.to_string(),
+                Some(_) => *c = to.to_string(),
+            }
+        }
+        put(txn, &s)?;
+    }
+    Ok(())
+}
+
+/// `TRUNCATE … RESTART IDENTITY`: the sequences `table`'s columns own
+/// back at their starts (at once, as `ALTER SEQUENCE … RESTART`).
+pub fn restart_owned(txn: &dyn KvTxn, table: &str) -> Result<()> {
+    let owned = owned(txn, table, None)?;
+    if owned.is_empty() {
+        return Ok(());
+    }
+    let kv = statement_kv()?;
+    for s in owned {
+        set(&kv, &s, s.start, false)?;
+    }
+    Ok(())
+}
+
+/// `pg_get_serial_sequence(table, column)`: the sequence the column owns,
+/// schema-qualified (`NULL`: none).
+struct SerialSequence;
+
+impl ScalarFunction for SerialSequence {
+    fn name(&self) -> &str {
+        "pg_get_serial_sequence"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=2
+    }
+
+    fn resolve(&self, _args: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(DataType::Text), Arg::Untyped(DataType::Text)],
+            Returns::Type(Some(DataType::Text)),
+        ))
+    }
+
+    fn volatility(&self) -> Volatility {
+        Volatility::Stable
+    }
+
+    fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let (Value::Text(t), Value::Text(c)) = (&args[0], &args[1]) else {
+            return Ok(Value::Null);
+        };
+        let txn = cx.txn();
+        let table = crate::catalog::table(txn, &name_of(t)?)?;
+        let column = table.column(c).ok_or_else(|| {
+            Error::undefined_column(format!(
+                "column \"{c}\" of relation \"{}\" does not exist",
+                table.name
+            ))
+        })?;
+        let column = &table.columns[column].name;
+        Ok(owned(txn, &table.name, Some(column))?
+            .first()
+            .map_or(Value::Null, |s| {
+                Value::Text(format!("public.{}", crate::definitions::ident(&s.name)))
+            }))
+    }
 }
 
 /// The sequences a default calls by name (`nextval('s')`, as written).
@@ -630,6 +862,12 @@ fn rewrite_defaults(txn: &mut dyn KvTxn, from: &str, to: Option<&str>) -> Result
     for mut t in crate::catalog::tables(&*txn)? {
         let mut changed = false;
         for c in &mut t.columns {
+            if let (Some(i), Some(to)) = (&mut c.identity, to)
+                && i.sequence == from
+            {
+                i.sequence = to.to_string();
+                changed = true;
+            }
             let Some(d) = &c.default else { continue };
             if !called_in(d).iter().any(|n| n == from) {
                 continue;
@@ -956,6 +1194,7 @@ struct SeqFn(F, &'static str);
 
 /// Registers `nextval`, `currval`, `setval`, `lastval`.
 pub fn register(r: &mut Registry) -> Result<()> {
+    r.add_function(&["pg_get_serial_sequence"], Arc::new(SerialSequence))?;
     for (f, name) in [
         (F::Nextval, "nextval"),
         (F::Currval, "currval"),

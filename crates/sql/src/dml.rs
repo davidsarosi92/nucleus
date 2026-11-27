@@ -1244,6 +1244,119 @@ pub fn generated_given(t: &Table, c: usize) -> Error {
     ))
 }
 
+/// Column `c`'s default as an expression: `NULL` without one (what a
+/// `DEFAULT` in a `VALUES` row or an `UPDATE`'s `SET` stands for).
+pub fn default_expr(t: &Table, c: usize) -> Result<ast::Expr> {
+    match &t.columns[c].default {
+        Some(text) => parse_expr(text),
+        None => Ok(ast::Expr::Literal(Value::Null)),
+    }
+}
+
+fn always_identity(t: &Table, c: usize) -> bool {
+    t.columns[c].identity.as_ref().is_some_and(|i| i.always)
+}
+
+/// What an `UPDATE`'s (or an upsert's) `SET c = e` assigns: `DEFAULT`, the
+/// column's default; an `ALWAYS` identity column takes nothing else
+/// (`428C9`).
+pub fn assigned<'e>(
+    t: &Table,
+    c: usize,
+    e: &'e ast::Expr,
+) -> Result<std::borrow::Cow<'e, ast::Expr>> {
+    if matches!(e, ast::Expr::Default) {
+        return Ok(std::borrow::Cow::Owned(default_expr(t, c)?));
+    }
+    if always_identity(t, c) {
+        let name = &t.columns[c].name;
+        return Err(Error::generated_always(format!(
+            "column \"{name}\" can only be updated to DEFAULT"
+        ))
+        .with_hint(format!(
+            "Column \"{name}\" is an identity column defined as GENERATED ALWAYS."
+        )));
+    }
+    Ok(std::borrow::Cow::Borrowed(e))
+}
+
+/// An `INSERT`'s source as it is run: each `DEFAULT` of a `VALUES` row
+/// its column's default — and the identity columns' rules: a value given
+/// for an `ALWAYS` one is `428C9` but with `OVERRIDING SYSTEM VALUE`;
+/// with `OVERRIDING USER VALUE` the values given for identity columns
+/// are not taken (the columns returned: they take their defaults).
+pub fn insert_source<'q>(
+    t: &Table,
+    targets: &[usize],
+    overriding: Option<ast::Overriding>,
+    source: &'q ast::Query,
+) -> Result<(std::borrow::Cow<'q, ast::Query>, Vec<usize>)> {
+    let plain = source.with.is_none()
+        && source.order_by.is_empty()
+        && source.limit.is_none()
+        && source.offset.is_none();
+    let rows = match &source.body {
+        ast::SetExpr::Values(rows) if plain => Some(rows),
+        _ => None,
+    };
+    let mut ignored = Vec::new();
+    for (j, &c) in targets.iter().enumerate() {
+        let Some(identity) = &t.columns[c].identity else {
+            continue;
+        };
+        match overriding {
+            Some(ast::Overriding::User) => ignored.push(c),
+            Some(ast::Overriding::System) => {}
+            None if !identity.always => {}
+            None => {
+                let given = match rows {
+                    Some(rows) => rows
+                        .iter()
+                        .any(|r| r.get(j).is_some_and(|e| !matches!(e, ast::Expr::Default))),
+                    None => true,
+                };
+                if given {
+                    let name = &t.columns[c].name;
+                    return Err(Error::generated_always(format!(
+                        "cannot insert a non-DEFAULT value into column \"{name}\""
+                    ))
+                    .with_hint(format!(
+                        "Column \"{name}\" is an identity column defined as GENERATED ALWAYS; use OVERRIDING SYSTEM VALUE to override."
+                    )));
+                }
+            }
+        }
+    }
+    let Some(rows) = rows else {
+        return Ok((std::borrow::Cow::Borrowed(source), ignored));
+    };
+    if !rows
+        .iter()
+        .flatten()
+        .any(|e| matches!(e, ast::Expr::Default))
+    {
+        return Ok((std::borrow::Cow::Borrowed(source), ignored));
+    }
+    let mut filled = Vec::with_capacity(rows.len());
+    for r in rows {
+        let mut row = Vec::with_capacity(r.len());
+        for (j, e) in r.iter().enumerate() {
+            row.push(match (e, targets.get(j)) {
+                (ast::Expr::Default, Some(&c)) => default_expr(t, c)?,
+                _ => e.clone(),
+            });
+        }
+        filled.push(row);
+    }
+    Ok((
+        std::borrow::Cow::Owned(ast::Query {
+            body: ast::SetExpr::Values(filled),
+            ..source.clone()
+        }),
+        ignored,
+    ))
+}
+
 /// New rows of a table from the values a statement gives for some of its
 /// columns — `INSERT`'s source rows, `COPY`'s fields or typed rows (PLAN.md
 /// §M14.20 W3: one builder, bound once per statement): each value assigned
@@ -1258,6 +1371,9 @@ pub struct RowBuilder {
     rest: Vec<usize>,
     /// The targets are every column, in order.
     in_order: bool,
+    /// Targets whose values given are not taken: their defaults are
+    /// (`OVERRIDING USER VALUE`).
+    ignored: Vec<usize>,
     check: Option<Expr>,
 }
 
@@ -1274,8 +1390,17 @@ impl RowBuilder {
             targets,
             rest,
             in_order,
+            ignored: Vec::new(),
             check,
         }
+    }
+
+    /// The builder with the values given for `columns` not taken: their
+    /// defaults are.
+    pub fn ignoring(mut self, columns: Vec<usize>) -> Self {
+        self.in_order &= columns.is_empty();
+        self.ignored = columns;
+        self
     }
 
     /// The columns given.
@@ -1342,7 +1467,12 @@ impl RowBuilder {
     /// Defaults for the columns not given (and the targets past the first
     /// `given`), then the checks.
     fn finish(&self, mut row: Row, given: usize, ctx: &Ctx) -> Result<Row> {
-        for &c in self.rest.iter().chain(&self.targets[given..]) {
+        for &c in self
+            .rest
+            .iter()
+            .chain(&self.targets[given..])
+            .chain(&self.ignored)
+        {
             row[c] = self.writer.default_of(c, ctx)?;
         }
         self.writer.complete(&mut row, ctx)?;
@@ -1571,6 +1701,7 @@ pub fn insert(
     table: &str,
     alias: Option<&str>,
     columns: &Option<Vec<String>>,
+    overriding: Option<ast::Overriding>,
     source: &ast::Query,
     on_conflict: Option<&ast::OnConflict>,
     returning_items: &[SelectItem],
@@ -1580,6 +1711,8 @@ pub fn insert(
     let t = catalog::table(&*txn, table)?;
     crate::chunk_tables::refuse(&t, "insert into")?;
     let targets = target_columns(&t, columns)?;
+    let (source, ignored) = insert_source(&t, &targets, overriding, source)?;
+    let source = &*source;
     let (rows, writer, ret, upsert) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
@@ -1611,7 +1744,8 @@ pub fn insert(
             .map(|oc| Upsert::bind(&mut binder, &t, alias, oc))
             .transpose()?;
         let check = new_row_check(&binder, &t, crate::policies::Command::Insert)?;
-        let builder = RowBuilder::new(Writer::new(ro, reg, t.clone())?, targets, check);
+        let builder =
+            RowBuilder::new(Writer::new(ro, reg, t.clone())?, targets, check).ignoring(ignored);
         let ctx = Ctx::new(ro, reg, params);
         // Collected before anything is written (the source may read the
         // table), in bounded memory.
@@ -1765,11 +1899,12 @@ impl Upsert {
             if let Some(ch) = binder.checker() {
                 ch.require(binder.txn(), Kind::Table, &t.name, UPDATE, Some(col))?;
             }
+            let e = assigned(t, c, e)?;
             // A parameter assigned to a column takes its type.
-            if let ast::Expr::Param(n) = e {
+            if let ast::Expr::Param(n) = &*e {
                 binder.note_param(n - 1, Some(t.columns[c].ty));
             }
-            sets.push((c, binder.expr(e, &scope)?.0));
+            sets.push((c, binder.expr(&e, &scope)?.0));
         }
         let filter = filter
             .as_ref()
@@ -2218,7 +2353,8 @@ pub fn update(
             if let Some(ch) = binder.checker() {
                 ch.require(ro, Kind::Table, &t.name, UPDATE, Some(col))?;
             }
-            sets.push((c, binder.expr(e, &scope)?.0));
+            let e = assigned(&t, c, e)?;
+            sets.push((c, binder.expr(&e, &scope)?.0));
         }
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;

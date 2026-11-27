@@ -595,6 +595,8 @@ pub enum Statement {
         alias: Option<String>,
         /// Target columns, if listed.
         columns: Option<Vec<String>>,
+        /// `OVERRIDING SYSTEM | USER VALUE`.
+        overriding: Option<Overriding>,
         /// The rows.
         source: Query,
         /// `ON CONFLICT …`: what a row whose key is taken does instead.
@@ -622,6 +624,8 @@ pub enum Statement {
         only: bool,
         /// `CASCADE`: the tables referencing them by foreign keys too.
         cascade: bool,
+        /// `RESTART IDENTITY`: the sequences their columns own restarted.
+        restart: bool,
     },
     /// `DELETE`.
     Delete {
@@ -928,6 +932,35 @@ pub struct ColumnSpec {
     pub references: Option<(Option<String>, References)>,
     /// `GENERATED …`: how the column's value is made.
     pub generated: Option<Generated>,
+    /// `serial` or `GENERATED … AS IDENTITY`: values from a sequence of
+    /// its own.
+    pub auto: Option<Auto>,
+}
+
+/// A column's values from a sequence of its own.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Auto {
+    /// `serial`, `bigserial`, `smallserial`: a default calling it.
+    Serial,
+    /// `GENERATED ALWAYS | BY DEFAULT AS IDENTITY [(options)]`.
+    Identity {
+        /// `ALWAYS`.
+        always: bool,
+        /// `SEQUENCE NAME name`.
+        name: Option<String>,
+        /// The sequence's options.
+        options: Vec<crate::sequences::SeqOption>,
+    },
+}
+
+/// `OVERRIDING … VALUE` of an `INSERT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overriding {
+    /// `SYSTEM VALUE`: the values given for `ALWAYS` identity columns
+    /// taken.
+    System,
+    /// `USER VALUE`: the values given for identity columns ignored.
+    User,
 }
 
 /// How a generated column's value is made.
@@ -1667,6 +1700,9 @@ pub enum Expr {
     },
     /// `$n`.
     Param(usize),
+    /// `DEFAULT`: a column's default, in a `VALUES` row of an `INSERT` or
+    /// an `UPDATE`'s `SET`.
+    Default,
     /// A row constructor: `(a, b, …)` or `ROW(…)`.
     Row(Vec<Expr>),
     /// A prefix operator: `-`, `+`, `NOT`.

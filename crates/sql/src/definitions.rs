@@ -19,6 +19,8 @@
 //! shown: a model that names one needs it made first), access rules,
 //! tokens, database settings, and data.
 
+use std::collections::HashMap;
+
 use nucleus_kv::KvTxn;
 
 use crate::ast::{FkAction, Generated};
@@ -74,11 +76,24 @@ fn list(t: &Table, cols: &[usize]) -> String {
 
 /// A column as `CREATE TABLE` and `ADD COLUMN` write it.
 pub fn column_sql(c: &Column) -> String {
+    column_sql_with(c, &HashMap::new())
+}
+
+/// [`column_sql`], an identity column's sequence's options (`options`,
+/// by the sequence's name) in its parentheses.
+fn column_sql_with(c: &Column, options: &HashMap<String, String>) -> String {
     let mut s = format!("{} {}", ident(&c.name), type_text(c));
-    if !c.nullable {
+    if !c.nullable && c.identity.is_none() {
         s.push_str(" NOT NULL");
     }
-    if let Some(d) = &c.default {
+    if let Some(i) = &c.identity {
+        s.push_str(&format!(
+            " GENERATED {} AS IDENTITY (SEQUENCE NAME {}{})",
+            if i.always { "ALWAYS" } else { "BY DEFAULT" },
+            ident(&i.sequence),
+            options.get(&i.sequence).map_or("", String::as_str)
+        ));
+    } else if let Some(d) = &c.default {
         s.push_str(&format!(" DEFAULT {d}"));
     }
     match &c.generated {
@@ -248,9 +263,23 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
     }
 
     // Sequences (before the tables whose defaults call them; `OWNED BY`
-    // after them).
-    for s in crate::sequences::all(txn)? {
-        def("sequence", &s.name, None, crate::sequences::definition(&s));
+    // after them) — an identity column's is the column's.
+    let sequences = crate::sequences::all(txn)?;
+    let identities: HashMap<String, String> = sequences
+        .iter()
+        .filter(|s| {
+            tables.iter().any(|t| {
+                t.columns
+                    .iter()
+                    .any(|c| c.identity.as_ref().is_some_and(|i| i.sequence == s.name))
+            })
+        })
+        .map(|s| (s.name.clone(), crate::sequences::options_sql(s)))
+        .collect();
+    for s in &sequences {
+        if !identities.contains_key(&s.name) {
+            def("sequence", &s.name, None, crate::sequences::definition(s));
+        }
     }
 
     // Types: enums, then what types were taught.
@@ -315,7 +344,11 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
     // memory stores and chunk tables (each after its source).
     let by_shape = |s: Shape| tables.iter().filter(move |t| shape(t) == s);
     for t in by_shape(Shape::Plain) {
-        let mut parts: Vec<String> = t.columns.iter().map(column_sql).collect();
+        let mut parts: Vec<String> = t
+            .columns
+            .iter()
+            .map(|c| column_sql_with(c, &identities))
+            .collect();
         for c in catalog::constraints(std::slice::from_ref(t)) {
             if matches!(c.kind, catalog::ConstraintKind::ForeignKey(_)) {
                 continue;
@@ -448,7 +481,7 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
                     format!(
                         "ALTER TABLE {} ADD COLUMN {}",
                         ident(&t.name),
-                        column_sql(col)
+                        column_sql_with(col, &identities)
                     ),
                 );
             }
@@ -533,6 +566,25 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
                     list(parent, &fk.ref_columns),
                     fk_action("UPDATE", fk.on_update),
                     fk_action("DELETE", fk.on_delete),
+                ),
+            );
+        }
+    }
+
+    // The sequences columns own (an identity column's is its own).
+    for s in &sequences {
+        if let Some((t, c)) = &s.owned_by
+            && !identities.contains_key(&s.name)
+        {
+            def(
+                "owned by",
+                &s.name,
+                Some(t),
+                format!(
+                    "ALTER SEQUENCE {} OWNED BY {}.{}",
+                    ident(&s.name),
+                    ident(t),
+                    ident(c)
                 ),
             );
         }

@@ -9,7 +9,7 @@ later — without changing the layers above.
 crash-safe copy-on-write B+tree with a write-ahead log, MVCC transactions
 (snapshot isolation and serializable — histories checked by Jepsen's
 Elle as strong snapshot isolation and strict serializability), the KV contract, a PostgreSQL-like
-SQL dialect (joins of every kind, CTEs, foreign keys, upserts (`INSERT … ON CONFLICT`), collections of documents (`CREATE COLLECTION`); integers by width,
+SQL dialect (joins of every kind, CTEs, foreign keys, upserts (`INSERT … ON CONFLICT`), savepoints, sequences, `serial` and identity columns, collections of documents (`CREATE COLLECTION`); integers by width,
 `real` and `double`, `numeric`, text and `char(n)`, `bytea` — large
 values stored out of line —, date, time and timestamps, intervals,
 `inet` / `cidr`, `uuid`, `json` — one binary type, read in place, with `jsonb`'s operators, SQL/JSON paths and the standard's `JSON_VALUE` / `JSON_QUERY` / `JSON_TABLE` / `JSON_OBJECT`, indexed by expression indexes, multi-valued indexes on arrays' elements and a containment index (`USING json`) —, enums and arrays) with a cost-based optimizer, its own system catalog

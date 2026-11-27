@@ -374,6 +374,7 @@ fn any_node(e: &ast::Expr, f: &dyn Fn(&ast::Expr) -> bool) -> bool {
         A::Literal(_)
         | A::Column { .. }
         | A::Param(_)
+        | A::Default
         | A::Exists { .. }
         | A::Subquery(_)
         | A::ArraySubquery(_) => false,
@@ -3222,6 +3223,9 @@ impl<'a> Binder<'a> {
                     },
                     Some(DataType::Bool),
                 )
+            }
+            A::Default => {
+                return Err(Error::syntax("DEFAULT is not allowed in this context"));
             }
             A::Param(n) => {
                 self.note_param(n - 1, None);

@@ -14407,8 +14407,25 @@ found missing, and the open issues.
   sessions at once take 4,000 values, each once, no gap; a reopen goes
   on past the reservation, after `setval` and `ALTER … INCREMENT` too;
   a crash at every point of 40 inserts never repeats a key); twelve
-  mutations, each failing.  Next: `serial` and identity columns, `OWNED
-  BY`'s drop, `pg_get_serial_sequence`; then `pg_class`, schema diffs.
+  mutations, each failing.
+- Issue #23, second step — `serial`, `bigserial`, `smallserial`;
+  `GENERATED ALWAYS | BY DEFAULT AS IDENTITY [(SEQUENCE NAME …,
+  options)]`; `INSERT … OVERRIDING SYSTEM | USER VALUE`; `DEFAULT` in a
+  `VALUES` row and in an `UPDATE`'s or upsert's `SET` (missing until
+  now); a sequence owned by a column dropped with it or its table and
+  following their renames; `TRUNCATE … RESTART IDENTITY` (accepted and
+  ignored until now); `pg_get_serial_sequence`; `attidentity` and
+  `is_identity` in pg-compat; definitions that replay them.  As
+  PostgreSQL: a sequence named `table_column_seq` (`1`, `2`, … after it
+  when taken), an identity column's default and sequence its own
+  (`42601`, `2BP01`), `428C9` for a value given to an `ALWAYS` column.
+  Tested by `93_identity.slt` (PostgreSQL 18 in one session: every
+  record but the nucleus-only definitions as it has them),
+  `01_pg_catalog.slt`, the definitions' replay; seventeen mutations, each failing but one
+  equivalent (a NOT NULL the parser set twice: now once).  Next: `ALTER
+  COLUMN … ADD | SET GENERATED`, `DROP IDENTITY`, `RESTART`;
+  `pg_class` / `pg_sequences` / `information_schema.sequences`;
+  sequences in schema diffs.
 
 ### §M16 — Document queries + document server ⬜
 

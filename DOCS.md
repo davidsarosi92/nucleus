@@ -2330,13 +2330,13 @@ EXISTS]` (of columns and expressions; `CONCURRENTLY`: built online, §8.7),
 CONSTRAINT [IF EXISTS] n`, `ALTER TABLE … RENAME …`, `… DROP COLUMN …`,
 `… ALTER COLUMN … SET / DROP DEFAULT | SET / DROP NOT NULL`, `ALTER INDEX
 … RENAME TO` (§8.35), `INSERT INTO t [AS a] … VALUES | SELECT | DEFAULT VALUES
-[ON CONFLICT …] [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
+[ON CONFLICT …] [RETURNING]` (`OVERRIDING SYSTEM | USER VALUE` after the columns; `DEFAULT` in a `VALUES` row: the column's default), `UPDATE … SET … [WHERE] [RETURNING]` (`SET c = DEFAULT`), `DELETE … [WHERE]
 [RETURNING]`, `TRUNCATE [TABLE] t, … [CONTINUE | RESTART IDENTITY]
 [CASCADE | RESTRICT]` (every row deleted as `DELETE` deletes them — in
 the transaction's snapshot, under `DELETE`'s privilege and row policies;
 a table another references by a foreign key only with that one, named or
-by `CASCADE`; `RESTART IDENTITY` has nothing to restart, no column owning
-a sequence), queries (`SELECT … INTO [TABLE] t …`: `CREATE TABLE t AS`
+by `CASCADE`; `RESTART IDENTITY` restarts the sequences their columns
+own, at once), queries (`SELECT … INTO [TABLE] t …`: `CREATE TABLE t AS`
 the query, as PostgreSQL's), `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
 `READ ONLY|WRITE`, `AS OF TIMESTAMP|COMMIT …`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
 name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `CREATE
@@ -3828,6 +3828,34 @@ are read through the session's catalog cache, the state kept by the
 session: `SELECT count(nextval('s')) FROM generate_series(1, 1000000)`
 281 ms (PostgreSQL 18: 194 ms), an `INSERT` of 200,000 rows keyed by one
 141 ms (PostgreSQL 18: 229 ms).
+
+**`serial` and identity columns** (issue #23).  `serial` / `serial4`,
+`bigserial` / `serial8`, `smallserial` / `serial2` are `integer`,
+`bigint`, `smallint` `NOT NULL DEFAULT nextval('t_c_seq')`, the sequence
+(of the column's type) made with the table and owned by the column.
+`GENERATED ALWAYS | BY DEFAULT AS IDENTITY [(SEQUENCE NAME s, sequence
+options)]` is the same, the column `NOT NULL`, of `smallint`, `integer`
+or `bigint` (`22023` otherwise), the column marked: an `ALWAYS` one takes
+no value given — an `INSERT`'s (but `DEFAULT`) or an `UPDATE`'s or
+upsert's `SET` (but `= DEFAULT`) is `428C9` — unless `INSERT …
+OVERRIDING SYSTEM VALUE`; `OVERRIDING USER VALUE` ignores the values
+given for identity columns of either kind.  `COPY` takes the values
+given, as PostgreSQL's.  An identity column's default is its sequence's
+(`SET` / `DROP DEFAULT`: `42601`), and its sequence is not dropped alone
+(`2BP01`, `CASCADE` or not).  A sequence's name is `table_column_seq`,
+with `1`, `2`, … after it when that is taken (PostgreSQL's).  A sequence
+owned by a column (`OWNED BY`, `serial`, identity) goes with the column
+or its table — `2BP01` if another table's default calls it, that default
+dropped with `CASCADE` — and follows their renames; `TRUNCATE … RESTART
+IDENTITY` restarts it.  `pg_get_serial_sequence(table, column)` names it
+(`public.s`).  The definitions write an identity column `GENERATED …
+AS IDENTITY (SEQUENCE NAME s options)`, a sequence another column owns
+`ALTER SEQUENCE s OWNED BY t.c` after the tables; pg-compat shows
+`pg_attribute.attidentity` (`a`, `d`) and `information_schema.columns
+.is_identity`.  The table record (version 30 on) keeps each column's
+identity after the rest: `0`, `1 <sequence>` (`ALWAYS`) or `2
+<sequence>`.  Not yet: `ALTER COLUMN … ADD GENERATED`, `SET GENERATED`,
+`DROP IDENTITY`, `RESTART`.
 
 Sessions: outside `BEGIN` every statement is its own transaction, retried
 up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the
@@ -5876,8 +5904,8 @@ searched, checked).  A value is never given: naming the column in an
 list, an `INSERT`'s values and a `COPY`'s fields are the columns that
 are not generated.  The expression may not read a generated column, call
 a volatile function (`42P17`) or hold a subquery (`0A000`), nor be in
-the partitioning; `DEFAULT` with it is `42601`; `VIRTUAL` and identity
-columns are refused (`0A000`).  `ALTER TABLE … ADD COLUMN … GENERATED`
+the partitioning; `DEFAULT` with it is `42601`; `VIRTUAL` is refused
+(`0A000`).  `ALTER TABLE … ADD COLUMN … GENERATED`
 computes it for every row.  The table record (version 15 on) keeps a
 column's generation after its statistics: `0`, `1 <expr>` or `2 <expr>
 <model> <version u32> <next model?>`.  `nc_catalog.columns` shows
