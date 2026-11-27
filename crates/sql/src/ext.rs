@@ -151,6 +151,17 @@ pub mod text {
     pub use crate::text::{Analyzer, Token, named, register_builtins, tokens};
 }
 
+/// Requests on a collection's documents compiled to SQL — what `ncp`'s
+/// `O` message runs, and the MongoDB module (§M16 Q4, Q5).
+pub mod documents {
+    pub use crate::documents::{Op, Request, statement};
+}
+
+/// `json` values: their text.
+pub mod json {
+    pub use crate::json::to_text;
+}
+
 /// A bound expression ([`crate::expr`]), as [`ScalarFunction::rewrite`]
 /// and [`ScalarFunction::found`] read and give them.
 pub use crate::expr::Expr;

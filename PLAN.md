@@ -297,7 +297,7 @@ are marked ✅.
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
 | **F2 — NoSQL** | M15 | Document model | ✅ (2026-11-27) study written (2026-11-20), steps D1–D5 (re-split 2026-11-25): D1 the form, D2 upsert, D3 collections, D4 path indexes, D5 multi-valued indexes; the bug hunt after them (upserts under concurrent writers, documents differentially and killed mid-write). Next: §M16, starting with the query language's decision |
-| | M16 | Document queries (shared executor) + document server | ⬜ the query language decided (2026-11-27, D22: SQL/JSON the core, a MongoDB-style filter compiled to lax paths); steps Q1–Q5 proposed |
+| | M16 | Document queries (shared executor) + document server | ✅ (2026-11-27) the query language decided (D22: SQL/JSON the core, a MongoDB-style filter compiled to lax paths); Q1 the filter compiler, Q2 its indexes, Q3 find / update / upsert / projection / sort (MongoDB 8's answers, differentially), Q4 `ncp`'s `O` and every driver's collection, Q5 `--mongo-compat` (mongosh, pymongo). Next: §M16.5 streams |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
 | | M16.7 | Sync: embedded databases on devices kept in sync with a server, offline first | ⬜ |
@@ -14467,7 +14467,7 @@ found missing, and the open issues.
   columns of partitioned tables; `'name'::regclass::text` gives the oid,
   not the name (as for tables).
 
-### §M16 — Document queries + document server ⬜
+### §M16 — Document queries + document server ✅ (2026-11-27; D22, Q1–Q5)
 
 - **The decision on the query language** ✅ (2026-11-27, D22; the
   prototype and its numbers in §M15's study, item 8): SQL/JSON the
@@ -14608,11 +14608,43 @@ found missing, and the open issues.
   each a thin layer over `O`, with the same conformance case
   (`documents`: every request, the `22023`s, `42P01`, a transaction with
   a table rolled back and committed).  Q4 is done; next Q5.
-- **Q5 — `--mongo-compat`**: the MongoDB wire protocol's subset (OP_MSG:
+- **Q5 — `--mongo-compat`** ✅ (2026-11-27): the MongoDB wire protocol's subset (OP_MSG:
   hello, find, insert, update, delete, count, getMore, the commands
   `mongosh` and drivers send first), the same compiler, Extended JSON
   mapped to and from BSON's types (§M15 item 4); `mongosh` and one
   standard driver run CRUD and queries.
+  *Done:* `modules/mongo-compat` (DOCS.md §8.42), a module on the public
+  API — `nucleus_sql::ext::documents`, the compiler `O` uses, now
+  exported there — so each request is one statement.  Its own BSON
+  reader and writer (from bsonspec.org's specification) and Extended
+  JSON both ways; `OP_MSG` and the first `OP_QUERY` `hello`;
+  SCRAM-SHA-256 by `saslStart` / `saslContinue` against the server's
+  verifiers (the Rust `ScramClient` gained `with_user`: MongoDB names
+  the user in SCRAM's first message); `find` / `getMore` /
+  `killCursors`, `insert` (ordered and unordered write errors), `update`
+  (upserts with ObjectIds), `delete`, `count`, `findAndModify` (one
+  transaction), `aggregate` of what drivers send for queries and
+  `countDocuments`, collections, indexes and a shell's first commands.
+  Two findings on the way: a value Extended JSON wraps (`{"$oid": …}`)
+  read as operators by the filter compiler — the module now compares it
+  with `$eq`, exactly —, and a range on a date or an ObjectId, which
+  the compiler refuses on objects — the module ranges on the wrapper's
+  text (`at.$date`), sorting as the values do, for which the compiler
+  now takes a `$`-part inside a dotted path (MongoDB refuses one; an
+  operator never stands there).  The other differences recorded: one
+  number type (a `double` `1.0` comes back `1`), keys in `json`'s
+  canonical order with `_id` first, no sessions (so no transactions or
+  retryable writes over this protocol — nucleus's own drivers have
+  them), aggregation beyond counting and the find stages to SQL.
+  Measured against the real clients: mongosh 2.14.3 (`--eval` and an
+  interactive session: `show dbs`, `show collections`, cursors, 250
+  documents in batches, `findOneAndUpdate` / `Delete`, `createIndex`,
+  Decimal128 and Long round-tripping, a duplicate key `11000`) and
+  pymongo 4.20.2 (CRUD, `bulk_write`, dates, ObjectIds, regular
+  expressions, `find_one_and_update`, `DuplicateKeyError`) — every check
+  passed; both in CI by `scripts/mongo-smoke.sh`.  Tests: the module's
+  `tests/wire.rs` (a client of its own: the legacy `hello`, a wrong and
+  a right password, every command) and its BSON unit tests.
 - Not in §M16: aggregation pipelines — SQL answers them (a pipeline
   stage-by-stage compiler may follow if users ask).
 - A transaction can span SQL tables and document collections.

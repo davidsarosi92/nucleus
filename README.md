@@ -255,14 +255,15 @@ The developer platform (§M14: columnar storage and partitions, vectors,
 full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …) is built, and so is the document
 model's first milestone (§M15: collections, upsert, path and
-multi-valued indexes).  Document queries and a document server (§M16)
-are under way: SQL/JSON stays the core, and a MongoDB-style filter
+multi-valued indexes), and document queries with a document server
+(§M16): SQL/JSON stays the core, and a MongoDB-style filter
 document (`{"age": {"$gt": 30}, "tags": "vip"}`, MongoDB's matching
 rules) is compiled to it — in SQL (`json_filter`, with `find`'s
 projection, sort, update and upsert), and in nucleus's own protocol,
 every driver (`db.collection("people").find(…)`) and the shell
-(`db.people.find(…)`), in the same transactions as SQL.  MongoDB's wire
-protocol comes next, as an optional module, as PostgreSQL's does.  Then streams and changefeeds, live queries and sync
+(`db.people.find(…)`), in the same transactions as SQL — and, with
+`--mongo-compat` (an optional module, as PostgreSQL's protocol is),
+`mongosh` and MongoDB's drivers.  Then streams and changefeeds, live queries and sync
 (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
@@ -295,7 +296,8 @@ nucleus kv ./mydb            # interactive shell: begin, put, get, scan, commit,
 
 SQL, and a server that nucleus's drivers ([`drivers/`](drivers), with
 [`examples/`](examples) in every language) and `ncsql` connect to — and,
-with `--pg-compat`, `psql` and PostgreSQL drivers too:
+with `--pg-compat`, `psql` and PostgreSQL drivers too, and with
+`--mongo-compat`, `mongosh` and MongoDB's drivers:
 
 ```sh
 nucleus sql ./mydb -c "CREATE TABLE t (id INT PRIMARY KEY, name TEXT)"
@@ -303,6 +305,7 @@ ncsql ./mydb                            # SQL shell (same as `nucleus sql`)
 nucleus server ./mydb                   # nucleus protocol on 127.0.0.1:20035
 ncsql -c '\d t'                         # the shell, connected (user and password: nucleus)
 nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
+nucleus server ./mydb --mongo-compat    # also MongoDB's wire protocol on 27017
 nucleus server ./mydb --console         # a web console on http://127.0.0.1:20036/
 nucleus server ./mydb --metrics         # Prometheus on :20037/metrics, /health/ready
 nucleus server ./mydb --backup-to /backups/db --backup-every 1d --backup-keep 4 \

@@ -1,6 +1,6 @@
 //! `nucleus server`: the front ends a command line names — the nucleus
 //! protocol by default, PostgreSQL compatibility (the `pg-compat` module,
-//! which this edition includes) on request; TLS (the `tls` module) for
+//! which this edition includes) and MongoDB's (`mongo-compat`) on request; TLS (the `tls` module) for
 //! clients that ask, given a certificate and its key.
 
 use std::net::TcpListener;
@@ -17,6 +17,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     let mut fronts = FrontEnds::builtin();
     fronts.add(Arc::new(nucleus_pg_compat::Pg))?;
+    fronts.add(Arc::new(nucleus_mongo_compat::Mongo))?;
     fronts.add(Arc::new(nucleus_console::Console::new()))?;
     // (front end, address): ncp always, on `--listen`'s address.
     let mut listen: Option<String> = None;
@@ -66,6 +67,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--listen" => listen = Some(rest.next().ok_or("--listen needs an address")?.clone()),
             "--socket" => socket = Some(rest.next().ok_or("--socket needs a path")?.clone()),
             "--pg-compat" => extra.push(("pg".into(), addr(&mut rest))),
+            "--mongo-compat" => extra.push(("mongo".into(), addr(&mut rest))),
             "--console" => extra.push(("console".into(), addr(&mut rest))),
             "--otlp" => otlp = Some(rest.next().ok_or("--otlp needs an endpoint")?.clone()),
             "--metrics" => {

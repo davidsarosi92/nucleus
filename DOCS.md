@@ -38,6 +38,7 @@
 | `crates/client` | `nucleus-client` | the Rust driver | §M14.6–§M14.8 ✅ |
 | `crates/testkit` | `nucleus-testkit` | the sqllogictest runner and the SQL layer's scripts, for the core, front ends and modules | §M14.19 |
 | `modules/pg-compat` | `nucleus-pg-compat` | PostgreSQL compatibility: the protocol, `pg_catalog`, `information_schema`, the `pg_*` functions (its own README) | §M12, §M14.5, §M14.19 |
+| `modules/mongo-compat` | `nucleus-mongo-compat` | MongoDB compatibility: the wire protocol's CRUD and queries over collections, BSON as Extended JSON (§8.42; its own README) | §M16 Q5 |
 | `modules/tls` | `nucleus-tls` | TLS over rustls, for the front ends and the Rust client | §M14.25 ✅ |
 | `modules/oidc` | `nucleus-oidc` | OpenID Connect: logins by identity tokens | §M14.25 ✅ |
 | `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
@@ -97,7 +98,8 @@ cargo build --target i686-unknown-linux-musl     # any target in PLAN.md "Build 
 CI (`.github/workflows/ci.yml`) runs fmt and clippy, then builds every build
 target and runs the tests on all of them except `x86_64-apple-darwin` (built
 only); on Linux it also runs the real `psql` against `--pg-compat`
-(`scripts/psql-smoke.sh`, §9), the `drivers` job runs every driver's
+(`scripts/psql-smoke.sh`, §9) and `mongosh` and pymongo against
+`--mongo-compat` (`scripts/mongo-smoke.sh`, §8.42), the `drivers` job runs every driver's
 tests and every example against a server (`scripts/driver-tests.sh`, §11),
 and the `modules` job checks the module boundaries and detaches every
 module (§1):
@@ -7837,11 +7839,99 @@ definition, a quoted key, three deep) and `69_expression_indexes.slt`
 (`#>` / `#>>` bound as the chain; integer keys left alone — checked
 against PostgreSQL 18); `a_path_on_a_table_says_what_a_path_is`.
 
+### 8.42 MongoDB's wire protocol (`modules/mongo-compat`, §M16 Q5)
+
+`nucleus server --mongo-compat [addr]` (the front end `mongo`, default
+`127.0.0.1:27017`) speaks MongoDB's wire protocol, so `mongosh` and
+MongoDB's drivers work with collections (§8.41) — the same documents,
+indexes and transactions SQL and `ncp` (§10 *Documents*) see.  A module
+on the public API (`nucleus_sql::ext::documents`, the compiler `O`
+uses), so every request is one SQL statement, planned as any.
+
+- **Wire:** `OP_MSG` (opcode 2013; a body and document sequences —
+  `insert`'s `documents` —; `checksumPresent` read past, `moreToCome`
+  answered with nothing), and `OP_QUERY` on `<db>.$cmd` for the first
+  `hello` / `isMaster` a driver sends, answered `OP_REPLY`; other
+  opcodes close the connection.  48 MB a message, 16 MiB a document.
+  TLS when the server has it (the first byte a handshake's, as `ncp`).
+- **Login:** SCRAM-SHA-256 by `saslStart` / `saslContinue` (with or
+  without `skipEmptyExchange`) against the server's own verifiers (§9),
+  the user named in the client's first message; `hello` with
+  `saslSupportedMechs` offers it.  Throttled and audited as the other
+  front ends; a user whose password a directory checks is refused here.
+  Every command but the handshake's needs a login (`13`).  With
+  `--no-auth`, the session is `nucleus`'s.
+- **Commands:** `find` (filter, projection, sort, skip, limit,
+  `batchSize`, `singleBatch`) / `getMore` / `killCursors` — the result
+  read whole and kept per connection, handed out 101 documents (or
+  `batchSize`) and at most 16 MiB a batch; `insert` — one statement for
+  the batch, and on a failure one by one so an ordered insert keeps the
+  documents before the failing one and an unordered every other
+  (`writeErrors` with each index); `update` (operators, or a replacement;
+  `multi`; `upsert`; `n`, `nModified`, `upserted`), `delete` (`limit`
+  0 or 1), `count`; `findAndModify` (in one transaction: the first match
+  by `sort`, updated, replaced or removed, the document before or `new`;
+  `fields`); `aggregate` of the pipelines drivers send for queries and
+  `countDocuments` — `$match` first, then `$sort`, `$skip`, `$limit`,
+  `$project`, and a last `$count` or `$group` counting with `{$sum: 1}`
+  — compiled to a find or a count (other stages `168`: SQL answers them,
+  §M16); `create`, `drop`, `listCollections` (`nameOnly`, a filter by
+  name), `listDatabases` (the database names the connection used — every
+  name reaches the same collections), `createIndexes` (path indexes,
+  `unique`, named `<collection>_<name>`; a key's direction ignored, text,
+  geospatial and hashed keys `67`), `dropIndexes`, `listIndexes` (`_id_`),
+  and what a shell asks first (`hello`, `buildInfo` — version 7.0.0,
+  wire version 21 —, `getParameter`, `getCmdLineOpts`, `getLog`,
+  `hostInfo`, `connectionStatus`, `whatsmyuri`, `ping`, `endSessions`).
+  An unknown command is `59`.  No sessions are offered (`hello` gives no
+  `logicalSessionTimeoutMinutes`), so drivers send no `lsid` and run no
+  transactions or retryable writes here; nucleus's own drivers have
+  transactions (§11).
+- **Collections:** a write makes a collection that is not there
+  (`CREATE COLLECTION IF NOT EXISTS`); a read of one is empty.  A
+  document without `_id` gets an ObjectId, an upsert's new document too
+  (by `$setOnInsert`, or for a replacement after its match was tried).
+- **Types:** documents travel as BSON (`mongo_compat::bson`, its
+  reader and writer the module's own) and are kept as `json` with
+  BSON's other types in Extended JSON (§M15 item 4): ObjectId `{"$oid":
+  "<24 hex>"}`, a date `{"$date": "YYYY-MM-DDTHH:MM:SS.mmmZ"}` (years 0
+  to 9999; else `{"$date": {"$numberLong": …}}`), decimal128
+  `{"$numberDecimal": "…"}` (its digits and exponent kept: `1.50`),
+  binary `{"$binary": {"base64": …, "subType": "hh"}}`, a regular
+  expression `{"$regularExpression": …}`, a timestamp, min and max keys,
+  a double that is not finite `{"$numberDouble": …}`; on the way out the
+  same objects are those types again.  A number is an `int32` when it is
+  a whole number that fits, an `int64` when it fits that, else a
+  `double` — JSON has one number type, so a `double` `1.0` comes back
+  `1` (an `int64` past 2^53 keeps its digits).  `_id` comes first in a
+  document; the other keys in `json`'s canonical order (§M15 item 3).
+- **Filters:** a filter is compiled as `json_filter` compiles it (§8.41),
+  after three rewrites: a regular expression value is `{"$regex": …,
+  "$options": …}`; a value Extended JSON wraps (an ObjectId, a date) is
+  compared exactly (`{"$eq": …}`); and `$gt` / `$gte` / `$lt` / `$lte`
+  with a date or an ObjectId compare its text (`{"at": {"$gt": date}}`
+  is `{"at.$date": {"$gt": "…Z"}}`) — the ISO text and the hex sort as
+  the values do.  For that, a filter's dotted path may hold a part
+  beginning with `$` after its first (MongoDB refuses such a path; an
+  operator never stands inside one).  Errors map to MongoDB's codes
+  drivers act on: `23505` `11000` (DuplicateKey), `42P01` `26`, `42P07`
+  `48`, `40001` `112` (WriteConflict), `22023` / `0A000` `2` (BadValue,
+  the SQLSTATE in the message).
+
+Tested by the module's `tests/wire.rs` (a client of its own over a
+socket: the legacy `hello`, a wrong and a right password, every command
+above) and by `scripts/mongo-smoke.sh` in CI — pymongo (CRUD, `bulk_write`,
+Decimal128 and dates round-tripping, ObjectId equality, date ranges,
+regular expressions, `find` in batches, `find_one_and_update`, a
+duplicate key as `DuplicateKeyError`) and `mongosh`'s CRUD and queries;
+`mongosh`'s interactive start (`show dbs`, `show collections`) was run
+by hand.
+
 ## 9. Server (`nucleus-server`)
 
 ```
 nucleus server <dir> [--listen <addr:port>] [--socket <path>] [--pg-compat [<addr:port>]]
-                     [--console [<addr:port>]] [--front-end <name> [<addr:port>]]
+                     [--mongo-compat [<addr:port>]] [--console [<addr:port>]] [--front-end <name> [<addr:port>]]
                      [--metrics [<addr:port>]] [--otlp <endpoint>]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
@@ -8517,10 +8607,11 @@ error, to stderr — to see what a tool asks for.
 **Front ends and authentication are registered** (principle 12): a
 front end is a `FrontEnd` (`name`, `default_addr`, `handle(stream, kv,
 config, id)`) — the built-in `Ncp` in `FrontEnds::builtin()`, `Pg` from
-the pg-compat module, which the `nucleus` edition adds;
+the pg-compat module and `Mongo` from the mongo-compat module, which the
+`nucleus` edition adds;
 `serve_front_end(front, listener, kv, config)` runs any.  The server
 starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
-pg`).  `Config { auth, registry, log_queries, tls }` (`tls`: a
+pg`, `--mongo-compat` `--front-end mongo`).  `Config { auth, registry, log_queries, tls }` (`tls`: a
 `transport::Tls`, `Config::with_tls`; the front end negotiates it and
 reads and writes through the stream it returns; `TlsInfo` says what was
 agreed, and `client_name` who a verified client certificate names): `auth` is an `Authenticator`
@@ -8564,6 +8655,12 @@ console)`).  `modules/console/test/browser.mjs` goes through the page in
 headless Chrome against a server — login refused and accepted, tables,
 rows, NULLs, two statements, a plan, the linter, an error and its hint,
 a transaction's state, a new table listed, the logout — in CI on Linux.
+
+**MongoDB compatibility** (optional, §M16 Q5): `--mongo-compat` also
+listens for MongoDB's wire protocol (`nucleus_mongo_compat::Mongo`, default
+`127.0.0.1:27017`), with the same credentials (SCRAM-SHA-256), so
+`mongosh` and MongoDB's drivers run CRUD and queries on collections
+(§8.42).
 
 **PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
 for the PostgreSQL protocol (`nucleus_pg_compat::Pg`, default

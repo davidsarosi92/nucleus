@@ -56,7 +56,8 @@ usage:
                                     sample and query (read-only unless
                                     --allow-writes); --memory: remember, recall,
                                     forget
-  nucleus server <dir> [--listen <addr:port>] [--socket <path>] [--pg-compat [<addr:port>]] [--console [<addr:port>]]
+  nucleus server <dir> [--listen <addr:port>] [--socket <path>] [--pg-compat [<addr:port>]] [--mongo-compat [<addr:port>]]
+                     [--console [<addr:port>]]
                      [--front-end <name> [<addr:port>]] [--metrics [<addr:port>]] [--otlp <url>]
                      [--user <name>] [--password <pw> (or NUCLEUS_PASSWORD)] [--no-auth] [--log-queries]
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
@@ -80,7 +81,10 @@ usage:
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
-                                    127.0.0.1:5432), with --console a web console
+                                    127.0.0.1:5432), with --mongo-compat (the
+                                    front end `mongo`) MongoDB's wire protocol
+                                    for mongosh and MongoDB's drivers (default
+                                    127.0.0.1:27017), with --console a web console
                                     (default 127.0.0.1:20036; beyond loopback
                                     over TLS only), with --metrics Prometheus's
                                     GET /metrics and the health checks

@@ -488,6 +488,11 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
           cargo build --target ${{ matrix.target }} --bin nucleus
           scripts/psql-smoke.sh target/${{ matrix.target }}/debug/nucleus
+      - name: mongosh and pymongo against nucleus server --mongo-compat
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          python3 -m venv /tmp/pymongo && /tmp/pymongo/bin/pip install -q pymongo
+          PYTHON=/tmp/pymongo/bin/python scripts/mongo-smoke.sh target/${{ matrix.target }}/debug/nucleus
       - uses: actions/setup-node@v5
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:

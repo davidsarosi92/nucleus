@@ -181,16 +181,19 @@ fn unknown(op: &str) -> Error {
     Error::invalid_parameter(format!("unknown operator in a filter: {op}"))
 }
 
-/// A field's path: its keys.
+/// A field's path: its keys.  A key after the first may begin with `$`
+/// (`at.$date`: Extended JSON's wrapper, which the MongoDB module ranges
+/// on) — an operator is never inside a dotted path, so it is a name
+/// there; MongoDB refuses it.
 fn field_path(field: &str) -> Result<Vec<String>> {
     let parts: Vec<String> = field.split('.').map(str::to_string).collect();
-    for p in &parts {
+    for (i, p) in parts.iter().enumerate() {
         if p.is_empty() {
             return Err(Error::invalid_parameter(format!(
                 "a filter's field \"{field}\" has an empty part"
             )));
         }
-        if p.starts_with('$') {
+        if i == 0 && p.starts_with('$') {
             return Err(unknown(p));
         }
         if p.bytes().all(|b| b.is_ascii_digit()) {

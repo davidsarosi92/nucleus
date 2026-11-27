@@ -453,6 +453,17 @@ impl ScramClient {
         }
     }
 
+    /// The same exchange naming `user` in its first message (`n=`) — for
+    /// protocols that carry the user there (MongoDB's), not in a message
+    /// of their own.  `,` and `=` in the name are escaped (RFC 5802).
+    pub fn with_user(mut self, user: &str) -> Self {
+        let name = user.replace('=', "=3D").replace(',', "=2C");
+        self.client_first_bare = self
+            .client_first_bare
+            .replacen("n=,", &format!("n={name},"), 1);
+        self
+    }
+
     /// The same exchange over a TLS session whose `tls-server-end-point`
     /// value is `data`: bound to it if the server `offered` binding
     /// (SCRAM-SHA-256-PLUS), else saying it could have ("y") — so a server
