@@ -5,8 +5,8 @@
 //! own records — not text kept from when it was made, so a table altered
 //! twenty times is one `CREATE TABLE` — in an order that replays on an
 //! empty database: models, enum types and what types were taught; tables
-//! (ordinary ones, then partitions, memory stores and chunk tables, each
-//! after what it is made from) with their columns, keys, unique
+//! (ordinary ones, then partitions, memory stores, chunk tables and
+//! collections, each after what it is made from) with their columns, keys, unique
 //! constraints and checks; then indexes, statistics objects, foreign keys
 //! (after every table, so cycles need no order), comments, the tables'
 //! settings (storage, expiry, subjects, row security) and policies.
@@ -30,7 +30,8 @@ use crate::ncatalog::type_text;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Definition {
     /// What it makes: `model`, `type`, `ordering`, `operator`, `cast`,
-    /// `table`, `partition`, `memory store`, `chunk table`, `column`,
+    /// `table`, `partition`, `memory store`, `chunk table`, `collection`,
+    /// `column`,
     /// `constraint`, `index`, `statistics`, `foreign key`, `comment`,
     /// `storage`, `expiry`, `subject`, `row security`, `policy`.
     pub kind: &'static str,
@@ -163,6 +164,7 @@ enum Shape {
     Partition,
     Memory,
     Chunks,
+    Collection,
 }
 
 fn shape(t: &Table) -> Shape {
@@ -172,6 +174,8 @@ fn shape(t: &Table) -> Shape {
         Shape::Memory
     } else if t.chunks.is_some() {
         Shape::Chunks
+    } else if t.collection {
+        Shape::Collection
     } else {
         Shape::Plain
     }
@@ -194,6 +198,7 @@ fn made_column(t: &Table, c: usize) -> bool {
         Shape::Partition => true,
         Shape::Memory => c < MEMORY_COLUMNS,
         Shape::Chunks => crate::chunk_tables::derives(t, c),
+        Shape::Collection => c < 2,
     }
 }
 
@@ -404,11 +409,29 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
         }
         def("chunk table", &t.name, Some(&t.name), sql);
     }
-    // What a memory store or chunk table has beyond what its statement
-    // made: columns, unique constraints, checks.
+    for t in by_shape(Shape::Collection) {
+        let mut options = Vec::new();
+        if let Some(schema) = crate::collection::schema(t) {
+            options.push(("schema".to_string(), schema));
+        }
+        if t.storage != crate::storage::ROW && t.storage != crate::column_store::ROW_COLUMN {
+            options.push(("storage".to_string(), t.storage.clone()));
+        }
+        if t.engine != catalog::TableEngine::BTree {
+            options.push(("engine".to_string(), t.engine.name().to_string()));
+        }
+        def(
+            "collection",
+            &t.name,
+            Some(&t.name),
+            format!("CREATE COLLECTION {}{}", ident(&t.name), with(&options)),
+        );
+    }
+    // What a memory store, chunk table or collection has beyond what its
+    // statement made: columns, unique constraints, checks.
     for t in tables
         .iter()
-        .filter(|t| matches!(shape(t), Shape::Memory | Shape::Chunks))
+        .filter(|t| matches!(shape(t), Shape::Memory | Shape::Chunks | Shape::Collection))
     {
         for (c, col) in t.columns.iter().enumerate() {
             if !made_column(t, c) {
@@ -425,10 +448,20 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
             }
         }
         for c in catalog::constraints(std::slice::from_ref(t)) {
-            if matches!(
-                c.kind,
-                catalog::ConstraintKind::Unique(_) | catalog::ConstraintKind::Check(_)
-            ) {
+            // A collection's own checks are its statement's.
+            let own = shape(t) == Shape::Collection
+                && [
+                    "doc_object",
+                    "id_not_array",
+                    crate::collection::SCHEMA_CHECK,
+                ]
+                .contains(&c.name.as_str());
+            if !own
+                && matches!(
+                    c.kind,
+                    catalog::ConstraintKind::Unique(_) | catalog::ConstraintKind::Check(_)
+                )
+            {
                 def(
                     "constraint",
                     &c.name,

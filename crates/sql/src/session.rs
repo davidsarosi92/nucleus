@@ -2774,6 +2774,58 @@ pub(crate) fn execute_statement(
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
         }
+        Statement::CreateCollection {
+            name,
+            if_not_exists,
+            options,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE COLLECTION".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            crate::collection::create(txn, reg, name, options)?;
+            Output::Command("CREATE COLLECTION".into())
+        }
+        Statement::DropCollection {
+            names,
+            if_exists,
+            cascade,
+        } => {
+            // Each a collection (or, with IF EXISTS, none at all); then
+            // dropped as tables are.
+            let mut there = Vec::new();
+            for name in names {
+                match catalog::get_table(&*txn, name)? {
+                    None if *if_exists => {}
+                    None => {
+                        return Err(Error::undefined_table(format!(
+                            "collection \"{name}\" does not exist"
+                        )));
+                    }
+                    Some(_) => {
+                        crate::collection::of(&*txn, name)?;
+                        there.push(name.clone());
+                    }
+                }
+            }
+            if !there.is_empty() {
+                let drop = Statement::DropTable {
+                    names: there,
+                    if_exists: false,
+                    cascade: *cascade,
+                };
+                execute_statement(txn, reg, &drop, params, sink)?;
+            }
+            Output::Command("DROP COLLECTION".into())
+        }
+        Statement::AlterCollection { name, action } => {
+            crate::collection::alter(txn, reg, name, action)?;
+            Output::Command("ALTER COLLECTION".into())
+        }
         Statement::CreateMemoryStore {
             name,
             if_not_exists,
@@ -4340,6 +4392,7 @@ pub(crate) fn create_table(
         missing: Vec::new(),
         gone: Vec::new(),
         memory: None,
+        collection: false,
         engine: opts.engine,
         relative_directory: true,
     };

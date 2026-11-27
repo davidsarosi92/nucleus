@@ -157,6 +157,32 @@ pub enum Statement {
         /// `merge`, `analyzer`.
         options: Vec<(String, String)>,
     },
+    /// `CREATE COLLECTION [IF NOT EXISTS] name [WITH (option = value,
+    /// …)]`: a table of documents (PLAN.md §M15 D3).
+    CreateCollection {
+        /// The collection.
+        name: String,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// `schema`, `storage`, `engine`.
+        options: Vec<(String, String)>,
+    },
+    /// `DROP COLLECTION [IF EXISTS] name, … [CASCADE | RESTRICT]`.
+    DropCollection {
+        /// The collections.
+        names: Vec<String>,
+        /// `IF EXISTS`.
+        if_exists: bool,
+        /// `CASCADE`.
+        cascade: bool,
+    },
+    /// `ALTER COLLECTION name …`.
+    AlterCollection {
+        /// The collection.
+        name: String,
+        /// What changes.
+        action: AlterCollection,
+    },
     /// `REMEMBER content FOR subject IN store [AS kind] [CONFIDENCE c]
     /// [VALID FROM t] [EXPIRES t] [SOURCE s] [REPLACING id]`: a memory
     /// kept — merged into a near-identical one, or added.
@@ -757,6 +783,17 @@ impl Default for ExplainOptions {
             timing: true,
         }
     }
+}
+
+/// What `ALTER COLLECTION` changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterCollection {
+    /// `SET (schema = '…')`: its documents' JSON Schema.
+    SetSchema(String),
+    /// `RESET (schema)`: none.
+    ResetSchema,
+    /// `RENAME TO name`.
+    Rename(String),
 }
 
 /// `ON CONFLICT [target] DO …` of an `INSERT` (PostgreSQL's upsert).

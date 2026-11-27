@@ -12,6 +12,7 @@
 //! |-------|-------------|
 //! | `nc_catalog.schemas` | schema (of the session's registry) |
 //! | `nc_catalog.tables` | table |
+//! | `nc_catalog.collections` | collection (`CREATE COLLECTION`), its JSON Schema |
 //! | `nc_catalog.columns` | column |
 //! | `nc_catalog.indexes` | index (the primary index is index 0) |
 //! | `nc_catalog.constraints` | primary key, unique, check, foreign key |
@@ -369,6 +370,16 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("size", I),
             ("overlap", I),
             ("model", T),
+        ],
+    ),
+    (
+        "collections",
+        &[
+            ("name", T),
+            ("owner", T),
+            ("schema", T),
+            ("storage", T),
+            ("engine", T),
         ],
     ),
     (
@@ -1041,6 +1052,17 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     t.budget
                         .rate
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
+                ]);
+            }
+        }
+        "collections" => {
+            for t in tables.iter().filter(|t| t.collection) {
+                out.push(vec![
+                    text(t.name.clone()),
+                    t.owner.clone().map_or(Value::Null, text),
+                    crate::collection::schema(t).map_or(Value::Null, text),
+                    text(t.storage.clone()),
+                    text(t.engine.name().to_string()),
                 ]);
             }
         }

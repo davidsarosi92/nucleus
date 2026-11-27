@@ -293,7 +293,7 @@ are marked ✅.
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
-| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅ (2026-11-27) |
+| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅, D3 collections ✅ (2026-11-27) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
@@ -13929,7 +13929,7 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1, D2 ✅)
+### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1–D3 ✅)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
@@ -14171,7 +14171,35 @@ multi-valued one, the language decision moved to §M16's start):*
   kind and `nc_catalog.collections`, `_id` as the stored key (made
   where absent), `WITH (schema = …)`; insert, replace, update by
   operators, delete and upsert (D2's statement) in SQL; pg-compat sees a
-  table; slt against PostgreSQL where the SQL is the same.
+  table; slt against PostgreSQL where the SQL is the same. ✅
+  (2026-11-27).  A collection is a table `(_id json PRIMARY KEY
+  GENERATED ALWAYS AS (doc -> '_id') STORED, doc json NOT NULL)` with
+  `Table::collection` set (catalog encoding 29; `collection.rs` makes
+  and alters it through the table statements, as memory stores are
+  made): the document holds its id and round-trips whole; a document
+  without one is given its row's on an update (replaced whole, the id
+  kept) or a UUIDv7 string on an insert — `collection::FILL`, bound
+  once with the writer, evaluated before the generated columns.  Checks
+  `doc_object` (tested before the fill, so the error names it),
+  `id_not_array` (MongoDB's rule) and `doc_schema`
+  (`json_matches_schema`, J5) for `WITH (schema = …)`; `ALTER
+  COLLECTION … SET (schema) | RESET (schema) | RENAME TO`; `DROP
+  COLLECTION` refuses a plain table (`42809`).  `nc_catalog.collections`;
+  definitions dump `CREATE COLLECTION … WITH (…)` and schema diffs set
+  or reset a changed schema in place; ncsql's `\d` says "Collection";
+  pg-compat shows a table of two `jsonb` columns.  Update by operators
+  is SQL's JSON functions (`json_set`, `#-`, `||`); a field index is an
+  expression index (D4 gives it a path spelling).  *Tests*:
+  `slt/88_collections.slt` (nucleus-only: PostgreSQL has no collections;
+  the SQL over documents is checked against it in 65–68 and 87),
+  `tests/collections.rs` (every storage kept whole through inserts,
+  replacements, upserts, deletes and a field index; ids in insert order;
+  privileges), `tests/schema_diff.rs`, pg-compat's `01_pg_catalog.slt`.
+  16 mutants, all killed (one survived first — the dump dropping
+  `engine = lsm` replays alike on both sides — and got its test,
+  `its_definition_keeps_every_option`).  Not measured: a collection's reads and writes are
+  a table's with one more expression a write (D5 measures documents
+  against PostgreSQL and MongoDB).
 - **D4 — path indexes**: `CREATE INDEX ON c (a.b.c)` for a collection —
   an expression index on the path's value (`doc #> '{a,b,c}'`) under
   another spelling, chosen by the planner as expression indexes are;

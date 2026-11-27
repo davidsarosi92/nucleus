@@ -819,6 +819,9 @@ struct Bound {
     generated: Vec<(usize, Expr)>,
     /// The embedding columns and the columns their texts are made of.
     embeddings: Vec<(usize, Vec<usize>)>,
+    /// A collection's document column and the document as written, given
+    /// an `_id` where it has none ([`crate::collection::FILL`]).
+    fill: Option<(usize, Expr)>,
     keys: Arc<IndexKeys>,
 }
 
@@ -863,12 +866,22 @@ impl Bound {
                 None => {}
             }
         }
+        let fill = match (table.collection, table.column(crate::collection::DOC)) {
+            (true, Some(c)) => Some((
+                c,
+                binder
+                    .expr(&parse_expr(crate::collection::FILL)?, &scope)?
+                    .0,
+            )),
+            _ => None,
+        };
         Ok(Self {
             table: table.clone(),
             checks,
             defaults,
             generated,
             embeddings,
+            fill,
             keys: Arc::new(IndexKeys::new(txn, reg, view)?),
         })
     }
@@ -984,10 +997,31 @@ impl Writer {
         }
     }
 
-    /// A new or changed row made whole: its stored generated columns
-    /// computed (from the row's other columns), then
-    /// [`validate`](Self::validate)d.
+    /// A new or changed row made whole: a collection's document given an
+    /// `_id` where it has none, its stored generated columns computed
+    /// (from the row's other columns), then [`validate`](Self::validate)d.
     pub fn complete(&self, row: &mut Row, ctx: &Ctx) -> Result<()> {
+        if let Some((c, e)) = &self.parts.fill {
+            // Not an object: refused by its check, before its `_id` (none)
+            // is missing.
+            if !row[*c].is_null()
+                && !matches!(
+                    crate::json::form::root(crate::json::bytes(&row[*c])?)?,
+                    crate::json::form::Node::Object(_)
+                )
+            {
+                return Err(Error::check_violation(format!(
+                    "new row for relation \"{}\" violates check constraint \"doc_object\"",
+                    self.table.name
+                )));
+            }
+            let v = e.eval(&Env {
+                row,
+                outer: None,
+                ctx,
+            })?;
+            row[*c] = v;
+        }
         for (c, e) in &self.parts.generated {
             let v = e.eval(&Env {
                 row,

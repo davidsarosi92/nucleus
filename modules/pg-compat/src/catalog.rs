@@ -588,6 +588,7 @@ fn def_table(k: usize) -> Table {
         missing: Vec::new(),
         gone: Vec::new(),
         memory: None,
+        collection: false,
         engine: Default::default(),
         relative_directory: true,
     }

@@ -1,0 +1,243 @@
+# Collections (PLAN.md §M15 D3): tables of documents, `CREATE COLLECTION`.
+# nucleus-only as a whole — PostgreSQL has no collections; the SQL over
+# them (json operators, ON CONFLICT) is checked against PostgreSQL 18 in
+# 65–68 and 87.
+
+statement ok
+CREATE COLLECTION people
+
+statement ok
+CREATE COLLECTION IF NOT EXISTS people
+
+statement error 42P07
+CREATE COLLECTION people
+
+# A document given no _id is given one: a UUIDv7 string, in order
+statement ok
+INSERT INTO people (doc) VALUES ('{"name": "Ann", "n": 1}'), ('{"name": "Bob", "n": 2}'), ('{"name": "Cy", "n": 3}')
+
+query TIT
+SELECT json_typeof(_id), length(_id #>> '{}'), doc ->> 'name' FROM people ORDER BY _id
+----
+string 36 Ann
+string 36 Bob
+string 36 Cy
+
+query B
+SELECT bool_and(doc -> '_id' = _id) FROM people
+----
+true
+
+# Any id but an array, given by the document
+statement ok
+INSERT INTO people (doc) VALUES ('{"_id": 7, "name": "Dee"}'), ('{"_id": {"org": 1, "n": 2}, "name": "Eve"}'), ('{"_id": "x", "name": "Fay"}')
+
+query TT
+SELECT _id, doc ->> 'name' FROM people WHERE _id IN ('7', '"x"', '{"n": 2, "org": 1}') ORDER BY doc ->> 'name'
+----
+7 Dee
+{"n": 2, "org": 1} Eve
+"x" Fay
+
+statement error 23505
+INSERT INTO people (doc) VALUES ('{"_id": 7, "name": "again"}')
+
+statement error 23514
+INSERT INTO people (doc) VALUES ('{"_id": [1], "name": "list"}')
+
+# A document is an object
+statement error 23514
+INSERT INTO people (doc) VALUES ('[1, 2]')
+
+statement error 23514
+INSERT INTO people (doc) VALUES ('"text"')
+
+statement error 23502
+INSERT INTO people (doc) VALUES (NULL)
+
+# The id is generated from the document: not given apart
+statement error 428C9
+INSERT INTO people (_id, doc) VALUES ('8', '{"name": "Gil"}')
+
+# Replaced whole: the id kept (keys in the canonical form's order: by
+# length, then bytes, as jsonb's)
+statement ok
+UPDATE people SET doc = '{"name": "Dee Dee", "n": 4}' WHERE _id = '7'
+
+query T
+SELECT doc FROM people WHERE _id = '7'
+----
+{"n": 4, "_id": 7, "name": "Dee Dee"}
+
+# Updated by the json functions: set, unset, increment, push
+statement ok
+UPDATE people SET doc = json_set(doc, '{city}', '"Pécs"') WHERE _id = '7'
+
+statement ok
+UPDATE people SET doc = doc #- '{n}' WHERE _id = '"x"'
+
+statement ok
+UPDATE people SET doc = json_set(doc, '{n}', to_json((doc ->> 'n')::int + 10)) WHERE doc ? 'n' AND doc ->> 'name' <> 'Dee Dee'
+
+statement ok
+UPDATE people SET doc = json_set(doc, '{tags}', coalesce(doc -> 'tags', '[]') || '["new"]') WHERE _id = '7'
+
+query T
+SELECT doc FROM people WHERE _id = '7'
+----
+{"n": 4, "_id": 7, "city": "Pécs", "name": "Dee Dee", "tags": ["new"]}
+
+query TI
+SELECT doc ->> 'name', (doc ->> 'n')::int FROM people WHERE doc ? 'n' ORDER BY 2
+----
+Dee Dee 4
+Ann 11
+Bob 12
+Cy 13
+
+# A new id in the document moves the row to it
+statement ok
+UPDATE people SET doc = json_set(doc, '{_id}', '"fay"') WHERE _id = '"x"'
+
+query T
+SELECT _id FROM people WHERE doc ->> 'name' = 'Fay'
+----
+"fay"
+
+# Upsert by the id
+query T
+INSERT INTO people (doc) VALUES ('{"_id": 7, "seen": true}'), ('{"_id": 9, "name": "Hal"}') ON CONFLICT (_id) DO UPDATE SET doc = people.doc || excluded.doc RETURNING doc
+----
+{"n": 4, "_id": 7, "city": "Pécs", "name": "Dee Dee", "seen": true, "tags": ["new"]}
+{"_id": 9, "name": "Hal"}
+
+statement ok
+DELETE FROM people WHERE doc ->> 'name' = 'Hal'
+
+query I
+SELECT count(*) FROM people
+----
+6
+
+# Its JSON Schema: given, checked, replaced, taken away
+statement ok
+CREATE COLLECTION events WITH (schema = '{"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["a", "b"]}}}')
+
+statement ok
+INSERT INTO events (doc) VALUES ('{"kind": "a"}')
+
+statement error 23514
+INSERT INTO events (doc) VALUES ('{"kind": "c"}')
+
+statement error 23514
+INSERT INTO events (doc) VALUES ('{"other": 1}')
+
+query T
+SELECT schema FROM nc_catalog.collections WHERE name = 'events'
+----
+{"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["a", "b"]}}}
+
+# A schema the documents there break is refused
+statement error 23514
+ALTER COLLECTION events SET (schema = '{"required": ["missing"]}')
+
+statement ok
+ALTER COLLECTION events SET (schema = '{"properties": {"kind": {"enum": ["a", "b", "c"]}}}')
+
+statement ok
+INSERT INTO events (doc) VALUES ('{"kind": "c"}')
+
+statement error 23514
+INSERT INTO events (doc) VALUES ('{"kind": "d"}')
+
+statement ok
+ALTER COLLECTION events RESET (schema)
+
+statement ok
+INSERT INTO events (doc) VALUES ('{"kind": "d"}')
+
+query TT
+SELECT name, schema FROM nc_catalog.collections ORDER BY name
+----
+events NULL
+people NULL
+
+statement error 22023
+ALTER COLLECTION events SET (schema = 'not json')
+
+statement error 22023
+CREATE COLLECTION bad WITH (shape = 'x')
+
+# Renamed; dropped — a table is not a collection
+statement ok
+ALTER COLLECTION events RENAME TO happenings
+
+query I
+SELECT count(*) FROM happenings
+----
+3
+
+statement ok
+CREATE TABLE plain (id int PRIMARY KEY)
+
+statement error 42809
+DROP COLLECTION plain
+
+statement error 42809
+ALTER COLLECTION plain RENAME TO other
+
+statement error 42P01
+DROP COLLECTION nothing
+
+statement ok
+DROP COLLECTION IF EXISTS nothing
+
+statement ok
+DROP COLLECTION happenings
+
+query T
+SELECT name FROM nc_catalog.collections
+----
+people
+
+# Another storage, another engine
+statement ok
+CREATE COLLECTION logs WITH (storage = column)
+
+statement ok
+INSERT INTO logs (doc) SELECT json_build_object('i', i) FROM generate_series(1, 100) i
+
+query IT
+SELECT count(*), max((doc ->> 'i')::int)::text FROM logs
+----
+100 100
+
+statement ok
+CREATE COLLECTION kv WITH (engine = lsm)
+
+statement ok
+INSERT INTO kv (doc) VALUES ('{"_id": "a", "v": 1}')
+
+query TT
+SELECT name, storage FROM nc_catalog.collections WHERE name IN ('logs', 'kv') ORDER BY name
+----
+kv row
+logs column
+
+query T
+SELECT engine FROM nc_catalog.collections WHERE name = 'kv'
+----
+lsm
+
+# A table's json column named doc is no collection's
+statement ok
+CREATE TABLE notes (id int PRIMARY KEY, doc json)
+
+statement ok
+INSERT INTO notes VALUES (1, '{"a": 1}'), (2, '[1]')
+
+query T
+SELECT doc FROM notes ORDER BY id
+----
+{"a": 1}
+[1]

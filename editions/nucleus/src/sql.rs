@@ -649,8 +649,16 @@ impl Shell {
             Some(n) => format!("analyzed: {n} rows"),
             None => "not analyzed".into(),
         };
+        // A collection says so (PLAN.md §M15 D3).
+        let kind = match self.fetch(
+            &format!("SELECT count(*) FROM nc_catalog.collections WHERE name = {q}"),
+            out,
+        )? {
+            Some(c) if c.rows.first().and_then(|r| r[0].as_deref()) == Some("1") => "Collection",
+            _ => "Table",
+        };
         let title = format!(
-            "Table \"{t}\" (id {}, key prefix {}, {analyzed}{})",
+            "{kind} \"{t}\" (id {}, key prefix {}, {analyzed}{})",
             cell(0),
             cell(1),
             if cell(3) == "t" || cell(3) == "true" {

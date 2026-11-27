@@ -191,3 +191,21 @@ c c_pid_amount pid, amount true true
 
 statement ok
 DROP STATISTICS c_pid_amount
+
+# A collection (PLAN.md §M15 D3) is a table to PostgreSQL's clients.
+statement ok
+CREATE COLLECTION slt_pg_docs
+
+query TTT
+SELECT column_name, data_type, is_generated FROM information_schema.columns WHERE table_name = 'slt_pg_docs' ORDER BY ordinal_position
+----
+_id jsonb ALWAYS
+doc jsonb NEVER
+
+query T
+SELECT relkind FROM pg_catalog.pg_class WHERE oid = 'slt_pg_docs'::regclass
+----
+r
+
+statement ok
+DROP COLLECTION slt_pg_docs

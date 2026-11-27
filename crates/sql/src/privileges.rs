@@ -969,7 +969,9 @@ pub fn authorize_ddl(
                 )?;
             }
         }
-        Statement::CreateEnum { .. } | Statement::CreateMemoryStore { .. } => {
+        Statement::CreateEnum { .. }
+        | Statement::CreateMemoryStore { .. }
+        | Statement::CreateCollection { .. } => {
             c.require(txn, Kind::Schema, "public", CREATE, None)?
         }
         Statement::CreateSecret { .. }
@@ -1001,6 +1003,7 @@ pub fn authorize_ddl(
         | Statement::DetachPartition { table, .. }
         | Statement::DropConstraint { table, .. }
         | Statement::AlterTable { table, .. }
+        | Statement::AlterCollection { name: table, .. }
         | Statement::SetRowSecurity { table, .. }
         | Statement::DropPolicy { table, .. }
         | Statement::CreatePolicy(crate::policies::Policy { table, .. }) => {

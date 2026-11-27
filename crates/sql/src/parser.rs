@@ -1639,6 +1639,16 @@ impl<'a> Parser<'a> {
             self.expect_op(")")?;
             return Ok(Statement::CreateEnum { name, labels });
         }
+        if self.eat_kw("collection") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.relation()?;
+            let options = self.table_options()?;
+            return Ok(Statement::CreateCollection {
+                name,
+                if_not_exists,
+                options,
+            });
+        }
         if self.eat_kws(&["memory", "store"]) {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.relation()?;
@@ -2277,6 +2287,22 @@ impl<'a> Parser<'a> {
 
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
+        if self.eat_kw("collection") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let mut names = vec![self.relation()?];
+            while self.eat_op(",") {
+                names.push(self.relation()?);
+            }
+            let cascade = self.eat_kw("cascade");
+            if !cascade {
+                self.eat_kw("restrict");
+            }
+            return Ok(Statement::DropCollection {
+                names,
+                if_exists,
+                cascade,
+            });
+        }
         if self.eat_kw("branch") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             return Ok(Statement::DropBranch {
@@ -2519,6 +2545,34 @@ impl<'a> Parser<'a> {
 
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
+        if self.eat_kw("collection") {
+            let name = self.relation()?;
+            let action = if self.eat_kws(&["rename", "to"]) {
+                AlterCollection::Rename(self.ident()?)
+            } else if self.eat_kw("reset") {
+                self.expect_op("(")?;
+                let key = self.ident()?;
+                self.expect_op(")")?;
+                if key != "schema" {
+                    return Err(Error::invalid_parameter(format!(
+                        "unrecognized collection option \"{key}\" (schema)"
+                    )));
+                }
+                AlterCollection::ResetSchema
+            } else {
+                self.expect_kw("set")?;
+                let mut options = self.option_list()?;
+                match (options.len(), options.pop()) {
+                    (1, Some((k, v))) if k == "schema" => AlterCollection::SetSchema(v),
+                    _ => {
+                        return Err(Error::invalid_parameter(
+                            "ALTER COLLECTION … SET takes one option, schema",
+                        ));
+                    }
+                }
+            };
+            return Ok(Statement::AlterCollection { name, action });
+        }
         if self.eat_kw("branch") {
             let name = self.ident()?;
             self.expect_kw("reset")?;

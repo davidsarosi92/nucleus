@@ -151,6 +151,40 @@ fn what_a_diff_must_not_do_is_a_note() {
     assert!(notes.contains("order"), "{notes}");
 }
 
+#[test]
+fn a_collections_schema_changed_in_place() {
+    let (up, down) = assert_both_ways(
+        "CREATE COLLECTION c WITH (schema = '{\"required\": [\"a\"]}');
+CREATE COLLECTION gone",
+        "CREATE COLLECTION c;
+CREATE COLLECTION fresh WITH (schema = '{\"type\": \"object\"}')",
+    );
+    let (up, down) = (up.script(), down.script());
+    for s in [
+        "ALTER COLLECTION c RESET (schema)",
+        "DROP COLLECTION gone",
+        "CREATE COLLECTION fresh",
+    ] {
+        assert!(up.contains(s), "{s}\n{up}");
+    }
+    assert!(
+        down.contains("ALTER COLLECTION c SET (schema = '{\"required\": [\"a\"]}')"),
+        "{down}"
+    );
+    // Another storage: a note, not a drop (its documents would go).
+    let (kx, ky) = (
+        with("CREATE COLLECTION c"),
+        with("CREATE COLLECTION c WITH (storage = column)"),
+    );
+    let d = between(&*kx, &*ky).unwrap();
+    assert!(d.statements.is_empty(), "{}", d.script());
+    assert!(
+        d.notes.join("\n").contains("collection c changed"),
+        "{:?}",
+        d.notes
+    );
+}
+
 /// Each script's schema, made from nothing and taken back to nothing.
 #[test]
 fn the_scripts_schemas_from_and_to_nothing() {

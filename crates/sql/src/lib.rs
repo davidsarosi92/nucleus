@@ -24,6 +24,7 @@ pub mod catalog_cache;
 pub mod check;
 pub mod chunk_tables;
 pub mod chunks;
+pub mod collection;
 pub mod column_store;
 mod columns;
 pub mod convert;

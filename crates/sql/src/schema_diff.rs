@@ -74,7 +74,13 @@ impl Diff {
 /// The kinds columns and tables are made of.
 const BASE: [&str; 5] = ["model", "type", "ordering", "operator", "cast"];
 /// The kinds that are tables.
-const TABLES: [&str; 4] = ["table", "partition", "memory store", "chunk table"];
+const TABLES: [&str; 5] = [
+    "table",
+    "partition",
+    "memory store",
+    "chunk table",
+    "collection",
+];
 /// The kinds that set something on a table: changed, the new statement
 /// is enough; gone, the setting goes back to its default.
 const SETTINGS: [&str; 4] = ["storage", "expiry", "subject", "row security"];
@@ -152,7 +158,22 @@ pub fn diff(from: &dyn KvTxn, to: &dyn KvTxn) -> Result<Diff> {
                         true
                     }
                     "type" => enum_additions(from, to, &d.name, &mut base)?,
-                    "partition" | "memory store" | "chunk table" => {
+                    // Only its schema changed: set or reset.
+                    "collection"
+                        if ta[&d.name].engine == tb[&d.name].engine
+                            && ta[&d.name].storage == tb[&d.name].storage =>
+                    {
+                        let name = ident(&d.name);
+                        additions.push(match crate::collection::schema(&tb[&d.name]) {
+                            Some(schema) => format!(
+                                "ALTER COLLECTION {name} SET (schema = {})",
+                                literal(&schema)
+                            ),
+                            None => format!("ALTER COLLECTION {name} RESET (schema)"),
+                        });
+                        true
+                    }
+                    "partition" | "memory store" | "chunk table" | "collection" => {
                         out.notes.push(format!(
                             "{} {} changed (from: {}; to: {}): dropping it would lose its rows, so the diff leaves it",
                             d.kind, d.name, d.sql, e.sql
@@ -222,6 +243,7 @@ fn drop_sql(d: &Definition) -> Option<String> {
         "table" | "partition" | "memory store" | "chunk table" => {
             Some(format!("DROP TABLE {name}"))
         }
+        "collection" => Some(format!("DROP COLLECTION {name}")),
         "column" => alter(&format!("DROP COLUMN {name}")),
         "constraint" | "foreign key" => alter(&format!("DROP CONSTRAINT {name}")),
         "index" => Some(format!("DROP INDEX {name}")),

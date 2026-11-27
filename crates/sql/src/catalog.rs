@@ -98,9 +98,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// ([`Table::dropped`]); version 26 the type changes being validated
 /// ([`Table::validating`]); version 27 the values of columns added since
 /// rows were stored ([`Table::missing`]); version 28 the places of
-/// columns dropped that rows still store ([`Table::gone`]); older versions
+/// columns dropped that rows still store ([`Table::gone`]); version 29
+/// whether it is a collection ([`Table::collection`]); older versions
 /// still read.
-const TABLE_VERSION: u8 = 28;
+const TABLE_VERSION: u8 = 29;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -435,6 +436,10 @@ pub struct Table {
     pub expiry: Option<usize>,
     /// A memory store ([`crate::memory`]).
     pub memory: Option<MemorySpec>,
+    /// A collection (`CREATE COLLECTION`, [`crate::collection`]): a table
+    /// `(_id, doc)` whose documents are given an `_id` where they have
+    /// none.
+    pub collection: bool,
     /// `SET SUBJECT (column, …)`: the columns that say whose a row is —
     /// `FORGET SUBJECT` erases the rows any of them names
     /// ([`crate::forget`]).
@@ -1154,6 +1159,7 @@ impl Table {
         for &g in &self.gone {
             w.u32(g as u32);
         }
+        w.u8(u8::from(self.collection));
         w.0
     }
 
@@ -1432,6 +1438,7 @@ impl Table {
         } else {
             Vec::new()
         };
+        let collection = version >= 29 && r.u8()? != 0;
         let building = if version >= 24 {
             let n = building_n;
             if n > indexes.len() {
@@ -1465,6 +1472,7 @@ impl Table {
             chunks,
             expiry,
             memory,
+            collection,
             subject,
             converting,
             building,
@@ -2448,6 +2456,7 @@ mod tests {
                 merge: 0.95,
                 analyzer: Some("english".into()),
             }),
+            collection: true,
             converting: Some(Conversion {
                 column: 1,
                 ty: DataType::Numeric,
