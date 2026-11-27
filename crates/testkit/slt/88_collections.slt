@@ -275,9 +275,11 @@ SELECT doc FROM notes ORDER BY id
 {"a": 1}
 [1]
 
-# Path indexes (PLAN.md §M15 D4): `a.b.c` in a collection's documents —
-# the json value there, `doc -> 'a' -> 'b' -> 'c'`; a name that is no
-# column, a path of one key
+# Path indexes (PLAN.md §M15 D4): `a.b.c` in a collection's documents;
+# a name that is no column, a path of one key.  A UNIQUE index's and a
+# later part's: the json value there, `doc -> 'a' -> 'b' -> 'c'`; the
+# first of another: the values lax mode finds there (§M16 Q2), which
+# serve a `->` chain's equality too (95_json_filter.slt has the rest)
 statement ok
 CREATE COLLECTION shop
 
@@ -296,10 +298,10 @@ CREATE INDEX shop_wh ON shop (dims.w, dims.h, _id)
 query TT
 SELECT name, columns FROM nc_catalog.indexes WHERE table_name = 'shop' ORDER BY name
 ----
-shop_dims_w_idx {"(doc -> 'dims' -> 'w')"}
+shop_dims_w_idx {"(json_path_query(doc, '$.\"dims\".\"w\"[*]'))"}
 shop_pkey {_id}
 shop_sku {"(doc -> 'sku')"}
-shop_wh {"(doc -> 'dims' -> 'w')","(doc -> 'dims' -> 'h')",_id}
+shop_wh {"(json_path_query(doc, '$.\"dims\".\"w\"[*]'))","(doc -> 'dims' -> 'h')",_id}
 
 query I
 SELECT count(*) FROM shop WHERE doc -> 'dims' -> 'w' = '3'
@@ -315,7 +317,7 @@ query T
 EXPLAIN SELECT doc FROM shop WHERE doc #> '{dims,w}' = '3'
 ----
 Project: #1
-  Index Scan using shop_dims_w_idx on shop ((doc -> 'dims' -> 'w') = 3) filter: (->(json,path)(#1, 'dims', 'w') = 3)
+  Index Scan using shop_dims_w_idx on shop ((json_path_query(doc, '$."dims"."w"[*]')) = 3) filter: (->(json,path)(#1, 'dims', 'w') = 3)
 
 query T
 EXPLAIN SELECT doc FROM shop WHERE doc -> 'sku' = '"s42"'
@@ -339,7 +341,7 @@ SELECT count(*) FROM shop WHERE doc -> 'sku' IS NULL
 query T
 SELECT definition FROM nc_catalog.definitions WHERE name = 'shop_dims_w_idx'
 ----
-CREATE INDEX shop_dims_w_idx ON shop ((doc -> 'dims' -> 'w'))
+CREATE INDEX shop_dims_w_idx ON shop ((json_path_query(doc, '$."dims"."w"[*]')))
 
 # Deeper, and keys quoted
 statement ok
@@ -348,7 +350,7 @@ CREATE INDEX shop_deep ON shop (dims.size.cm, "it's"."a.b")
 query T
 SELECT columns FROM nc_catalog.indexes WHERE name = 'shop_deep'
 ----
-{"(doc -> 'dims' -> 'size' -> 'cm')","(doc -> 'it''s' -> 'a' -> 'b')"}
+{"(json_path_query(doc, '$.\"dims\".\"size\".\"cm\"[*]'))","(doc -> 'it''s' -> 'a' -> 'b')"}
 
 # On a table, a path is no column
 statement error 42703

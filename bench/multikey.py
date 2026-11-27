@@ -18,6 +18,11 @@ the documents found:
   'strict $.items[*] ? (@.qty > n)'` by `(items[*].qty)`; PostgreSQL's
   GIN serves no range (a full scan, as PostgreSQL has it); `{"items.qty":
   {$gt: n}}`.
+`nucleus filter`: the same lookups written as filter documents (§M16
+Q1, Q2) — `doc @? json_filter('{"tags": "t…"}')`, `{"items.sku":
+"s…"}`, `{"items.qty": {"$gt": n}}`, MongoDB's own filters — served by
+path indexes on `tags`, `items.sku`, `items.qty` (the values lax mode
+finds there).
 Each the median of five runs of its 100 lookups.  nucleus as a server of
 the given binary (its Python client, one round trip a lookup);
 PostgreSQL 18 native and tuned (`bench/pg.py`; one psql script, its
@@ -73,7 +78,11 @@ def values(kind):
     return [990 - (k % 10) for k in range(LOOKUPS)]
 
 
-def condition(kind, v):
+def condition(kind, v, filtered=False):
+    if filtered:
+        f = {"tag": f'{{"tags": "{v}"}}', "sku": f'{{"items.sku": "{v}"}}'}.get(
+            kind, f'{{"items.qty": {{"$gt": {v}}}}}')
+        return f"doc @? json_filter('{f}')"
     if kind == "tag":
         return f"doc @> '{{\"tags\": [\"{v}\"]}}'"
     if kind == "sku":
@@ -84,7 +93,7 @@ def condition(kind, v):
 KINDS = ["tag", "sku", "qty range"]
 
 
-def run_nucleus(binary, docs):
+def run_nucleus(binary, docs, filtered=False):
     work = tempfile.mkdtemp(prefix="nucleus-multikey-")
     server = subprocess.Popen([binary, "server", os.path.join(work, "db"), "--listen", "127.0.0.1:20239"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -100,7 +109,8 @@ def run_nucleus(binary, docs):
         for _ in range(RUNS):
             db.execute("DROP TABLE IF EXISTS c")
             db.execute("CREATE COLLECTION c")
-            for p in ("tags[*]", "items[*].sku", "items[*].qty"):
+            for p in (("tags", "items.sku", "items.qty") if filtered
+                      else ("tags[*]", "items[*].sku", "items[*].qty")):
                 db.execute(f"CREATE INDEX ON c ({p})")
             start = time.perf_counter()
             db.execute(f"INSERT INTO c (doc) {load_sql(docs, False)}")
@@ -109,14 +119,15 @@ def run_nucleus(binary, docs):
         db.execute("ANALYZE c")
         for kind in KINDS:
             plan = "\n".join(r[0] for r in db.execute(
-                f"EXPLAIN SELECT count(*) FROM c WHERE {condition(kind, values(kind)[0])}").rows)
+                f"EXPLAIN SELECT count(*) FROM c WHERE {condition(kind, values(kind)[0], filtered)}").rows)
             assert "Index Scan" in plan, plan
             times = []
             for _ in range(RUNS + 1):
                 total = 0
                 start = time.perf_counter()
                 for v in values(kind):
-                    total += db.execute(f"SELECT count(*) FROM c WHERE {condition(kind, v)}").rows[0][0]
+                    total += db.execute(
+                        f"SELECT count(*) FROM c WHERE {condition(kind, v, filtered)}").rows[0][0]
                 times.append(time.perf_counter() - start)
             out[kind] = times[1:]
             counts[kind] = total
@@ -213,7 +224,9 @@ def main():
     a.add_argument("--docs", type=int, default=200_000)
     a.add_argument("--no-mongo", action="store_true")
     args = a.parse_args()
-    results = {"nucleus": run_nucleus(args.nucleus, args.docs), "postgresql": run_postgres(args.docs)}
+    results = {"nucleus": run_nucleus(args.nucleus, args.docs),
+               "nucleus filter": run_nucleus(args.nucleus, args.docs, filtered=True),
+               "postgresql": run_postgres(args.docs)}
     if not args.no_mongo:
         results["mongodb"] = run_mongo(args.docs)
     # The same documents found by every system.
@@ -222,14 +235,14 @@ def main():
         assert len(set(found.values())) == 1, (kind, found)
     systems = list(results)
     print(f"{args.docs} documents; load and {LOOKUPS} lookups a case, median of {RUNS}, ms")
-    print(f"{'':10}" + "".join(f"{s:>12}" for s in systems))
+    print(f"{'':10}" + "".join(f"{s:>15}" for s in systems))
     for case in ["load"] + KINDS:
         row = []
         for s in systems:
             t = results[s][0][case]
             method.emit(case, t, unit="s", system=s, phase="write" if case == "load" else "warm")
             row.append(method.median(t) * 1000)
-        print(f"{case:10}" + "".join(f"{x:12.1f}" for x in row))
+        print(f"{case:10}" + "".join(f"{x:15.1f}" for x in row))
 
 
 if __name__ == "__main__":

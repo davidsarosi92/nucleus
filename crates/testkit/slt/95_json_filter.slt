@@ -252,7 +252,401 @@ SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{}')
 5
 6
 
-# The path it compiles to; a constant filter is folded when bound
+# The same filters with indexes on the fields (§M16 Q2): a path index
+# holds the values lax mode finds there, so an index scan finds every
+# document the filter matches — the answers above, again
+statement ok
+CREATE INDEX ON people (name)
+
+statement ok
+CREATE INDEX ON people (tags)
+
+statement ok
+CREATE INDEX ON people (address.city)
+
+statement ok
+CREATE INDEX ON people (age)
+
+statement ok
+CREATE INDEX ON people (score)
+
+statement ok
+CREATE INDEX ON people (orders.sku)
+
+# (indexed) equality with a scalar
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"name": "ann"}')
+----
+1
+
+# (indexed) an array holds it, or it is the value
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": "vip"}')
+----
+1
+2
+
+# (indexed) a dotted path, through an array of objects
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": "Budapest"}')
+----
+1
+2
+
+# (indexed) ranges skip other types
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$gt": 30}}')
+----
+1
+6
+
+# (indexed) two ranges, any elements
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$gte": 19, "$lt": 40}}')
+----
+1
+3
+
+# (indexed) $in and $nin
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": {"$in": ["Wien", "Graz"]}}')
+----
+2
+4
+
+# (indexed) $nin passes a missing field
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": {"$nin": ["Wien", "Graz"]}}')
+----
+1
+3
+5
+6
+
+# (indexed) $ne passes another type and none
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$ne": "vip"}}')
+----
+3
+4
+5
+6
+
+# (indexed) null: null or missing
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"score": null}')
+----
+2
+3
+4
+6
+
+# (indexed) null on a path: missing at a step
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address.city": null}')
+----
+3
+5
+6
+
+# (indexed) $exists
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"score": {"$exists": false}}')
+----
+3
+4
+6
+
+# (indexed) $type, of the value or an element
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$type": "string"}}')
+----
+2
+
+# (indexed) $type array
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$type": "array"}}')
+----
+1
+3
+4
+5
+6
+
+# (indexed) $size
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$size": 2}}')
+----
+1
+4
+5
+
+# (indexed) $all
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$all": ["a", "b"]}}')
+----
+5
+
+# (indexed) $regex with i
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"name": {"$regex": "^an", "$options": "i"}}')
+----
+1
+5
+
+# (indexed) $elemMatch on fields
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"orders": {"$elemMatch": {"sku": "A1", "qty": {"$gte": 2}}}}')
+----
+1
+
+# (indexed) $elemMatch on scalars
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$elemMatch": {"$eq": "a"}}}')
+----
+1
+5
+
+# (indexed) $not
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"age": {"$not": {"$gt": 30}}}')
+----
+2
+3
+4
+5
+
+# (indexed) $or
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"$or": [{"age": {"$lt": 20}}, {"tags": "student"}]}')
+----
+3
+4
+
+# (indexed) $nor
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"$nor": [{"tags": "vip"}, {"tags": "a"}]}')
+----
+3
+4
+6
+
+# (indexed) $and
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"$and": [{"tags": "a"}, {"score": {"$gte": 0.5}}]}')
+----
+1
+5
+
+# (indexed) equality with an array: whole or an element
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"point": [1, 2]}')
+----
+5
+6
+
+# (indexed) equality with an array element of an array
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": ["vip"]}')
+----
+6
+
+# (indexed) equality with an object, exactly
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"meta": {"x": 1, "y": [1]}}')
+----
+6
+
+# (indexed) an object with a key less is not equal
+query I
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"meta": {"x": 1}}')
+----
+
+# (indexed) null below an array of scalars: no object lacks it
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags.x": null}')
+----
+2
+
+# (indexed) $type of an element
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$type": "string"}}')
+----
+1
+2
+4
+5
+
+# (indexed) $gte null: null or missing
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"score": {"$gte": null}}')
+----
+2
+3
+4
+6
+
+# (indexed) $regex, any case
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"name": {"$regex": "^b", "$options": "i"}}')
+----
+2
+
+# (indexed) $elemMatch on fields: objects and arrays, not scalars.  The one
+# (indexed) recorded difference: MongoDB answers 6 (its element ["vip"] lacks x);
+# (indexed) lax mode unwraps that element and tests "vip", a scalar
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"tags": {"$elemMatch": {"x": {"$exists": false}}}}')
+----
+
+# (indexed) ... and an array of objects
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{"address": {"$elemMatch": {"zip": {"$exists": false}}}}')
+----
+2
+
+# (indexed) an empty filter: every document
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? json_filter('{}')
+----
+1
+2
+3
+4
+5
+6
+
+# Plans: equality on any scalar, ranges on numbers, through arrays
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"tags": "vip"}')
+----
+Project: #1
+  Index Scan using people_tags_idx on people ((json_path_query(doc, '$."tags"[*]')) = "vip") filter: @?(json,jsonpath)(#1, $?(@."tags" == "vip"))
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"address.city": "Wien", "age": {"$gt": 30}}')
+----
+Project: #1
+  Index Scan using people_address_city_idx on people ((json_path_query(doc, '$."address"."city"[*]')) = "Wien") filter: @?(json,jsonpath)(#1, $?(@."age" > 30 && @."address"."city" == "Wien"))
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"age": {"$gte": 50}}')
+----
+Project: #1
+  Index Scan using people_age_idx on people ((json_path_query(doc, '$."age"[*]')) >= 50) filter: @?(json,jsonpath)(#1, $?(@."age" >= 50))
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? '$.orders ? (@.sku == "C3")'
+----
+Project: #1
+  Index Scan using people_orders_sku_idx on people ((json_path_query(doc, '$."orders"."sku"[*]')) = "C3") filter: @?(json,jsonpath)(#1, $."orders"?(@."sku" == "C3"))
+
+# A constant on the left: `30 > @.age` is a bound below 30, `30 <
+# @.age` above
+query I
+SELECT (doc->>'_id')::int FROM people WHERE doc @? '$ ? (30 > @.age)'
+----
+3
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? '$ ? (30 > @.age)'
+----
+Project: #1
+  Index Scan using people_age_idx on people ((json_path_query(doc, '$."age"[*]')) < 30) filter: @?(json,jsonpath)(#1, $?(30 > @."age"))
+
+query I rowsort
+SELECT (doc->>'_id')::int FROM people WHERE doc @? '$ ? (30 < @.age)'
+----
+1
+6
+
+# Only the part's own path: `city` is not `address.city`; `!=` no bound
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"city": "Wien"}')
+----
+Project: #1
+  Seq Scan on people filter: @?(json,jsonpath)(#1, $?(@."city" == "Wien"))
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? '$ ? (@.name != "ann")'
+----
+Project: #1
+  Seq Scan on people filter: @?(json,jsonpath)(#1, $?(@."name" != "ann"))
+
+# A `->` chain's equality with a scalar or an object: its value is one
+# of the index's
+query T
+EXPLAIN SELECT doc FROM people WHERE doc -> 'name' = '"ann"'
+----
+Project: #1
+  Index Scan using people_name_idx on people ((json_path_query(doc, '$."name"[*]')) = "ann") filter: (->(json,text)(#1, 'name') = "ann")
+
+query I
+SELECT (doc->>'_id')::int FROM people WHERE doc -> 'name' = '"ann"'
+----
+1
+
+# Not served: a range on strings (a path compares them by code point),
+# an array's equality (its entries are its elements), a strict path
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"name": {"$gt": "b"}}')
+----
+Project: #1
+  Seq Scan on people filter: @?(json,jsonpath)(#1, $?(@."name" > "b"))
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc -> 'tags' = '["vip", "a"]'
+----
+Project: #1
+  Seq Scan on people filter: (->(json,text)(#1, 'tags') = ["vip", "a"])
+
+query T
+EXPLAIN SELECT doc FROM people WHERE doc @? 'strict $ ? (@.tags == "vip")'
+----
+Project: #1
+  Seq Scan on people filter: @?(json,jsonpath)(#1, strict $?(@."tags" == "vip"))
+
+# A UNIQUE path index holds the json value there, as before
+statement ok
+CREATE UNIQUE INDEX people_nick ON people (nick)
+
+query T
+SELECT columns FROM nc_catalog.indexes WHERE name = 'people_nick'
+----
+{"(doc -> 'nick')"}
+
+# The part on a table: a lax path of keys ending in [*]
+statement ok
+CREATE TABLE lax_t (id int PRIMARY KEY, j json)
+
+statement ok
+CREATE INDEX ON lax_t ((json_path_query(j, '$.a.b[*]')))
+
+statement ok
+INSERT INTO lax_t VALUES (1, '{"a": [{"b": [1, 2]}, {"b": 3}]}'), (2, '{"a": {"b": 4}}')
+
+query I rowsort
+SELECT id FROM lax_t WHERE j @? '$ ? (@.a.b == 2 || @.a.b == 4)'
+----
+1
+2
+
+query I
+SELECT id FROM lax_t WHERE j @? '$ ? (@.a.b == 3)'
+----
+1
+
+statement error 0A000
+CREATE INDEX ON lax_t ((json_path_query(j, '$.a.b')))
+
+statement error 0A000
+CREATE INDEX ON lax_t ((json_path_query(j, 'strict $.a[*]')))
+
+statement ok
+DROP TABLE lax_t
+
+# The path it compiles to; a constant filter is folded when bound (the
+# plan's filter is the path; the index on name serves it)
 query T
 SELECT json_filter('{"age": {"$gt": 30}, "tags": "vip"}')
 ----
@@ -267,7 +661,7 @@ query T
 EXPLAIN SELECT doc FROM people WHERE doc @? json_filter('{"name": "ann"}')
 ----
 Project: #1
-  Seq Scan on people filter: @?(json,jsonpath)(#1, $?(@."name" == "ann"))
+  Index Scan using people_name_idx on people ((json_path_query(doc, '$."name"[*]')) = "ann") filter: @?(json,jsonpath)(#1, $?(@."name" == "ann"))
 
 # What a filter cannot say
 statement error 22023

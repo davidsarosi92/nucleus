@@ -7622,16 +7622,21 @@ excluded.doc`; an arbiter's part named as an index's — `ON CONFLICT
 (`CREATE INDEX ON c ((doc ->> 'name'))`), and every storage and engine
 holds them.
 
-**Path indexes** (§M15 D4): on a collection, `CREATE [UNIQUE] INDEX
-[name] ON c (a.b.c, …)` — a key part that names no column (`a.b.c`, or
-`name` alone) is a path in the documents, the expression index `doc ->
-'a' -> 'b' -> 'c'` (`collection::path_sql`; the keys split at the dots,
-each quoted as a literal), named `c_a_b_c_idx` when unnamed.  It holds
-the json value there (a document without it: a `NULL` key), so it serves
-the query's `doc -> 'a' -> 'b' -> 'c' = '…'` or `doc #> '{a,b,c}' = '…'`
-— both bound as the same one walk — as any expression index (equality,
-ranges in json's order, `UNIQUE`), and its definition is the
-expression's.  A text comparison (`doc ->> 'name' = 'x'`) wants an index
+**Path indexes** (§M15 D4, §M16 Q2): on a collection, `CREATE [UNIQUE]
+INDEX [name] ON c (a.b.c, …)` — a key part that names no column
+(`a.b.c`, or `name` alone) is a path in the documents (the keys split at
+the dots), named `c_a_b_c_idx` when unnamed.  The first such part of an
+index that is not `UNIQUE` holds the values lax mode finds there: the
+multi-valued part `json_path_query(doc, '$."a"."b"."c"[*]')`
+(`collection::index_path_sql`, below) — so a filter document's
+conditions on the field are served by it, through arrays along the path
+as MongoDB's multikey indexes are.  A `UNIQUE` index's part and a later
+part hold the json value there, the expression `doc -> 'a' -> 'b' ->
+'c'` (`collection::path_sql`; a document without it: a `NULL` key),
+which serves the query's `doc -> 'a' -> 'b' -> 'c' = '…'` or `doc #>
+'{a,b,c}' = '…'` — both bound as the same one walk — as any expression
+index (equality, ranges in json's order, `UNIQUE`; `ON CONFLICT`'s
+arbiter).  Either way the definition is the expression's.  A text comparison (`doc ->> 'name' = 'x'`) wants an index
 on that expression (`((doc ->> 'name'))`): a json value's text form is
 not its key.  `_id` and `doc` are columns, so a field named `doc` is
 indexed by its expression; a key holding a dot or reading as an array
@@ -7644,7 +7649,10 @@ be the elements of an array — `CREATE INDEX ON t
 ((json_array_elements(doc -> 'tags')))`, `((unnest(tags)))` for an SQL
 array, `((json_array_elements(doc -> 'items') ->> 'sku'))` for each
 element's field; on a collection `tags[*]` and `items[*].sku` (one `[*]`
-a path, `0A000` otherwise).  A row has an entry per distinct value
+a path, `0A000` otherwise); or the items a lax path of keys ending in
+`[*]` finds — `((json_path_query(doc, '$.a.b[*]')))`, a collection's path
+index (above): a field's value, an array's elements, along the path
+arrays unwrapped as lax mode does (any other path `0A000`).  A row has an entry per distinct value
 (MySQL's multi-valued index, MongoDB's multikey one): a value that is no
 array is its one element; an element's field that holds an array gives
 its elements (so a containment through the field finds the row); a row
@@ -7673,6 +7681,16 @@ could match the path with no entry.  Two conditions are never combined
 into one range on the part (two elements may meet them).  Not served:
 `a ? 'x'` (true of an object with key `x` too, which has no entry `x`),
 `JSON_EXISTS` (its `ON ERROR TRUE` would hold where the path fails).
+A lax path part (`multikey::lax_bound`) is bound by a lax `x @? '$.k… ?
+(C)'` — a filter document's path —, a conjunct of `C` `@.g… op c` (or
+`c op @.g…`) whose keys before the filter and `g…` are the part's: an
+equality with a scalar, a range with a number (a path compares strings
+by code point, which need not be the index's order), an equality
+preferred; its entries are exactly what the comparison compares, so a
+row it holds for has an entry in the bound.  `$or`, `$in`, `$ne`,
+`$exists`, `$regex` and strict paths are not served; and a `->` chain's
+equality with a json constant but an array (`doc -> 'a' -> 'b' = '3'`,
+`#>` too): the value there is one of the part's.
 
 **Filter documents** (§M16 Q1, D22; `json::path::filter`):
 `json_filter(f)` compiles a MongoDB-style filter document to a lax
@@ -7704,12 +7722,14 @@ keys are unordered (§M15 item 3), so object equality ignores their order
 and an object of operators and fields is an error, not read by its
 first key; `$elemMatch` over an element that is itself an array tests
 that array's elements (lax mode unwraps it) where MongoDB tests the
-array whole.  No index serves the path yet (§M16 Q2).  Checked against
+array whole.  A collection's path indexes serve it (§M16 Q2, above):
+an equality on a field, a range on a number.  Checked against
 MongoDB 8: `slt/95_json_filter.slt` (every answer MongoDB's on the same
 documents but the `$elemMatch` difference, marked) and a differential fuzzer of random filters over random
 irregular documents (outside the repository, as the bug hunt's) —
 4,500 filters without nested arrays or without `$elemMatch`, every
-answer MongoDB's.
+answer MongoDB's, and 4,500 again with path indexes on every path one
+and two keys deep (`INDEX=1`).
 
 `nc_catalog.collections` lists them (name, owner, schema,
 storage, engine); `nc_catalog.definitions` gives `CREATE COLLECTION …

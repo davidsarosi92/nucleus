@@ -3694,17 +3694,21 @@ pub(crate) fn define_index(
         (c, x, o, p, w)
     };
     // A collection's part naming no column is a path in its documents
-    // (PLAN.md §M15 D4): `a.b.c` the expression `doc -> 'a' -> 'b' -> 'c'`.
+    // (PLAN.md §M15 D4): `a.b.c` the expression `doc -> 'a' -> 'b' -> 'c'`
+    // — the first one of a non-`UNIQUE` index the values lax mode finds
+    // there, a multi-valued part a filter document is served by (§M16 Q2).
     let mut paths = vec![None; columns.len()];
     let (columns, exprs) = &{
         let (mut c, mut x) = (columns.clone(), exprs.clone());
         if let Some(t) = catalog::get_table(txn, table)?.filter(|t| t.collection) {
+            let mut first = true;
             for k in 0..c.len() {
                 if x[k].is_none()
                     && t.column(&c[k]).is_none()
                     && k < columns.len() - partition_by.len()
                 {
-                    x[k] = Some(crate::collection::path_sql(&c[k])?);
+                    x[k] = Some(crate::collection::index_path_sql(&c[k], *unique || !first)?);
+                    first = false;
                     paths[k] = Some(
                         std::mem::take(&mut c[k])
                             .replace("[*]", "")

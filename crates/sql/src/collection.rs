@@ -195,6 +195,33 @@ pub fn path_sql(path: &str) -> Result<String> {
     Ok(sql)
 }
 
+/// Path `a.b.c` as a non-`UNIQUE` index's part (PLAN.md §M16 Q2, D22):
+/// the values lax mode finds there, `json_path_query(doc,
+/// '$."a"."b"."c"[*]')` — a multi-valued part whose entries are what a
+/// filter's `@.a.b.c op v` compares (arrays along the path unwrapped, as
+/// MongoDB's indexes are multikey), so a filter document is served by it.
+/// A `UNIQUE` index and a path with `[*]` keep [`path_sql`]'s.
+pub fn index_path_sql(path: &str, unique: bool) -> Result<String> {
+    if unique || path.contains("[*]") {
+        return path_sql(path);
+    }
+    use crate::json::path::ast::{Expr as P, Path, Step};
+    let mut steps: Vec<Step> = path
+        .split('.')
+        .filter(|k| !k.is_empty())
+        .map(|k| Step::Key(k.to_string()))
+        .collect();
+    steps.push(Step::AnyArray);
+    let p = Path {
+        strict: false,
+        expr: P::Chain(Box::new(P::Root), steps),
+    };
+    Ok(format!(
+        "json_path_query({DOC}, {})",
+        literal(&p.to_string())
+    ))
+}
+
 /// A collection's JSON Schema, if it has one.
 pub fn schema(t: &Table) -> Option<String> {
     let (_, text) = t.checks.iter().find(|(n, _)| n == SCHEMA_CHECK)?;

@@ -14506,13 +14506,40 @@ found missing, and the open issues.
   without `$elemMatch`); fifteen mutations, each failing (five only
   after cases were added: `null` below an array of scalars, `$type` of
   an element, `$gte: null`, `$regex` with `i`, `$elemMatch` on fields).
-- **Q2 — indexes for it**: a collection's path index multi-valued (its
+- **Q2 — indexes for it** ✅ (2026-11-27): a collection's path index multi-valued (its
   entries unwrap arrays along the path, lax mode's way; the exact value
   stays an expression index, `((doc -> 'a'))`); the planner probes one
   from a lax predicate's conjuncts (equality, ranges, `$in`, `$all`,
   `exists`) and keeps the predicate as the filter; a lax predicate's
   evaluation made cheaper where it loses to `->>`.  Measured against
   MongoDB and PostgreSQL's GIN.
+  *Done:* a multi-valued part may be the items a lax path of keys ending
+  in `[*]` finds — `json_path_query(doc, '$.a.b[*]')`, the values a lax
+  `@.a.b op c` compares, computed by the path evaluator itself (so the
+  index and the filter cannot disagree); a collection's path index is
+  one — its first path part, unless the index is `UNIQUE` (`ON
+  CONFLICT`'s arbiters stay exact: a unique multi-valued index is not
+  built yet) —, later parts exact, as only one part an index may be
+  multi-valued.  The optimizer (`multikey::lax_bound`) takes an equality
+  with a scalar or a range with a number from a lax filter's
+  conjuncts (strings compare by code point in a path, which need not be
+  the index's order), and a `->` chain's equality with a json constant
+  but an array (its value is one of the part's) — so the D4 plans stay
+  index scans.  Not served yet: `$in` / `$or` (one probe a part; an
+  index union would), `$ne`, `$exists`, `$regex` prefixes.
+  Measured (`bench/multikey.py`, its `nucleus filter` column: the D5
+  lookups written as filter documents over path indexes): the same as
+  D5's explicit `[*]` indexes — the lookup is the same; the gap to
+  PostgreSQL's GIN and MongoDB is gh #22's (the row behind each entry,
+  the re-check), not the filter's.  Tests: `95_json_filter.slt` (every
+  filter again with path indexes, the same answers; plans: equality,
+  number range, through an array of objects, a `->` chain; what is not
+  served; `UNIQUE` exact; the part on a table and its errors),
+  `88_collections.slt` (the D4 plans and definitions as they are now),
+  `filterfuzz.py` with `INDEX=1` (indexes on every path one and two
+  keys deep): 4,500 filters, every answer MongoDB 8's; eleven mutations,
+  each failing (three only after cases were added: a raw `!=`, a path
+  ending in the part's last key but not its path, `c < @.x`).
 - **Q3 — reads and writes by filter**: `find` (filter, projection,
   sort, skip, limit), count, `update` by operators (`$set $unset $inc
   $mul $min $max $rename $push $pull $addToSet $pop`, upsert) compiled

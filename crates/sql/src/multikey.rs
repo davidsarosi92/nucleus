@@ -53,6 +53,11 @@ pub struct Each {
     pub text: bool,
     /// The values' type.
     pub ty: DataType,
+    /// A lax path's values instead (`json_path_query(x, '$.k…[*]')`,
+    /// PLAN.md §M16 Q2): its keys and the path.  Its entries are the items
+    /// the path finds — what a lax comparison `@.k… op c` compares, arrays
+    /// unwrapped as lax mode does.
+    pub lax: Option<(Vec<String>, Box<crate::json::path::Path>)>,
 }
 
 impl ScalarFunction for Each {
@@ -88,6 +93,25 @@ impl Each {
     /// deduplicated.
     pub fn values(&self, array: &Value) -> Result<Vec<Value>> {
         let mut out = Vec::new();
+        if let Some((_, path)) = &self.lax {
+            if array.is_null() {
+                return Ok(out);
+            }
+            use crate::json::path::eval::{self, Fail};
+            let mut found = Vec::new();
+            match eval::run(
+                path,
+                crate::json::bytes(array)?,
+                None,
+                false,
+                Some(&mut found),
+            ) {
+                Ok(_) | Err(Fail::Soft(_)) => {}
+                Err(Fail::Hard(e)) => return Err(e),
+            }
+            out.extend(found.iter().map(|i| crate::json::value(i.to_json())));
+            return Ok(out);
+        }
         match self.kind {
             Kind::Array => {
                 if let Value::Array(items) = array {
@@ -158,14 +182,27 @@ pub fn is_multi(e: &ast::Expr) -> bool {
 
 /// Whether index expression text `sql` is a multi-valued part.
 pub fn is_multi_sql(sql: &str) -> bool {
-    (sql.contains("elements") || sql.contains("unnest"))
+    (sql.contains("elements") || sql.contains("unnest") || sql.contains("path_query"))
         && crate::parser::parse_expr(sql).is_ok_and(|e| is_multi(&e))
 }
 
-/// `f(array) -> 'k1' … ->> 'kn'`: the function, its array and the keys
-/// (the last's operator `->>`: text).
-fn split(e: &ast::Expr) -> Option<(&str, &ast::Expr, Vec<String>, bool)> {
+/// The parts of a multi-valued part's expression: the function, its
+/// array, the keys after it, whether the last is `->>` (text), and a lax
+/// path's text (`json_path_query(x, '…')`).
+type Split<'e> = (&'e str, &'e ast::Expr, Vec<String>, bool, Option<String>);
+
+/// `f(array) -> 'k1' … ->> 'kn'` or `json_path_query(x, 'path')`.
+fn split(e: &ast::Expr) -> Option<Split<'_>> {
     match e {
+        ast::Expr::Function { name, args, .. }
+            if args.len() == 2
+                && matches!(name.as_str(), "json_path_query" | "jsonb_path_query") =>
+        {
+            let ast::Expr::Literal(Value::Text(p)) = &args[1] else {
+                return None;
+            };
+            Some((name.as_str(), &args[0], Vec::new(), false, Some(p.clone())))
+        }
         ast::Expr::Function { name, args, .. } if args.len() == 1 => {
             let name = name.as_str();
             matches!(
@@ -176,18 +213,18 @@ fn split(e: &ast::Expr) -> Option<(&str, &ast::Expr, Vec<String>, bool)> {
                     | "jsonb_array_elements_text"
                     | "unnest"
             )
-            .then(|| (name, &args[0], Vec::new(), false))
+            .then(|| (name, &args[0], Vec::new(), false, None))
         }
         ast::Expr::Operator { op, left, right } if op == "->" || op == "->>" => {
             let ast::Expr::Literal(Value::Text(k)) = &**right else {
                 return None;
             };
-            let (f, a, mut keys, text) = split(left)?;
-            if text {
-                return None; // a key of a text
+            let (f, a, mut keys, text, lax) = split(left)?;
+            if text || lax.is_some() {
+                return None; // a key of a text, or after a path
             }
             keys.push(k.clone());
-            Some((f, a, keys, op == "->>"))
+            Some((f, a, keys, op == "->>", None))
         }
         _ => None,
     }
@@ -200,10 +237,34 @@ pub fn bind(
     table: &crate::catalog::Table,
     e: &ast::Expr,
 ) -> Result<Option<(Expr, DataType)>> {
-    let Some((f, a, keys, text)) = split(e) else {
+    let Some((f, a, keys, text, lax)) = split(e) else {
         return Ok(None);
     };
     let (array, ty) = binder.expr(a, &crate::dml::table_scope(table))?;
+    if let Some(text) = lax {
+        if ty.is_some_and(|t| t != crate::json::data_type()) {
+            return Err(Error::type_mismatch(format!("{f}() takes json")));
+        }
+        let path = crate::json::path::parse(&text)?;
+        let lax_keys = lax_keys(&path).ok_or_else(|| {
+            Error::feature(format!(
+                "an index part {f}(x, path) takes a lax path of keys ending in [*] ('$.a.b[*]'), not '{text}'"
+            ))
+        })?;
+        let json = crate::json::data_type();
+        let each = Each {
+            name: format!("{f}(…, '{path}')"),
+            kind: Kind::Json { text: false },
+            keys: Vec::new(),
+            text: false,
+            ty: json,
+            lax: Some((lax_keys, Box::new(path))),
+        };
+        return Ok(Some((
+            Expr::Call(FnRef::new(Arc::new(each)), vec![array]),
+            json,
+        )));
+    }
     let json = crate::json::data_type();
     let kind = match (f, ty) {
         ("unnest", Some(DataType::Array(_))) => Kind::Array,
@@ -243,11 +304,32 @@ pub fn bind(
         keys,
         text,
         ty: elem,
+        lax: None,
     };
     Ok(Some((
         Expr::Call(FnRef::new(Arc::new(each)), vec![array]),
         elem,
     )))
+}
+
+/// A lax path `$.k…[*]`'s keys (`None`: another path).
+fn lax_keys(path: &crate::json::path::Path) -> Option<Vec<String>> {
+    use crate::json::path::ast::{Expr as P, Step};
+    let P::Chain(head, steps) = &path.expr else {
+        return None;
+    };
+    let (Some(Step::AnyArray), keys) = (steps.last(), &steps[..steps.len().checked_sub(1)?]) else {
+        return None;
+    };
+    if path.strict || !matches!(**head, P::Root) {
+        return None;
+    }
+    keys.iter()
+        .map(|s| match s {
+            Step::Key(k) => Some(k.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The bound on multi-valued part `part` condition `pred` implies, if
@@ -268,7 +350,15 @@ pub fn probe(pred: &Expr, part: &Expr) -> Option<(crate::ast::BinaryOp, Expr)> {
     {
         let (each, array) = of(part)?;
         let path = crate::json::path::compiled(p).ok()?;
+        if let Some((keys, _)) = &each.lax {
+            let mut want = below(array, x)?;
+            want.extend(keys.iter().cloned());
+            return lax_bound(&want, &path);
+        }
         return path_bound(each, &below(array, x)?, &path);
+    }
+    if let Some((keys, _)) = &of(part)?.0.lax {
+        return chain_equal(pred, of(part)?.1, keys).map(|e| (BinaryOp::Eq, e));
     }
     contained(pred, part).map(|e| (BinaryOp::Eq, e))
 }
@@ -369,6 +459,122 @@ fn path_bound(
                 return Some((op, Expr::Literal(v)));
             }
             _ => {}
+        }
+    }
+    None
+}
+
+/// A lax path's bound on a lax part whose values are at keys `want`:
+/// `$.k… ? (C)`, a conjunct of `C` `@.g… op c` (or `c op @.g…`) with the
+/// keys before the filter and `g…` `want`.  An equality with a scalar,
+/// or a range with a number (strings compare by code point in a path,
+/// which need not be the index's order: no ranges on them); an equality
+/// before a range.
+fn lax_bound(
+    want: &[String],
+    path: &crate::json::path::Path,
+) -> Option<(crate::ast::BinaryOp, Expr)> {
+    use crate::ast::BinaryOp;
+    use crate::json::path::ast::{Cmp, Expr as P, Step};
+    if path.strict {
+        return None;
+    }
+    let P::Chain(head, steps) = &path.expr else {
+        return None;
+    };
+    let (Some(Step::Filter(cond)), before) = (steps.last(), &steps[..steps.len() - 1]) else {
+        return None;
+    };
+    if !matches!(**head, P::Root) {
+        return None;
+    }
+    let mut prefix = Vec::new();
+    for s in before {
+        let Step::Key(k) = s else { return None };
+        prefix.push(k.clone());
+    }
+    let current = |e: &P| -> Option<Vec<String>> {
+        let mut keys = prefix.clone();
+        match e {
+            P::Current => {}
+            P::Chain(h, steps) if matches!(**h, P::Current) => {
+                for s in steps {
+                    let Step::Key(k) = s else { return None };
+                    keys.push(k.clone());
+                }
+            }
+            _ => return None,
+        }
+        Some(keys)
+    };
+    // The constant's json value, and whether it is a number.
+    let constant = |e: &P| -> Option<(Value, bool)> {
+        let mut b = Vec::new();
+        match e {
+            P::Num(_, j) => return Some((crate::json::value(j.to_vec()), true)),
+            P::Str(_, j) => return Some((crate::json::value(j.to_vec()), false)),
+            P::Bool(v) => crate::json::form::put_bool(&mut b, *v),
+            P::Null => crate::json::form::put_null(&mut b),
+            _ => return None,
+        }
+        Some((crate::json::value(b), false))
+    };
+    let mut range = None;
+    let mut conds = vec![&**cond];
+    while let Some(c) = conds.pop() {
+        match c {
+            P::And(a, b) => {
+                conds.push(a);
+                conds.push(b);
+            }
+            P::Cmp(op, l, r) => {
+                let (at, (v, number), flip) = match (current(l), constant(r)) {
+                    (Some(at), Some(v)) => (at, v, false),
+                    _ => match (constant(l), current(r)) {
+                        (Some(v), Some(at)) => (at, v, true),
+                        _ => continue,
+                    },
+                };
+                if at != want {
+                    continue;
+                }
+                let op = match (op, flip) {
+                    (Cmp::Eq, _) => return Some((BinaryOp::Eq, Expr::Literal(v))),
+                    (Cmp::Lt, false) | (Cmp::Gt, true) => BinaryOp::Lt,
+                    (Cmp::Le, false) | (Cmp::Ge, true) => BinaryOp::LtEq,
+                    (Cmp::Gt, false) | (Cmp::Lt, true) => BinaryOp::Gt,
+                    (Cmp::Ge, false) | (Cmp::Le, true) => BinaryOp::GtEq,
+                    (Cmp::Ne, _) => continue,
+                };
+                if number && range.is_none() {
+                    range = Some((op, Expr::Literal(v)));
+                }
+            }
+            _ => {}
+        }
+    }
+    range
+}
+
+/// `x -> 'k1' … -> 'kn' = c` (or `#>`, bound as the same walk), `c` a
+/// json constant but an array, on a lax part over `x` at keys `keys`:
+/// the value there equal to `c` is one of the part's values (an array
+/// would be its elements, so not served).
+fn chain_equal(pred: &Expr, array: &Expr, keys: &[String]) -> Option<Expr> {
+    use crate::json::form::{Node, root};
+    let Expr::Binary(crate::ast::BinaryOp::Eq, a, b) = pred else {
+        return None;
+    };
+    let json = crate::json::data_type();
+    for (chain, c) in [(a, b), (b, a)] {
+        let Expr::Literal(v @ Value::Ext(t, bytes)) = &**c else {
+            continue;
+        };
+        if DataType::Ext(*t) != json || matches!(root(bytes).ok()?, Node::Array(_)) {
+            continue;
+        }
+        if matches!(&**chain, Expr::Call(..)) && below(chain, array).as_deref() == Some(keys) {
+            return Some(Expr::Literal(v.clone()));
         }
     }
     None
