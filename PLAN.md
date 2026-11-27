@@ -295,7 +295,7 @@ are marked ✅.
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
-| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅, D3 collections ✅, D4 path indexes ✅, D5 multi-valued indexes ✅ (2026-11-27); next: the bug hunt |
+| **F2 — NoSQL** | M15 | Document model | ✅ (2026-11-27) study written (2026-11-20), steps D1–D5 (re-split 2026-11-25): D1 the form, D2 upsert, D3 collections, D4 path indexes, D5 multi-valued indexes; the bug hunt after them (upserts under concurrent writers, documents differentially and killed mid-write). Next: §M16, starting with the query language's decision |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
@@ -13931,7 +13931,7 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1–D5 ✅)
+### §M15 — Document model ✅ (2026-11-27; study written and steps agreed 2026-11-20; D1–D5 ✅, the bug hunt after them)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
@@ -14303,6 +14303,17 @@ against the release build:
   failures retried, nothing wrong — PostgreSQL's behaviour at
   `REPEATABLE READ` (at `READ COMMITTED` it waits and never fails;
   nucleus has no weaker level than snapshot).
+- *Killed mid-write* (the document fuzzer with `KILL`): beside it a
+  connection writes large statements to a table of its own (row,
+  column or LSM, with multi-valued and path indexes) — inserts of 50 to
+  1,500 documents, updates, deletes and upserts of a batch — and the
+  server is killed (`-9`) at a random moment and started again on its
+  directory: the tables written before the kill still agree with the
+  reference, each table answers through its indexes as without them
+  (`doc || '{}'`, no indexed expression), and the writer's table holds
+  every batch it was told committed, none it was not, and the cut
+  statement's whole or nothing.  1,050 kills, each in a statement:
+  nothing found.
 
 Found and fixed:
 - `ON CONFLICT (email)` on a collection named a column, not the path its

@@ -251,10 +251,12 @@ value kept in the table's definition.  `DROP COLUMN` reads and rewrites no
 row either: the rows keep the dropped column's place, which reads pass
 over.  `SET NOT NULL`, `ADD CHECK` and `ADD
 UNIQUE` that meet writes are checked online the same way.
-Next is the rest of the
-developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, a B+tree
-or an LSM tree chosen per table, …), then
-the document model (§F2).  See
+The developer platform (§M14: columnar storage and partitions, vectors,
+full-text and hybrid search, embeddings, memory for AI models, a B+tree
+or an LSM tree chosen per table, …) is built, and so is the document
+model's first milestone (§M15: collections, upsert, path and
+multi-valued indexes).  Next are document queries and a document server
+(§M16), then streams and changefeeds, live queries and sync (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 
