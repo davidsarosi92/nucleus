@@ -1,0 +1,289 @@
+# Streams (PLAN.md §M16.5 S2, D23): append-only tables whose seq the
+# commit gives, consumer groups, retention.  nucleus-only — PostgreSQL
+# has no streams.
+
+statement ok
+CREATE TABLE customers (id INT PRIMARY KEY, name TEXT)
+
+statement ok
+INSERT INTO customers VALUES (1, 'Ann'), (2, 'Bob')
+
+statement ok
+CREATE STREAM orders (customer INT NOT NULL REFERENCES customers (id), amount NUMERIC(10,2) CHECK (amount > 0), note TEXT DEFAULT 'none') WITH (retention = '7 days', max_entries = 1000)
+
+statement ok
+CREATE STREAM IF NOT EXISTS orders (x INT)
+
+statement error 42P07
+CREATE STREAM orders (x INT)
+
+# Appended: seq from 1, in commit order; the columns without a list are
+# the stream's own after seq and time
+statement ok
+INSERT INTO orders VALUES (1, 9.50, 'first')
+
+statement ok
+INSERT INTO orders (customer, amount) VALUES (2, 3.25), (1, 4)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO orders (customer, amount) VALUES (2, 1)
+
+statement ok
+SAVEPOINT s
+
+statement ok
+INSERT INTO orders (customer, amount) VALUES (2, 100)
+
+statement ok
+ROLLBACK TO SAVEPOINT s
+
+statement ok
+COMMIT
+
+# Rolled back: no number taken
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO orders (customer, amount) VALUES (1, 50)
+
+statement ok
+ROLLBACK
+
+statement ok
+INSERT INTO orders (customer, amount) VALUES (1, 7)
+
+query IIRT
+SELECT seq, customer, amount, note FROM orders ORDER BY seq
+----
+1 1 9.500 first
+2 2 3.250 none
+3 1 4.000 none
+4 2 1.000 none
+5 1 7.000 none
+
+# One commit's entries share its time; times never go back
+query B
+SELECT (SELECT time FROM orders WHERE seq = 2) = (SELECT time FROM orders WHERE seq = 3)
+----
+true
+
+query B
+SELECT bool_and(a.time <= b.time) FROM orders a JOIN orders b ON b.seq = a.seq + 1
+----
+true
+
+# Read by its key, joined as any table
+query IT
+SELECT o.seq, c.name FROM orders o JOIN customers c ON c.id = o.customer WHERE o.seq > 3 ORDER BY o.seq
+----
+4 Bob
+5 Ann
+
+# The constraints hold
+statement error 23503
+INSERT INTO orders (customer, amount) VALUES (3, 1)
+
+statement error 23514
+INSERT INTO orders (customer, amount) VALUES (1, -1)
+
+# seq and time are the commit's
+statement error 428C9
+INSERT INTO orders (seq, customer, amount) VALUES (9, 1, 1)
+
+statement error 428C9
+INSERT INTO orders (time, customer, amount) VALUES (now(), 1, 1)
+
+statement error 0A000
+INSERT INTO orders (customer, amount) VALUES (1, 1) RETURNING seq
+
+statement error 0A000
+INSERT INTO orders (customer, amount) VALUES (1, 1) ON CONFLICT DO NOTHING
+
+# Entries are appended, never changed
+statement error 0A000
+UPDATE orders SET note = 'x' WHERE seq = 1
+
+statement error 0A000
+DELETE FROM orders WHERE seq = 1
+
+statement error 0A000
+TRUNCATE orders
+
+statement error 0A000
+CREATE INDEX ON orders (customer)
+
+statement error 0A000
+ALTER TABLE orders ADD COLUMN extra INT
+
+statement error 0A000
+ALTER TABLE orders DROP COLUMN note
+
+# A consumer group: the entries after its position, moved past them
+# (the columns named, seq first)
+query IIR
+CONSUME customer, amount FROM orders GROUP billing LIMIT 2
+----
+1 1 9.500
+2 2 3.250
+
+statement error 42703
+CONSUME nope FROM orders GROUP billing
+
+statement ok
+CREATE STREAM small (n INT)
+
+statement ok
+INSERT INTO small (n) VALUES (10), (20), (30), (40)
+
+query II
+CONSUME n FROM small GROUP g LIMIT 2
+----
+1 10
+2 20
+
+query I
+SELECT stream_position('small', 'g')
+----
+2
+
+query II
+CONSUME n FROM small GROUP g
+----
+3 30
+4 40
+
+query II
+CONSUME n FROM small GROUP g
+----
+
+# In a transaction rolled back, the position stays
+statement ok
+INSERT INTO small (n) VALUES (50)
+
+statement ok
+BEGIN
+
+query II
+CONSUME n FROM small GROUP g
+----
+5 50
+
+statement ok
+ROLLBACK
+
+query I
+SELECT stream_position('small', 'g')
+----
+4
+
+# Groups are apart; a replay seeks back
+query II
+CONSUME n FROM small GROUP other LIMIT 1
+----
+1 10
+
+statement ok
+ALTER STREAM small SEEK GROUP g TO 1
+
+query II
+CONSUME n FROM small GROUP g LIMIT 1
+----
+2 20
+
+query TTII
+SELECT stream, consumer_group, position, lag FROM nc_catalog.consumers WHERE stream = 'small' ORDER BY 2
+----
+small g 2 3
+small other 1 4
+
+statement ok
+ALTER STREAM small DROP GROUP other
+
+query T
+SELECT consumer_group FROM nc_catalog.consumers WHERE stream = 'small'
+----
+g
+
+# Waiting: the newest seq, at once when past it
+query I
+SELECT stream_wait('small', 3, 1000)
+----
+5
+
+query I
+SELECT stream_wait('small', 5, 10)
+----
+5
+
+# The catalog (its engine the default's: the scripts run on both)
+query TTIIB
+SELECT name, retention, max_entries, last_seq, last_time > now() - interval '1 hour' FROM nc_catalog.streams ORDER BY name
+----
+orders 7 days 1000 5 true
+small NULL NULL 5 true
+
+statement ok
+ALTER STREAM small SET (retention = '1 hour', max_entries = 10)
+
+statement ok
+ALTER STREAM orders RESET (max_entries)
+
+query TTI
+SELECT name, retention, max_entries FROM nc_catalog.streams ORDER BY name
+----
+orders 7 days NULL
+small 01:00:00 10
+
+# Its options
+statement error 22023
+CREATE STREAM bad (n INT) WITH (retention = 'soon')
+
+statement error 22023
+CREATE STREAM bad (n INT) WITH (max_entries = 0)
+
+statement error 22023
+CREATE STREAM bad (n INT) WITH (partitions = 4)
+
+statement error 42701
+CREATE STREAM bad (seq INT)
+
+statement error 0A000
+CREATE STREAM bad (n INT PRIMARY KEY)
+
+statement error 0A000
+CREATE STREAM bad (n INT UNIQUE)
+
+# Not a stream
+statement error 42809
+CONSUME FROM customers GROUP g
+
+statement error 42809
+ALTER STREAM customers SET (max_entries = 1)
+
+statement error 42809
+DROP STREAM customers
+
+statement ok
+DROP STREAM small, orders
+
+statement ok
+DROP STREAM IF EXISTS small
+
+statement error 42P01
+DROP STREAM small
+
+# A stream made again under a name starts from 1
+statement ok
+CREATE STREAM small (n INT)
+
+statement ok
+INSERT INTO small (n) VALUES (1)
+
+query I
+SELECT seq FROM small
+----
+1

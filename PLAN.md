@@ -244,6 +244,7 @@ are marked ✅.
 | D20 | gRPC and REST front ends | ✅ **Optional modules after §M16.6** (2026-11-27): `modules/grpc` and `modules/rest`, each mapped onto `ncp` (principle 11: no second protocol inside) with the same login, roles, row-level security and statement budgets.  gRPC because it is the common tongue of service meshes and its server streams fit changefeeds (§M16.5) and live queries (§M16.6): a generic `Query` / `Subscribe` service, and per-table services with their `.proto` generated from `nc_catalog` (as `nucleus codegen` generates types); HTTP/2 is a dependency, so a module and the core stays free of it.  REST as a resource API generated from the catalog (prior art: PostgREST), beside D19's GraphQL module.  Both after §M16.6, whose subscriptions they carry | in the core (a dependency and a second interface shaping nucleus); never (users of gRPC or REST put a service in front) |
 | D21 | External wire protocols (FIX, ITCH and the like) | ✅ **Adapters, not the core** (2026-11-27): §M16.5 gets an extension point — a module that maps an external wire protocol onto a stream's appends (ingest) or a changefeed's subscription (egress) — and a protocol such as FIX (sessions between trading parties) or ITCH (market data) is an adapter module on it, like §M24's connectors.  So the streams are designed for it from the start: per-stream sequence numbers with gap detection and replay from an offset (what FIX's resend requests and ITCH's rewind need), nanosecond timestamps, a guaranteed order.  nucleus is then the system of record, tick store and analysis behind such a protocol, not the microsecond hot path (matching, feed handling) | in the core (nucleus partly a trading gateway, outside its aim); none (a separate service translates) |
 | D22 | Document query language (§M16) | ✅ **SQL/JSON the core, a filter document a front end compiled to it** (2026-11-27, after a prototype): a MongoDB-style filter (`{"age": {"$gt": 30}, "tags": "vip"}`) compiles to lax SQL/JSON path predicates over `doc` (`doc @? '$ ? (@.age > 30)'`) — the same `Expr`, the same planner, no second language inside.  Its semantics are MongoDB's, which are lax mode's (arrays unwrapped, no comparison across types, a missing field matches `null` and `$ne`), so nucleus adds no rule of its own.  On a collection a path index is multi-valued (its entries unwrap arrays along the path, as every MongoDB index does), so a filter's conditions are served by it.  The filter is everywhere: `ncp` messages, the drivers' `find`, `ncsql`, and in SQL `doc @? json_filter('…')`, folded to a constant when bound.  The prototype, on 22 tasks over 3,000 irregular documents: the filter compiled answered as MongoDB 8 in all 22; the SQL developers and models write (`->>`, `::int`) differed in 12 (5 errors, 7 silently wrong) | SQL/JSON only (the filter syntax only in `--mongo-compat`: the form models and document developers write fluently left out); the filter only on collections (two languages for one table); strict semantics (not what the filter's users expect); an exact path index beside a separate lax one (two notions to learn) |
+| D23 | How a stream is stored and read (§M16.5) | ✅ **A stream is an append-only table whose key the commit gives** (2026-11-27, taken under "the whole of F2" without a question, as recommended): an entry's offset is its stream's next sequence number, assigned by the engine under the commit lock — dense from 1, in commit order, so every snapshot sees a gap-free prefix of the stream and a consumer that read to offset n never later finds an n−1 (an offset taken at write time, as a sequence's, commits out of order and is lost to a consumer already past it: the outbox's known flaw).  Appenders never conflict.  Its columns are declared as a table's, with `offset` and `time` (the commit's, nanoseconds) added; rows only appended, removed only from the head (retention).  A consumer group's offset is a row written in the consumer's transaction, so the work and the offset commit together (exactly once).  A changefeed is such a stream that a table's writes append to in their own transaction — not a reading of the MVCC versions, which would need an index by time over every key and lose what vacuum and the history's retention remove | offsets from a sequence (out of order); FoundationDB's versionstamps (a commit's timestamp and an index: ordered but not dense, so no gap detection, D21); changefeeds from MVCC versions or the WAL (a separate retention and an index by time to build; the WAL's records are physical) |
 
 ---
 
@@ -14659,7 +14660,7 @@ found missing, and the open issues.
 in transactions that also touch tables; and with `--mongo-compat`,
 `mongosh` and a standard MongoDB driver run CRUD and queries.
 
-### §M16.5 — Streams: a transactional broker ⬜
+### §M16.5 — Streams: a transactional broker ⬜ (steps S1–S7, 2026-11-27)
 
 Not a Kafka replacement — what the ordered KV and transactions give almost
 for free, and what developers otherwise assemble from several systems:
@@ -14699,6 +14700,108 @@ for free, and what developers otherwise assemble from several systems:
 crash tests, changefeeds deliver every committed change in order, the
 task queue survives crash tests with no lost or doubled task, and every
 agent example runs in CI against `nucleus server`.
+
+*Study (2026-11-27, D23).*  What the engine gives: commits are made one
+at a time under a lock, each with the next timestamp, and become visible
+in that order (a commit waits for its log record to be durable, and the
+log is durable in order), so a sequence number given under that lock is
+dense and in visibility order — the property a broker needs and an
+outbox table lacks.  Appends write new keys only, so they are checked
+for no conflict.  What a stream is then: a table whose primary key is
+`offset` and whose rows the engine keys at commit; a consumer's position
+an ordinary row in its transaction; waiting a wake-up on the stream's
+newest offset.  Prior art: Kafka's log, offsets and consumer groups (the
+model), FoundationDB's versionstamps (keys given by the commit),
+PostgreSQL's logical decoding and the transactional outbox (what is
+assembled today), Debezium's change events (their shape), SQS and
+pgmq / River (leases, visibility, dead letters).
+
+*Steps (2026-11-27, each closed by itself):*
+
+- **S1 — appends in the engine:** `KvTxn::append(head, entries, value,
+  fill)` — an entry whose key the commit gives (`stream_key(entries,
+  n)`: `n` the stream's next number, from 1, in the sign-flipped
+  big-endian form a SQL `bigint` key takes, so a stream's entries are a
+  table's rows keyed by `offset`) and into whose value `fill` writes the
+  number and the commit's time in nanoseconds (so the row holds them as
+  columns); the head, a key of the caller's choosing outside the
+  entries, holds the last number and its time — kept in memory, read
+  when first needed; appends conflict with nothing;
+  `Kv::wait_appended(head, after, timeout)` wakes a reader when an entry
+  past `after` is visible.  Tested on the simulation: concurrent
+  appenders, rollbacks, savepoints, crashes and reopening (no number
+  reused, none skipped), trimming, a clock that went back.
+  *Done:* `nucleus_txn::Transaction::append` — the appends held until
+  the commit, numbered under the commit lock (`number_appends`), their
+  entries and heads written with the commit's batch, the conflict
+  window's spans noted (a validated reader of the range conflicts with
+  them), each stream's last visible number raised after the commit is
+  visible and its waiters woken (one condition variable; a waiter checks
+  its stream).  An entry's time is never before its stream's last one
+  (the head keeps it across restarts).  Tests: `crates/txn/tests/streams.rs`
+  (seven: numbered by the commit, savepoints, four appenders with no
+  conflict and no gap, numbers after reopening and trimming, waking,
+  a crash at every I/O point in both crash modes, a head from the
+  future); mutations — the savepoint's truncation, the cached number,
+  the count, the head's key, the wake-up, the visible number's maximum,
+  the wait's comparison, the time's maximum — each failing (the cache's
+  update alone survives: without it every commit reads the head again,
+  the same numbers, slower).
+- **S2 — streams in SQL:** `CREATE STREAM s (columns) [WITH (retention
+  = interval | max_entries = n)]` (`nc_catalog.streams`), `INSERT INTO
+  s` appends (`UPDATE` and `DELETE` refused, no other indexes), reads
+  as a table with `seq` and `time`; consumer groups — the entries after
+  the group's position, moving it in the same transaction
+  (`nc_catalog.consumers`); waiting outside a transaction; retention
+  trimming in the background; `DROP STREAM`.
+  *Done:* a stream is a table of storage `stream` (`crate::stream`, a
+  `TableStorage`): inserting appends, reading is the row storage's, so
+  scans, joins, row security, time travel and branches are a table's.
+  Its key column is `seq` (not `offset`, a reserved word in SQL).
+  `CONSUME [columns] FROM s GROUP g [LIMIT n]` — a statement, since a
+  function cannot write its transaction — returns the entries after the
+  group's position as `SELECT` sees them and moves the position;
+  `ALTER STREAM s SEEK GROUP g TO n | DROP GROUP g | SET (…) | RESET
+  (…)`; `stream_wait(s, after, timeout_ms)`, `stream_position(s, g)`.
+  The retention trims in the server's maintenance (as expiry); the head
+  keeps numbers from being reused.  Refused, each with its reason
+  (`0A000`, `428C9`): a value for `seq` or `time`, `RETURNING`, `ON
+  CONFLICT`, `UPDATE`, `DELETE`, `TRUNCATE`, an index, columns changed,
+  another storage.  Not yet: a stream partitioned for parallel
+  consumers within a group (one consumer of a group commits at a time;
+  §M16.5 S5's queues take competing consumers), `COPY` and a logical
+  dump keep no numbers (a `BACKUP` keeps them), an embedded database
+  trims only when its application calls `trim_all`.  Tests:
+  `slt/97_streams.slt` (on every storage path: rows, batches, LSM,
+  encrypted), `crates/sql/tests/streams.rs` (the outbox under four
+  producers, three consumers of one group billing every entry exactly
+  once, retention by count and time with numbers never reused, a waiter
+  woken), the `fill` unit test (rows of 3, 17 and 40 columns: the
+  offsets' marks); mutations — the position's move, the count kept,
+  the columns refused, `seq` first, the placeholder's width — each
+  failing (the time cutoff's boundary by a microsecond survives).
+- **S3 — changefeeds:** `CREATE CHANGEFEED f ON t [WITH (before)]` — a
+  stream that every write of `t` appends to in its own transaction
+  (`op`, the key, the row after, optionally before, as `json`); in
+  order, every committed change, none of a rolled-back one.
+- **S4 — clients:** `ncp` messages to wait on a stream; every driver's
+  consumer API (a group's next batch processed in a transaction, the
+  offset moved with it) and producer; `ncsql`.
+- **S5 — task queues:** `CREATE QUEUE` — tasks with priorities and a
+  time they become available (delays); taking a task leases it (its own
+  short transaction), finishing it in the transaction of its work,
+  failing it schedules a retry with backoff; past `max_attempts` it
+  moves to a dead-letter stream; an expired lease returns it.
+- **S6 — protocol adapters (D21):** the extension point for a module
+  mapping an external protocol onto appends or a changefeed's
+  subscription; replay from an offset, a gap an error naming it; a
+  sample adapter (newline-delimited JSON over TCP) as the pattern.
+- **S7 — the proofs and the patterns:** crash tests (exactly-once
+  consume-write-commit, the task queue with no lost or doubled task,
+  changefeeds' order) on the simulation and against a server killed
+  mid-run; `examples/agents/` (conversation memory, semantic memory,
+  run state, an agents' task queue, experiments on a branch) in Python
+  and TypeScript, then every driver, run in CI.
 
 ### §M16.6 — Live queries ⬜
 

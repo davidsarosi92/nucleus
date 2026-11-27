@@ -984,6 +984,7 @@ pub fn authorize_ddl(
         Statement::CreateEnum { .. }
         | Statement::CreateMemoryStore { .. }
         | Statement::CreateCollection { .. }
+        | Statement::CreateStream { .. }
         | Statement::CreateSequence { .. } => {
             c.require(txn, Kind::Schema, "public", CREATE, None)?
         }
@@ -1017,6 +1018,7 @@ pub fn authorize_ddl(
         | Statement::DropConstraint { table, .. }
         | Statement::AlterTable { table, .. }
         | Statement::AlterCollection { name: table, .. }
+        | Statement::AlterStream { name: table, .. }
         | Statement::SetRowSecurity { table, .. }
         | Statement::DropPolicy { table, .. }
         | Statement::CreatePolicy(crate::policies::Policy { table, .. }) => {

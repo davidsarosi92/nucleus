@@ -133,6 +133,7 @@ impl Module for Builtin {
         }
         crate::uuid::register(r)?;
         crate::sequences::register(r)?;
+        crate::stream::register(r)?;
         crate::json::register(r)?;
         crate::vectors::register(r)?;
         crate::sparse::register(r)?;

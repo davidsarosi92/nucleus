@@ -180,6 +180,7 @@ enum Shape {
     Memory,
     Chunks,
     Collection,
+    Stream,
 }
 
 fn shape(t: &Table) -> Shape {
@@ -191,6 +192,8 @@ fn shape(t: &Table) -> Shape {
         Shape::Chunks
     } else if t.collection {
         Shape::Collection
+    } else if crate::stream::is_stream(t) {
+        Shape::Stream
     } else {
         Shape::Plain
     }
@@ -214,6 +217,7 @@ fn made_column(t: &Table, c: usize) -> bool {
         Shape::Memory => c < MEMORY_COLUMNS,
         Shape::Chunks => crate::chunk_tables::derives(t, c),
         Shape::Collection => c < 2,
+        Shape::Stream => true,
     }
 }
 
@@ -464,6 +468,44 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
             &t.name,
             Some(&t.name),
             format!("CREATE COLLECTION {}{}", ident(&t.name), with(&options)),
+        );
+    }
+    for t in by_shape(Shape::Stream) {
+        // Its columns after seq and time, its constraints but the key.
+        let mut parts: Vec<String> = t.columns[2..]
+            .iter()
+            .map(|c| column_sql_with(c, &identities))
+            .collect();
+        for c in catalog::constraints(std::slice::from_ref(t)) {
+            if matches!(
+                c.kind,
+                catalog::ConstraintKind::ForeignKey(_) | catalog::ConstraintKind::PrimaryKey
+            ) {
+                continue;
+            }
+            parts.push(format!("CONSTRAINT {} {}", ident(&c.name), c.definition));
+        }
+        let spec = t.stream.clone().unwrap_or_default();
+        let mut options = Vec::new();
+        if let Some(r) = spec.retention {
+            options.push(("retention".to_string(), r.to_string()));
+        }
+        if let Some(n) = spec.max_entries {
+            options.push(("max_entries".to_string(), n.to_string()));
+        }
+        if t.engine != catalog::TableEngine::BTree {
+            options.push(("engine".to_string(), t.engine.name().to_string()));
+        }
+        def(
+            "stream",
+            &t.name,
+            Some(&t.name),
+            format!(
+                "CREATE STREAM {} ({}){}",
+                ident(&t.name),
+                parts.join(", "),
+                with(&options)
+            ),
         );
     }
     // What a memory store, chunk table or collection has beyond what its

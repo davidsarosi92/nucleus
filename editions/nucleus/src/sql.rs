@@ -676,12 +676,16 @@ impl Shell {
             Some(n) => format!("analyzed: {n} rows"),
             None => "not analyzed".into(),
         };
-        // A collection says so (PLAN.md §M15 D3).
+        // A collection or a stream says so (PLAN.md §M15 D3, §M16.5 S2).
         let kind = match self.fetch(
-            &format!("SELECT count(*) FROM nc_catalog.collections WHERE name = {q}"),
+            &format!(
+                "SELECT (SELECT count(*) FROM nc_catalog.collections WHERE name = {q}), \
+                 (SELECT count(*) FROM nc_catalog.streams WHERE name = {q})"
+            ),
             out,
         )? {
             Some(c) if c.rows.first().and_then(|r| r[0].as_deref()) == Some("1") => "Collection",
+            Some(c) if c.rows.first().and_then(|r| r[1].as_deref()) == Some("1") => "Stream",
             _ => "Table",
         };
         let title = format!(

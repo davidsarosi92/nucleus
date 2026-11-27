@@ -438,6 +438,14 @@ impl RowWriter {
         at
     }
 
+    /// Appends the next column's encoding as given (a tag and its bytes:
+    /// a fixed-width placeholder filled later, as a stream's `seq` and
+    /// `time`, [`crate::stream`]).
+    pub fn raw(&mut self, encoding: &[u8]) {
+        self.begin();
+        self.out.extend_from_slice(encoding);
+    }
+
     /// Appends the next column as a value stored out of line, `len` bytes
     /// of encoding.
     pub fn out_of_line(&mut self, len: u32) {

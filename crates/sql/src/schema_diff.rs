@@ -78,12 +78,13 @@ impl Diff {
 /// The kinds columns and tables are made of.
 const BASE: [&str; 6] = ["model", "type", "ordering", "operator", "cast", "sequence"];
 /// The kinds that are tables.
-const TABLES: [&str; 5] = [
+const TABLES: [&str; 6] = [
     "table",
     "partition",
     "memory store",
     "chunk table",
     "collection",
+    "stream",
 ];
 /// The kinds that set something on a table: changed, the new statement
 /// is enough; gone, the setting goes back to its default.
@@ -196,7 +197,7 @@ pub fn diff(from: &dyn KvTxn, to: &dyn KvTxn) -> Result<Diff> {
                         });
                         true
                     }
-                    "partition" | "memory store" | "chunk table" | "collection" => {
+                    "partition" | "memory store" | "chunk table" | "collection" | "stream" => {
                         out.notes.push(format!(
                             "{} {} changed (from: {}; to: {}): dropping it would lose its rows, so the diff leaves it",
                             d.kind, d.name, d.sql, e.sql
@@ -274,6 +275,7 @@ fn drop_sql(d: &Definition) -> Option<String> {
             Some(format!("DROP TABLE {name}"))
         }
         "collection" => Some(format!("DROP COLLECTION {name}")),
+        "stream" => Some(format!("DROP STREAM {name}")),
         "column" => alter(&format!("DROP COLUMN {name}")),
         "constraint" | "foreign key" => alter(&format!("DROP CONSTRAINT {name}")),
         "index" => Some(format!("DROP INDEX {name}")),

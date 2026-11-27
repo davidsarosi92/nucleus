@@ -7927,6 +7927,90 @@ duplicate key as `DuplicateKeyError`) and `mongosh`'s CRUD and queries;
 `mongosh`'s interactive start (`show dbs`, `show collections`) was run
 by hand.
 
+### 8.43 Streams (`stream`, §M16.5 S1–S2)
+
+A stream is an append-only table whose key the commit gives (D23):
+
+```sql
+CREATE STREAM order_events (order_id INT NOT NULL REFERENCES orders (id), amount NUMERIC(10,2))
+  WITH (retention = '7 days', max_entries = 1000000);
+BEGIN;
+INSERT INTO orders VALUES (42, 9.50);
+INSERT INTO order_events (order_id, amount) VALUES (42, 9.50);   -- the outbox, built in
+COMMIT;
+SELECT seq, time, order_id FROM order_events WHERE seq > 100 ORDER BY seq;
+BEGIN;
+CONSUME order_id, amount FROM order_events GROUP billing LIMIT 100;  -- moves billing's position
+INSERT INTO invoices …;                                               -- the work
+COMMIT;                                                               -- both, or neither
+```
+
+- **Its columns:** `seq bigint` (the primary key) and `time timestamptz`,
+  then those declared — with their defaults, `NOT NULL`, `CHECK` and
+  foreign keys; no other key or unique constraint.  An `INSERT` without
+  a column list fills the declared ones; `seq` and `time` are the
+  commit's (`428C9` for a value given), so `RETURNING` (`0A000`: the seq
+  is not known yet) and `ON CONFLICT` (nothing conflicts) are refused.
+- **Numbered by the commit:** the engine holds a transaction's appends
+  until its commit and numbers them under the commit lock
+  (`KvTxn::append`): `seq` is the stream's next number, dense from 1, in
+  commit order, and every entry of one commit has its time (the
+  engine's clock in nanoseconds, kept in microseconds by `timestamptz`;
+  never before the entry before, across restarts too).  A snapshot
+  therefore sees a prefix of the stream without a gap: a consumer that
+  read to `seq` n never later finds an n − 1 — what an outbox table
+  numbered by a sequence cannot promise (a number taken early commits
+  late).  Appenders never conflict with each other; an entry rolled
+  back, or taken back by `ROLLBACK TO SAVEPOINT`, takes no number.  The
+  stored row is written whole at the commit (`fill` puts `seq` and
+  `time` into its first two columns, fixed-width), so everything else
+  reads a stream as a table: `WHERE seq > $1` is a range of its key,
+  joins, row-level security, time travel, branches.
+- **Never changed:** `UPDATE`, `DELETE`, `TRUNCATE`, indexes, columns
+  added, dropped or retyped, another storage, partitions, an expiry are
+  refused (`0A000`); `ALTER TABLE … RENAME`, row security, policies and
+  statistics stay.  Its entries are kept inline (no value out of line).
+- **Retention:** `retention` (an interval) and `max_entries` trim from
+  the head — the server's maintenance thread, as expiry (§8.28),
+  `nucleus_sql::stream::trim_all`; trimmed in transactions of up to
+  10,000 entries, the range vacuumed after.  The head (the last number
+  and its time, under the table's reserved index `u32::MAX − 6`) stays,
+  so numbers are never reused, even when every entry is gone.  `ALTER
+  STREAM s SET (…)` / `RESET (retention, max_entries)`.
+- **Consumer groups:** a group's position is the last `seq` it consumed,
+  a key of the stream's (reserved index `u32::MAX − 7`).  `CONSUME
+  [columns] FROM s GROUP g [LIMIT n]` (100 by default; a number or a
+  parameter) returns the entries after it — as `SELECT` would, under its
+  privileges and row policies; `seq` first whatever columns are named —
+  and moves it past them in the statement's transaction: the work done
+  with them and the position commit together or not at all (exactly
+  once).  Two consumers of a group that took the same entries both write
+  its position: one commits, the other's commit fails (`40001`) and it
+  takes the next ones.  `ALTER STREAM s SEEK GROUP g TO n` sets a
+  position (a replay), `ALTER STREAM s DROP GROUP g` forgets one;
+  `stream_position(s, g)` reads one.
+- **Waiting:** `stream_wait(s, after, timeout_ms)` returns the stream's
+  newest `seq` once it is past `after` or the time is up (at most an
+  hour) — woken by the commit that makes an entry visible, not by
+  polling.  A transaction's snapshot does not move, so it is called
+  before the transaction that reads (outside one, or as its own
+  statement).
+- **Catalog:** `nc_catalog.streams` (name, owner, retention,
+  `max_entries`, `last_seq`, `last_time`, engine) and
+  `nc_catalog.consumers` (stream, `consumer_group`, position, lag);
+  `nucleus dump --schema` writes `CREATE STREAM` (its consumer groups and
+  entries are data: `BACKUP` keeps them, numbers and all); `\d` says
+  *Stream*; `schema_diff` knows the kind.  `DROP STREAM` drops it all.
+
+Tests: `crates/txn/tests/streams.rs` (the engine: numbered by the
+commit, savepoints, appenders without conflict or gap, reopening and
+trimming, waking, a crash at every I/O point), `slt/97_streams.slt` (the
+statements, refusals, groups, catalog; on every storage path the
+scripts run), `crates/sql/tests/streams.rs` (four producers writing an
+order and its event in each transaction while three consumers of one
+group bill every event exactly once; retention by count and by time;
+a waiter woken by a commit).
+
 ## 9. Server (`nucleus-server`)
 
 ```

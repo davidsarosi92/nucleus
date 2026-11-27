@@ -198,6 +198,14 @@ struct Inner {
     /// Key prefixes mirrored ([`Engine::mirror`]): (source, destination).
     /// Changed under the commit lock (taken first).
     mirrors: RwLock<Arc<Vec<(Vec<u8>, Vec<u8>)>>>,
+    /// Each stream's last number given ([`Transaction::append`]) and its
+    /// time, as commits gave them — read from its head when first needed, changed
+    /// under the commit lock (taken first).
+    stream_last: Mutex<HashMap<Vec<u8>, (u64, u64)>>,
+    /// Each stream's last number visible: raised after its commit is,
+    /// waking [`Engine::wait_appended`]'s waiters.
+    stream_visible: Mutex<HashMap<Vec<u8>, u64>>,
+    appended: Condvar,
     /// How many pairs `mirrors` holds (writes look at it first).
     mirroring: AtomicUsize,
     /// The platform (its clock gives commits their times).
@@ -712,6 +720,9 @@ impl Engine {
                 watched: RwLock::new(Vec::new()),
                 watched_at: AtomicU64::new(recovery.meta),
                 mirrors: RwLock::new(Arc::new(Vec::new())),
+                stream_last: Mutex::new(HashMap::new()),
+                stream_visible: Mutex::new(HashMap::new()),
+                appended: Condvar::new(),
                 mirroring: AtomicUsize::new(0),
                 platform,
                 last_time: AtomicU64::new(0),
@@ -908,6 +919,19 @@ impl Engine {
     /// none [`running`](Self::running), the database was idle.
     pub fn activity(&self) -> u64 {
         self.inner.begun.load(Ordering::Relaxed)
+    }
+
+    /// The last number of the stream whose head is `stream`
+    /// ([`Transaction::append`]) visible, once it is past `after` or
+    /// `timeout` has passed (then whatever it is): what a consumer waits
+    /// on for new entries.  0 for a stream with none.
+    pub fn wait_appended(
+        &self,
+        stream: &[u8],
+        after: u64,
+        timeout: std::time::Duration,
+    ) -> Result<u64> {
+        self.inner.wait_appended(stream, after, timeout)
     }
 
     /// Watches the keys from `start` to `end` (exclusive): from now on a
@@ -1108,6 +1132,7 @@ impl Engine {
             mirrors: None,
             savepoints: Vec::new(),
             restoring: false,
+            appends: Vec::new(),
         })
     }
 
@@ -1613,6 +1638,111 @@ impl Inner {
             .wall()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+    }
+
+    /// [`Engine::wait_appended`].
+    fn wait_appended(
+        &self,
+        stream: &[u8],
+        after: u64,
+        timeout: std::time::Duration,
+    ) -> Result<u64> {
+        let mut visible = lock(&self.stream_visible);
+        if !visible.contains_key(stream) {
+            drop(visible);
+            let ts = self.visible.load(Ordering::Acquire);
+            let (n, _) = self.stream_head(stream, ts)?;
+            visible = lock(&self.stream_visible);
+            let v = visible.entry(stream.to_vec()).or_insert(0);
+            *v = (*v).max(n);
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let n = visible[stream];
+            let now = std::time::Instant::now();
+            if n > after || now >= deadline {
+                return Ok(n);
+            }
+            visible = self
+                .appended
+                .wait_timeout(visible, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// A stream's last number and its time as its head holds them at
+    /// snapshot `ts` (zeros for none).
+    fn stream_head(&self, head: &[u8], ts: u64) -> Result<(u64, u64)> {
+        let Some(v) = self.read_at(head, ts, None)?.flatten() else {
+            return Ok((0, 0));
+        };
+        let word = |i: usize| {
+            v.get(i..i + 8)
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_be_bytes)
+                .ok_or(Error::Corrupt("a stream's head"))
+        };
+        Ok((word(0)?, word(8)?))
+    }
+
+    /// Numbers a commit's appends (under the commit lock; `last` the last
+    /// commit, `ts` this one's): their entries and each stream's head
+    /// into `ops`; for each stream, what it was given.
+    fn number_appends(
+        &self,
+        appends: &[Append],
+        last: u64,
+        ts: u64,
+        ops: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    ) -> Result<Vec<Appended>> {
+        let mut out: Vec<Appended> = Vec::new();
+        if appends.is_empty() {
+            return Ok(out);
+        }
+        let now = self
+            .platform
+            .clock()
+            .wall()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let known = lock(&self.stream_last);
+        for a in appends {
+            let i = match out.iter().position(|o| o.head == a.head) {
+                Some(i) => i,
+                None => {
+                    let (n, time) = match known.get(&a.head) {
+                        Some(&nt) => nt,
+                        None => self.stream_head(&a.head, last)?,
+                    };
+                    out.push(Appended {
+                        head: a.head.clone(),
+                        entries: a.entries.clone(),
+                        first: n + 1,
+                        last: n,
+                        // Never before the stream's last entry, whatever
+                        // the clock did meanwhile (a restart, a step back).
+                        time: now.max(time),
+                    });
+                    out.len() - 1
+                }
+            };
+            let o = &mut out[i];
+            o.last += 1;
+            let mut v = a.value.clone();
+            (a.fill)(&mut v, o.last, o.time);
+            ops.push((
+                encode_key(&stream_key(&a.entries, o.last), ts),
+                Some(encode_value(Some(&v))),
+            ));
+        }
+        drop(known);
+        for o in &out {
+            let mut head = o.last.to_be_bytes().to_vec();
+            head.extend_from_slice(&o.time.to_be_bytes());
+            ops.push((encode_key(&o.head, ts), Some(encode_value(Some(&head)))));
+        }
+        Ok(out)
     }
 
     /// The last commit time recorded: its commit and time.  (Commit
@@ -2536,6 +2666,8 @@ pub struct Transaction {
     savepoints: Vec<Savepoint>,
     /// Restoring a savepoint's keys: their writes not remembered again.
     restoring: bool,
+    /// Its appends ([`Transaction::append`]), in order.
+    appends: Vec<Append>,
 }
 
 /// A savepoint: for each key written since, this transaction's own write
@@ -2544,6 +2676,8 @@ pub struct Transaction {
 #[derive(Debug, Default)]
 struct Savepoint {
     undo: HashMap<Vec<u8>, Option<Option<Vec<u8>>>>,
+    /// How many appends were made before it.
+    appends: usize,
 }
 
 /// Ranges a transaction remembers the store as empty in, at most.
@@ -2679,6 +2813,38 @@ impl Drop for Transaction {
     }
 }
 
+/// Entry `n` of a stream whose entries are keyed under `entries`
+/// ([`Transaction::append`]): the prefix, then `n` as a signed 64-bit
+/// integer flipped at its sign bit, big-endian — the order-preserving
+/// form a SQL `bigint` key takes after its tag.
+pub fn stream_key(entries: &[u8], n: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(entries.len() + 8);
+    k.extend_from_slice(entries);
+    k.extend_from_slice(&(n ^ (1 << 63)).to_be_bytes());
+    k
+}
+
+/// Writes an appended entry's number and time (nanoseconds) into its
+/// value at the commit ([`Transaction::append`]).
+pub type Fill = fn(&mut [u8], u64, u64);
+
+/// An append held until the commit.
+struct Append {
+    head: Vec<u8>,
+    entries: Vec<u8>,
+    value: Vec<u8>,
+    fill: Fill,
+}
+
+/// What a commit appended to one stream.
+struct Appended {
+    head: Vec<u8>,
+    entries: Vec<u8>,
+    first: u64,
+    last: u64,
+    time: u64,
+}
+
 fn check_key(key: &[u8]) -> Result<()> {
     let encoded = key.len() + key.iter().filter(|&&b| b == 0).count() + mvcc::OVERHEAD;
     if encoded > MAX_KEY {
@@ -2805,6 +2971,45 @@ impl Transaction {
     /// Sets `key` to `value`.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.write(key, Some(value))
+    }
+
+    /// Appends an entry to the stream whose head is the key `head` and
+    /// whose entries are keyed under `entries` (PLAN.md §M16.5 S1, D23):
+    /// its key the commit gives — [`stream_key`]`(entries, n)`, `n` the
+    /// stream's next number, dense from 1 in commit order, so every
+    /// snapshot sees a prefix of the stream without a gap — and its value
+    /// `value` once `fill` has written the number and the commit's time
+    /// (nanoseconds since the epoch, never before the entry before's)
+    /// into it.  The head holds the last number and its time (8 bytes
+    /// each, big-endian).  Appends conflict with nothing; this
+    /// transaction does not read them back (their keys are not known
+    /// before it commits); a rollback to a savepoint takes back those
+    /// after it.  Held in memory until the commit.
+    pub fn append(&mut self, head: &[u8], entries: &[u8], value: &[u8], fill: Fill) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        check_key(head)?;
+        check_key(&stream_key(entries, 0))?;
+        self.appends.push(Append {
+            head: head.to_vec(),
+            entries: entries.to_vec(),
+            value: value.to_vec(),
+            fill,
+        });
+        Ok(())
+    }
+
+    /// [`Engine::wait_appended`] on this transaction's database (its
+    /// snapshot does not move: what it finds is for a transaction begun
+    /// after).
+    pub fn wait_appended(
+        &self,
+        head: &[u8],
+        after: u64,
+        timeout: std::time::Duration,
+    ) -> Result<u64> {
+        self.engine.wait_appended(head, after, timeout)
     }
 
     /// Sets `key` to `value` unless this transaction sees a value there
@@ -3386,7 +3591,8 @@ impl Transaction {
     fn commit_counted(mut self) -> Result<Timestamp> {
         self.done = true;
         let unlogged = self.fresh.iter().any(|f| f.mode == FreshMode::Unlogged);
-        if self.writes.is_empty() && self.spilled.is_none() && !unlogged {
+        if self.writes.is_empty() && self.spilled.is_none() && !unlogged && self.appends.is_empty()
+        {
             return Ok(Timestamp(self.start));
         }
         let engine = Arc::clone(&self.engine);
@@ -3398,7 +3604,7 @@ impl Transaction {
         }
         let spilled = self.spilled;
         engine.refresh_time_floor()?;
-        let (ts, lsn) = {
+        let (ts, lsn, appended) = {
             let mut last = lock(&engine.commit);
             let wm = engine.current_watermark();
             let mut ops = Vec::with_capacity(self.writes.len() + 1);
@@ -3450,6 +3656,9 @@ impl Transaction {
                 deferred.push((time_key(ts), time.to_be_bytes().to_vec()));
                 time
             });
+            // The appends: each its stream's next number, and the
+            // stream's head the last one given.
+            let appended = engine.number_appends(&self.appends, *last, ts, &mut ops)?;
             for (key, value) in self.writes.iter() {
                 if let Some(id) = spilled
                     && self
@@ -3479,6 +3688,12 @@ impl Transaction {
                 )?
             };
             *last = ts;
+            if !appended.is_empty() {
+                let mut lasts = lock(&engine.stream_last);
+                for a in &appended {
+                    lasts.insert(a.head.clone(), (a.last, a.time));
+                }
+            }
             engine.last_lsn.store(lsn, Ordering::Release);
             if let Some(time) = time {
                 engine.last_time.store(time, Ordering::Release);
@@ -3511,6 +3726,16 @@ impl Transaction {
             if let Some((lo, hi)) = self.span.take() {
                 recent.add_span(lo, hi, ts);
             }
+            // A reader of a stream's range (a serializable one, a
+            // validated scan) conflicts with what was appended there.
+            for a in &appended {
+                recent.add_span(a.head.clone(), a.head.clone(), ts);
+                recent.add_span(
+                    stream_key(&a.entries, a.first),
+                    stream_key(&a.entries, a.last),
+                    ts,
+                );
+            }
             if recent.wants_prune() {
                 // Nobody started before the oldest running transaction can
                 // still commit, so older writes cannot conflict any more —
@@ -3526,10 +3751,19 @@ impl Transaction {
                 recent.prune(oldest);
             }
             drop(recent);
-            (ts, lsn)
+            (ts, lsn, appended)
         };
         engine.store.wait_durable(lsn)?;
         engine.visible.fetch_max(ts, Ordering::AcqRel);
+        if !appended.is_empty() {
+            let mut visible = lock(&engine.stream_visible);
+            for a in appended {
+                let v = visible.entry(a.head).or_insert(0);
+                *v = (*v).max(a.last);
+            }
+            drop(visible);
+            engine.appended.notify_all();
+        }
         engine.checkpoint_if_due()?;
         Ok(Timestamp(ts))
     }
@@ -3594,7 +3828,10 @@ impl Transaction {
     pub fn savepoint(&mut self) -> Result<()> {
         // (Writes gathered for the WAL-less path, before it, are kept
         // whatever becomes of it.)
-        self.savepoints.push(Savepoint::default());
+        self.savepoints.push(Savepoint {
+            appends: self.appends.len(),
+            ..Savepoint::default()
+        });
         Ok(())
     }
 
@@ -3619,6 +3856,7 @@ impl Transaction {
         let Some(top) = self.savepoints.last_mut() else {
             return Ok(());
         };
+        self.appends.truncate(top.appends);
         let undo = std::mem::take(&mut top.undo);
         if undo.is_empty() {
             return Ok(());

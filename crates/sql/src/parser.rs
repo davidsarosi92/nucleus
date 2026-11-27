@@ -1054,6 +1054,28 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Describe(Box::new(self.statement()?)))
             }
             "remember" => self.remember(),
+            "consume" => {
+                self.pos += 1;
+                let mut columns = Vec::new();
+                if !self.eat_op("*") && !self.peek_kw("from") {
+                    columns = self.name_list()?;
+                }
+                self.expect_kw("from")?;
+                let stream = self.relation()?;
+                self.expect_kw("group")?;
+                let group = self.ident()?;
+                let limit = if self.eat_kw("limit") {
+                    Some(self.expr()?)
+                } else {
+                    None
+                };
+                Ok(Statement::Consume {
+                    columns,
+                    stream,
+                    group,
+                    limit,
+                })
+            }
             "record" => {
                 self.pos += 1;
                 self.expect_kw("migration")?;
@@ -1681,6 +1703,38 @@ impl<'a> Parser<'a> {
             }
             self.expect_op(")")?;
             return Ok(Statement::CreateEnum { name, labels });
+        }
+        if self.eat_kw("stream") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.relation()?;
+            let mut columns = Vec::new();
+            let mut constraints = Vec::new();
+            if self.eat_op("(") {
+                loop {
+                    if self.peek_kw("primary")
+                        || self.peek_kw("unique")
+                        || self.peek_kw("check")
+                        || self.peek_kw("constraint")
+                        || self.peek_kw("foreign")
+                    {
+                        constraints.push(self.table_constraint()?);
+                    } else {
+                        columns.push(self.column_spec()?);
+                    }
+                    if !self.eat_op(",") {
+                        break;
+                    }
+                }
+                self.expect_op(")")?;
+            }
+            let options = self.table_options()?;
+            return Ok(Statement::CreateStream {
+                name,
+                columns,
+                constraints,
+                if_not_exists,
+                options,
+            });
         }
         if self.eat_kw("collection") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
@@ -2353,6 +2407,14 @@ impl<'a> Parser<'a> {
 
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
+        if self.eat_kw("stream") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let mut names = vec![self.relation()?];
+            while self.eat_op(",") {
+                names.push(self.relation()?);
+            }
+            return Ok(Statement::DropStream { names, if_exists });
+        }
         if self.eat_kw("collection") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let mut names = vec![self.relation()?];
@@ -2796,6 +2858,30 @@ impl<'a> Parser<'a> {
                 action,
                 if_exists,
             });
+        }
+        if self.eat_kw("stream") {
+            let name = self.relation()?;
+            let action = if self.eat_kw("set") {
+                AlterStream::Set(self.option_list()?)
+            } else if self.eat_kw("reset") {
+                self.expect_op("(")?;
+                let keys = self.name_list()?;
+                self.expect_op(")")?;
+                AlterStream::Reset(keys)
+            } else if self.eat_kw("seek") {
+                self.expect_kw("group")?;
+                let group = self.ident()?;
+                self.expect_kw("to")?;
+                AlterStream::Seek {
+                    group,
+                    to: self.signed_int()?,
+                }
+            } else {
+                self.expect_kw("drop")?;
+                self.expect_kw("group")?;
+                AlterStream::DropGroup(self.ident()?)
+            };
+            return Ok(Statement::AlterStream { name, action });
         }
         if self.eat_kw("collection") {
             let name = self.relation()?;

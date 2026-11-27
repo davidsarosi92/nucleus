@@ -99,9 +99,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// ([`Table::validating`]); version 27 the values of columns added since
 /// rows were stored ([`Table::missing`]); version 28 the places of
 /// columns dropped that rows still store ([`Table::gone`]); version 29
-/// whether it is a collection ([`Table::collection`]); older versions
-/// still read.
-const TABLE_VERSION: u8 = 30;
+/// whether it is a collection ([`Table::collection`]); version 30 the
+/// identity columns; version 31 a stream's retention ([`Table::stream`]);
+/// older versions still read.
+const TABLE_VERSION: u8 = 31;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -404,6 +405,17 @@ pub struct Statistic {
     pub columns: Vec<usize>,
 }
 
+/// A stream's retention (`CREATE STREAM … WITH (retention = …,
+/// max_entries = …)`, [`crate::stream`]): its entries older than
+/// `retention`, and those beyond the newest `max_entries`, are trimmed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamSpec {
+    /// How long an entry is kept.
+    pub retention: Option<crate::datetime::Interval>,
+    /// How many entries are kept at most.
+    pub max_entries: Option<u64>,
+}
+
 /// A table definition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -463,6 +475,8 @@ pub struct Table {
     /// `(_id, doc)` whose documents are given an `_id` where they have
     /// none.
     pub collection: bool,
+    /// A stream (`CREATE STREAM`, [`crate::stream`]): its retention.
+    pub stream: Option<StreamSpec>,
     /// `SET SUBJECT (column, …)`: the columns that say whose a row is —
     /// `FORGET SUBJECT` erases the rows any of them names
     /// ([`crate::forget`]).
@@ -1193,6 +1207,22 @@ impl Table {
                 }
             }
         }
+        match &self.stream {
+            None => {
+                w.u8(0);
+            }
+            Some(s) => {
+                w.u8(1);
+                match s.retention {
+                    None => w.u8(0),
+                    Some(i) => w.u8(1).value(&Value::Interval(i)),
+                };
+                match s.max_entries {
+                    None => w.u8(0),
+                    Some(n) => w.u8(1).u64(n),
+                };
+            }
+        }
         w.0
     }
 
@@ -1485,6 +1515,25 @@ impl Table {
                 };
             }
         }
+        let stream = if version >= 31 && r.u8()? == 1 {
+            let retention = match r.u8()? {
+                0 => None,
+                _ => match r.value()? {
+                    Value::Interval(i) => Some(i),
+                    _ => return Err(Error::internal("a stream's retention is no interval")),
+                },
+            };
+            let max_entries = match r.u8()? {
+                0 => None,
+                _ => Some(r.u64()?),
+            };
+            Some(StreamSpec {
+                retention,
+                max_entries,
+            })
+        } else {
+            None
+        };
         let building = if version >= 24 {
             let n = building_n;
             if n > indexes.len() {
@@ -1519,6 +1568,7 @@ impl Table {
             expiry,
             memory,
             collection,
+            stream,
             subject,
             converting,
             building,
@@ -2201,7 +2251,7 @@ fn names_key(prefix: &[u8], names: &[&str]) -> Vec<u8> {
     k
 }
 
-fn scan_prefix(txn: &dyn KvTxn, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+pub(crate) fn scan_prefix(txn: &dyn KvTxn, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let end = prefix_end(prefix).expect("a catalog prefix");
     let mut out = Vec::new();
     for e in txn.scan(Bound::Included(prefix), Bound::Excluded(&end))? {
@@ -2510,6 +2560,14 @@ mod tests {
                 analyzer: Some("english".into()),
             }),
             collection: true,
+            stream: Some(StreamSpec {
+                retention: Some(crate::datetime::Interval {
+                    months: 0,
+                    days: 7,
+                    micros: 0,
+                }),
+                max_entries: Some(1000),
+            }),
             converting: Some(Conversion {
                 column: 1,
                 ty: DataType::Numeric,

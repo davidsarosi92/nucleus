@@ -1710,7 +1710,23 @@ pub fn insert(
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
     crate::chunk_tables::refuse(&t, "insert into")?;
-    let targets = target_columns(&t, columns)?;
+    let targets = if crate::stream::is_stream(&t) {
+        // Without a column list, a stream's own columns (seq, time) are
+        // left to the commit.
+        let targets = match columns {
+            None => (2..t.columns.len()).collect(),
+            Some(_) => target_columns(&t, columns)?,
+        };
+        crate::stream::check_insert(
+            &t,
+            &targets,
+            !returning_items.is_empty(),
+            on_conflict.is_some(),
+        )?;
+        targets
+    } else {
+        target_columns(&t, columns)?
+    };
     let (source, ignored) = insert_source(&t, &targets, overriding, source)?;
     let source = &*source;
     let (rows, writer, ret, upsert) = {

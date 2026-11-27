@@ -454,8 +454,10 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<dyn TableStorage>>> {
         let column: Arc<dyn TableStorage> = Arc::new(crate::column_store::ColumnStorage);
         let both: Arc<dyn TableStorage> = Arc::new(crate::column_store::HtapStorage);
         let sealed: Arc<dyn TableStorage> = Arc::new(crate::sealed::SealedStorage);
+        let stream: Arc<dyn TableStorage> = Arc::new(crate::stream::StreamStorage);
         RwLock::new(HashMap::from([
             (ROW.to_string(), row),
+            (crate::stream::STREAM.to_string(), stream),
             (crate::sealed::SEALED.to_string(), sealed),
             (crate::column_store::COLUMN.to_string(), column),
             (crate::column_store::ROW_COLUMN.to_string(), both),

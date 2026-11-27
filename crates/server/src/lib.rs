@@ -703,6 +703,10 @@ pub fn maintain_with(
                 if let Err(e) = nucleus_sql::expiry::expire(&kv, &registry, None, now) {
                     nucleus_platform::log!("nucleus-server: expiry: {}", e.message);
                 }
+                // Streams' entries past their retention (§M16.5 S2).
+                if let Err(e) = nucleus_sql::stream::trim_all(&kv, now) {
+                    nucleus_platform::log!("nucleus-server: stream retention: {}", e.message);
+                }
                 // Column type changes cut short (a crash, a session gone):
                 // finished.
                 match nucleus_sql::datetime::with_now(now, &kv, || {

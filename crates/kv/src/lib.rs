@@ -41,7 +41,7 @@ pub use nucleus_storage::scan;
 /// (PLAN.md §M14.30 K3f).
 pub use nucleus_storage::store::RESEAL_BATCH;
 pub use nucleus_txn::mvcc::unescape_onto;
-pub use nucleus_txn::{Chunk, Isolation, Timestamp};
+pub use nucleus_txn::{Chunk, Fill, Isolation, Timestamp, stream_key};
 
 /// Errors of the KV contract.
 #[derive(Debug)]
@@ -567,6 +567,15 @@ pub trait Kv: Send + Sync {
         let _ = (start, end);
     }
 
+    /// The last number of the stream whose head is `head`
+    /// ([`KvTxn::append`]) visible, once it is past `after` or `timeout`
+    /// has passed (then whatever it is): what a consumer waits on.  The
+    /// default: streams are not supported.
+    fn wait_appended(&self, head: &[u8], after: u64, timeout: Duration) -> Result<u64> {
+        let _ = (head, after, timeout);
+        Err(Error::Storage("this store has no streams".into()))
+    }
+
     /// Erasure (PLAN.md §M14.24 R2): once no snapshot older than now
     /// runs (waiting up to `wait`), every version of the keys in `ranges`
     /// (each `[start, end)`) no snapshot can see removed, past any history
@@ -903,6 +912,27 @@ pub trait KvTxn: Send {
 
     /// Sets `key` to `value`.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+
+    /// Appends an entry to the stream whose head is the key `head` and
+    /// whose entries are keyed under `entries` (PLAN.md §M16.5, D23): its
+    /// key the commit gives — [`stream_key`]`(entries, n)`, `n` the next
+    /// number, dense from 1 in commit order — and its value `value` once
+    /// `fill` has written the number and the commit's time (nanoseconds,
+    /// never before the entry before's) into it; the head holds the last
+    /// number and its time (8 bytes each, big-endian).  Appends conflict
+    /// with nothing and are not read back before the commit.  The
+    /// default: streams are not supported.
+    fn append(&mut self, head: &[u8], entries: &[u8], value: &[u8], fill: Fill) -> Result<()> {
+        let _ = (head, entries, value, fill);
+        Err(Error::Storage("this store has no streams".into()))
+    }
+
+    /// [`Kv::wait_appended`] on this transaction's database: its snapshot
+    /// does not move, so what it finds is for a transaction begun after.
+    fn wait_appended(&self, head: &[u8], after: u64, timeout: Duration) -> Result<u64> {
+        let _ = (head, after, timeout);
+        Err(Error::Storage("this store has no streams".into()))
+    }
 
     /// Deletes `key` (no error if absent).
     fn delete(&mut self, key: &[u8]) -> Result<()>;
@@ -1571,6 +1601,10 @@ impl Kv for Database {
         self.engine.watch(start, end);
     }
 
+    fn wait_appended(&self, head: &[u8], after: u64, timeout: Duration) -> Result<u64> {
+        Ok(self.engine.wait_appended(head, after, timeout)?)
+    }
+
     fn scrub(&self, ranges: &[(Vec<u8>, Vec<u8>)], wait: Duration) -> Result<Option<Scrub>> {
         // Intents made versions, so none of the keys is left whole.
         if self.engine.intents_pending() {
@@ -1803,6 +1837,14 @@ impl KvTxn for LocalTxn {
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         Ok(self.0.put(key, value)?)
+    }
+
+    fn append(&mut self, head: &[u8], entries: &[u8], value: &[u8], fill: Fill) -> Result<()> {
+        Ok(self.0.append(head, entries, value, fill)?)
+    }
+
+    fn wait_appended(&self, head: &[u8], after: u64, timeout: Duration) -> Result<u64> {
+        Ok(self.0.wait_appended(head, after, timeout)?)
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<()> {

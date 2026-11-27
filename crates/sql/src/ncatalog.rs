@@ -13,6 +13,8 @@
 //! | `nc_catalog.schemas` | schema (of the session's registry) |
 //! | `nc_catalog.tables` | table |
 //! | `nc_catalog.collections` | collection (`CREATE COLLECTION`), its JSON Schema |
+//! | `nc_catalog.streams` | stream (`CREATE STREAM`): its retention, last `seq` and its time |
+//! | `nc_catalog.consumers` | consumer group of a stream: its position and how far behind it is |
 //! | `nc_catalog.columns` | column |
 //! | `nc_catalog.indexes` | index (the primary index is index 0) |
 //! | `nc_catalog.constraints` | primary key, unique, check, foreign key |
@@ -396,6 +398,27 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("schema", T),
             ("storage", T),
             ("engine", T),
+        ],
+    ),
+    (
+        "streams",
+        &[
+            ("name", T),
+            ("owner", T),
+            ("retention", DataType::Interval),
+            ("max_entries", I),
+            ("last_seq", I),
+            ("last_time", DataType::TimestampTz),
+            ("engine", T),
+        ],
+    ),
+    (
+        "consumers",
+        &[
+            ("stream", T),
+            ("consumer_group", T),
+            ("position", I),
+            ("lag", I),
         ],
     ),
     (
@@ -1069,6 +1092,35 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         .rate
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
                 ]);
+            }
+        }
+        "streams" => {
+            for t in tables.iter().filter(|t| crate::stream::is_stream(t)) {
+                let spec = t.stream.clone().unwrap_or_default();
+                let (last, at) = crate::stream::last(txn, t)?;
+                out.push(vec![
+                    text(t.name.clone()),
+                    t.owner.clone().map_or(Value::Null, text),
+                    spec.retention.map_or(Value::Null, Value::Interval),
+                    spec.max_entries
+                        .map_or(Value::Null, |n| Value::Int(n as i64)),
+                    Value::Int(last),
+                    at.map_or(Value::Null, Value::TimestampTz),
+                    text(t.engine.name().to_string()),
+                ]);
+            }
+        }
+        "consumers" => {
+            for t in tables.iter().filter(|t| crate::stream::is_stream(t)) {
+                let (last, _) = crate::stream::last(txn, t)?;
+                for (group, at) in crate::stream::groups(txn, t)? {
+                    out.push(vec![
+                        text(t.name.clone()),
+                        text(group),
+                        Value::Int(at),
+                        Value::Int((last - at).max(0)),
+                    ]);
+                }
             }
         }
         "collections" => {

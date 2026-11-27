@@ -167,6 +167,47 @@ pub enum Statement {
         /// `schema`, `storage`, `engine`.
         options: Vec<(String, String)>,
     },
+    /// `CREATE STREAM [IF NOT EXISTS] name (columns, constraints) [WITH
+    /// (retention = …, max_entries = …, engine = …)]`: an append-only
+    /// table numbered by its commits (PLAN.md §M16.5 S2).
+    CreateStream {
+        /// The stream.
+        name: String,
+        /// Its columns after `seq` and `time`.
+        columns: Vec<ColumnSpec>,
+        /// Its constraints (`CHECK`, `FOREIGN KEY`).
+        constraints: Vec<TableConstraint>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// `WITH (…)`.
+        options: Vec<(String, String)>,
+    },
+    /// `DROP STREAM [IF EXISTS] name, …`.
+    DropStream {
+        /// The streams.
+        names: Vec<String>,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
+    /// `ALTER STREAM name …`.
+    AlterStream {
+        /// The stream.
+        name: String,
+        /// What changes.
+        action: AlterStream,
+    },
+    /// `CONSUME [column, …] FROM stream GROUP group [LIMIT n]`: the entries after the
+    /// group's position, which moves past them (PLAN.md §M16.5 S2).
+    Consume {
+        /// The columns returned (empty: all).
+        columns: Vec<String>,
+        /// The stream.
+        stream: String,
+        /// The consumer group.
+        group: String,
+        /// `LIMIT n` (100 by default).
+        limit: Option<Expr>,
+    },
     /// `DROP COLLECTION [IF EXISTS] name, … [CASCADE | RESTRICT]`.
     DropCollection {
         /// The collections.
@@ -820,6 +861,24 @@ impl Default for ExplainOptions {
             timing: true,
         }
     }
+}
+
+/// What `ALTER STREAM` changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterStream {
+    /// `SET (retention = …, max_entries = …)`.
+    Set(Vec<(String, String)>),
+    /// `RESET (retention, max_entries)`.
+    Reset(Vec<String>),
+    /// `SEEK GROUP g TO n`: the group's position set to `n`.
+    Seek {
+        /// The group.
+        group: String,
+        /// The position: the last `seq` consumed.
+        to: i64,
+    },
+    /// `DROP GROUP g`: the group forgotten.
+    DropGroup(String),
 }
 
 /// What `ALTER COLLECTION` changes.

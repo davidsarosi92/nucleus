@@ -1106,6 +1106,7 @@ impl Session {
                 {
                     let txn = self.kv.begin(TxnOptions::read_only())?;
                     crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                    crate::stream::refuse_change(&*txn, stmt)?;
                     catalog::table(&*txn, table)?;
                 }
                 if let Some(engine) = engine {
@@ -1131,6 +1132,7 @@ impl Session {
                 let target = {
                     let txn = self.kv.begin(TxnOptions::read_only())?;
                     crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                    crate::stream::refuse_change(&*txn, stmt)?;
                     let t = catalog::table(&*txn, table)?;
                     crate::convert::target(&t, kinds, columns.as_deref())?
                 };
@@ -1159,6 +1161,7 @@ impl Session {
                 {
                     let txn = self.kv.begin(TxnOptions::read_only())?;
                     crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                    crate::stream::refuse_change(&*txn, stmt)?;
                 }
                 let using = using.as_ref().zip(using_text.as_deref());
                 let now = crate::datetime::from_system(self.kv.wall_clock());
@@ -1180,6 +1183,7 @@ impl Session {
                 {
                     let txn = self.kv.begin(TxnOptions::read_only())?;
                     crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                    crate::stream::refuse_change(&*txn, stmt)?;
                 }
                 let now = crate::datetime::from_system(self.kv.wall_clock());
                 crate::datetime::with_now(now, &self.kv, || {
@@ -1286,6 +1290,7 @@ impl Session {
                 let now = crate::datetime::from_system(self.kv.wall_clock());
                 let mut txn = self.kv.begin(TxnOptions::default())?;
                 crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                crate::stream::refuse_change(&*txn, stmt)?;
                 crate::datetime::with_now(now, &self.kv, || {
                     crate::partition::set_policy(
                         txn.as_mut(),
@@ -2066,6 +2071,9 @@ impl Session {
                         .collect(),
                 )
             }
+            Statement::Consume {
+                stream, columns, ..
+            } => Some(crate::stream::columns(txn, stream, columns)?),
             Statement::Lint(_) => Some(columns_of(
                 ["rule", "place", "finding", "fix"].map(|c| (c.to_string(), Some(DataType::Text))),
             )),
@@ -2465,6 +2473,7 @@ pub(crate) fn execute_statement(
     sink: &mut dyn Sink,
 ) -> Result<Output> {
     crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
+    crate::stream::refuse_change(&*txn, stmt)?;
     Ok(match stmt {
         Statement::SetStorage { .. } | Statement::SetStoragePolicy { .. } => {
             return Err(Error::active_txn(
@@ -2979,6 +2988,87 @@ pub(crate) fn execute_statement(
         Statement::AlterCollection { name, action } => {
             crate::collection::alter(txn, reg, name, action)?;
             Output::Command("ALTER COLLECTION".into())
+        }
+        Statement::CreateStream {
+            name,
+            columns,
+            constraints,
+            if_not_exists,
+            options,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE STREAM".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            crate::stream::create(txn, reg, name, columns, constraints, options)?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
+            Output::Command("CREATE STREAM".into())
+        }
+        Statement::DropStream { names, if_exists } => {
+            let mut there = Vec::new();
+            for name in names {
+                match catalog::get_table(&*txn, name)? {
+                    None if *if_exists => {}
+                    None => {
+                        return Err(Error::undefined_table(format!(
+                            "stream \"{name}\" does not exist"
+                        )));
+                    }
+                    Some(_) => {
+                        crate::stream::of(&*txn, name)?;
+                        there.push(name.clone());
+                    }
+                }
+            }
+            if !there.is_empty() {
+                let drop = Statement::DropTable {
+                    names: there,
+                    if_exists: false,
+                    cascade: false,
+                };
+                execute_statement(txn, reg, &drop, params, sink)?;
+            }
+            Output::Command("DROP STREAM".into())
+        }
+        Statement::AlterStream { name, action } => {
+            crate::stream::alter(txn, name, action)?;
+            Output::Command("ALTER STREAM".into())
+        }
+        Statement::Consume {
+            columns,
+            stream,
+            group,
+            limit,
+        } => {
+            // A number, or a parameter holding one.
+            let value = match limit {
+                None => None,
+                Some(crate::ast::Expr::Literal(v)) => Some(v.clone()),
+                Some(crate::ast::Expr::Param(n)) => {
+                    Some(params.get(n - 1).cloned().ok_or_else(|| {
+                        Error::undefined_object(format!("there is no parameter ${n}"))
+                    })?)
+                }
+                Some(_) => {
+                    return Err(Error::feature("CONSUME's LIMIT is a number or a parameter"));
+                }
+            };
+            let limit = match value {
+                None | Some(Value::Null) => None,
+                Some(Value::Int(n)) => Some(n),
+                Some(Value::Text(t)) => Some(
+                    t.trim()
+                        .parse::<i64>()
+                        .map_err(|_| Error::invalid_text(format!("invalid LIMIT \"{t}\"")))?,
+                ),
+                Some(_) => return Err(Error::type_mismatch("LIMIT is a whole number")),
+            };
+            crate::stream::consume(txn, reg, stream, columns, group, limit)?
         }
         Statement::CreateMemoryStore {
             name,
@@ -4505,7 +4595,7 @@ impl TableOptions {
     }
 
     /// These with `WITH (options)` over them.
-    fn with(mut self, options: &[(String, String)]) -> Result<Self> {
+    pub(crate) fn with(mut self, options: &[(String, String)]) -> Result<Self> {
         for (key, value) in options {
             match key.as_str() {
                 "storage" => {
@@ -4650,6 +4740,7 @@ pub(crate) fn create_table(
         gone: Vec::new(),
         memory: None,
         collection: false,
+        stream: None,
         engine: opts.engine,
         relative_directory: true,
     };
