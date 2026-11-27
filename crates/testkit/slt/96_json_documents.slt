@@ -1,0 +1,390 @@
+# Reads and writes by filter (PLAN.md §M16 Q3, D22): find's projection
+# (json_project), sort (json_sort_key), skip and limit; update documents
+# (json_update), upserts (json_upsert_document); delete.  nucleus-only;
+# every expected answer is MongoDB 8's on the same documents (written by
+# a generator that ran both).
+
+statement ok
+CREATE COLLECTION inv
+
+statement ok
+INSERT INTO inv (doc) VALUES ('{"_id": 1, "item": "journal", "qty": 25, "tags": ["blank", "red"], "size": {"h": 14, "w": 21}, "status": "A"}'), ('{"_id": 2, "item": "notebook", "qty": 50, "tags": ["red", "blank"], "size": {"h": 8.5, "w": 11}, "status": "A"}'), ('{"_id": 3, "item": "paper", "qty": 100, "tags": ["red", "blank", "plain"], "size": {"h": 8.5, "w": 11}, "status": "D"}'), ('{"_id": 4, "item": "planner", "qty": 75, "tags": ["blank", "red"], "size": {"h": 22.85, "w": 30}, "status": "D"}'), ('{"_id": 5, "item": "postcard", "qty": 45, "tags": ["blue"], "size": {"h": 10, "w": 15.25}, "status": "A"}'), ('{"_id": 6, "item": "misc", "qty": "many", "tags": [], "status": null}'), ('{"_id": 7, "item": "box", "sizes": [{"h": 1}, {"h": 5, "w": 2}]}')
+
+# a filter, a projection, a sort: MongoDB's find
+query T
+SELECT json_project(doc, '{"item": 1, "_id": 0}') FROM inv WHERE doc @? json_filter('{"status": "A"}') ORDER BY json_sort_key(doc, '{"qty": -1}')
+----
+{"item": "notebook"}
+{"item": "postcard"}
+{"item": "journal"}
+
+# values of different types in MongoDB's order: null or missing, numbers, strings
+query T
+SELECT json_project(doc, '{"qty": 1}') FROM inv WHERE doc @? json_filter('{}') ORDER BY json_sort_key(doc, '{"qty": 1, "_id": 1}')
+----
+{"_id": 7}
+{"_id": 1, "qty": 25}
+{"_id": 5, "qty": 45}
+{"_id": 2, "qty": 50}
+{"_id": 4, "qty": 75}
+{"_id": 3, "qty": 100}
+{"_id": 6, "qty": "many"}
+
+# an array by its least element ascending (an empty array first)
+query T
+SELECT json_project(doc, '{"tags": 1}') FROM inv WHERE doc @? json_filter('{}') ORDER BY json_sort_key(doc, '{"tags": 1, "_id": 1}')
+----
+{"_id": 6, "tags": []}
+{"_id": 7}
+{"_id": 1, "tags": ["blank", "red"]}
+{"_id": 2, "tags": ["red", "blank"]}
+{"_id": 3, "tags": ["red", "blank", "plain"]}
+{"_id": 4, "tags": ["blank", "red"]}
+{"_id": 5, "tags": ["blue"]}
+
+# an array by its greatest element descending
+query T
+SELECT json_project(doc, '{"tags": 1}') FROM inv WHERE doc @? json_filter('{}') ORDER BY json_sort_key(doc, '{"tags": -1, "_id": 1}')
+----
+{"_id": 1, "tags": ["blank", "red"]}
+{"_id": 2, "tags": ["red", "blank"]}
+{"_id": 3, "tags": ["red", "blank", "plain"]}
+{"_id": 4, "tags": ["blank", "red"]}
+{"_id": 5, "tags": ["blue"]}
+{"_id": 7}
+{"_id": 6, "tags": []}
+
+# a dotted path, a missing field as null
+query T
+SELECT json_project(doc, '{"size.h": 1}') FROM inv WHERE doc @? json_filter('{}') ORDER BY json_sort_key(doc, '{"size.h": 1, "_id": 1}')
+----
+{"_id": 6}
+{"_id": 7}
+{"_id": 2, "size": {"h": 8.5}}
+{"_id": 3, "size": {"h": 8.5}}
+{"_id": 5, "size": {"h": 10}}
+{"_id": 1, "size": {"h": 14}}
+{"_id": 4, "size": {"h": 22.85}}
+
+# skip and limit after the sort
+query T
+SELECT json_project(doc, '{"_id": 1}') FROM inv WHERE doc @? json_filter('{}') ORDER BY json_sort_key(doc, '{"qty": -1, "_id": 1}') LIMIT 2 OFFSET 1
+----
+{"_id": 3}
+{"_id": 4}
+
+# through an array of objects
+query T
+SELECT json_project(doc, '{"sizes.h": 1}') FROM inv WHERE doc @? json_filter('{}') ORDER BY json_sort_key(doc, '{"sizes.h": -1, "_id": 1}')
+----
+{"_id": 7, "sizes": [{"h": 1}, {"h": 5}]}
+{"_id": 1}
+{"_id": 2}
+{"_id": 3}
+{"_id": 4}
+{"_id": 5}
+{"_id": 6}
+
+# excluded fields; _id excluded too
+query T
+SELECT json_project(doc, '{"size": 0, "tags": 0, "_id": 0}') FROM inv WHERE doc @? json_filter('{"_id": {"$lte": 2}}') ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"qty": 25, "item": "journal", "status": "A"}
+{"qty": 50, "item": "notebook", "status": "A"}
+
+# $slice of an array, with fields included
+query T
+SELECT json_project(doc, '{"tags": {"$slice": 1}, "item": 1}') FROM inv WHERE doc @? json_filter('{"tags": "red"}') ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "item": "journal", "tags": ["blank"]}
+{"_id": 2, "item": "notebook", "tags": ["red"]}
+{"_id": 3, "item": "paper", "tags": ["red"]}
+{"_id": 4, "item": "planner", "tags": ["blank"]}
+
+# $slice [skip, n]; from the end
+query T
+SELECT json_project(doc, '{"tags": {"$slice": [-2, 1]}}') FROM inv WHERE doc @? json_filter('{"tags": {"$size": 3}}') ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11}, "tags": ["blank"], "status": "D"}
+
+# $set a field in an object, and one more
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$set": {"size.uom": "cm", "status": "P"}}') WHERE doc @? json_filter('{"item": "paper"}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 25, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["blank", "red"], "status": "A"}
+{"_id": 2, "qty": 50, "item": "notebook", "size": {"h": 8.5, "w": 11}, "tags": ["red", "blank"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "blank", "plain"], "status": "P"}
+{"_id": 4, "qty": 75, "item": "planner", "size": {"h": 22.85, "w": 30}, "tags": ["blank", "red"], "status": "D"}
+{"_id": 5, "qty": 45, "item": "postcard", "size": {"h": 10, "w": 15.25}, "tags": ["blue"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": [], "status": null}
+{"_id": 7, "item": "box", "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $inc and $push with $each and $position, on every match
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$inc": {"qty": -5}, "$push": {"tags": {"$each": ["x", "y"], "$position": 0}}}') WHERE doc @? json_filter('{"qty": {"$lt": 50}}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["x", "y", "blank", "red"], "status": "A"}
+{"_id": 2, "qty": 50, "item": "notebook", "size": {"h": 8.5, "w": 11}, "tags": ["red", "blank"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "blank", "plain"], "status": "P"}
+{"_id": 4, "qty": 75, "item": "planner", "size": {"h": 22.85, "w": 30}, "tags": ["blank", "red"], "status": "D"}
+{"_id": 5, "qty": 40, "item": "postcard", "size": {"h": 10, "w": 15.25}, "tags": ["x", "y", "blue"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": [], "status": null}
+{"_id": 7, "item": "box", "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $unset and $rename
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$unset": {"size": ""}, "$rename": {"item": "name"}}') WHERE doc @? json_filter('{"_id": 4}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["x", "y", "blank", "red"], "status": "A"}
+{"_id": 2, "qty": 50, "item": "notebook", "size": {"h": 8.5, "w": 11}, "tags": ["red", "blank"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "blank", "plain"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["blank", "red"], "status": "D"}
+{"_id": 5, "qty": 40, "item": "postcard", "size": {"h": 10, "w": 15.25}, "tags": ["x", "y", "blue"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": [], "status": null}
+{"_id": 7, "item": "box", "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $addToSet with $each: only what is not there
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$addToSet": {"tags": {"$each": ["red", "green"]}}}') WHERE doc @? json_filter('{}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["x", "y", "blank", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 50, "item": "notebook", "size": {"h": 8.5, "w": 11}, "tags": ["red", "blank", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "blank", "plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["blank", "red", "green"], "status": "D"}
+{"_id": 5, "qty": 40, "item": "postcard", "size": {"h": 10, "w": 15.25}, "tags": ["x", "y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": ["red", "green"], "status": null}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $pull by a condition
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$pull": {"tags": {"$in": ["blank", "x"]}}}') WHERE doc @? json_filter('{}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 50, "item": "notebook", "size": {"h": 8.5, "w": 11}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 40, "item": "postcard", "size": {"h": 10, "w": 15.25}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": ["red", "green"], "status": null}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $min and $max (a field made where missing)
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$min": {"qty": 30}, "$max": {"size.w": 20}}') WHERE doc @? json_filter('{"status": "A"}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 30, "item": "notebook", "size": {"h": 8.5, "w": 20}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 30, "item": "postcard", "size": {"h": 10, "w": 20}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": ["red", "green"], "status": null}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $mul
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$mul": {"qty": 2}}') WHERE doc @? json_filter('{"_id": 5}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 30, "item": "notebook", "size": {"h": 8.5, "w": 20}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["red", "plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 60, "item": "postcard", "size": {"h": 10, "w": 20}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": ["red", "green"], "status": null}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# $pop the first
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$pop": {"tags": -1}}') WHERE doc @? json_filter('{"_id": 3}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 30, "item": "notebook", "size": {"h": 8.5, "w": 20}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 60, "item": "postcard", "size": {"h": 10, "w": 20}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": "many", "item": "misc", "tags": ["red", "green"], "status": null}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# a replacement: the fields replaced, the _id kept
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"item": "misc", "qty": 0}') WHERE doc @? json_filter('{"_id": 6}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 30, "item": "notebook", "size": {"h": 8.5, "w": 20}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 60, "item": "postcard", "size": {"h": 10, "w": 20}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": 0, "item": "misc"}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 2}]}
+
+# a position in a path
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$set": {"sizes.1.w": 9}}') WHERE doc @? json_filter('{"_id": 7}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 30, "item": "notebook", "size": {"h": 8.5, "w": 20}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 60, "item": "postcard", "size": {"h": 10, "w": 20}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": 0, "item": "misc"}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 1}, {"h": 5, "w": 9}]}
+
+# $push with $sort by a field and $slice
+statement ok
+UPDATE inv SET doc = json_update(doc, '{"$push": {"sizes": {"$each": [{"h": 3}], "$sort": {"h": -1}, "$slice": 2}}}') WHERE doc @? json_filter('{"_id": 7}')
+
+query T
+SELECT doc FROM inv ORDER BY json_sort_key(doc, '{"_id": 1}')
+----
+{"_id": 1, "qty": 20, "item": "journal", "size": {"h": 14, "w": 21}, "tags": ["y", "red", "green"], "status": "A"}
+{"_id": 2, "qty": 30, "item": "notebook", "size": {"h": 8.5, "w": 20}, "tags": ["red", "green"], "status": "A"}
+{"_id": 3, "qty": 100, "item": "paper", "size": {"h": 8.5, "w": 11, "uom": "cm"}, "tags": ["plain", "green"], "status": "P"}
+{"_id": 4, "qty": 75, "name": "planner", "tags": ["red", "green"], "status": "D"}
+{"_id": 5, "qty": 60, "item": "postcard", "size": {"h": 10, "w": 20}, "tags": ["y", "blue", "red", "green"], "status": "A"}
+{"_id": 6, "qty": 0, "item": "misc"}
+{"_id": 7, "item": "box", "tags": ["red", "green"], "sizes": [{"h": 5, "w": 9}, {"h": 3}]}
+
+# delete by a filter; count
+statement ok
+DELETE FROM inv WHERE doc @? json_filter('{"status": "D"}')
+
+query I
+SELECT count(*) FROM inv WHERE doc @? json_filter('{"qty": {"$gt": 20}}')
+----
+3
+
+# an upsert's document: the filter's equalities, then the update ($setOnInsert too)
+query T
+SELECT json_upsert_document('{"item": "pen", "qty": {"$gt": 1}, "size.uom": {"$eq": "mm"}}', '{"$set": {"qty": 5}, "$setOnInsert": {"tags": []}}')
+----
+{"qty": 5, "item": "pen", "size": {"uom": "mm"}, "tags": []}
+
+# inserted when nothing matches (the _id made by the collection), not again
+statement ok
+INSERT INTO inv (doc) SELECT json_upsert_document('{"item": "pen", "qty": {"$gt": 1}, "size.uom": {"$eq": "mm"}}', '{"$set": {"qty": 5}, "$setOnInsert": {"tags": []}}') WHERE NOT EXISTS (SELECT 1 FROM inv WHERE doc @? json_filter('{"item": "pen", "qty": {"$gt": 1}, "size.uom": {"$eq": "mm"}}'))
+
+statement ok
+INSERT INTO inv (doc) SELECT json_upsert_document('{"item": "pen", "qty": {"$gt": 1}, "size.uom": {"$eq": "mm"}}', '{"$set": {"qty": 5}, "$setOnInsert": {"tags": []}}') WHERE NOT EXISTS (SELECT 1 FROM inv WHERE doc @? json_filter('{"item": "pen", "qty": {"$gt": 1}, "size.uom": {"$eq": "mm"}}'))
+
+query T
+SELECT doc - '_id' FROM inv WHERE doc @? json_filter('{"item": "pen"}')
+----
+{"qty": 5, "item": "pen", "size": {"uom": "mm"}, "tags": []}
+
+# A sort document's fields in its text's order (a json object's keys are
+# unordered), or as [field, 1 or -1] pairs
+query T
+SELECT string_agg(i::text, ',' ORDER BY json_sort_key(d::json, '{"t": 1, "i": -1}')) FROM (VALUES (1, '{"t": [2], "i": 1}'), (2, '{"t": [1, 5], "i": 2}'), (3, '{"t": 2, "i": 3}')) v(i, d)
+----
+2,3,1
+
+query T
+SELECT string_agg(i::text, ',' ORDER BY json_sort_key(d::json, '[["t", 1], ["i", -1]]')) FROM (VALUES (1, '{"t": [2], "i": 1}'), (2, '{"t": [1, 5], "i": 2}'), (3, '{"t": 2, "i": 3}')) v(i, d)
+----
+2,3,1
+
+# Two sort fields through different arrays of a document: MongoDB's
+# parallel arrays; through the same array, one key per element
+statement error 22023
+SELECT json_sort_key('{"a": [1], "b": [2]}', '{"a": 1, "b": 1}')
+
+query B
+SELECT json_sort_key('{"a": [{"x": 1, "y": 9}, {"x": 2, "y": 0}]}', '{"a.x": 1, "a.y": 1}') < json_sort_key('{"a": [{"x": 1, "y": 5}]}', '{"a.x": 1, "a.y": 1}')
+----
+false
+
+statement error 22023
+SELECT json_sort_key('{}', '{}')
+
+statement error 22023
+SELECT json_sort_key('{}', '{"a": 2}')
+
+# Errors: an unknown operator, operators and fields mixed, a conflict, the
+# _id changed, an operator on a value of another type
+statement error 22023
+SELECT json_update('{"a": 1}', '{"$sett": {"a": 2}}')
+
+statement error 22023
+SELECT json_update('{"a": 1}', '{"$set": {"a": 2}, "b": 1}')
+
+statement error 22023
+SELECT json_update('{"a": {"b": 1}}', '{"$set": {"a": 2}, "$inc": {"a.b": 1}}')
+
+statement error 22023
+SELECT json_update('{"_id": 1}', '{"$set": {"_id": 2}}')
+
+statement error 22023
+SELECT json_update('{"_id": 1}', '{"_id": 2, "a": 1}')
+
+statement error 22023
+SELECT json_update('{"a": "x"}', '{"$inc": {"a": 1}}')
+
+statement error 22023
+SELECT json_update('{"a": "x"}', '{"$set": {"a.b": 1}}')
+
+statement error 22023
+SELECT json_update('{"a": [1]}', '{"$pull": {"a.b": 1}}')
+
+statement error 22023
+SELECT json_update('{"a": 1}', '{}')
+
+# Not supported: positional paths, $currentDate, $bit, a $push $sort by
+# several fields (a json object's keys are unordered)
+statement error 0A000
+SELECT json_update('{"a": [1]}', '{"$set": {"a.$": 2}}')
+
+statement error 0A000
+SELECT json_update('{"a": 1}', '{"$currentDate": {"a": true}}')
+
+statement error 0A000
+SELECT json_update('{"a": []}', '{"$push": {"a": {"$each": [{"x": 1}], "$sort": {"x": 1, "y": 1}}}}')
+
+statement error 0A000
+SELECT json_project('{"a": [1]}', '{"a": {"$elemMatch": {"$gt": 0}}}')
+
+statement error 22023
+SELECT json_project('{"a": 1, "b": 2}', '{"a": 1, "b": 0}')
+
+# An upsert's filter setting a path twice
+statement error 22023
+SELECT json_upsert_document('{"a": 1, "a.b": 2}', '{"$set": {"c": 1}}')
+
+# NULL in, NULL out
+query T
+SELECT json_update(NULL, '{"$set": {"a": 1}}') IS NULL AND json_project('{}', NULL) IS NULL AND json_sort_key(NULL, '{"a": 1}') IS NULL
+----
+t
+
+# $setOnInsert holds only on an insert; numbers stay exact
+query T
+SELECT json_update('{"a": 0.1}', '{"$inc": {"a": 0.2}, "$setOnInsert": {"b": 1}}')
+----
+{"a": 0.3}

@@ -648,6 +648,62 @@ fn functions(r: &mut Registry) -> Result<()> {
         )
         .arity(3..=4),
     )?;
+    // Documents by MongoDB's rules (§M16 Q3; `super::document`).
+    add(
+        r,
+        &["json_update", "jsonb_update"],
+        Func::new("json_update", vec![u(j), u(j)], j, |a| {
+            Ok(json_value(super::document::update(jb(&a[0])?, jb(&a[1])?)?))
+        }),
+    )?;
+    add(
+        r,
+        &["json_upsert_document", "jsonb_upsert_document"],
+        Func::new("json_upsert_document", vec![u(j), u(j)], j, |a| {
+            Ok(json_value(super::document::upsert_document(
+                jb(&a[0])?,
+                jb(&a[1])?,
+            )?))
+        }),
+    )?;
+    add(
+        r,
+        &["json_project", "jsonb_project"],
+        Func::new("json_project", vec![u(j), u(j)], j, |a| {
+            Ok(json_value(super::document::project(
+                jb(&a[0])?,
+                jb(&a[1])?,
+            )?))
+        }),
+    )?;
+    add(
+        r,
+        &["json_sort_key", "jsonb_sort_key"],
+        // The sort document as text: its fields' order is what it says.
+        Func::new("json_sort_key", vec![u(j), u(t)], DataType::Bytea, |a| {
+            let Value::Text(sort) = &a[1] else {
+                return Err(Error::internal("json_sort_key: text expected"));
+            };
+            // The sort document is read once a thread while it stays the
+            // same (it is a constant in a query).
+            thread_local! {
+                static LAST: std::cell::RefCell<Option<(String, Vec<(String, super::document::T)>)>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+            LAST.with(|last| {
+                let mut last = last.borrow_mut();
+                if last.as_ref().is_none_or(|(text, _)| text != sort) {
+                    *last = Some((sort.clone(), super::document::sort_fields(sort)?));
+                }
+                let (_, fields) = last
+                    .as_ref()
+                    .ok_or_else(|| Error::internal("sort fields"))?;
+                Ok(Value::Bytea(
+                    super::document::sort_key(jb(&a[0])?, fields)?.into(),
+                ))
+            })
+        }),
+    )?;
     add(
         r,
         &["json_insert", "jsonb_insert"],

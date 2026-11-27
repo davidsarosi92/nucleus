@@ -9,6 +9,7 @@
 //! PostgreSQL's ([`key`]).  To drivers it travels as text — every language
 //! parses JSON — and they hand out their own values (a `dict`, an object).
 
+pub mod document;
 pub mod form;
 mod funcs;
 pub mod key;

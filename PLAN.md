@@ -14540,11 +14540,45 @@ found missing, and the open issues.
   keys deep): 4,500 filters, every answer MongoDB 8's; eleven mutations,
   each failing (three only after cases were added: a raw `!=`, a path
   ending in the part's last key but not its path, `c < @.x`).
-- **Q3 — reads and writes by filter**: `find` (filter, projection,
+- **Q3 — reads and writes by filter** ✅ (2026-11-27): `find` (filter, projection,
   sort, skip, limit), count, `update` by operators (`$set $unset $inc
   $mul $min $max $rename $push $pull $addToSet $pop`, upsert) compiled
   to the `json_*` functions in one rewrite of the row, `replace`,
   `delete` — as SQL statements first, so they are one plan.
+  *Done* (`json::document`): `json_update(doc, update)` (the operators
+  above, `$pullAll`, `$setOnInsert`; `$push`'s `$each $position $sort
+  $slice`; a replacement keeping `_id`), `json_upsert_document(filter,
+  update)`, `json_project(doc, projection)` (`$slice` too),
+  `json_sort_key(doc, sort)` — a `bytea` in MongoDB's sort order — so
+  `SELECT json_project(…) … WHERE doc @? json_filter(…) ORDER BY
+  json_sort_key(…) LIMIT … OFFSET …`, `UPDATE … SET doc =
+  json_update(doc, …)`, `DELETE`, and an upsert as `INSERT … SELECT
+  json_upsert_document(…) WHERE NOT EXISTS (…)`.  One tree of the
+  document a call, written once.  What MongoDB 8 showed that its
+  documentation does not say, each now nucleus's: an empty array sorts
+  first only as the field's own value, not as an element, nor where a
+  path goes through it (`null` there); a sort's keys are a compound
+  multikey index's — a tuple per element of the array the fields share
+  (so `{"b.a": 1, "b.b": -1}` takes both from one element), an object
+  without the field and an element that is no object `null`; objects
+  compare field by field, the value's type before the name; `$pop`,
+  `$pull`, `$rename` refuse a path through a scalar but do nothing where
+  it is missing, `$unset` never refuses; a `$rename` of nothing does not
+  look at its target; an upsert's filter may not name a path twice.  A
+  sort document is text, read in its order (a json object's keys are
+  unordered; `[[field, dir], …]` too); a `$push` `$sort` by several
+  fields is `0A000` for that reason.  Measured: `ORDER BY json_sort_key`
+  over 200,000 documents 3.7× `ORDER BY doc -> 'age'` at first — the
+  sort document read on every row, the whole document made a tree —;
+  read once a thread and cut to the paths, 1.9× (40 vs 21 ms; the rest
+  is MongoDB's order, which `->` does not give); `UPDATE … json_update`
+  1.28× `json_set`'s.  Tests: `96_json_documents.slt`, written by a
+  generator that ran each case in nucleus and MongoDB 8 and kept only
+  agreeing answers (ten finds, eleven updates in a row, delete, count,
+  an upsert), and errors; unit tests of the corners MongoDB showed;
+  differential fuzzers (outside the repository) — 48,000 updates,
+  2,400 upserts, 6,240 projections and sorts, no difference; 22
+  mutations, each failing (ten only after the corner tests).
 - **Q4 — the document server**: `ncp` messages for them, a document API
   in every nucleus driver and `ncsql`, in the same sessions and
   transactions as SQL.

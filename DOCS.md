@@ -7731,6 +7731,76 @@ irregular documents (outside the repository, as the bug hunt's) —
 answer MongoDB's, and 4,500 again with path indexes on every path one
 and two keys deep (`INDEX=1`).
 
+**Reads and writes by filter** (§M16 Q3; `json::document`): what
+MongoDB's `find`, `update`, `replace`, `delete` and upserts do, as SQL
+over a collection — one statement, one plan:
+
+```sql
+SELECT json_project(doc, '{"name": 1, "_id": 0}') FROM people
+  WHERE doc @? json_filter('{"age": {"$gte": 18}}')
+  ORDER BY json_sort_key(doc, '{"age": -1, "name": 1}') LIMIT 10 OFFSET 20;
+UPDATE people SET doc = json_update(doc, '{"$inc": {"visits": 1}, "$push": {"tags": "new"}}')
+  WHERE doc @? json_filter('{"name": "ann"}');
+UPDATE people SET doc = json_update(doc, '{"name": "ann", "age": 35}')   -- a replacement
+  WHERE doc @? json_filter('{"_id": 7}');
+DELETE FROM people WHERE doc @? json_filter('{"status": "gone"}');
+INSERT INTO people (doc) SELECT json_upsert_document(f, u)
+  WHERE NOT EXISTS (SELECT 1 FROM people WHERE doc @? json_filter(f));
+```
+
+- `json_update(doc, update)`: an update document's operators — `$set
+  $unset $inc $mul $min $max $rename $push` (`$each`, `$position`,
+  `$sort`, `$slice`) `$addToSet` (`$each`) `$pop $pull` (a value, a
+  condition on the element `{"$gte": 6}` or on its fields `{"qty":
+  {"$lt": 2}}`, compiled as a filter) `$pullAll $setOnInsert` (only on
+  an insert) — applied in one pass over a tree of the document; or, with
+  no operator, a replacement, the `_id` kept.  Dotted paths, a number in
+  one an array's position (`$set` pads with `null`); objects made along
+  the way.  MongoDB's rules, each checked: paths of one update apart
+  ("would create a conflict"), the `_id` unchanged, `$inc` / `$mul` of a
+  number, no field made in a scalar or by a name in an array, `$pop`,
+  `$pull`, `$rename` not going through a scalar or by a name through an
+  array (a missing path: nothing done), `$unset` never an error.
+  Arithmetic is exact (`numeric`'s: `0.1 + 0.2` is `0.3`).
+- `json_upsert_document(filter, update)`: what an upsert inserts when
+  nothing matches — the filter's equalities (a value or `$eq`, through
+  `$and`; a path set twice or within another an error), then the update
+  with `$setOnInsert`; a replacement takes the filter's `_id`.
+- `json_project(doc, projection)`: fields included (`1`, `true`; `_id`
+  too unless `0`) or excluded (`0`, `false`), not both; dotted, through
+  arrays of objects; `{"_id": 1}` alone the `_id` alone; `$slice` (`n`,
+  `-n`, `[skip, n]`) of an array, through arrays of objects too.
+- `json_sort_key(doc, sort)`: a `bytea` whose order is MongoDB's sort.
+  The sort document is text, read in its order (a json object's keys
+  are unordered), or `[["age", -1], ["name", 1]]`.  Values compare in
+  MongoDB's order of types (null and missing, numbers, strings, objects
+  field by field, arrays element by element, booleans; a field that is
+  an empty array before them all); a document's keys are a compound
+  multikey index's — one tuple per element of the array the fields go
+  through (fields through two different arrays: "parallel arrays",
+  `22023`), an object without the field and an element that is no object
+  `null` — and its key is the least tuple in the sort's order (an
+  ascending array by its least element, a descending one by its
+  greatest).  The sort document is read once a thread while it stays
+  the same; of the document only what the paths reach is read.  No
+  index serves it yet: the rows are sorted (a `LIMIT` keeps the top
+  ones).
+
+Not supported (`0A000`): positional paths (`a.$`, `a.$[]`, `a.$[x]`),
+`$currentDate`, `$bit`, a `$push` `$sort` by several fields (keys are
+unordered), projection operators but `$slice`.  Errors (`22023`): an
+unknown operator, operators mixed with fields, an empty update, a sort
+value other than `1` / `-1`.  Differences from MongoDB, recorded: one
+number type (an `$inc` of an integer by `0.5` is `0.5` more, not a
+double); objects compare by their sorted keys where MongoDB's compare in
+their stored order.  Checked against MongoDB 8:
+`slt/96_json_documents.slt` (written by a generator that ran each case
+in both — finds, eleven updates one after another, delete, count, an
+upsert — and errors), and differential fuzzers outside the repository:
+48,000 random updates of random documents (every result or error
+MongoDB's), 2,400 upserts, 6,240 projections and sorts — none
+different.
+
 `nc_catalog.collections` lists them (name, owner, schema,
 storage, engine); `nc_catalog.definitions` gives `CREATE COLLECTION …
 WITH (…)`, and schema diffs set or reset a changed schema in place
