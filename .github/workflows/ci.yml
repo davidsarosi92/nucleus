@@ -275,8 +275,21 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
       - name: Native libraries
         run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" drivers/android/build-native.sh
+      # Gradle's plugins and dependencies fetched and the APKs built before
+      # the emulator starts, retried: the plugin portal fails at times
+      # ("could not resolve plugin artifact … kotlin.android", 2026-11-27).
+      - name: The library, its tests and the example built (retried)
+        run: |
+          cd drivers/android
+          for i in 1 2 3; do
+            ./gradlew --no-daemon :nucleus:assembleDebug :nucleus:assembleDebugAndroidTest :notes:assembleDebug && exit 0
+            echo "attempt $i failed; again in 30 s"
+            sleep 30
+          done
+          exit 1
       - name: The engine's suites for the emulator (built, run below)
         run: |
           echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang" >> "$GITHUB_ENV"
