@@ -256,7 +256,12 @@ full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …) is built, and so is the document
 model's first milestone (§M15: collections, upsert, path and
 multi-valued indexes).  Next are document queries and a document server
-(§M16), then streams and changefeeds, live queries and sync (§F2).  See
+(§M16): SQL/JSON stays the core, and a MongoDB-style filter document
+(`{"age": {"$gt": 30}, "tags": "vip"}`, MongoDB's matching rules) is
+compiled to it — in nucleus's own protocol, drivers and shell, and in
+SQL; MongoDB's wire protocol comes as an optional module, as
+PostgreSQL's does.  Then streams and changefeeds, live queries and sync
+(§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 
