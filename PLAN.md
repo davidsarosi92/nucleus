@@ -293,7 +293,7 @@ are marked ✅.
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
-| **F2 — NoSQL** | M15 | Document model | ⬜ study written, D1–D4 agreed (2026-11-20) |
+| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅ (2026-11-27) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
@@ -13929,7 +13929,7 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ⬜ (study written and steps agreed 2026-11-20)
+### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1, D2 ✅)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
@@ -14116,6 +14116,57 @@ multi-valued one, the language decision moved to §M16's start):*
   PostgreSQL).  Useful without documents (pg-compat, ORMs, migrations).
   slt against PostgreSQL 18; a concurrency test (writers racing on
   keys, the invariant counted, as `bank.py` does).
+  **✅ (2026-11-27).**  Built as planned (`ast::OnConflict`,
+  `dml::Upsert`; DOCS §8.7, upsert): `INSERT INTO t [AS a] …
+  ON CONFLICT [(part, …) [WHERE …] | ON CONSTRAINT name] DO NOTHING |
+  DO UPDATE SET … [WHERE …]`, `excluded`, `RETURNING` of the rows
+  inserted and updated.  Arbiters inferred as PostgreSQL infers them —
+  a key whose parts are exactly those named, columns or expressions in
+  any order (an expression compared bound, against the expression
+  index's bound text); nucleus has no partial indexes, so a target's
+  `WHERE` is accepted and any matching index serves (PostgreSQL lets a
+  non-partial index serve too).  `ON CONSTRAINT` takes `t_pkey` or a
+  unique index's name (nucleus tells a constraint from an index by name
+  only).  The rows proposed are built and checked first (PostgreSQL's
+  order), then taken one by one: each arbiter's key — the row key or a
+  unique entry; a `NULL` part none — looked up; new rows batched into
+  `insert_batch` (4,096); an update goes the `UPDATE` path, the batch
+  stored before it (a self-referencing foreign key to a row the
+  statement inserted holds).  The keys of the rows the statement wrote
+  are kept, so a later row taking one is skipped (`DO NOTHING`) or
+  refused (`21000`) without the batch stored first.  Concurrency needs
+  nothing new: two writers of one key write the same row key or unique
+  entry, and the second to commit conflicts (`40001`, run again outside
+  a block) — `tests/upsert.rs` races four writers on twelve keys in
+  every storage (row, column, LSM) and at read committed in autocommit,
+  repeatable read and serializable in blocks (32–182 conflicts a run,
+  each retried): never a `23505`, every update counted.  Found on the
+  way, fixed: a column assigned twice in `UPDATE` was `42701`,
+  PostgreSQL's is `42601`.  *Checked against PostgreSQL 18:*
+  `slt/87_upsert.slt`, 63 records filled by `scripts/slt-pg.py`
+  (targets, errors `42P10` / `42704` / `42601` / `21000` / `42702`, an
+  alias, `WHERE`, keys changed by the update, `NULL` keys, a
+  partitioned table by its key and by a unique index of another name in
+  each partition, generated columns, a data-modifying CTE, a
+  self-referencing foreign key); privileges and row-level security
+  (`INSERT` alone allows `DO NOTHING`, not `DO UPDATE`; `UPDATE` on the
+  columns set; the row there through the update policy's `USING` — an
+  error, not a skip; the new row through its check) and a parameter's
+  type in `DO UPDATE` in `tests/upsert.rs`, the codes PostgreSQL's in
+  one session.  18 mutants, all killed.  *Measured*
+  (`bash bench/all.sh upsert`; `bench/upsert.py`, 200,000 rows offered
+  to a table of 200,000, half there; native PostgreSQL 18 tuned): DO
+  UPDATE 0.73× PostgreSQL's time, by a unique secondary key 0.79×, a
+  plain `INSERT … SELECT` of as many new rows 0.70×; DO NOTHING was
+  1.07× — the row there read and decoded to learn it is there — and is
+  1.02× (intervals overlapping) with a look at the key alone
+  (`dml::taken`; ABBA 351 → 333 ms, the other cases unchanged).
+  Profiled (`sample`, every row there): half the conflict path is a
+  descent of the tree a row, though the rows come in key order — a
+  batch of `DO NOTHING`'s probes looked up sorted together (valid for
+  the batch: `DO NOTHING` changes no row there; the rows it inserts are
+  in `touched`) is the next step if this ever lags; not taken now.
+  Not done: `SET (a, b) = (…)` (nor in `UPDATE`); `MERGE`.
 - **D3 — collections**: `CREATE / DROP / ALTER COLLECTION`, the catalog
   kind and `nc_catalog.collections`, `_id` as the stored key (made
   where absent), `WITH (schema = …)`; insert, replace, update by

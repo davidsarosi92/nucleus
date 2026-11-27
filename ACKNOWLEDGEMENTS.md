@@ -153,6 +153,7 @@ checked against.
 - **PostgreSQL GIN `jsonb_path_ops` and `jsonb_ops`** — the containment index. J4b.
 - **pg_jsonschema's names; the `jsonschema` crate's compiled keywords** — schema checks. J5.
 - **PostgreSQL `jsonb_extract_path`** — a `->` chain fused. §M15 D1.
+- **PostgreSQL `INSERT … ON CONFLICT` (its documentation)** — the upsert's form and meaning: arbiters inferred from a key's parts, `excluded`, a row affected twice refused (`21000`), the update policy's `USING` an error. §M15 D2.
 - **MongoDB `_id` rules and multikey indexes; MySQL multi-valued indexes; Oracle 23ai JSON collections; DocumentDB / FerretDB** — the collection design. §M15.
 
 ## Wire protocol, drivers and compatibility

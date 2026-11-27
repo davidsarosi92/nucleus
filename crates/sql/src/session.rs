@@ -2028,8 +2028,10 @@ impl Session {
             )),
             Statement::Insert {
                 table,
+                alias,
                 columns,
                 source,
+                on_conflict,
                 returning,
             } => {
                 // `VALUES ($1, …)`: a parameter takes its target column's type.
@@ -2049,7 +2051,11 @@ impl Session {
                 }
                 let types = targets.iter().map(|&c| t.columns[c].ty).collect();
                 let _ = binder.insert_source(source, types)?;
-                returning_columns(binder, txn, table, returning)?
+                // `DO UPDATE SET c = $1`: its parameters' types too.
+                if let Some(oc) = on_conflict {
+                    dml::describe_upsert(binder, &t, alias.as_deref(), oc)?;
+                }
+                returning_columns(binder, txn, table, alias.as_deref(), returning)?
             }
             Statement::Update {
                 table,
@@ -2069,7 +2075,7 @@ impl Session {
                 if let Some(f) = filter {
                     binder.condition(f, &scope)?;
                 }
-                returning_columns(binder, txn, table, returning)?
+                returning_columns(binder, txn, table, None, returning)?
             }
             Statement::Delete {
                 table,
@@ -2080,7 +2086,7 @@ impl Session {
                 if let Some(f) = filter {
                     binder.condition(f, &dml::table_scope(&t))?;
                 }
-                returning_columns(binder, txn, table, returning)?
+                returning_columns(binder, txn, table, None, returning)?
             }
             _ => None,
         })
@@ -2091,13 +2097,14 @@ fn returning_columns(
     binder: &mut Binder,
     txn: &dyn KvTxn,
     table: &str,
+    alias: Option<&str>,
     items: &[crate::ast::SelectItem],
 ) -> Result<Option<Vec<OutColumn>>> {
     if items.is_empty() {
         return Ok(None);
     }
     let t = catalog::table(txn, table)?;
-    let scope = dml::table_scope(&t);
+    let scope = dml::table_scope_as(&t, alias);
     let mut cols = Vec::new();
     for item in items {
         match item {
@@ -2139,10 +2146,23 @@ fn modify(
     match stmt {
         Statement::Insert {
             table,
+            alias,
             columns,
             source,
+            on_conflict,
             returning,
-        } => dml::insert(txn, reg, table, columns, source, returning, params, given),
+        } => dml::insert(
+            txn,
+            reg,
+            table,
+            alias.as_deref(),
+            columns,
+            source,
+            on_conflict.as_deref(),
+            returning,
+            params,
+            given,
+        ),
         Statement::Update {
             table,
             assignments,
@@ -2715,7 +2735,7 @@ pub(crate) fn execute_statement(
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             let n = if *with_data {
-                dml::insert(txn, reg, name, &None, query, &[], params, &[])?.count
+                dml::insert(txn, reg, name, None, &None, query, None, &[], params, &[])?.count
             } else {
                 0
             };

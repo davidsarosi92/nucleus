@@ -537,10 +537,15 @@ pub enum Statement {
     Insert {
         /// Table.
         table: String,
+        /// `AS alias`: the name the table goes by in `ON CONFLICT` and
+        /// `RETURNING`.
+        alias: Option<String>,
         /// Target columns, if listed.
         columns: Option<Vec<String>>,
         /// The rows.
         source: Query,
+        /// `ON CONFLICT …`: what a row whose key is taken does instead.
+        on_conflict: Option<Box<OnConflict>>,
         /// `RETURNING` items.
         returning: Vec<SelectItem>,
     },
@@ -752,6 +757,48 @@ impl Default for ExplainOptions {
             timing: true,
         }
     }
+}
+
+/// `ON CONFLICT [target] DO …` of an `INSERT` (PostgreSQL's upsert).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OnConflict {
+    /// Which unique keys' conflicts it is about.
+    pub target: ConflictTarget,
+    /// What is done with a row whose key is taken.
+    pub action: ConflictAction,
+}
+
+/// The keys an `ON CONFLICT` is about: its arbiters.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConflictTarget {
+    /// None named: every unique key (`DO NOTHING` only).
+    Any,
+    /// `(col | (expr), …) [WHERE predicate]`: the unique indexes whose
+    /// key parts are these (the predicate a partial index's; nucleus has
+    /// none, so any matching index serves).
+    Parts {
+        /// The key parts: a column's name or an expression.
+        parts: Vec<Expr>,
+        /// `WHERE predicate`.
+        filter: Option<Expr>,
+    },
+    /// `ON CONSTRAINT name`: a primary key's or unique constraint's.
+    Constraint(String),
+}
+
+/// What an `ON CONFLICT` does with a row whose key is taken.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConflictAction {
+    /// `DO NOTHING`: the row is not inserted.
+    Nothing,
+    /// `DO UPDATE SET … [WHERE …]`: the row there is updated instead —
+    /// the proposed row read as `excluded`.
+    Update {
+        /// `SET column = expr`.
+        assignments: Vec<(String, Expr)>,
+        /// `WHERE`: the row is updated only where it holds.
+        filter: Option<Expr>,
+    },
 }
 
 /// Transaction characteristics.

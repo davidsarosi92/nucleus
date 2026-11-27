@@ -21,12 +21,19 @@ use crate::types::{DataType, Row, Value};
 
 /// The scope of a table's own columns.
 pub fn table_scope(table: &Table) -> Scope {
+    table_scope_as(table, None)
+}
+
+/// The scope of a table's own columns, the table called `alias` if given
+/// (`INSERT INTO t AS a`).
+pub fn table_scope_as(table: &Table, alias: Option<&str>) -> Scope {
+    let name = alias.unwrap_or(&table.name);
     Scope {
         cols: table
             .columns
             .iter()
             .map(|c| ScopeCol {
-                table: Some(table.name.clone()),
+                table: Some(name.to_string()),
                 name: c.name.clone(),
                 ty: Some(c.ty),
                 hidden: false,
@@ -1402,10 +1409,19 @@ fn returning(
     items: &[SelectItem],
     table: &Table,
 ) -> Result<Option<(Vec<Expr>, Vec<(String, Option<DataType>)>)>> {
+    returning_as(binder, items, table, None)
+}
+
+fn returning_as(
+    binder: &mut Binder,
+    items: &[SelectItem],
+    table: &Table,
+    alias: Option<&str>,
+) -> Result<Option<(Vec<Expr>, Vec<(String, Option<DataType>)>)>> {
     if items.is_empty() {
         return Ok(None);
     }
-    let scope = table_scope(table);
+    let scope = table_scope_as(table, alias);
     let mut exprs = Vec::new();
     let mut cols = Vec::new();
     for item in items {
@@ -1453,8 +1469,10 @@ pub fn insert(
     txn: &mut dyn KvTxn,
     reg: &Registry,
     table: &str,
+    alias: Option<&str>,
     columns: &Option<Vec<String>>,
     source: &ast::Query,
+    on_conflict: Option<&ast::OnConflict>,
     returning_items: &[SelectItem],
     params: &[Value],
     given: &[GivenCte],
@@ -1462,7 +1480,7 @@ pub fn insert(
     let t = catalog::table(&*txn, table)?;
     crate::chunk_tables::refuse(&t, "insert into")?;
     let targets = target_columns(&t, columns)?;
-    let (rows, writer, ret) = {
+    let (rows, writer, ret, upsert) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
         binder.give_ctes(given)?;
@@ -1488,7 +1506,10 @@ pub fn insert(
                 "INSERT has more target columns than expressions",
             ));
         }
-        let ret = returning(&mut binder, returning_items, &t)?;
+        let ret = returning_as(&mut binder, returning_items, &t, alias)?;
+        let upsert = on_conflict
+            .map(|oc| Upsert::bind(&mut binder, &t, alias, oc))
+            .transpose()?;
         let check = new_row_check(&binder, &t, crate::policies::Command::Insert)?;
         let builder = RowBuilder::new(Writer::new(ro, reg, t.clone())?, targets, check);
         let ctx = Ctx::new(ro, reg, params);
@@ -1498,8 +1519,11 @@ pub fn insert(
         for src in exec::build(&plan, &ctx, None)? {
             rows.push(builder.build_values(&ctx, src?)?)?;
         }
-        (std::rc::Rc::new(rows.seal()?), builder.writer, ret)
+        (std::rc::Rc::new(rows.seal()?), builder.writer, ret, upsert)
     };
+    if let Some(up) = upsert {
+        return up.run(txn, reg, &writer, &rows, ret, params);
+    }
     let mut chunk = Vec::with_capacity(CHUNK);
     for r in rows.iter() {
         chunk.push(r?);
@@ -1524,6 +1548,495 @@ pub fn insert(
         count: rows.len() as u64,
         returning,
     })
+}
+
+/// Binds an `ON CONFLICT` for a statement's description (its parameters'
+/// types, its errors), not run.
+pub fn describe_upsert(
+    binder: &mut Binder,
+    t: &Table,
+    alias: Option<&str>,
+    oc: &ast::OnConflict,
+) -> Result<()> {
+    Upsert::bind(binder, t, alias, oc).map(|_| ())
+}
+
+/// A unique key an `ON CONFLICT` is about (an arbiter): the primary key,
+/// or a unique B-tree index — by its name in the table, by its parts in a
+/// partition (a partitioned table's index is a partition's of another
+/// name, `name_partition`, with the same parts).
+#[derive(Clone, Debug)]
+enum Arbiter {
+    Key,
+    Index {
+        name: String,
+        columns: Vec<usize>,
+        exprs: Vec<Option<String>>,
+    },
+}
+
+/// An arbiter where a row is written: the row key, or the index at this
+/// position of the write table ([`Writer::write_table`]).
+#[derive(Clone, Copy, Debug)]
+enum ArbiterAt {
+    Key,
+    Index(usize),
+}
+
+/// `INSERT … ON CONFLICT` bound (PostgreSQL's upsert, PLAN.md §M15 D2).
+struct Upsert {
+    arbiters: Vec<Arbiter>,
+    /// `DO UPDATE`: the columns set and their values, then the condition —
+    /// over the row there followed by the proposed row (`excluded`).
+    /// `None`: `DO NOTHING`.
+    update: Option<(Vec<(usize, Expr)>, Option<Expr>)>,
+    /// The row-level security condition the row there must pass to be
+    /// updated (`42501` otherwise, as PostgreSQL), and the one the updated
+    /// row must pass.
+    using: Option<Expr>,
+    check: Option<Expr>,
+}
+
+/// One proposed row's fate.
+enum Fate {
+    Insert,
+    Skip,
+    Update {
+        ti: usize,
+        key: Vec<u8>,
+        old: Row,
+        new: Row,
+    },
+}
+
+impl Upsert {
+    /// Binds `oc` for `t` (called `alias` if given).
+    fn bind(
+        binder: &mut Binder,
+        t: &Table,
+        alias: Option<&str>,
+        oc: &ast::OnConflict,
+    ) -> Result<Self> {
+        let arbiters = arbiters(binder, t, &oc.target)?;
+        let ast::ConflictAction::Update {
+            assignments,
+            filter,
+        } = &oc.action
+        else {
+            return Ok(Self {
+                arbiters,
+                update: None,
+                using: None,
+                check: None,
+            });
+        };
+        if matches!(oc.target, ast::ConflictTarget::Any) {
+            return Err(Error::syntax(
+                "ON CONFLICT DO UPDATE requires inference specification or constraint name",
+            ));
+        }
+        // The row there, then the proposed one as `excluded` (a column's
+        // name alone is either's: ambiguous, `42702`, as PostgreSQL).
+        let mut scope = table_scope_as(t, alias);
+        scope.cols.extend(t.columns.iter().map(|c| ScopeCol {
+            table: Some("excluded".into()),
+            name: c.name.clone(),
+            ty: Some(c.ty),
+            hidden: false,
+            origin: None,
+            not_null: !c.nullable,
+        }));
+        let mut sets: Vec<(usize, Expr)> = Vec::new();
+        for (col, e) in assignments {
+            let c = t.column(col).ok_or_else(|| {
+                Error::undefined_column(format!(
+                    "column \"{col}\" of relation \"{}\" does not exist",
+                    t.name
+                ))
+            })?;
+            if sets.iter().any(|(x, _)| *x == c) {
+                return Err(Error::syntax(format!(
+                    "multiple assignments to same column \"{col}\""
+                )));
+            }
+            if t.columns[c].generated.is_some() {
+                return Err(generated_given(t, c));
+            }
+            if let Some(ch) = binder.checker() {
+                ch.require(binder.txn(), Kind::Table, &t.name, UPDATE, Some(col))?;
+            }
+            // A parameter assigned to a column takes its type.
+            if let ast::Expr::Param(n) = e {
+                binder.note_param(n - 1, Some(t.columns[c].ty));
+            }
+            sets.push((c, binder.expr(e, &scope)?.0));
+        }
+        let filter = filter
+            .as_ref()
+            .map(|f| binder.condition(f, &scope))
+            .transpose()?;
+        Ok(Self {
+            arbiters,
+            update: Some((sets, filter)),
+            using: row_policy(binder, t, crate::policies::Command::Update)?,
+            check: new_row_check(binder, t, crate::policies::Command::Update)?,
+        })
+    }
+
+    /// The arbiters where `w` writes its rows.
+    fn at(&self, w: &Writer) -> Result<Vec<ArbiterAt>> {
+        let wt = w.write_table();
+        let mut out = Vec::with_capacity(self.arbiters.len());
+        for a in &self.arbiters {
+            match a {
+                Arbiter::Key => out.push(ArbiterAt::Key),
+                Arbiter::Index {
+                    name,
+                    columns,
+                    exprs,
+                } => {
+                    let shaped = |ix: &crate::catalog::Index| {
+                        ix.unique
+                            && ix.method.is_none()
+                            && &ix.columns == columns
+                            && ix
+                                .exprs
+                                .iter()
+                                .map(|e| e.as_ref().map(|e| &e.sql))
+                                .eq(exprs.iter().map(Option::as_ref))
+                    };
+                    let i = wt
+                        .indexes
+                        .iter()
+                        .position(|ix| &ix.name == name && shaped(ix))
+                        .or_else(|| wt.indexes.iter().position(shaped))
+                        .ok_or_else(|| {
+                            Error::internal(format!(
+                                "the index \"{name}\" of \"{}\" not found",
+                                wt.name
+                            ))
+                        })?;
+                    out.push(ArbiterAt::Index(i));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Writes `rows` (built and checked) to `w` in order: each inserted
+    /// unless an arbiter's key of it is taken — then left out, or the row
+    /// there updated.  A row this statement inserted or updated is not
+    /// updated again (`21000`, as PostgreSQL: the outcome would depend on
+    /// the rows' order).  The rows inserted wait in a batch; one that
+    /// conflicts with them is told by their keys, kept here (`touched`).
+    fn run(
+        &self,
+        txn: &mut dyn KvTxn,
+        reg: &Registry,
+        w: &Writer,
+        rows: &std::rc::Rc<crate::spill::Stored>,
+        ret: Option<(Vec<Expr>, Vec<(String, Option<DataType>)>)>,
+        params: &[Value],
+    ) -> Result<Written> {
+        let t = &w.table;
+        let width = t.columns.len();
+        let targets: Vec<&Writer> = match &w.partitions {
+            Some((_, parts)) => parts.iter().collect(),
+            None => vec![w],
+        };
+        let at = targets
+            .iter()
+            .map(|pw| self.at(pw))
+            .collect::<Result<Vec<_>>>()?;
+        let mut touched: HashSet<Vec<u8>> = HashSet::new();
+        let mut chunk: Vec<Row> = Vec::new();
+        let mut out = crate::spill::Stash::new();
+        let mut count = 0u64;
+        let mut labels = crate::enums::Labels::default();
+        for r in rows.iter() {
+            let row = r?;
+            let ti = w.partition_of(&row)?.unwrap_or(0);
+            let pw = targets[ti];
+            let fate = {
+                let ro: &dyn KvTxn = &*txn;
+                let keys = arbiter_keys(ro, pw, &at[ti], &row)?;
+                if keys.iter().any(|(k, _)| touched.contains(k)) {
+                    if self.update.is_some() {
+                        return Err(Error::cardinality(
+                            "ON CONFLICT DO UPDATE command cannot affect row a second time",
+                        ));
+                    }
+                    Fate::Skip
+                } else if self.update.is_none() {
+                    // `DO NOTHING`: whether a key is taken, not the row.
+                    if taken(ro, pw, &keys)? {
+                        Fate::Skip
+                    } else {
+                        touched.extend(keys.into_iter().map(|(k, _)| k));
+                        Fate::Insert
+                    }
+                } else {
+                    match there(ro, pw, &keys, &mut labels)? {
+                        None => {
+                            touched.extend(keys.into_iter().map(|(k, _)| k));
+                            Fate::Insert
+                        }
+                        Some((key, old)) => {
+                            let ctx = Ctx::new(ro, reg, params);
+                            match self.updated(w, &old, &row[..width], &ctx)? {
+                                None => Fate::Skip,
+                                Some(new) => Fate::Update { ti, key, old, new },
+                            }
+                        }
+                    }
+                }
+            };
+            match fate {
+                Fate::Skip => continue,
+                Fate::Insert => {
+                    if ret.is_some() {
+                        out.push(row.clone())?;
+                    }
+                    chunk.push(row);
+                    count += 1;
+                    if chunk.len() == CHUNK {
+                        insert_rows(txn, w, std::mem::take(&mut chunk))?;
+                    }
+                }
+                Fate::Update { ti, key, old, new } => {
+                    // The rows inserted before it first: the update's
+                    // checks (a foreign key to one of them) see them.
+                    insert_rows(txn, w, std::mem::take(&mut chunk))?;
+                    let to = w.partition_of(&new)?.unwrap_or(0);
+                    let keys = arbiter_keys(&*txn, targets[to], &at[to], &new)?;
+                    touched.extend(keys.into_iter().map(|(k, _)| k));
+                    if ret.is_some() {
+                        out.push(new.clone())?;
+                    }
+                    apply_updates(txn, reg, w, vec![(ti, key, old, new)])?;
+                    count += 1;
+                }
+            }
+        }
+        insert_rows(txn, w, chunk)?;
+        let returning = match ret {
+            None => None,
+            Some((exprs, cols)) => {
+                let ctx = Ctx::new(&*txn, reg, params);
+                let out = std::rc::Rc::new(out.seal()?);
+                Some((
+                    cols,
+                    out.iter()
+                        .map(|r| project(&exprs, &r?, &ctx))
+                        .collect::<Result<_>>()?,
+                ))
+            }
+        };
+        Ok(Written { count, returning })
+    }
+
+    /// `DO UPDATE`'s new row for `old`, the row there, given the proposed
+    /// row `excluded` — `None` where its condition does not hold.
+    fn updated(&self, w: &Writer, old: &Row, excluded: &[Value], ctx: &Ctx) -> Result<Option<Row>> {
+        let t = &w.table;
+        let (sets, filter) = self.update.as_ref().expect("DO UPDATE");
+        if let Some(u) = &self.using
+            && !u.holds(&exec::env(old, ctx, None))?
+        {
+            return Err(crate::policies::violated(&t.name));
+        }
+        let mut both = old[..t.columns.len()].to_vec();
+        both.extend_from_slice(excluded);
+        let env = exec::env(&both, ctx, None);
+        if let Some(f) = filter
+            && !f.holds(&env)?
+        {
+            return Ok(None);
+        }
+        let mut new = old.clone();
+        for (c, e) in sets {
+            new[*c] = assign(ctx.txn, e.eval(&env)?, t, *c)?;
+        }
+        w.complete(&mut new, ctx)?;
+        admit(&self.check, t, &new, ctx)?;
+        Ok(Some(new))
+    }
+}
+
+/// The keys `row` takes in arbiters `at` of `w`'s write table — the row
+/// key, or a unique index's entry (none where a part is `NULL`: such a
+/// row conflicts with none) — and which is the row key.
+fn arbiter_keys(
+    txn: &dyn KvTxn,
+    w: &Writer,
+    at: &[ArbiterAt],
+    row: &Row,
+) -> Result<Vec<(Vec<u8>, bool)>> {
+    let wt = w.write_table();
+    let mut keys = Vec::with_capacity(at.len());
+    for a in at {
+        match *a {
+            ArbiterAt::Key => keys.push((row_key_of(&w.table, row, None), true)),
+            ArbiterAt::Index(i) => {
+                let (k, unique) = w.keys.entry(txn, wt, row, &[], i)?;
+                if unique {
+                    keys.push((k, false));
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
+/// Whether one of `keys` is taken: a row stored under the row key, an
+/// entry under a unique index's (whose row is there).
+fn taken(txn: &dyn KvTxn, w: &Writer, keys: &[(Vec<u8>, bool)]) -> Result<bool> {
+    for (k, is_row) in keys {
+        let found = if *is_row {
+            w.storage.exists(txn, &w.table, k, false)?
+        } else {
+            txn.get(k)?.is_some()
+        };
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The row whose key one of `keys` is (the first found, in the arbiters'
+/// order): its row key and the row as stored.
+fn there(
+    txn: &dyn KvTxn,
+    w: &Writer,
+    keys: &[(Vec<u8>, bool)],
+    labels: &mut crate::enums::Labels,
+) -> Result<Option<(Vec<u8>, Row)>> {
+    let t = &w.table;
+    for (k, is_row) in keys {
+        let key = if *is_row {
+            k.clone()
+        } else {
+            match txn.get(k)? {
+                None => continue,
+                Some(pk) => {
+                    let mut key = Vec::with_capacity(crate::catalog::INDEX_PREFIX_LEN + pk.len());
+                    t.push_index_prefix(&mut key, 0);
+                    key.extend_from_slice(&pk);
+                    key
+                }
+            }
+        };
+        if let Some(row) = w.storage.get(txn, t, &key, None, labels)? {
+            return Ok(Some((key, row)));
+        }
+        if !*is_row {
+            return Err(Error::internal(format!(
+                "an entry of a unique index of \"{}\" without its row",
+                t.name
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// The arbiters `target` names in `t`: `42P10` where no unique key has
+/// those parts, `42704` where no such constraint is.
+fn arbiters(binder: &mut Binder, t: &Table, target: &ast::ConflictTarget) -> Result<Vec<Arbiter>> {
+    let unique_btree = |i: usize| -> Result<bool> {
+        Ok(t.indexes[i].unique && crate::index_method::of(&t.indexes[i])?.is_none())
+    };
+    let index = |i: usize| {
+        let ix = &t.indexes[i];
+        Arbiter::Index {
+            name: ix.name.clone(),
+            columns: ix.columns.clone(),
+            exprs: ix
+                .exprs
+                .iter()
+                .map(|e| e.as_ref().map(|e| e.sql.clone()))
+                .collect(),
+        }
+    };
+    let has_key = !t.primary_key.is_empty();
+    match target {
+        ast::ConflictTarget::Any => {
+            let mut out = Vec::new();
+            if has_key {
+                out.push(Arbiter::Key);
+            }
+            for i in 0..t.indexes.len() {
+                if unique_btree(i)? {
+                    out.push(index(i));
+                }
+            }
+            Ok(out)
+        }
+        ast::ConflictTarget::Constraint(name) => {
+            if has_key && *name == format!("{}_pkey", t.name) {
+                return Ok(vec![Arbiter::Key]);
+            }
+            for i in 0..t.indexes.len() {
+                if t.indexes[i].name == *name && unique_btree(i)? {
+                    return Ok(vec![index(i)]);
+                }
+            }
+            Err(Error::undefined_object(format!(
+                "constraint \"{name}\" for table \"{}\" does not exist",
+                t.name
+            )))
+        }
+        ast::ConflictTarget::Parts { parts, .. } => {
+            // Each part a column (`None`: by its expression), bound.
+            let scope = table_scope(t);
+            let mut want: Vec<(Option<usize>, Option<Expr>)> = Vec::new();
+            for p in parts {
+                if let ast::Expr::Column { name, .. } = p {
+                    let c = t.column(name).ok_or_else(|| {
+                        Error::undefined_column(format!("column \"{name}\" does not exist"))
+                    })?;
+                    want.push((Some(c), None));
+                } else {
+                    want.push((None, Some(binder.expr(p, &scope)?.0)));
+                }
+            }
+            // The same parts as a key's, in any order.
+            let same = |have: &[(Option<usize>, Option<Expr>)]| {
+                have.len() == want.len()
+                    && have.iter().all(|h| want.contains(h))
+                    && want.iter().all(|w| have.contains(w))
+            };
+            let mut out = Vec::new();
+            if has_key {
+                let have: Vec<_> = t.primary_key.iter().map(|&c| (Some(c), None)).collect();
+                if same(&have) {
+                    out.push(Arbiter::Key);
+                }
+            }
+            for i in 0..t.indexes.len() {
+                if !unique_btree(i)? {
+                    continue;
+                }
+                let ix = &t.indexes[i];
+                let mut have = Vec::with_capacity(ix.columns.len());
+                for (&c, e) in ix.columns.iter().zip(&ix.exprs) {
+                    have.push(match e {
+                        None => (Some(c), None),
+                        Some(e) => (None, Some(bind_index_expr(binder, t, &e.sql)?.0)),
+                    });
+                }
+                if same(&have) {
+                    out.push(index(i));
+                }
+            }
+            if out.is_empty() {
+                return Err(Error::invalid_column_reference(
+                    "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+                ));
+            }
+            Ok(out)
+        }
+    }
 }
 
 /// The access path and filter for `WHERE filter` on `table`.
@@ -1579,7 +2092,7 @@ pub fn update(
                 ))
             })?;
             if sets.iter().any(|(x, _)| *x == c) {
-                return Err(Error::duplicate_column(format!(
+                return Err(Error::syntax(format!(
                     "multiple assignments to same column \"{col}\""
                 )));
             }

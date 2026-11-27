@@ -2893,6 +2893,11 @@ impl<'a> Parser<'a> {
         self.expect_kw("insert")?;
         self.expect_kw("into")?;
         let table = self.relation()?;
+        let alias = if self.eat_kw("as") {
+            Some(self.ident()?)
+        } else {
+            None
+        };
         let columns = if self.peek_op("(") && !matches!(self.peek_at(1), Some(t) if t.is("select"))
         {
             Some(self.ident_list()?)
@@ -2910,18 +2915,69 @@ impl<'a> Parser<'a> {
         } else {
             self.query()?
         };
+        let on_conflict = if self.eat_kws(&["on", "conflict"]) {
+            Some(Box::new(self.on_conflict()?))
+        } else {
+            None
+        };
         Ok(Statement::Insert {
             table,
+            alias,
             columns,
             source,
+            on_conflict,
             returning: self.returning()?,
         })
     }
 
-    fn update(&mut self) -> Result<Statement> {
-        self.expect_kw("update")?;
-        let table = self.relation()?;
-        self.expect_kw("set")?;
+    /// `ON CONFLICT`'s rest: `[(part, …) [WHERE …] | ON CONSTRAINT name]
+    /// DO NOTHING | DO UPDATE SET … [WHERE …]`.
+    fn on_conflict(&mut self) -> Result<OnConflict> {
+        let target = if self.eat_kws(&["on", "constraint"]) {
+            ConflictTarget::Constraint(self.ident()?)
+        } else if self.eat_op("(") {
+            let mut parts = Vec::new();
+            loop {
+                // A column's name, or an expression (in parentheses, as
+                // an index's).
+                parts.push(self.expr()?);
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op(")")?;
+            let filter = if self.eat_kw("where") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            ConflictTarget::Parts { parts, filter }
+        } else {
+            ConflictTarget::Any
+        };
+        self.expect_kw("do")?;
+        let action = if self.eat_kw("nothing") {
+            ConflictAction::Nothing
+        } else {
+            self.expect_kw("update")?;
+            self.expect_kw("set")?;
+            let assignments = self.assignments()?;
+            let filter = if self.eat_kw("where") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            ConflictAction::Update {
+                assignments,
+                filter,
+            }
+        };
+        Ok(OnConflict { target, action })
+    }
+
+    /// `col = expr, …` (`col[i] = x`: the column with element i replaced)
+    /// of an `UPDATE`'s or an upsert's `SET`.
+    fn assignments(&mut self) -> Result<Vec<(String, Expr)>> {
         let mut assignments = Vec::new();
         loop {
             let col = self.ident()?;
@@ -2952,6 +3008,14 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        Ok(assignments)
+    }
+
+    fn update(&mut self) -> Result<Statement> {
+        self.expect_kw("update")?;
+        let table = self.relation()?;
+        self.expect_kw("set")?;
+        let assignments = self.assignments()?;
         let filter = if self.eat_kw("where") {
             Some(self.expr()?)
         } else {

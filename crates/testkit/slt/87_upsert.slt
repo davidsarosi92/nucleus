@@ -1,0 +1,305 @@
+# INSERT … ON CONFLICT (PLAN.md §M15 D2): PostgreSQL's upsert.  Filled
+# from and checked against PostgreSQL 18 (scripts/slt-pg.py).
+
+statement ok
+CREATE TABLE users (id int PRIMARY KEY, email text UNIQUE, name text, visits int DEFAULT 0, CHECK (visits >= 0))
+
+statement ok
+CREATE UNIQUE INDEX users_lower_name ON users ((lower(name)))
+
+statement ok
+INSERT INTO users (id, email, name) VALUES (1, 'a@x', 'Ann'), (2, 'b@x', 'Bob')
+
+# DO NOTHING: a taken key, by any arbiter, leaves the row out
+statement ok
+INSERT INTO users (id, email, name) VALUES (1, 'other@x', 'Other') ON CONFLICT DO NOTHING
+
+statement ok
+INSERT INTO users (id, email, name) VALUES (3, 'a@x', 'Third') ON CONFLICT DO NOTHING
+
+statement ok
+INSERT INTO users (id, email, name) VALUES (4, 'd@x', 'ANN') ON CONFLICT DO NOTHING
+
+query ITT
+SELECT id, email, name FROM users ORDER BY id
+----
+1 a@x Ann
+2 b@x Bob
+
+# By the target named: the primary key's columns, a constraint's name
+query I
+INSERT INTO users (id, email, name) VALUES (1, 'z@x', 'Zed'), (5, 'e@x', 'Eve') ON CONFLICT (id) DO NOTHING RETURNING id
+----
+5
+
+query I
+INSERT INTO users (id, email, name) VALUES (2, 'y@x', 'Yan'), (6, 'f@x', 'Fay') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING RETURNING id
+----
+6
+
+# Another unique key taken than the one named: a unique violation
+statement error 23505
+INSERT INTO users (id, email, name) VALUES (7, 'a@x', 'Gus') ON CONFLICT (id) DO NOTHING
+
+# No unique key with those parts
+statement error 42P10
+INSERT INTO users (id, email, name) VALUES (7, 'g@x', 'Gus') ON CONFLICT (name) DO NOTHING
+
+statement error 42P10
+INSERT INTO users (id, email, name) VALUES (7, 'g@x', 'Gus') ON CONFLICT (id, email) DO NOTHING
+
+statement error 42704
+INSERT INTO users (id, email, name) VALUES (7, 'g@x', 'Gus') ON CONFLICT ON CONSTRAINT no_such DO NOTHING
+
+# DO UPDATE needs a target
+statement error 42601
+INSERT INTO users (id, email, name) VALUES (1, 'a@x', 'Ann') ON CONFLICT DO UPDATE SET visits = 1
+
+# DO UPDATE: the row there updated, the proposed row read as excluded
+query ITTI
+INSERT INTO users (id, email, name) VALUES (1, 'a2@x', 'Ann'), (8, 'h@x', 'Hal') ON CONFLICT (id) DO UPDATE SET email = excluded.email, visits = users.visits + 1 RETURNING id, email, name, visits
+----
+1 a2@x Ann 1
+8 h@x Hal 0
+
+# A column's name alone is either row's: ambiguous
+query error 42702
+INSERT INTO users (id, email, name) VALUES (1, 'a2@x', 'Ann') ON CONFLICT (id) DO UPDATE SET visits = visits + 10 RETURNING id, visits
+
+# An alias names the table in the clause and in RETURNING
+query IT
+INSERT INTO users AS u (id, email, name) VALUES (2, 'b@x', 'Bobby') ON CONFLICT (email) DO UPDATE SET name = excluded.name || '/' || u.name RETURNING u.id, u.name
+----
+2 Bobby/Bob
+
+# WHERE false: the row neither inserted nor updated, nor returned
+query I
+INSERT INTO users (id, email, name) VALUES (1, 'a2@x', 'Ann'), (2, 'b@x', 'Bob') ON CONFLICT (id) DO UPDATE SET visits = 100 WHERE users.visits > 5 RETURNING id
+----
+
+query II
+SELECT id, visits FROM users WHERE id IN (1, 2) ORDER BY id
+----
+1 1
+2 0
+
+# By an expression index's part
+query IT
+INSERT INTO users (id, email, name) VALUES (9, 'i@x', 'eve') ON CONFLICT ((lower(name))) DO UPDATE SET name = excluded.name RETURNING id, name
+----
+5 eve
+
+# A row affected twice in one statement: an error with DO UPDATE …
+statement error 21000
+INSERT INTO users (id, email, name) VALUES (10, 'j@x', 'Jo'), (10, 'k@x', 'Kay') ON CONFLICT (id) DO UPDATE SET name = excluded.name
+
+statement error 21000
+INSERT INTO users (id, email, name) VALUES (1, 'a2@x', 'Ann'), (1, 'a2@x', 'Ann') ON CONFLICT (id) DO UPDATE SET visits = users.visits + 1
+
+# … left out with DO NOTHING
+query IT
+INSERT INTO users (id, email, name) VALUES (10, 'j@x', 'Jo'), (10, 'k@x', 'Kay') ON CONFLICT (id) DO NOTHING RETURNING id, name
+----
+10 Jo
+
+# The updated row is checked
+statement error 23514
+INSERT INTO users (id, email, name) VALUES (1, 'a2@x', 'Ann') ON CONFLICT (id) DO UPDATE SET visits = -1
+
+# … its other unique keys too
+statement error 23505
+INSERT INTO users (id, email, name) VALUES (1, 'a2@x', 'Ann') ON CONFLICT (id) DO UPDATE SET email = 'b@x'
+
+# A key changed by the update
+query IT
+INSERT INTO users (id, email, name) VALUES (10, 'j@x', 'Jo') ON CONFLICT (id) DO UPDATE SET id = excluded.id + 100 RETURNING id, name
+----
+110 Jo
+
+query I
+SELECT count(*) FROM users WHERE id = 10
+----
+0
+
+# A NULL key part conflicts with nothing
+statement ok
+INSERT INTO users (id, email, name) VALUES (11, NULL, 'Null1'), (12, NULL, 'Null2') ON CONFLICT (email) DO NOTHING
+
+query I
+SELECT count(*) FROM users WHERE email IS NULL
+----
+2
+
+# The target's predicate: any index without one serves
+query I
+INSERT INTO users (id, email, name) VALUES (11, 'q@x', 'Q') ON CONFLICT (id) WHERE id > 0 DO UPDATE SET email = excluded.email RETURNING id
+----
+11
+
+# From a query, the defaults in excluded
+statement ok
+CREATE TABLE staged (id int, email text, name text)
+
+statement ok
+INSERT INTO staged VALUES (1, 'a3@x', 'Ann'), (13, 'm@x', 'Mo'), (14, 'n@x', 'Ned')
+
+query ITI
+INSERT INTO users (id, email, name) SELECT id, email, name FROM staged ON CONFLICT (id) DO UPDATE SET email = excluded.email, visits = excluded.visits RETURNING id, email, visits
+----
+1 a3@x 0
+13 m@x 0
+14 n@x 0
+
+# A subquery in SET
+query II
+INSERT INTO users (id, email, name) VALUES (13, 'm@x', 'Mo') ON CONFLICT (id) DO UPDATE SET visits = (SELECT count(*) FROM staged) RETURNING id, visits
+----
+13 3
+
+# In a data-modifying CTE
+query II
+WITH up AS (INSERT INTO users (id, email, name) VALUES (14, 'n@x', 'Ned'), (15, 'o@x', 'Ola') ON CONFLICT (id) DO UPDATE SET visits = users.visits + 1 RETURNING id, visits) SELECT id, visits FROM up ORDER BY id
+----
+14 1
+15 0
+
+query ITTI
+SELECT id, email, name, visits FROM users ORDER BY id
+----
+1 a3@x Ann 0
+2 b@x Bobby/Bob 0
+5 e@x eve 0
+6 f@x Fay 0
+8 h@x Hal 0
+11 q@x Null1 0
+12 NULL Null2 0
+13 m@x Mo 3
+14 n@x Ned 1
+15 o@x Ola 0
+110 j@x Jo 0
+
+# A key of two columns, named in any order
+statement ok
+CREATE TABLE stock (shop int, item text, qty int, PRIMARY KEY (shop, item))
+
+statement ok
+INSERT INTO stock VALUES (1, 'nail', 10), (1, 'screw', 5)
+
+query ITI
+INSERT INTO stock VALUES (1, 'nail', 3), (2, 'nail', 7) ON CONFLICT (item, shop) DO UPDATE SET qty = stock.qty + excluded.qty RETURNING shop, item, qty
+----
+1 nail 13
+2 nail 7
+
+statement error 42P10
+INSERT INTO stock VALUES (1, 'nail', 3) ON CONFLICT (shop) DO NOTHING
+
+# A table without a primary key: its unique index the arbiter
+statement ok
+CREATE TABLE tags (name text UNIQUE, uses int)
+
+query TI
+INSERT INTO tags VALUES ('a', 1), ('b', 1), ('a', 5) ON CONFLICT (name) DO NOTHING RETURNING name, uses
+----
+a 1
+b 1
+
+query TI
+INSERT INTO tags VALUES ('a', 1), ('c', 1) ON CONFLICT (name) DO UPDATE SET uses = tags.uses + excluded.uses RETURNING name, uses
+----
+a 2
+c 1
+
+query TI
+SELECT name, uses FROM tags ORDER BY name
+----
+a 2
+b 1
+c 1
+
+# A partitioned table: the arbiter the partition's index
+statement ok
+CREATE TABLE events (region int, id int, n int, PRIMARY KEY (region, id)) PARTITION BY LIST (region)
+
+statement ok
+CREATE TABLE events_1 PARTITION OF events FOR VALUES IN (1)
+
+statement ok
+CREATE TABLE events_2 PARTITION OF events FOR VALUES IN (2)
+
+statement ok
+INSERT INTO events VALUES (1, 1, 1), (2, 1, 1)
+
+query III
+INSERT INTO events VALUES (1, 1, 5), (2, 2, 5), (2, 1, 5) ON CONFLICT (region, id) DO UPDATE SET n = events.n + excluded.n RETURNING region, id, n
+----
+1 1 6
+2 2 5
+2 1 6
+
+query III
+SELECT region, id, n FROM events ORDER BY region, id
+----
+1 1 6
+2 1 6
+2 2 5
+
+# … or a unique index's, of another name in each partition
+statement ok
+CREATE TABLE codes (region int, id int, code text, n int, PRIMARY KEY (region, id), UNIQUE (region, code)) PARTITION BY LIST (region)
+
+statement ok
+CREATE TABLE codes_1 PARTITION OF codes FOR VALUES IN (1)
+
+statement ok
+CREATE TABLE codes_2 PARTITION OF codes FOR VALUES IN (2)
+
+statement ok
+INSERT INTO codes VALUES (1, 1, 'a', 0), (2, 1, 'a', 0)
+
+query IITI
+INSERT INTO codes VALUES (1, 9, 'a', 1), (2, 9, 'b', 1) ON CONFLICT (code, region) DO UPDATE SET n = codes.n + 10 RETURNING region, id, code, n
+----
+1 1 a 10
+2 9 b 1
+
+# A generated column: computed for excluded, not to be set
+statement ok
+CREATE TABLE prices (id int PRIMARY KEY, net int, gross int GENERATED ALWAYS AS (net * 2) STORED)
+
+statement ok
+INSERT INTO prices (id, net) VALUES (1, 10)
+
+query III
+INSERT INTO prices (id, net) VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET net = excluded.net + excluded.gross RETURNING id, net, gross
+----
+1 60 120
+
+statement error 428C9
+INSERT INTO prices (id, net) VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET gross = 1
+
+# DO UPDATE's own errors: a column twice, a column not there
+statement error 42601
+INSERT INTO prices (id, net) VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET net = 1, net = 2
+
+statement error 42703
+INSERT INTO prices (id, net) VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET nope = 1
+
+statement error 42703
+INSERT INTO prices (id, net) VALUES (1, 20) ON CONFLICT (nope) DO NOTHING
+
+# An update whose row refers to a row the same statement inserted
+statement ok
+CREATE TABLE nodes (id int PRIMARY KEY, parent int REFERENCES nodes (id))
+
+statement ok
+INSERT INTO nodes VALUES (5, NULL)
+
+query II
+INSERT INTO nodes VALUES (6, NULL), (5, 6) ON CONFLICT (id) DO UPDATE SET parent = excluded.parent RETURNING id, parent
+----
+6 NULL
+5 6
+
+statement error 23503
+INSERT INTO nodes VALUES (5, 7) ON CONFLICT (id) DO UPDATE SET parent = excluded.parent

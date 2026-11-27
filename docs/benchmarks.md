@@ -1754,6 +1754,31 @@ operators); as three calls copying the values between, it was 1.11×
 PostgreSQL's.  `jsonb` stores the 16 KB documents in 8.9 KB, compressed;
 nucleus's form takes 13.9 KB.
 
+## Upserts
+
+PLAN.md §M15 D2: `INSERT … ON CONFLICT` (`bash bench/all.sh upsert`;
+`bench/upsert.py`).  A table `t (id int PRIMARY KEY, n int, tag text
+UNIQUE)` of 200,000 rows; each statement offers 200,000 rows, half of
+them there already — `DO UPDATE SET n = t.n + excluded.n` by the key,
+`DO NOTHING`, `DO UPDATE` by the unique `tag` — against a plain `INSERT
+… SELECT` of as many new rows; each on a table loaded afresh.  nucleus as
+a server (its Python client's clock), PostgreSQL 18 native and tuned
+(`\timing`):
+
+| upsert | nucleus (s) | postgresql (s) |
+|---|---:|---:|
+| insert | 0.384 [0.382–0.390] ±2% | 0.547 [0.519–0.553] ±9% |
+| do update | 0.511 [0.507–0.518] ±2% | 0.703 [0.678–0.730] ±8% |
+| do nothing | 0.333 [0.331–0.336] ±2% | 0.325 [0.318–0.334] ±5% |
+| by tag | 0.580 [0.574–0.585] ±9% | 0.735 [0.727–0.746] ±4% |
+
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-27.2.1-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus 6a9ca6605+changes — 2026-11-27T03:02:18+00:00
+
+`DO UPDATE` 0.73× PostgreSQL's time, by the secondary key 0.79×; `DO
+NOTHING` 1.02× (the intervals overlap) — PostgreSQL skips a taken row
+without writing, as nucleus does, and both pay a lookup a row; nucleus's
+is a descent of the tree for each (half the conflict path's time).
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (`bash bench/all.sh

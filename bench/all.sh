@@ -40,7 +40,7 @@ mkdir -p "$R"
 STEPS="suite phases tpch clickbench knn ann-sift ann-sift-int8 ann-filtered ann-dbpedia ann-related ann-sparse
 stats analyzers bm25 bm25-filters bm25-snippets msmarco hybrid hybrid-sparse tsearch tsearch-rank
 embed-speed embed-beir longmemeval recall erasure backup retype sealing page-crypto encrypted aead aes
-keys json json-pg json-index json-schema json-schema-pg json-forms json-forms-pg wamp wamp-lsm ycsb history branches python wasm browser"
+keys json json-pg json-index json-schema json-schema-pg json-forms json-forms-pg upsert wamp wamp-lsm ycsb history branches python wasm browser"
 
 need() { # need PATH HOW: a step's data, or how to get it
   [ -e "$1" ] || { echo "missing $1: $2" >&2; exit 1; }
@@ -248,6 +248,7 @@ step_json-forms-pg() {
 }
 
 # --- writes
+step_upsert() { m upsert "$RUNS" -- python3 bench/upsert.py --nucleus "$N"; }
 step_wamp() {
   local db=$ROOT/target/wamp-db
   m wamp "$LONG" -- python3 -I bench/wamp/wamp.py nucleus "$N" "$db" 21006 0,1,2,3,4,5,6,7

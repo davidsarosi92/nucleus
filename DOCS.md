@@ -2318,8 +2318,8 @@ EXISTS]` (of columns and expressions; `CONCURRENTLY`: built online, §8.7),
 [CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
 CONSTRAINT [IF EXISTS] n`, `ALTER TABLE … RENAME …`, `… DROP COLUMN …`,
 `… ALTER COLUMN … SET / DROP DEFAULT | SET / DROP NOT NULL`, `ALTER INDEX
-… RENAME TO` (§8.35), `INSERT … VALUES | SELECT | DEFAULT VALUES
-[RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
+… RENAME TO` (§8.35), `INSERT INTO t [AS a] … VALUES | SELECT | DEFAULT VALUES
+[ON CONFLICT …] [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
 [RETURNING]`, `TRUNCATE [TABLE] t, … [CONTINUE | RESTART IDENTITY]
 [CASCADE | RESTRICT]` (every row deleted as `DELETE` deletes them — in
 the transaction's snapshot, under `DELETE`'s privilege and row policies;
@@ -3719,6 +3719,51 @@ between its first and last key.  A front end without a client to read from refus
 (`0A000`); `Session::run_copy(stmt, params, reader)` reads it from any
 `Read`.  From a server-side file is not supported (the client sends
 files).
+
+**Upsert** (`INSERT … ON CONFLICT`, PLAN.md §M15 D2; PostgreSQL's
+statement and meaning).  `ON CONFLICT [(part, …) [WHERE predicate] | ON
+CONSTRAINT name] DO NOTHING | DO UPDATE SET col = expr, … [WHERE cond]`.
+The *arbiters* are the unique keys the target names: the primary key or
+unique B-tree indexes whose parts are exactly those listed — columns or
+expressions, in any order (`42P10` when none is; an expression matches
+an expression index's bound the same way) —, the one key `ON CONSTRAINT`
+names (`t_pkey` or a unique index's name; `42704` otherwise), or with no
+target every unique key (`DO NOTHING` only: `DO UPDATE` needs a target,
+`42601`).  nucleus has no partial indexes, so a target's `WHERE` is
+accepted and any matching index serves (as PostgreSQL lets a non-partial
+index serve).  `INSERT INTO t AS a` names the table in the clause and in
+`RETURNING`.  The proposed rows are built first (defaults, generated
+columns, `CHECK`s and the insert policy's check, as PostgreSQL checks
+them before looking for a conflict), then taken in order
+(`dml::Upsert::run`): each arbiter's key of the row — the row key, or a
+unique index's entry (none where a part is `NULL`: such a row conflicts
+with nothing) — looked up in the transaction; none taken: the row joins
+the batch being inserted (stored through `insert_batch`, 4,096 at a
+time); one taken: `DO NOTHING` leaves the row out (it looks only
+whether a key is taken, `dml::taken`: the row there is not read), `DO UPDATE` evaluates
+`SET` and `WHERE` over the row there and the proposed row as `excluded`
+(a column's name alone is ambiguous, `42702`, as PostgreSQL's), the
+result checked as an `UPDATE`'s (`CHECK`s, unique keys, foreign keys,
+the update policy's `WITH CHECK`) and written by the `UPDATE` path — the
+batch inserted so far stored first, so the update's checks see it.  The
+keys of every row the statement inserted or updated are kept: a later
+row taking one is left out by `DO NOTHING` and refused by `DO UPDATE`
+(`21000`, "cannot affect row a second time": the outcome would depend on
+the rows' order).  `RETURNING` gives the rows inserted and updated, in
+order; the count is theirs.  Privileges: `INSERT` on the columns
+inserted, and for `DO UPDATE` `UPDATE` on the columns set and `SELECT`
+on those read; row-level security: the row there must pass the update
+policy's `USING` (`42501` otherwise, not skipped — PostgreSQL's rule).
+A partitioned table's rows go to their partitions, an arbiter index
+found in each by its parts (its name there is `name_partition`).
+*Concurrent upserts* of one key: the second writer either finds the
+first's row in its snapshot or does not; if not, its insert's key — row
+key or unique entry — is written by both and the second to commit gets
+`40001`, never `23505`: outside a block the statement runs again (up to
+10 times, §8.7's sessions) and then updates the row; inside a block the
+client runs the transaction again, as with PostgreSQL's `REPEATABLE
+READ`.  (`tests/upsert.rs` races four writers on twelve keys, in every
+storage and isolation level, and counts every update.)
 
 `COPY t [(columns)] | (query) TO STDOUT [options]` (`copy::copy_to`)
 runs the query (`SELECT columns FROM t` for a table) and writes each row
