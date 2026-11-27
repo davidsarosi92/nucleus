@@ -32,7 +32,9 @@ const WIRE_BUFFER: usize = 64 << 10;
 /// Version 7 adds the columnar result format (2): batches `B` of a buffer
 /// per column instead of a `D` per row; and `COPY … FROM STDIN`: `I`, then
 /// the client's data (`d` bytes, `B` batches of typed rows) to `e` (or
-/// `f`).
+/// `f`).  Version 8 a subject's key (`k`); version 9 requests on a
+/// collection's documents (`O`), compiled to one statement each
+/// (`nucleus_sql::documents`).
 pub const VERSION: u16 = nucleus_wire::VERSION;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = nucleus_wire::MIN_VERSION;
@@ -208,6 +210,28 @@ impl<'a> Body<'a> {
     fn str(&mut self) -> Result<String, Error> {
         self.r.str().map_err(malformed)
     }
+    fn u64(&mut self) -> Result<u64, Error> {
+        self.r.u64().map_err(malformed)
+    }
+}
+
+/// An `O` message's request (PLAN.md §M16 Q4).
+fn document_request(body: &[u8]) -> Result<nucleus_sql::documents::Request, Error> {
+    use nucleus_sql::documents::{Op, Request};
+    let mut b = Body::new(body);
+    let op = Op::of(b.u8()?)?;
+    let flags = b.u8()?;
+    Ok(Request {
+        op: Some(op),
+        many: flags & 1 != 0,
+        upsert: flags & 2 != 0,
+        collection: b.str()?,
+        filter: b.str()?,
+        body: b.str()?,
+        sort: b.str()?,
+        skip: b.u64()?,
+        limit: b.u64()?,
+    })
 }
 
 fn malformed(e: nucleus_wire::Malformed) -> Error {
@@ -423,6 +447,38 @@ fn message<R: Read, W: Write>(
                         },
                         fetch,
                         params: &params,
+                        stepped,
+                    };
+                    match run(session, &query, version, input, out)? {
+                        Ran::Done => {}
+                        Ran::Failed(e) => {
+                            log("error", &format!("{} {}", e.code, e.message));
+                            out.write_all(&error_msg(&e, version))?;
+                        }
+                        Ran::Close(e) => {
+                            if let Some(e) = e {
+                                out.write_all(&error_msg(&e, version))?;
+                            }
+                            return Ok(Next::End);
+                        }
+                    }
+                }
+                Err(e) => out.write_all(&error_msg(&e, version))?,
+            }
+            out.write_all(&ready_msg(session.status()))?;
+            Ok(Next::Go)
+        }
+        b'O' if version >= 9 => {
+            // A request on a collection's documents: the statement it
+            // compiles to, run as a `Q`'s (typed rows, fetched whole).
+            match document_request(body).and_then(|r| nucleus_sql::documents::statement(&r)) {
+                Ok(sql) => {
+                    log("document", &sql);
+                    let query = Query {
+                        sql: &sql,
+                        format: Format::Typed,
+                        fetch: 0,
+                        params: &[],
                         stepped,
                     };
                     match run(session, &query, version, input, out)? {

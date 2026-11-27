@@ -118,6 +118,19 @@ key.decrypt(row[0])                     # 'ann@example.com'
 
 A sealed table's rows whose key their user holds: `db.present_subject_key(subject, secret)`.
 
+## Documents
+
+A collection's documents by MongoDB's requests (`CREATE COLLECTION`;
+nucleus DOCS.md §8.41, §10 *Documents*), in the connection's transaction:
+
+```python
+people = conn.collection("people")
+people.insert_one({"name": "ann", "age": 34})          # its _id
+people.find({"age": {"$gte": 30}}, {"name": 1}, [("age", -1)], limit=10)
+people.update_one({"name": "ann"}, {"$inc": {"age": 1}}, upsert=True)
+people.delete_many({"age": {"$lt": 18}})
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's library in the wheel is the database,

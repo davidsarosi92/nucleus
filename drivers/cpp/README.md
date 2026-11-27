@@ -48,6 +48,20 @@ std::get<std::string>(key.decrypt(r.rows[0][0].as<nucleus::Bytes>()));   // "ann
 
 A sealed table's rows whose key their user holds: `db.present_subject_key(subject, secret)`.
 
+## Documents
+
+A collection's documents by MongoDB's requests (`CREATE COLLECTION`;
+nucleus DOCS.md §8.41, §10 *Documents*), in the connection's transaction:
+
+```cpp
+auto people = db.collection("people");
+people.insert_one(R"({"name": "ann", "age": 34})");
+nucleus::FindOptions o;
+o.sort = R"({"age": -1})";
+for (auto& doc : people.find(R"({"age": {"$gte": 30}})", o)) std::cout << doc.text << "\n";
+people.update_one(R"({"name": "ann"})", R"({"$inc": {"age": 1}})", true);
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

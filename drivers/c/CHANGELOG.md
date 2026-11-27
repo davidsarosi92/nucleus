@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
+  9, the `O` message): `nc_document(db, &request, &err)` with an
+  `nc_document_request` (`NC_DOC_FIND`, `_COUNT`, `_INSERT`, `_UPDATE`,
+  `_REPLACE`, `_DELETE`; collection, filter, body, sort as JSON texts,
+  skip, limit, `NC_DOC_MANY` / `NC_DOC_UPSERT`) → an `nc_result`; in the
+  connection's transaction.
 - A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as
   `nc_config.host` — `"/tmp/nucleus.sock"` — reaches `nucleus server
   --socket` (not on Windows); no TLS there.

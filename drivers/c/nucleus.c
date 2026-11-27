@@ -2513,6 +2513,31 @@ int nc_hold_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32
     return subject_key(c, 1, subject, secret, err);
 }
 
+nc_result *nc_document(nc_conn *c, const nc_document_request *req, nc_error *err) {
+    buf m = {0};
+    int lost;
+    if (c->version < 9) {
+        set_error(err, "0A000", "the server speaks version %d of the protocol; document requests need 9", c->version);
+        return NULL;
+    }
+    if (c->active) cursor_drain(c->active);
+    put_u8(&m, (unsigned)req->op);
+    put_u8(&m, req->flags & 3u);
+    put_str(&m, req->collection);
+    put_str(&m, req->filter);
+    put_str(&m, req->body);
+    put_str(&m, req->sort);
+    put_le(&m, req->skip, 8);
+    put_le(&m, req->limit, 8);
+    if (m.failed || send_frame(c, 'O', &m) != 0) {
+        free(m.b);
+        set_error(err, "08006", "connection lost");
+        return NULL;
+    }
+    free(m.b);
+    return read_replies(c, err, &lost);
+}
+
 /* ------------------------------------------------ encrypted columns (K5) */
 
 /* ChaCha20 and Poly1305 as RFC 8439 writes them, HChaCha20 as

@@ -330,6 +330,47 @@ class Conformance(unittest.TestCase):
             self.assertEqual(list(s), [])
             self.assertEqual(c.execute("SELECT 44").rows, [(44,)])
 
+    def test_documents(self):
+        # A collection's documents by MongoDB's requests (protocol 9).
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE COLLECTION {t}")
+            c.execute(f"CREATE TABLE {t}_audit (n INT)")
+            p = c.collection(t)
+            self.assertEqual(p.insert_one({"_id": 1, "name": "ann", "age": 34}), 1)
+            self.assertEqual(p.insert_many([{"_id": 2, "name": "bob", "age": 25, "tags": ["x"]},
+                                            {"_id": 3, "name": "cy", "age": 40}]), [2, 3])
+            self.assertEqual(p.find({"age": {"$gte": 25}}, {"name": 1, "_id": 0}, {"age": -1}, 1, 1),
+                             [{"name": "ann"}])
+            self.assertEqual(p.find(sort=[("age", 1)], projection={"_id": 1}), [{"_id": 2}, {"_id": 1}, {"_id": 3}])
+            self.assertEqual(p.count_documents({"age": {"$gt": 30}}), 2)
+            u = p.update_many({}, {"$max": {"age": 30}})
+            self.assertEqual((u.matched, u.modified, u.upserted_id), (3, 1, None))
+            u = p.update_one({"name": "dan"}, {"$set": {"age": 5}}, upsert=True)
+            self.assertEqual((u.matched, u.modified), (0, 0))
+            self.assertIsNotNone(u.upserted_id)
+            u = p.replace_one({"_id": 3}, {"name": "cyrus"})
+            self.assertEqual((u.matched, u.modified), (1, 1))
+            self.assertEqual(p.find_one({"_id": 3}), {"_id": 3, "name": "cyrus"})
+            # An update needs operators; a replacement has none.
+            for call in (lambda: p.update_one({}, {"name": "x"}), lambda: p.replace_one({}, {"$set": {"a": 1}})):
+                with self.assertRaises(nucleus.Error) as e:
+                    call()
+                self.assertEqual(e.exception.code, "22023")
+            self.assertEqual(p.delete_one({"age": {"$gte": 30}}), 1)
+            self.assertEqual(p.delete_many({}), 3)
+            # In a transaction with a table: rolled back, then committed.
+            for commit in (False, True):
+                c.execute("BEGIN")
+                c.execute(f"INSERT INTO {t}_audit VALUES (1)")
+                p.insert_one({"_id": 9})
+                c.execute("COMMIT" if commit else "ROLLBACK")
+                self.assertEqual(p.count_documents({}), int(commit))
+                self.assertEqual(c.execute(f"SELECT count(*) FROM {t}_audit").rows, [(int(commit),)])
+            with self.assertRaises(nucleus.ProgrammingError) as e:
+                c.collection("py_nosuch").count_documents({})
+            self.assertEqual(e.exception.code, "42P01")
+
     def test_transactions(self):
         t = table()
         with connect() as c:

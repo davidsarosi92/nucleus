@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
+  9, the `O` message): `db.collection(name)` → `DocumentCollection` —
+  `find(filter[, projection, sort, skip, limit])`, `findOne`,
+  `countDocuments`, `insertOne` / `insertMany` (their `_id`s),
+  `updateOne` / `updateMany` / `replaceOne(filter, doc, upsert)` →
+  `UpdateResult(matched, modified, upsertedId)`, `deleteOne` /
+  `deleteMany`; JSON texts in, `Json` out; in the connection's
+  transaction (Android too).
 - A server's Unix socket (nucleus PLAN.md §M14.33 R2): a path as the
   host — `new Config().host("/tmp/nucleus.sock")` — reaches `nucleus
   server --socket` (Java 16's Unix-domain channels, looked up when a

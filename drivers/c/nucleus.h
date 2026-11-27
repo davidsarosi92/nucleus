@@ -35,8 +35,9 @@ extern "C" {
  * 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
  * 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
  * a hint; 6: results stream, fetched in batches; 7: columnar results;
- * 8: a subject's key presented (nc_present_subject_key). */
-#define NC_PROTOCOL_VERSION 8
+ * 8: a subject's key presented (nc_present_subject_key); 9: requests on a
+ * collection's documents (nc_document). */
+#define NC_PROTOCOL_VERSION 9
 /* Rows a cursor asks the server for at a time. */
 #define NC_DEFAULT_FETCH 1000
 /* Rows a columnar batch holds when none is given. */
@@ -278,6 +279,35 @@ void nc_close(nc_conn *c);
  * call): from then on only a session that presents it opens the rows. */
 int nc_present_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32], nc_error *err);
 int nc_hold_subject_key(nc_conn *c, const char *subject, const uint8_t secret[32], nc_error *err);
+
+/* Requests on a collection's documents (protocol 9; nucleus DOCS.md 10,
+ * Documents): MongoDB's find, count, insert, update, replace and delete,
+ * one message each, which the server runs as one statement in the
+ * session's transaction. */
+typedef enum nc_document_op {
+    NC_DOC_FIND = 1,    /* rows of one json column, doc */
+    NC_DOC_COUNT = 2,   /* one row: n, a bigint */
+    NC_DOC_INSERT = 3,  /* a row per document: its _id (json) */
+    NC_DOC_UPDATE = 4,  /* one row: matched, modified (bigints), upserted (the _id, or NULL) */
+    NC_DOC_REPLACE = 5, /* the same row as an update */
+    NC_DOC_DELETE = 6   /* nc_count: the documents deleted */
+} nc_document_op;
+#define NC_DOC_MANY 1   /* update, delete: every match, not the first */
+#define NC_DOC_UPSERT 2 /* update, replace: insert one when none matches */
+typedef struct nc_document_request {
+    nc_document_op op;
+    const char *collection;
+    /* JSON texts, NULL or "" where not given. */
+    const char *filter; /* every document where not given */
+    const char *body;   /* insert: a document or an array of them; update: the update
+                           document; replace: the replacement; find: the projection */
+    const char *sort;   /* find: a sort document, its fields in its text's order */
+    uint64_t skip;
+    uint64_t limit;     /* 0: none */
+    unsigned flags;     /* NC_DOC_MANY, NC_DOC_UPSERT */
+} nc_document_request;
+/* Runs a document request: its result (above), or NULL (and err filled). */
+nc_result *nc_document(nc_conn *c, const nc_document_request *req, nc_error *err);
 
 /* Client-side encrypted columns (nucleus PLAN.md M14.30 K5, DOCS.md 11): a
  * value encrypted before it is sent and decrypted after it arrives, so the

@@ -14579,9 +14579,35 @@ found missing, and the open issues.
   differential fuzzers (outside the repository) — 48,000 updates,
   2,400 upserts, 6,240 projections and sorts, no difference; 22
   mutations, each failing (ten only after the corner tests).
-- **Q4 — the document server**: `ncp` messages for them, a document API
+- **Q4 — the document server** ✅ (2026-11-27): `ncp` messages for them, a document API
   in every nucleus driver and `ncsql`, in the same sessions and
   transactions as SQL.
+  *Step 1 done (2026-11-27):* one message, `O` (protocol version 9) —
+  operation, flags, collection, filter, body, sort, skip, limit — which
+  the server compiles to one statement (`nucleus_sql::documents`, the
+  compiler §M16 Q5 will share) and runs as a `Q`: the drivers stay thin
+  and alike, the server checks every part before any document (as
+  MongoDB refuses a bad request on an empty collection — a filter
+  literal's error otherwise came only with a row).  The Rust driver's
+  `Client::collection` (find, count, insert, update, replace, delete;
+  matched / modified / upserted), and ncsql's `db.c.find(…)` lines in the
+  shell's relaxed syntax.  Found on the way, fixed: a query CTE beside a
+  data-modifying one was bound where it was read, after the writes — an
+  upsert's `WITH m AS (matches), i AS (INSERT … WHERE NOT EXISTS m)
+  SELECT count(*) FROM m` counted the row it had just inserted; now read
+  once where it stands, as PostgreSQL materializes it
+  (`80_with_modifying.slt`).  Tests: `client.rs`
+  `documents_by_filter` (every request, errors, a transaction with a
+  table rolled back and committed), `cli.rs`
+  `the_shells_document_requests`, the relaxed syntax's unit test.
+  *Step 2 done (2026-11-27):* every driver speaks version 9 and has the
+  collection — Python `Collection` (dicts; the embedded edition through
+  the same connection), JavaScript `Collection` (objects; embedded and
+  WebAssembly too), Java `DocumentCollection` (Android too), C
+  `nc_document`, C++ `nucleus::Collection`, Swift `DocumentCollection` —
+  each a thin layer over `O`, with the same conformance case
+  (`documents`: every request, the `22023`s, `42P01`, a transaction with
+  a table rolled back and committed).  Q4 is done; next Q5.
 - **Q5 — `--mongo-compat`**: the MongoDB wire protocol's subset (OP_MSG:
   hello, find, insert, update, delete, count, getMore, the commands
   `mongosh` and drivers send first), the same compiler, Extended JSON

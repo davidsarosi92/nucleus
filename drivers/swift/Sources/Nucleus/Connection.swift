@@ -255,6 +255,35 @@ public final class Connection {
         if send(c, subject, secret, &err) != 0 { throw NucleusError(err) }
     }
 
+    /// A collection's documents (protocol 9; nucleus DOCS.md §10,
+    /// *Documents*): MongoDB's requests, each one message, run by the server
+    /// as one statement in this connection's transaction.
+    public func collection(_ name: String) -> DocumentCollection {
+        DocumentCollection(self, name)
+    }
+
+    /// Runs a document request (`nc_document`): its result.
+    func document(
+        _ op: nc_document_op, _ collection: String, filter: String = "", body: String = "", sort: String = "",
+        skip: UInt64 = 0, limit: UInt64 = 0, flags: UInt32 = 0
+    ) throws -> QueryResult {
+        let c = try handle()
+        let arena = Arena()
+        var q = nc_document_request()
+        q.op = op
+        q.collection = arena.cString(collection)
+        q.filter = arena.cString(filter)
+        q.body = arena.cString(body)
+        q.sort = arena.cString(sort)
+        q.skip = skip
+        q.limit = limit
+        q.flags = flags
+        var err = nc_error()
+        guard let r = nc_document(c, &q, &err) else { throw NucleusError(err) }
+        defer { nc_result_free(r) }
+        return result(r)
+    }
+
     /// `copy` of text.
     @discardableResult
     public func copy(_ sql: String, text: String) throws -> Int64 {

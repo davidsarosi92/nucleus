@@ -255,12 +255,14 @@ The developer platform (§M14: columnar storage and partitions, vectors,
 full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …) is built, and so is the document
 model's first milestone (§M15: collections, upsert, path and
-multi-valued indexes).  Next are document queries and a document server
-(§M16): SQL/JSON stays the core, and a MongoDB-style filter document
-(`{"age": {"$gt": 30}, "tags": "vip"}`, MongoDB's matching rules) is
-compiled to it — in nucleus's own protocol, drivers and shell, and in
-SQL; MongoDB's wire protocol comes as an optional module, as
-PostgreSQL's does.  Then streams and changefeeds, live queries and sync
+multi-valued indexes).  Document queries and a document server (§M16)
+are under way: SQL/JSON stays the core, and a MongoDB-style filter
+document (`{"age": {"$gt": 30}, "tags": "vip"}`, MongoDB's matching
+rules) is compiled to it — in SQL (`json_filter`, with `find`'s
+projection, sort, update and upsert), and in nucleus's own protocol,
+every driver (`db.collection("people").find(…)`) and the shell
+(`db.people.find(…)`), in the same transactions as SQL.  MongoDB's wire
+protocol comes next, as an optional module, as PostgreSQL's does.  Then streams and changefeeds, live queries and sync
 (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.

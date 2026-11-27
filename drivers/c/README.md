@@ -69,6 +69,21 @@ nc_blind_index(&k, NC_PLAIN_TEXT, "ann@example.com", 15, index);     /* WHERE em
 
 A sealed table's rows whose key their user holds: `nc_present_subject_key(db, subject, secret, &err)`.
 
+## Documents
+
+A collection's documents by MongoDB's requests (`CREATE COLLECTION`;
+nucleus DOCS.md §8.41, §10 *Documents*), in the connection's transaction:
+
+```c
+nc_document_request q = {0};
+q.op = NC_DOC_FIND;
+q.collection = "people";
+q.filter = "{\"age\": {\"$gte\": 30}}";
+q.sort = "{\"age\": -1}";
+q.limit = 10;
+nc_result *r = nc_document(db, &q, &err);   /* rows of one json column, doc */
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

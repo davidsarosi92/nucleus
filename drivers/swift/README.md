@@ -85,6 +85,18 @@ if case .bytes(let sealed) = row[0] { print(try key.decrypt(sealed)) }   // .tex
 
 A sealed table's rows whose key their user holds: `try db.presentSubjectKey(subject, secret: secret)`.
 
+## Documents
+
+A collection's documents by MongoDB's requests (`CREATE COLLECTION`;
+nucleus DOCS.md §8.41, §10 *Documents*), in the connection's transaction:
+
+```swift
+let people = db.collection("people")
+try people.insertOne(#"{"name": "ann", "age": 34}"#)
+let found = try people.find(#"{"age": {"$gte": 30}}"#, FindOptions(sort: #"{"age": -1}"#, limit: 10))
+try people.updateOne(#"{"name": "ann"}"#, #"{"$inc": {"age": 1}}"#, upsert: true)
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  `NucleusEmbedded` (its XCFramework) is the database,

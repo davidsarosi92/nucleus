@@ -21,6 +21,7 @@
 #include <cstring>
 #include <deque>
 #include <istream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -516,6 +517,8 @@ inline std::string Value::str() const {
 }
 
 /// A connection; closes when destroyed.  One thread at a time.
+class Collection;
+
 class Connection {
 public:
     explicit Connection(const Config& config = Config()) {
@@ -686,6 +689,19 @@ public:
             throw Error(err.message, err.code, err.hint);
     }
 
+    /// A collection's documents (protocol 9; nucleus DOCS.md §10,
+    /// *Documents*): MongoDB's requests, each one message, run by the server
+    /// as one statement in this connection's transaction.
+    Collection collection(const std::string& name);
+
+    /// Runs a document request (nc_document): its result.
+    Result document(const nc_document_request& request) {
+        nc_error err;
+        nc_result* r = nc_document(conn_, &request, &err);
+        if (!r) throw Error(err.message, err.code, err.hint);
+        return take(r);
+    }
+
     /// The same with the data read from `in` (a file, …), 64 KiB at a time.
     uint64_t copy(const std::string& sql, std::istream& in) {
         nc_error err;
@@ -727,6 +743,121 @@ public:
 private:
     nc_conn* conn_ = nullptr;
 };
+
+/// What an update or a replacement did.
+struct UpdateResult {
+    uint64_t matched = 0;
+    uint64_t modified = 0; // the documents it changed
+    Value upserted_id;     // the _id of the document an upsert inserted, else NULL
+};
+
+/// A find's options: JSON texts (empty: none), skip, limit (0: all).
+struct FindOptions {
+    std::string projection;
+    std::string sort; // its fields in its text's order
+    uint64_t skip = 0;
+    uint64_t limit = 0;
+};
+
+/// A collection's documents (Connection::collection): MongoDB's requests
+/// with filter documents.  Filters, documents, updates, projections and
+/// sorts are JSON texts ("" or "{}": every document); documents come back as
+/// Json, their text.
+class Collection {
+public:
+    Collection(Connection& db, std::string name) : db_(db), name_(std::move(name)) {}
+
+    /// The documents `filter` matches.
+    std::vector<Json> find(const std::string& filter = "", const FindOptions& options = {}) {
+        auto q = request(NC_DOC_FIND, filter, options.projection, 0);
+        q.sort = options.sort.c_str();
+        q.skip = options.skip;
+        q.limit = options.limit;
+        std::vector<Json> out;
+        for (auto& row : db_.document(q).rows) out.push_back(row[0].as<Json>());
+        return out;
+    }
+
+    /// The first document `filter` matches, if any.
+    std::optional<Json> find_one(const std::string& filter = "") {
+        FindOptions o;
+        o.limit = 1;
+        auto found = find(filter, o);
+        if (found.empty()) return std::nullopt;
+        return found[0];
+    }
+
+    /// How many documents `filter` matches.
+    uint64_t count_documents(const std::string& filter = "") {
+        return static_cast<uint64_t>(db_.document(request(NC_DOC_COUNT, filter, "", 0)).rows[0][0].as<int64_t>());
+    }
+
+    /// Inserts `document`; its _id (made where it has none).
+    Value insert_one(const std::string& document) {
+        return db_.document(request(NC_DOC_INSERT, "", document, 0)).rows[0][0];
+    }
+
+    /// Inserts `documents`, in their order; their _ids.
+    std::vector<Value> insert_many(const std::vector<std::string>& documents) {
+        std::string body = "[";
+        for (size_t i = 0; i < documents.size(); i++) body += (i ? ", " : "") + documents[i];
+        body += "]";
+        std::vector<Value> ids;
+        for (auto& row : db_.document(request(NC_DOC_INSERT, "", body, 0)).rows) ids.push_back(row[0]);
+        return ids;
+    }
+
+    /// Updates the first document `filter` matches by `update`'s operators
+    /// ({"$set": …}); with `upsert`, inserts one where none matches.
+    UpdateResult update_one(const std::string& filter, const std::string& update, bool upsert = false) {
+        return updated(NC_DOC_UPDATE, filter, update, upsert ? NC_DOC_UPSERT : 0);
+    }
+
+    /// Updates every document `filter` matches.
+    UpdateResult update_many(const std::string& filter, const std::string& update, bool upsert = false) {
+        return updated(NC_DOC_UPDATE, filter, update, NC_DOC_MANY | (upsert ? NC_DOC_UPSERT : 0));
+    }
+
+    /// Replaces the first document `filter` matches (its _id kept).
+    UpdateResult replace_one(const std::string& filter, const std::string& document, bool upsert = false) {
+        return updated(NC_DOC_REPLACE, filter, document, upsert ? NC_DOC_UPSERT : 0);
+    }
+
+    /// Deletes the first document `filter` matches; how many (0 or 1).
+    uint64_t delete_one(const std::string& filter) { return db_.document(request(NC_DOC_DELETE, filter, "", 0)).count; }
+
+    /// Deletes every document `filter` matches; how many.
+    uint64_t delete_many(const std::string& filter) {
+        return db_.document(request(NC_DOC_DELETE, filter, "", NC_DOC_MANY)).count;
+    }
+
+private:
+    // The request points into its arguments, which outlive it.
+    nc_document_request request(nc_document_op op, const std::string& filter, const std::string& body,
+                                unsigned flags) const {
+        nc_document_request q{};
+        q.op = op;
+        q.collection = name_.c_str();
+        q.filter = filter.c_str();
+        q.body = body.c_str();
+        q.flags = flags;
+        return q;
+    }
+
+    UpdateResult updated(nc_document_op op, const std::string& filter, const std::string& body, unsigned flags) {
+        auto row = db_.document(request(op, filter, body, flags)).rows[0];
+        UpdateResult u;
+        u.matched = static_cast<uint64_t>(row[0].as<int64_t>());
+        u.modified = static_cast<uint64_t>(row[1].as<int64_t>());
+        u.upserted_id = row[2];
+        return u;
+    }
+
+    Connection& db_;
+    std::string name_;
+};
+
+inline Collection Connection::collection(const std::string& name) { return Collection(*this, name); }
 
 /// A client-side encrypted column's keys (nucleus PLAN.md §M14.30 K5,
 /// DOCS.md §11; the C driver's nc_column_key): from a 32-byte master key the

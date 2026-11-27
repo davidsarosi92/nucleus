@@ -153,6 +153,46 @@ enum Conformance {
         XCTAssertEqual(try db.query("SELECT id FROM \(t)").rows.map { $0[0] }, [.int32(1)])
     }
 
+    /// A collection's documents by MongoDB's requests (the O message, protocol 9).
+    static func documents(_ db: Connection) throws {
+        let t = table()
+        try db.query("CREATE COLLECTION \(t)")
+        try db.query("CREATE TABLE \(t)_audit (n INT)")
+        let p = db.collection(t)
+        XCTAssertEqual(try p.insertOne(#"{"_id": 1, "name": "ann", "age": 34}"#), .json("1"))
+        XCTAssertEqual(
+            try p.insertMany([#"{"_id": 2, "name": "bob", "age": 25}"#, #"{"_id": 3, "name": "cy", "age": 40}"#]),
+            [.json("2"), .json("3")])
+        XCTAssertEqual(
+            try p.find(#"{"age": {"$gte": 25}}"#,
+                       FindOptions(projection: #"{"name": 1, "_id": 0}"#, sort: #"{"age": -1}"#, skip: 1, limit: 1)),
+            [#"{"name": "ann"}"#])
+        XCTAssertEqual(try p.countDocuments(#"{"age": {"$gt": 30}}"#), 2)
+        XCTAssertEqual(try p.updateMany("{}", #"{"$max": {"age": 30}}"#),
+                       UpdateResult(matched: 3, modified: 1, upsertedId: .null))
+        let u = try p.updateOne(#"{"name": "dan"}"#, #"{"$set": {"age": 5}}"#, upsert: true)
+        XCTAssertEqual(u.matched + u.modified, 0)
+        XCTAssertNotEqual(u.upsertedId, .null)
+        XCTAssertEqual(try p.replaceOne(#"{"_id": 3}"#, #"{"name": "cyrus"}"#),
+                       UpdateResult(matched: 1, modified: 1, upsertedId: .null))
+        XCTAssertEqual(try p.findOne(#"{"_id": 3}"#), #"{"_id": 3, "name": "cyrus"}"#)
+        // An update needs operators; a replacement has none.
+        assertFails("22023") { try p.updateOne("{}", #"{"name": "x"}"#) }
+        assertFails("22023") { try p.replaceOne("{}", #"{"$set": {"a": 1}}"#) }
+        XCTAssertEqual(try p.deleteOne(#"{"age": {"$gte": 30}}"#), 1)
+        XCTAssertEqual(try p.deleteMany("{}"), 3)
+        // In a transaction with a table: rolled back, then committed.
+        for commit in [false, true] {
+            try db.query("BEGIN")
+            try db.query("INSERT INTO \(t)_audit VALUES (1)")
+            try p.insertOne(#"{"_id": 9}"#)
+            try db.query(commit ? "COMMIT" : "ROLLBACK")
+            XCTAssertEqual(try p.countDocuments(), commit ? 1 : 0)
+            XCTAssertEqual(try db.query("SELECT count(*) FROM \(t)_audit").rows[0][0].intValue, commit ? 1 : 0)
+        }
+        assertFails("42P01") { _ = try db.collection("swift_nosuch").countDocuments() }
+    }
+
     static func cursors(_ db: Connection) throws {
         // Ten billion rows: only what is read is produced.
         let big = try db.cursor("SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b",

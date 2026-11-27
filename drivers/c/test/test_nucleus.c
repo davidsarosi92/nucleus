@@ -980,6 +980,94 @@ static void subject_key(void) {
     nc_close(other);
 }
 
+/* A request on a collection; its result, or NULL with err. */
+static nc_result *doc(nc_conn *db, nc_document_op op, const char *c, const char *filter, const char *body,
+                      unsigned flags, nc_error *err) {
+    nc_document_request q = {0};
+    q.op = op;
+    q.collection = c;
+    q.filter = filter;
+    q.body = body;
+    q.flags = flags;
+    return nc_document(db, &q, err);
+}
+
+/* A collection's documents by MongoDB's requests (the O message, protocol 9). */
+static void documents(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    nc_document_request q = {0};
+    nc_result *r;
+    char t[64], audit[80], sql[256];
+    int commit;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(audit, sizeof audit, "%s_audit", t);
+    snprintf(sql, sizeof sql, "CREATE COLLECTION %s", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (n INT)", audit);
+    nc_result_free(must(db, sql, NULL, 0));
+    r = doc(db, NC_DOC_INSERT, t, NULL, "{\"_id\": 1, \"name\": \"ann\", \"age\": 34}", 0, &err);
+    CHECK(r && nc_rows(r) == 1 && strcmp(text_of(r, 0, 0), "1") == 0);
+    nc_result_free(r);
+    r = doc(db, NC_DOC_INSERT, t, NULL,
+            "[{\"_id\": 2, \"name\": \"bob\", \"age\": 25}, {\"_id\": 3, \"name\": \"cy\", \"age\": 40}]", 0, &err);
+    CHECK(r && nc_rows(r) == 2 && strcmp(text_of(r, 1, 0), "3") == 0);
+    nc_result_free(r);
+    q.op = NC_DOC_FIND;
+    q.collection = t;
+    q.filter = "{\"age\": {\"$gte\": 25}}";
+    q.body = "{\"name\": 1, \"_id\": 0}";
+    q.sort = "{\"age\": -1}";
+    q.skip = 1;
+    q.limit = 1;
+    r = nc_document(db, &q, &err);
+    CHECK(r && nc_rows(r) == 1 && nc_column_type(r, 0) == NC_JSON && strcmp(text_of(r, 0, 0), "{\"name\": \"ann\"}") == 0);
+    nc_result_free(r);
+    r = doc(db, NC_DOC_COUNT, t, "{\"age\": {\"$gt\": 30}}", NULL, 0, &err);
+    CHECK(r && strcmp(text_of(r, 0, 0), "2") == 0);
+    nc_result_free(r);
+    r = doc(db, NC_DOC_UPDATE, t, "{}", "{\"$max\": {\"age\": 30}}", NC_DOC_MANY, &err);
+    CHECK(r && strcmp(text_of(r, 0, 0), "3") == 0 && strcmp(text_of(r, 0, 1), "1") == 0 &&
+          nc_value_at(r, 0, 2)->type == NC_NULL);
+    nc_result_free(r);
+    r = doc(db, NC_DOC_UPDATE, t, "{\"name\": \"dan\"}", "{\"$set\": {\"age\": 5}}", NC_DOC_UPSERT, &err);
+    CHECK(r && strcmp(text_of(r, 0, 0), "0") == 0 && nc_value_at(r, 0, 2)->type != NC_NULL);
+    nc_result_free(r);
+    r = doc(db, NC_DOC_REPLACE, t, "{\"_id\": 3}", "{\"name\": \"cyrus\"}", 0, &err);
+    CHECK(r && strcmp(text_of(r, 0, 1), "1") == 0);
+    nc_result_free(r);
+    /* An update needs operators; a replacement has none. */
+    CHECK(doc(db, NC_DOC_UPDATE, t, "{}", "{\"name\": \"x\"}", 0, &err) == NULL && strcmp(err.code, "22023") == 0);
+    CHECK(doc(db, NC_DOC_REPLACE, t, "{}", "{\"$set\": {\"a\": 1}}", 0, &err) == NULL &&
+          strcmp(err.code, "22023") == 0);
+    r = doc(db, NC_DOC_DELETE, t, "{\"age\": {\"$gte\": 30}}", NULL, 0, &err);
+    CHECK(r && nc_count(r) == 1);
+    nc_result_free(r);
+    r = doc(db, NC_DOC_DELETE, t, NULL, NULL, NC_DOC_MANY, &err);
+    CHECK(r && nc_count(r) == 3);
+    nc_result_free(r);
+    /* In a transaction with a table: rolled back, then committed. */
+    for (commit = 0; commit < 2; commit++) {
+        nc_result_free(must(db, "BEGIN", NULL, 0));
+        snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (1)", audit);
+        nc_result_free(must(db, sql, NULL, 0));
+        nc_result_free(doc(db, NC_DOC_INSERT, t, NULL, "{\"_id\": 9}", 0, &err));
+        nc_result_free(must(db, commit ? "COMMIT" : "ROLLBACK", NULL, 0));
+        r = doc(db, NC_DOC_COUNT, t, NULL, NULL, 0, &err);
+        CHECK(r && strcmp(text_of(r, 0, 0), commit ? "1" : "0") == 0);
+        nc_result_free(r);
+        snprintf(sql, sizeof sql, "SELECT count(*) FROM %s", audit);
+        r = must(db, sql, NULL, 0);
+        CHECK(r && strcmp(text_of(r, 0, 0), commit ? "1" : "0") == 0);
+        nc_result_free(r);
+    }
+    CHECK(doc(db, NC_DOC_COUNT, "c_nosuch", NULL, NULL, 0, &err) == NULL && strcmp(err.code, "42P01") == 0);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -1000,6 +1088,7 @@ int main(void) {
     custom_transport();
     encrypted_columns();
     subject_key();
+    documents();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

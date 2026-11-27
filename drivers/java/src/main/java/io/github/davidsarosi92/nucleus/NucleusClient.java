@@ -74,9 +74,10 @@ public final class NucleusClient implements AutoCloseable {
      * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
      * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
      * SCRAM-SHA-256, never sent; 5: errors carry a hint; 6: results stream, fetched in batches;
-     * 7: columnar results; 8: a subject's key presented ({@link #presentSubjectKey}).
+     * 7: columnar results; 8: a subject's key presented ({@link #presentSubjectKey}); 9:
+     * requests on a collection's documents ({@link #collection}).
      */
-    public static final int PROTOCOL_VERSION = 8;
+    public static final int PROTOCOL_VERSION = 9;
     /** Rows a cursor asks the server for at a time. */
     public static final int DEFAULT_FETCH = 1000;
     /** Rows a columnar batch holds when none is given. */
@@ -1200,6 +1201,37 @@ public final class NucleusClient implements AutoCloseable {
                     default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
                 }
             }
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * A collection's documents (nucleus DOCS.md §10, <i>Documents</i>): MongoDB's requests —
+     * find, count, insert, update, replace, delete — each one message, run by the server as one
+     * statement in this connection's transaction.
+     */
+    public DocumentCollection collection(String name) {
+        return new DocumentCollection(this, name);
+    }
+
+    /** Sends a document request (O) and reads its result. */
+    Result document(int op, String name, String filter, String body, String sort, long skip, long limit,
+            boolean many, boolean upsert) {
+        if (version < 9) {
+            throw new NucleusException("the server speaks version " + version
+                    + " of the protocol; document requests need 9", "0A000");
+        }
+        try {
+            if (active != null) active.close();
+            Writer w = new Writer().u8(op).u8((many ? 1 : 0) | (upsert ? 2 : 0)).str(name)
+                    .str(filter == null ? "" : filter).str(body == null ? "" : body)
+                    .str(sort == null ? "" : sort).i64(skip).i64(limit);
+            send('O', w.bytes());
+            List<Result> results = new ArrayList<>();
+            NucleusException error = replies(results);
+            if (error != null) throw error;
+            return results.get(results.size() - 1);
         } catch (IOException e) {
             throw new NucleusException("connection lost: " + e.getMessage(), e);
         }

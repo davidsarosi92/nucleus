@@ -311,6 +311,50 @@ test("statements nested too deep", async () => {
   await db.close();
 });
 
+test("documents", async () => {
+  // A collection's documents by MongoDB's requests (protocol 9).
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE COLLECTION ${t}`);
+  await db.query(`CREATE TABLE ${t}_audit (n INT)`);
+  const p = db.collection(t);
+  assert.equal(await p.insertOne({ _id: 1, name: "ann", age: 34 }), 1);
+  assert.deepEqual(
+    await p.insertMany([
+      { _id: 2, name: "bob", age: 25, tags: ["x"] },
+      { _id: 3, name: "cy", age: 40 },
+    ]),
+    [2, 3],
+  );
+  assert.deepEqual(await p.find({ age: { $gte: 25 } }, { projection: { name: 1, _id: 0 }, sort: { age: -1 }, skip: 1, limit: 1 }), [
+    { name: "ann" },
+  ]);
+  assert.deepEqual(await p.find({}, { sort: [["age", 1]], projection: { _id: 1 } }), [{ _id: 2 }, { _id: 1 }, { _id: 3 }]);
+  assert.equal(await p.countDocuments({ age: { $gt: 30 } }), 2);
+  assert.deepEqual(await p.updateMany({}, { $max: { age: 30 } }), { matched: 3, modified: 1, upsertedId: null });
+  const u = await p.updateOne({ name: "dan" }, { $set: { age: 5 } }, { upsert: true });
+  assert.equal(u.matched + u.modified, 0);
+  assert.notEqual(u.upsertedId, null);
+  assert.deepEqual(await p.replaceOne({ _id: 3 }, { name: "cyrus" }), { matched: 1, modified: 1, upsertedId: null });
+  assert.deepEqual(await p.findOne({ _id: 3 }), { _id: 3, name: "cyrus" });
+  // An update needs operators; a replacement has none.
+  await assert.rejects(p.updateOne({}, { name: "x" }), (e: NucleusError) => e.code === "22023");
+  await assert.rejects(p.replaceOne({}, { $set: { a: 1 } }), (e: NucleusError) => e.code === "22023");
+  assert.equal(await p.deleteOne({ age: { $gte: 30 } }), 1);
+  assert.equal(await p.deleteMany({}), 3);
+  // In a transaction with a table: rolled back, then committed.
+  for (const commit of [false, true]) {
+    await db.query("BEGIN");
+    await db.query(`INSERT INTO ${t}_audit VALUES (1)`);
+    await p.insertOne({ _id: 9 });
+    await db.query(commit ? "COMMIT" : "ROLLBACK");
+    assert.equal(await p.countDocuments({}), commit ? 1 : 0);
+    assert.equal(Number((await db.query(`SELECT count(*) FROM ${t}_audit`)).rows[0][0]), commit ? 1 : 0);
+  }
+  await assert.rejects(db.collection("js_nosuch").countDocuments({}), (e: NucleusError) => e.code === "42P01");
+  await db.close();
+});
+
 test("transactions", async () => {
   const db = await connect(options);
   const t = table();

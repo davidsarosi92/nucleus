@@ -64,6 +64,19 @@ key.decrypt((byte[]) rows.get(0).get(0));   // "ann@example.com"
 
 A sealed table's rows whose key their user holds: `db.presentSubjectKey(subject, secret)`.
 
+## Documents
+
+A collection's documents by MongoDB's requests (`CREATE COLLECTION`;
+nucleus DOCS.md §8.41, §10 *Documents*), in the connection's transaction:
+
+```java
+DocumentCollection people = db.collection("people");
+people.insertOne("{\"name\": \"ann\", \"age\": 34}");          // its _id
+List<Json> found = people.find("{\"age\": {\"$gte\": 30}}", "{\"name\": 1}", "{\"age\": -1}", 0, 10);
+people.updateOne("{\"name\": \"ann\"}", "{\"$inc\": {\"age\": 1}}", true);
+people.deleteMany("{\"age\": {\"$lt\": 18}}");
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

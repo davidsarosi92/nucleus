@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
+  9, through `nc_document`): `db.collection(name)` → `nucleus::Collection`
+  — `find(filter, FindOptions)`, `find_one`, `count_documents`,
+  `insert_one` / `insert_many`, `update_one` / `update_many` /
+  `replace_one(filter, doc, upsert)` → `UpdateResult`, `delete_one` /
+  `delete_many`; JSON texts in, `Json` out.
 - A server's Unix socket (nucleus PLAN.md §M14.33 R2), through the C
   driver: a path as the host reaches `nucleus server --socket`.
 - Client-side encrypted columns (nucleus PLAN.md §M14.30 K5):

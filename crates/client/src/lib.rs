@@ -39,8 +39,10 @@ use nucleus_wire::{
 /// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
 /// named as such; 4: the password is proved by SCRAM-SHA-256, never
 /// sent; 5: errors carry a hint; 6: results stream, and a [`Cursor`]
-/// fetches them in batches; 7: columnar results, [`Client::batches`]).
-pub const PROTOCOL_VERSION: u16 = 8;
+/// fetches them in batches; 7: columnar results, [`Client::batches`]; 8:
+/// subject keys; 9: requests on a collection's documents,
+/// [`Client::collection`]).
+pub const PROTOCOL_VERSION: u16 = 9;
 /// A [`Cursor`]'s batch when none is given: rows the server sends before
 /// it waits for the client.
 pub const DEFAULT_FETCH: u32 = 1000;
@@ -1577,6 +1579,39 @@ impl Client {
         }
     }
 
+    /// A collection's documents (PLAN.md §M16 Q4): MongoDB's requests —
+    /// find, count, insert, update, replace, delete — with filter
+    /// documents, each sent as one `O` message and run by the server as
+    /// one statement, in this session's transaction.
+    pub fn collection(&mut self, name: &str) -> Collection<'_> {
+        Collection {
+            client: self,
+            name: name.to_string(),
+        }
+    }
+
+    /// Sends a document request (`O`) and reads its one result.
+    fn document(&mut self, r: &DocumentRequest<'_>) -> Result<Reply, Error> {
+        if self.version < 9 {
+            return Err(Error::Protocol(format!(
+                "the server speaks version {} of the protocol; document requests need 9",
+                self.version
+            )));
+        }
+        let mut body = vec![r.op, u8::from(r.many) | (u8::from(r.upsert) << 1)];
+        for s in [r.collection, r.filter, r.body, r.sort] {
+            put_str(&mut body, s);
+        }
+        body.extend_from_slice(&r.skip.to_le_bytes());
+        body.extend_from_slice(&r.limit.to_le_bytes());
+        self.send(b'O', &body)?;
+        match self.replies()?.pop() {
+            Some(Ok(r)) => Ok(r),
+            Some(Err(e)) => Err(Error::Server(e)),
+            None => Err(Error::Protocol("no result".into())),
+        }
+    }
+
     /// Runs one statement; its result, or the server's error as
     /// [`Error::Server`].
     pub fn execute(&mut self, sql: &str, params: &[Value]) -> Result<Reply, Error> {
@@ -1617,6 +1652,206 @@ impl Client {
     pub fn close(mut self) -> io::Result<()> {
         self.conn.get_mut().write_all(&frame(b'X', &[]))?;
         self.conn.get_mut().flush()
+    }
+}
+
+/// An `O` message's fields.
+struct DocumentRequest<'a> {
+    op: u8,
+    many: bool,
+    upsert: bool,
+    collection: &'a str,
+    filter: &'a str,
+    body: &'a str,
+    sort: &'a str,
+    skip: u64,
+    limit: u64,
+}
+
+/// A find's options: what of each document (a projection), in which
+/// order (a sort document, its fields in its text's order), how many
+/// skipped, at most how many (0: all).  JSON texts; empty: none.
+#[derive(Clone, Debug, Default)]
+pub struct FindOptions {
+    /// `{"name": 1, "_id": 0}`, `{"tags": {"$slice": 2}}`.
+    pub projection: String,
+    /// `{"age": -1, "name": 1}`.
+    pub sort: String,
+    /// Documents skipped after the sort.
+    pub skip: u64,
+    /// At most this many (0: no limit).
+    pub limit: u64,
+}
+
+/// What an update or a replacement did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateResult {
+    /// Documents the filter matched (at most one for `…_one`).
+    pub matched: u64,
+    /// Of them, those the update changed.
+    pub modified: u64,
+    /// The `_id` of the document an upsert inserted.
+    pub upserted_id: Option<Value>,
+}
+
+/// A collection's documents, through a [`Client`]'s session (see
+/// [`Client::collection`]).  Filters, updates, projections, sorts and
+/// documents are JSON texts; documents come back as JSON texts.
+pub struct Collection<'c> {
+    client: &'c mut Client,
+    name: String,
+}
+
+impl Collection<'_> {
+    fn request(
+        &mut self,
+        op: u8,
+        filter: &str,
+        body: &str,
+        many: bool,
+        upsert: bool,
+    ) -> Result<Reply, Error> {
+        let r = DocumentRequest {
+            op,
+            many,
+            upsert,
+            collection: &self.name,
+            filter,
+            body,
+            sort: "",
+            skip: 0,
+            limit: 0,
+        };
+        self.client.document(&r)
+    }
+
+    /// The documents `filter` matches (`""` or `"{}"`: all).
+    pub fn find(&mut self, filter: &str, options: &FindOptions) -> Result<Vec<String>, Error> {
+        let r = DocumentRequest {
+            op: 1,
+            many: false,
+            upsert: false,
+            collection: &self.name,
+            filter,
+            body: &options.projection,
+            sort: &options.sort,
+            skip: options.skip,
+            limit: options.limit,
+        };
+        let reply = self.client.document(&r)?;
+        Ok(reply
+            .rows
+            .into_iter()
+            .map(|mut row| json_text(row.swap_remove(0)))
+            .collect())
+    }
+
+    /// The first document `filter` matches.
+    pub fn find_one(&mut self, filter: &str) -> Result<Option<String>, Error> {
+        let options = FindOptions {
+            limit: 1,
+            ..FindOptions::default()
+        };
+        Ok(self.find(filter, &options)?.pop())
+    }
+
+    /// How many documents `filter` matches.
+    pub fn count(&mut self, filter: &str) -> Result<u64, Error> {
+        let reply = self.request(2, filter, "", false, false)?;
+        match reply.rows.first().and_then(|r| r.first()) {
+            Some(Value::Int(n)) => Ok(*n as u64),
+            other => Err(Error::Protocol(format!("a count, not {other:?}"))),
+        }
+    }
+
+    /// Inserts a document; its `_id` (made where it has none).
+    pub fn insert_one(&mut self, doc: &str) -> Result<Value, Error> {
+        let mut ids = self.request(3, "", doc, false, false)?.rows;
+        ids.pop()
+            .and_then(|mut r| r.pop())
+            .ok_or_else(|| Error::Protocol("no _id".into()))
+    }
+
+    /// Inserts documents, in their order; their `_id`s.
+    pub fn insert_many(&mut self, docs: &[&str]) -> Result<Vec<Value>, Error> {
+        let body = format!("[{}]", docs.join(", "));
+        let rows = self.request(3, "", &body, false, false)?.rows;
+        Ok(rows.into_iter().filter_map(|mut r| r.pop()).collect())
+    }
+
+    fn updated(
+        &mut self,
+        op: u8,
+        filter: &str,
+        body: &str,
+        many: bool,
+        upsert: bool,
+    ) -> Result<UpdateResult, Error> {
+        let reply = self.request(op, filter, body, many, upsert)?;
+        let row = reply
+            .rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Protocol("no update result".into()))?;
+        let n = |v: &Value| match v {
+            Value::Int(n) => *n as u64,
+            _ => 0,
+        };
+        Ok(UpdateResult {
+            matched: n(&row[0]),
+            modified: n(&row[1]),
+            upserted_id: (!row[2].is_null()).then(|| row[2].clone()),
+        })
+    }
+
+    /// Updates the first document `filter` matches by `update`'s
+    /// operators (`{"$set": …}`); with `upsert`, inserts one where none
+    /// matches.
+    pub fn update_one(
+        &mut self,
+        filter: &str,
+        update: &str,
+        upsert: bool,
+    ) -> Result<UpdateResult, Error> {
+        self.updated(4, filter, update, false, upsert)
+    }
+
+    /// Updates every document `filter` matches.
+    pub fn update_many(
+        &mut self,
+        filter: &str,
+        update: &str,
+        upsert: bool,
+    ) -> Result<UpdateResult, Error> {
+        self.updated(4, filter, update, true, upsert)
+    }
+
+    /// Replaces the first document `filter` matches (its `_id` kept).
+    pub fn replace_one(
+        &mut self,
+        filter: &str,
+        doc: &str,
+        upsert: bool,
+    ) -> Result<UpdateResult, Error> {
+        self.updated(5, filter, doc, false, upsert)
+    }
+
+    /// Deletes the first document `filter` matches; how many (0 or 1).
+    pub fn delete_one(&mut self, filter: &str) -> Result<u64, Error> {
+        Ok(self.request(6, filter, "", false, false)?.count)
+    }
+
+    /// Deletes every document `filter` matches; how many.
+    pub fn delete_many(&mut self, filter: &str) -> Result<u64, Error> {
+        Ok(self.request(6, filter, "", true, false)?.count)
+    }
+}
+
+/// A `json` value's text.
+fn json_text(v: Value) -> String {
+    match v {
+        Value::Json(s) | Value::Text(s) => s,
+        other => other.to_string(),
     }
 }
 

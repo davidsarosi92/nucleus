@@ -7,10 +7,16 @@ otherwise — the database they name is `nucleus` (the main one) unless
 told another, a branch's name (`CREATE BRANCH`, DOCS.md §8.32) for a
 branch —, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
-parameters, errors with their SQLSTATE, transactions, passwords).  They
-speak protocol version 8 (a subject's key presented for the rows its
+parameters, errors with their SQLSTATE, transactions, passwords, a
+collection's documents).  They
+speak protocol version 9 (a subject's key presented for the rows its
 user holds the key of — `present_subject_key`, DOCS.md §8.40 — a message
-of its own, never a statement): large results stream, read a batch at a time
+of its own, never a statement; a collection's documents by MongoDB's
+requests — `collection(name)`: `find`, `count_documents`, `insert_one`
+/ `insert_many`, `update_one` / `update_many`, `replace_one`,
+`delete_one` / `delete_many`, in each language's case; C's
+`nc_document` —, one `O` message each, compiled by the server, in the
+connection's transaction beside its SQL, DOCS.md §10 *Documents*): large results stream, read a batch at a time
 through each driver's cursor (Rust `cursor`, Python and JavaScript
 `stream`, Java, C and C++ `cursor`) — or in columnar batches, a buffer
 per column, without a value per cell (`batches` in each; Python into

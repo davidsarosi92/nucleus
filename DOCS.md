@@ -1714,7 +1714,16 @@ nucleus protocol (default `127.0.0.1:20035`, user, password and database
 `nucleus`; the password also from `NCPASSWORD`).  An error prints its hint
 on a `HINT:` line.  Statements end with `;` (a script on stdin,
 or one `-c` command); the prompt shows `*` in a transaction block and `!`
-in a failed one.  Its backslash commands read `nc_catalog` (§8.11), so they
+in a failed one.  A line beginning `db.` is a request on a collection's
+documents as MongoDB's shell writes it (§M16 Q4) — `db.<collection>.`
+`find(filter, projection)` with `.sort(…)`, `.skip(n)`, `.limit(n)` on the
+same line, `findOne`, `countDocuments`, `insertOne`, `insertMany`,
+`updateOne`, `updateMany`, `replaceOne` (`{upsert: true}` as the third
+argument), `deleteOne`, `deleteMany` — its arguments JSON or the shell's
+relaxed form (unquoted keys, single quotes, trailing commas; their order
+kept), over lines until its brackets close; it is compiled to the
+statement a driver's `O` is (§10 *Documents*) and its result printed as
+a statement's.  Its backslash commands read `nc_catalog` (§8.11), so they
 work the same locally and remotely:
 
 | Command | Shows |
@@ -2360,8 +2369,14 @@ one of them (`WITH d AS (DELETE … RETURNING *) INSERT INTO t SELECT *
 FROM d`; inside a subquery `0A000`, as PostgreSQL's).  Such a CTE's
 statement runs once, before what comes after it, read or not; its
 `RETURNING` rows are what a reference reads (without `RETURNING` a
-reference is `0A000`).  Unlike PostgreSQL's, which all read the
-statement's snapshot, each part sees the writes of the CTEs before it.
+reference is `0A000`).  A query CTE beside them is read once, where it
+stands, as PostgreSQL materializes it: what comes after it reads what it
+read, not what was written since — `WITH m AS (SELECT …), i AS (INSERT
+… WHERE NOT EXISTS (SELECT 1 FROM m)) SELECT (SELECT count(*) FROM m)`
+counts the rows before the insert (`WITH RECURSIVE`'s queries excepted:
+bound where they are read).  Unlike PostgreSQL's, which all read the
+statement's snapshot, a part that reads a table itself sees the writes
+of the CTEs before it.
 A recursive one may end in `SEARCH DEPTH | BREADTH FIRST BY c… SET s`
 and `CYCLE c… SET m [TO v DEFAULT d] USING p` (PostgreSQL 14's, written
 as its rewrite: `crates/sql/src/search_cycle.rs`).  Depth first, `s` is
@@ -2542,8 +2557,9 @@ A statement's own `WITH` with a data-modifying CTE, or before `INSERT`,
 `UPDATE` or `DELETE`, is a `Statement::WithStatement`: the session runs
 the CTEs' statements in order and gives each part bound after them —
 the next CTE's statement, then the statement itself — the CTEs before
-it (`binder::GivenCte`): a query CTE bound there, a data-modifying one
-as its `RETURNING` rows (a `Values`).  `DESCRIBE` gives them as their
+it (`binder::GivenCte`): a query CTE run where it stands, as its rows
+(under `WITH RECURSIVE` bound there), a data-modifying one as its
+`RETURNING` rows (a `Values`).  `DESCRIBE` gives them as their
 columns, with no rows, and runs nothing.  An aggregate's `FILTER (WHERE c)` (`agg_filter`) is bound as
 an aggregate of its own wrapping the inner one, fed `c` first and passing
 on the rows it holds for.
@@ -8647,7 +8663,7 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (8; 1–7 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `H` Hello | client → server, first | `u16` version (9; 1–8 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
@@ -8667,6 +8683,7 @@ header bytes not included; at most 1 GiB), then the body.
 | `c` Close | client → server | empty, after `S`: no more rows — the statement ends there |
 | `X` Bye | client → server | empty; the server closes |
 | `k` Subject key | client → server | version 8: `u8` action (0 present, 1 give into the user's keeping), string subject, bytes (`u32` 32, then the user's 32-byte secret) — a message of its own so no log or audit record holds the secret (§8.40); answered `E` on failure, then `R` |
+| `O` Document request | client → server | version 9: `u8` operation (1 find, 2 count, 3 insert, 4 update, 5 replace, 6 delete), `u8` flags (1 every match, 2 upsert), strings collection, filter, body (insert: a document or an array of them; update: the update document; replace: the replacement; find: the projection), sort (a sort document, read in its text's order) — JSON texts, empty where not given —, `u64` skip, `u64` limit (0: none).  Compiled to one statement (`nucleus_sql::documents`, below) and answered as a typed `Q` with it, fetched whole: find `C D* K` of one `json` column `doc`; count one row (`n`, `bigint`); insert a row per document (`_id`); update and replace one row (`matched`, `modified` — the documents the update changed —, `upserted`: the inserted document's `_id` or NULL); delete `K` (`DELETE n`) |
 
 **Session.** The client sends Hello.  If the server wants a password and
 the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
@@ -8702,6 +8719,26 @@ return rows), and finally Ready.  A failing statement sends Error instead
 of Done, the remaining statements of that Query are skipped, and Ready
 follows.  A Query with parameters must hold one statement; `$1`, `$2`, …
 refer to them.
+
+**Documents** (version 9, PLAN.md §M16 Q4).  `O` is MongoDB's requests
+on a collection — find (filter, projection, sort, skip, limit), count,
+insert, update and replace (one or every match; upsert), delete (one or
+every match) — so that every driver sends the same request and the
+server compiles it once: `nucleus_sql::documents::statement` makes the
+one statement each is, over §8.41's functions (`doc @? json_filter(…)`,
+`json_project`, `json_sort_key`, `json_update`, `json_upsert_document`),
+the JSON texts as literals (a constant filter compiled where it is
+bound, and served by a path index) and the collection's name quoted as
+an identifier.  An update or a replacement is `WITH m AS (the matches, or
+the first), u AS (UPDATE … the matches the update changes RETURNING
+_id) [, i AS (INSERT … json_upsert_document(…) WHERE NOT EXISTS m)]
+SELECT counts`; `…_one`'s match, a delete's one, is the first the plan
+finds.  Each part is checked before any document, as MongoDB refuses a
+bad request whether or not anything matches: the filter compiled, the
+sort document read, an update applied to an empty document, a
+projection too (`22023`, `0A000`).  An update document needs operators
+and a replacement has none (`22023`).  It runs in the session's
+transaction, beside its SQL.
 
 **Pipelining.**  A client may send Queries without waiting for the
 replies to those before: the server reads and answers them in order,
@@ -8867,7 +8904,23 @@ midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 ascending; every driver has a type of its own for it), `Json(String)`
 (its text; columns `Type::Json`), `Other {
 type_name, bytes }` for another registered type; `char(n)` and enum values as text, their columns typed `Char` and
-`Enum(name)`) with `From` conversions for parameters.  Every driver
+`Enum(name)`) with `From` conversions for parameters.
+`collection(name)` (version 9, §10 *Documents*): a collection's
+documents by MongoDB's requests, in the session's transaction —
+`find(filter, &FindOptions { projection, sort, skip, limit })` and
+`find_one(filter)` (documents as JSON texts), `count(filter)`,
+`insert_one(doc)` / `insert_many(&[doc])` (their `_id`s),
+`update_one` / `update_many(filter, update, upsert)` and
+`replace_one(filter, doc, upsert)` (`UpdateResult { matched, modified,
+upserted_id }`), `delete_one` / `delete_many(filter)` (the count); JSON
+texts in, `""` an empty filter.  Every driver has it, a thin layer
+over `O` with the same names in its language's case (Python
+`Collection`, dicts in and out, a sort as `(field, 1 | -1)` pairs too;
+JavaScript `Collection`, objects; Java and Swift `DocumentCollection` —
+`Collection` is the standard library's —, C++ `nucleus::Collection`,
+JSON texts; C `nc_document` with an `nc_document_request`), and the
+same conformance case (`documents`: every request, the `22023`s, a
+transaction with a table rolled back and committed).  Every driver
 speaks protocol version 7 — results read as they arrive, a batch at a
 time (Rust `Client::cursor`, Python `Connection.stream` and a lazy DB-API
 cursor, JavaScript `Client.stream` with `for await`, Java

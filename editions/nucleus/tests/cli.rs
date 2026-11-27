@@ -240,6 +240,47 @@ fn a_database_in_memory() {
     std::fs::remove_dir_all(&cwd).unwrap();
 }
 
+/// `db.<collection>.<method>(…)` lines: MongoDB's shell's requests on a
+/// collection's documents, in its relaxed syntax (PLAN.md §M16 Q4).
+#[test]
+fn the_shells_document_requests() {
+    let (ok, out) = nucleus(
+        &["sql", ":memory:"],
+        "CREATE COLLECTION people;\n\
+         db.people.insertMany([{_id: 1, name: 'ann', age: 34}, {_id: 2, name: \"bob\", age: 25, tags: ['x',]}])\n\
+         db.people.updateOne({name: 'cy'}, {$set: {age: 40}}, {upsert: true});\n\
+         db.people.updateMany({\n  age: {$lt: 30}\n}, {$inc: {age: 1}})\n\
+         db.people.find({age: {$gte: 20}}, {name: 1, _id: 0}).sort({age: -1, name: 1}).skip(1).limit(1)\n\
+         db.people.countDocuments({tags: 'x'})\n",
+    );
+    assert!(ok, "{out}");
+    assert!(out.contains(" 0       | 0        | \""), "{out}"); // the upsert
+    assert!(out.contains(" 1       | 1        |"), "{out}");
+    assert!(
+        out.contains(" doc             \n-----------------\n {\"name\": \"ann\"} \n(1 row)"),
+        "{out}"
+    );
+    assert!(out.ends_with(" n \n---\n 1 \n(1 row)\n"), "{out}");
+    // Not a request it knows; a chained call on its own line; a bad filter.
+    let (ok, out) = nucleus(
+        &["sql", ":memory:"],
+        "CREATE COLLECTION c;\ndb.c.drop()\ndb.c.find()\n  .limit(1)\ndb.c.find({a: {$where: 1}})\n",
+    );
+    assert!(!ok);
+    assert!(
+        out.contains("db.c.drop: not a request ncsql knows"),
+        "{out}"
+    );
+    assert!(out.contains(".limit(1) belongs on the line"), "{out}");
+    // Checked before any document: the collection is empty.
+    assert!(
+        out.contains("unknown operator in a filter: $where (22023)"),
+        "{out}"
+    );
+    let (ok, out) = nucleus(&["sql", ":memory:", "-c", "db.nope.countDocuments({})"], "");
+    assert!(!ok && out.contains("42P01"), "{out}");
+}
+
 /// `nucleus init` with no password given makes one, shown once, which
 /// then logs in (§M14.17 E2).
 #[test]

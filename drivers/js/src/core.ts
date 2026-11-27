@@ -39,8 +39,9 @@ export type { PlainValue } from "./columns.ts";
 // 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 // 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
 // a hint; 6: results stream, fetched in batches; 7: columnar results; 8: a
-// subject's key presented (presentSubjectKey).
-export const PROTOCOL_VERSION = 8;
+// subject's key presented (presentSubjectKey); 9: requests on a
+// collection's documents (collection).
+export const PROTOCOL_VERSION = 9;
 /** Rows a stream asks the server for at a time. */
 export const DEFAULT_FETCH = 1000;
 /** Rows a columnar batch holds when none is given. */
@@ -1235,6 +1236,42 @@ export class Client {
     return next;
   }
 
+  /** A collection's documents (nucleus DOCS.md section 10, *Documents*):
+   * MongoDB's requests — find, count, insert, update, replace, delete —
+   * each one message, run by the server as one statement in this
+   * connection's transaction. */
+  collection(name: string): Collection {
+    return new Collection(this, name);
+  }
+
+  /** Sends a document request (`O`) and reads its result. */
+  document(op: number, name: string, parts: DocumentParts): Promise<Result> {
+    if (this.version < 9) {
+      return Promise.reject(
+        new NucleusError(`the server speaks version ${this.version} of the protocol; document requests need 9`, "0A000"),
+      );
+    }
+    void this.active?.close();
+    const run = async (): Promise<Result> => {
+      const w = new Writer()
+        .u8(op)
+        .u8((parts.many ? 1 : 0) | (parts.upsert ? 2 : 0))
+        .str(name)
+        .str(documentText(parts.filter))
+        .str(documentText(parts.body))
+        .str(documentText(parts.sort))
+        .i64(BigInt(parts.skip ?? 0))
+        .i64(BigInt(parts.limit ?? 0));
+      this.socket.write(frame("O", w.bytes()));
+      const [results, error] = await this.replies();
+      if (error) throw error;
+      return results[results.length - 1];
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
   /** Sends `Q`: rows `fetch` at a time (0: all at once; from version 6). */
   sendQuery(sql: string, params: Value[], format: number, fetch: number): void {
     this.socket.write(frame("Q", this.queryBody(sql, params, format, fetch)));
@@ -1522,6 +1559,128 @@ function readColumns(r: Reader): Column[] {
  * `for await`; `columns`, and once every row is read `command` and
  * `count`.
  */
+/** A document request's parts. */
+interface DocumentParts {
+  filter?: unknown;
+  body?: unknown;
+  sort?: unknown;
+  skip?: number;
+  limit?: number;
+  many?: boolean;
+  upsert?: boolean;
+}
+
+/** A filter, document, update, projection or sort as JSON text: a string
+ * as it is, `undefined` / `null` empty, a list of `[field, direction]`
+ * pairs (a sort) as such, anything else `JSON.stringify`'d (an object's
+ * keys in their order). */
+function documentText(part: unknown): string {
+  if (part === undefined || part === null) return "";
+  if (typeof part === "string") return part;
+  return JSON.stringify(part);
+}
+
+/** Options of a find. */
+export interface FindOptions {
+  /** Which fields: `{ name: 1 }` or `{ secret: 0 }`. */
+  projection?: unknown;
+  /** The order: `{ age: -1, name: 1 }`, its keys in their order. */
+  sort?: unknown;
+  skip?: number;
+  /** At most this many (0: all). */
+  limit?: number;
+}
+
+/** What an update or a replacement did. */
+export interface UpdateResult {
+  matched: number;
+  /** The documents it changed. */
+  modified: number;
+  /** The `_id` of the document an upsert inserted, else `null`. */
+  upsertedId: Value;
+}
+
+/** A collection's documents (`Client.collection(name)`).  Filters,
+ * documents, updates, projections and sorts are objects (or JSON texts);
+ * documents come back as objects. */
+export class Collection {
+  readonly client: Client;
+  readonly name: string;
+
+  constructor(client: Client, name: string) {
+    this.client = client;
+    this.name = name;
+  }
+
+  /** The documents `filter` matches (none given: all). */
+  async find(filter?: unknown, options: FindOptions = {}): Promise<JsonValue[]> {
+    const r = await this.client.document(1, this.name, {
+      filter,
+      body: options.projection,
+      sort: options.sort,
+      skip: options.skip,
+      limit: options.limit,
+    });
+    return r.rows.map((row) => row[0] as JsonValue);
+  }
+
+  /** The first document `filter` matches, or `null`. */
+  async findOne(filter?: unknown, options: FindOptions = {}): Promise<JsonValue | null> {
+    const found = await this.find(filter, { ...options, limit: 1 });
+    return found.length > 0 ? found[0] : null;
+  }
+
+  /** How many documents `filter` matches. */
+  async countDocuments(filter?: unknown): Promise<number> {
+    const r = await this.client.document(2, this.name, { filter });
+    return Number(r.rows[0][0]);
+  }
+
+  /** Inserts `doc`; its `_id` (made where it has none). */
+  async insertOne(doc: unknown): Promise<Value> {
+    return (await this.client.document(3, this.name, { body: doc })).rows[0][0];
+  }
+
+  /** Inserts `docs`, in their order; their `_id`s. */
+  async insertMany(docs: unknown[]): Promise<Value[]> {
+    const body = docs.every((d) => typeof d === "string")
+      ? `[${docs.join(", ")}]`
+      : docs.map((d) => (typeof d === "string" ? JSON.parse(d) : d));
+    return (await this.client.document(3, this.name, { body })).rows.map((row) => row[0]);
+  }
+
+  private async updated(op: number, filter: unknown, body: unknown, many: boolean, upsert: boolean): Promise<UpdateResult> {
+    const row = (await this.client.document(op, this.name, { filter, body, many, upsert })).rows[0];
+    return { matched: Number(row[0]), modified: Number(row[1]), upsertedId: row[2] };
+  }
+
+  /** Updates the first document `filter` matches by `update`'s operators
+   * (`{ $set: … }`); with `upsert`, inserts one where none matches. */
+  updateOne(filter: unknown, update: unknown, options: { upsert?: boolean } = {}): Promise<UpdateResult> {
+    return this.updated(4, filter, update, false, options.upsert ?? false);
+  }
+
+  /** Updates every document `filter` matches. */
+  updateMany(filter: unknown, update: unknown, options: { upsert?: boolean } = {}): Promise<UpdateResult> {
+    return this.updated(4, filter, update, true, options.upsert ?? false);
+  }
+
+  /** Replaces the first document `filter` matches (its `_id` kept). */
+  replaceOne(filter: unknown, doc: unknown, options: { upsert?: boolean } = {}): Promise<UpdateResult> {
+    return this.updated(5, filter, doc, false, options.upsert ?? false);
+  }
+
+  /** Deletes the first document `filter` matches; how many (0 or 1). */
+  async deleteOne(filter: unknown): Promise<number> {
+    return Number((await this.client.document(6, this.name, { filter })).count);
+  }
+
+  /** Deletes every document `filter` matches; how many. */
+  async deleteMany(filter: unknown): Promise<number> {
+    return Number((await this.client.document(6, this.name, { filter, many: true })).count);
+  }
+}
+
 export class Stream<T = Value[]> implements AsyncIterable<T> {
   columns: Column[] = [];
   /** `SELECT`, …, once the statement has ended. */

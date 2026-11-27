@@ -15,8 +15,9 @@ use std::io::{self, Read};
 /// tags 12–20; 4 SCRAM-SHA-256 logins; 5 a hint in `E`; 6 streaming
 /// (`S`, `F`, `c`) and a fetch size in `Q`; 7 columnar results (`B`) and
 /// `COPY … FROM STDIN` (`I`, `d`, `e`, `f`); 8 a subject's key presented
-/// or given into its user's keeping (`k`).
-pub const VERSION: u16 = 8;
+/// or given into its user's keeping (`k`); 9 requests on a collection's
+/// documents (`O`).
+pub const VERSION: u16 = 9;
 /// The oldest still spoken.
 pub const MIN_VERSION: u16 = 1;
 /// The largest body a frame may have.
@@ -66,6 +67,14 @@ pub mod kind {
     /// 1 given into the user's keeping), the subject, the user's 32-byte
     /// secret — never a statement's text, so no log holds it.
     pub const SUBJECT_KEY: u8 = b'k';
+    /// A request on a collection's documents (client, from version 9):
+    /// the operation (`u8`: 1 find, 2 count, 3 insert, 4 update, 5
+    /// replace, 6 delete), flags (`u8`: 1 every match, 2 upsert), the
+    /// collection, the filter, the body (documents, update, replacement or
+    /// projection) and the sort document (JSON texts, empty where not
+    /// given), skip and limit (`u64`, limit 0 none).  Answered as a `Q`
+    /// is: the statement it compiles to runs (PLAN.md §M16 Q4).
+    pub const DOCUMENT: u8 = b'O';
 }
 
 /// Value and type tags.

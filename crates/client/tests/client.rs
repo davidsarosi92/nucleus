@@ -2080,3 +2080,89 @@ fn the_database_named_is_a_branch() {
         other => panic!("{other:?}"),
     }
 }
+
+/// PLAN.md §M16 Q4: a collection's documents through `O` messages — every
+/// request, in a transaction with a table, and the errors.
+#[test]
+fn documents_by_filter() {
+    use nucleus_client::FindOptions;
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute("CREATE COLLECTION people", &[]).unwrap();
+    c.execute("CREATE INDEX ON people (age)", &[]).unwrap();
+    c.execute("CREATE TABLE audit (n INT)", &[]).unwrap();
+    let mut p = c.collection("people");
+    assert_eq!(
+        p.insert_one(r#"{"_id": 1, "name": "ann", "age": 34}"#)
+            .unwrap(),
+        Value::Json("1".into())
+    );
+    let ids = p
+        .insert_many(&[
+            r#"{"_id": 2, "name": "bob", "age": 25, "tags": ["x"]}"#,
+            r#"{"_id": 3, "name": "cy", "age": 40}"#,
+        ])
+        .unwrap();
+    assert_eq!(ids, vec![Value::Json("2".into()), Value::Json("3".into())]);
+    // A find: filter, projection, sort, skip, limit.
+    let options = FindOptions {
+        projection: r#"{"name": 1, "_id": 0}"#.into(),
+        sort: r#"{"age": -1}"#.into(),
+        skip: 1,
+        limit: 1,
+    };
+    assert_eq!(
+        p.find(r#"{"age": {"$gte": 25}}"#, &options).unwrap(),
+        vec![r#"{"name": "ann"}"#]
+    );
+    assert_eq!(p.count(r#"{"age": {"$gt": 30}}"#).unwrap(), 2);
+    assert_eq!(p.count("").unwrap(), 3);
+    assert_eq!(p.find_one(r#"{"name": "zed"}"#).unwrap(), None);
+    // Updates: matched, modified, the upserted id.
+    let u = p
+        .update_many("{}", r#"{"$max": {"age": 30}}"#, false)
+        .unwrap();
+    assert_eq!((u.matched, u.modified, u.upserted_id), (3, 1, None));
+    let u = p
+        .update_one(r#"{"name": "dan"}"#, r#"{"$set": {"age": 5}}"#, true)
+        .unwrap();
+    assert_eq!((u.matched, u.modified), (0, 0));
+    assert!(u.upserted_id.is_some());
+    let u = p
+        .replace_one(r#"{"_id": 3}"#, r#"{"name": "cyrus"}"#, false)
+        .unwrap();
+    assert_eq!((u.matched, u.modified), (1, 1));
+    assert_eq!(
+        p.find_one(r#"{"_id": 3}"#).unwrap().unwrap(),
+        r#"{"_id": 3, "name": "cyrus"}"#
+    );
+    // A replacement is not an update, nor the reverse.
+    assert!(
+        matches!(p.update_one("{}", r#"{"name": "x"}"#, false), Err(Error::Server(e)) if e.code == "22023")
+    );
+    assert!(
+        matches!(p.replace_one("{}", r#"{"$set": {"a": 1}}"#, false), Err(Error::Server(e)) if e.code == "22023")
+    );
+    assert!(matches!(
+        p.find(r#"{"a": {"$where": "1"}}"#, &FindOptions::default()),
+        Err(Error::Server(_))
+    ));
+    assert_eq!(p.delete_one(r#"{"age": {"$gte": 30}}"#).unwrap(), 1);
+    assert_eq!(p.delete_many("{}").unwrap(), 3);
+    // In a transaction with a table: both rolled back, then both kept.
+    for commit in [false, true] {
+        c.execute("BEGIN", &[]).unwrap();
+        c.execute("INSERT INTO audit VALUES (1)", &[]).unwrap();
+        c.collection("people").insert_one(r#"{"_id": 9}"#).unwrap();
+        assert_eq!(c.status(), TxnStatus::InBlock);
+        c.execute(if commit { "COMMIT" } else { "ROLLBACK" }, &[])
+            .unwrap();
+        let n = c.collection("people").count("{}").unwrap();
+        let rows = c.rows("SELECT count(*) FROM audit", &[]).unwrap();
+        assert_eq!(
+            (n, rows[0][0].clone()),
+            (u64::from(commit), Value::Int(i64::from(commit)))
+        );
+    }
+    // No such collection: the server's error.
+    assert!(matches!(c.collection("nope").count("{}"), Err(Error::Server(e)) if e.code == "42P01"));
+}

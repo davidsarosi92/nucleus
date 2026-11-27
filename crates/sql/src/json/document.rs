@@ -787,6 +787,19 @@ pub fn update(doc: &[u8], u: &[u8]) -> Result<Vec<u8>> {
     d.to_bytes()
 }
 
+/// Checks an update document whole, before any document: applied to an
+/// empty one, where only what it says can fail (an unknown operator, a
+/// conflict, an argument of the wrong kind, a condition that is no
+/// filter) — as MongoDB refuses it whether or not anything matches.
+pub fn check_update(u: &[u8]) -> Result<()> {
+    update(&T::Obj(BTreeMap::new()).to_bytes()?, u).map(|_| ())
+}
+
+/// Checks a projection whole (on an empty document).
+pub fn check_projection(p: &[u8]) -> Result<()> {
+    project(&T::Obj(BTreeMap::new()).to_bytes()?, p).map(|_| ())
+}
+
 /// `json_upsert_document(filter, update)`: the filter's equalities (its
 /// fields with a value or `$eq`, through `$and`), then the update.
 pub fn upsert_document(filter: &[u8], u: &[u8]) -> Result<Vec<u8>> {

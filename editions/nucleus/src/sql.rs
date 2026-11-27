@@ -3,7 +3,13 @@
 //!
 //! Its backslash commands read `nc_catalog`, nucleus's own catalog, so
 //! they work the same locally and over the network (and show what psql's
-//! `\d` cannot: table ids, key prefixes, statistics).
+//! `\d` cannot: table ids, key prefixes, statistics).  A line beginning
+//! `db.` is a request on a collection's documents, as MongoDB's shell
+//! writes it (`db.people.find({age: {$gt: 30}}).sort({age: -1})`; PLAN.md
+//! §M16 Q4), compiled to the statement a driver's request is.
+
+#[path = "mongosh.rs"]
+mod mongosh;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Arc;
@@ -413,6 +419,27 @@ struct Shell {
 
 impl Shell {
     /// Runs SQL text and prints the results; whether everything succeeded.
+    /// A `db.<collection>.<method>(…)` request: the statement it compiles
+    /// to, run (an error in it printed as a statement's).
+    fn run_request(&mut self, text: &str, out: &mut dyn Write) -> Result<bool> {
+        let sql = mongosh::parse(text).and_then(|r| {
+            nucleus_sql::documents::statement(&r)
+                .map_err(|e| format!("ERROR:  {} ({})", e.message, e.code))
+        });
+        match sql {
+            Ok(sql) => self.run_sql(&sql, out),
+            Err(e) => {
+                let e = if e.starts_with("ERROR:") {
+                    e
+                } else {
+                    format!("ERROR:  {e}")
+                };
+                writeln!(out, "{e}").map_err(|e| e.to_string())?;
+                Ok(false)
+            }
+        }
+    }
+
     fn run_sql(&mut self, sql: &str, out: &mut dyn Write) -> Result<bool> {
         let started = Instant::now();
         let results = self.backend.execute(sql)?;
@@ -783,13 +810,33 @@ impl Shell {
                     continue;
                 }
             }
+            if buf.trim().is_empty() && line.trim_start().starts_with('.') {
+                // A chained call on a line of its own: its request ran.
+                writeln!(
+                    out,
+                    "ERROR:  {} belongs on the line of its db.… request",
+                    line.trim()
+                )
+                .map_err(|e| e.to_string())?;
+                ok = false;
+                continue;
+            }
             buf.push_str(&line);
+            if mongosh::is_request(&buf) {
+                if mongosh::complete(&buf) {
+                    ok &= self.run_request(&buf, out)?;
+                    buf.clear();
+                }
+                continue;
+            }
             if buf.trim_end().ends_with(';') {
                 ok &= self.run_sql(&buf, out)?;
                 buf.clear();
             }
         }
-        if !buf.trim().is_empty() {
+        if mongosh::is_request(&buf) {
+            ok &= self.run_request(&buf, out)?;
+        } else if !buf.trim().is_empty() {
             ok &= self.run_sql(&buf, out)?;
         }
         if ok || interactive {
@@ -990,6 +1037,8 @@ pub fn run(args: &[String]) -> Result<()> {
         Some(c) => {
             let ok = if c.trim_start().starts_with('\\') {
                 shell.command(c.trim(), &mut out)?.unwrap_or(true)
+            } else if mongosh::is_request(&c) {
+                shell.run_request(&c, &mut out)?
             } else {
                 shell.run_sql(&c, &mut out)?
             };

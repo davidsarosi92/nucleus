@@ -59,6 +59,7 @@ from dataclasses import field as _field
 __all__ = [
     "connect", "open", "Database", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
     "Result", "Column", "Interval", "Ext", "Json", "SparseVector",
+    "Collection", "UpdateResult",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
     "NotSupportedError", "DEFAULT_PORT", "DEFAULT_FETCH",
@@ -72,8 +73,9 @@ paramstyle = "numeric"  # $1, $2, ...
 # 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 # 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
 # a hint; 6: results stream, fetched in batches; 7: columnar results; 8: a
-# subject's key presented (present_subject_key).
-PROTOCOL_VERSION = 8
+# subject's key presented (present_subject_key); 9: requests on a
+# collection's documents (collection).
+PROTOCOL_VERSION = 9
 DEFAULT_PORT = 20035
 # Rows a stream asks the server for at a time.
 DEFAULT_FETCH = 1000
@@ -1116,6 +1118,31 @@ class Connection:
             else:
                 raise InterfaceError(f"unexpected message {kind!r}")
 
+    def collection(self, name):
+        """A collection's documents (nucleus DOCS.md section 10,
+        *Documents*): MongoDB's requests — ``find``, ``count``, ``insert``,
+        ``update``, ``replace``, ``delete`` — each one message, run by the
+        server as one statement in this connection's transaction."""
+        return Collection(self, name)
+
+    def _document(self, op, name, filter=None, body=None, sort=None, skip=0, limit=0, many=False, upsert=False):
+        if self._version < 9:
+            raise NotSupportedError(
+                f"the server speaks version {self._version} of the protocol; document requests need 9",
+                "0A000", None)
+        if self._active is not None:
+            self._active.close()
+        out = bytearray([op, (1 if many else 0) | (2 if upsert else 0)])
+        _put_str(out, str(name))
+        for part in (filter, body, sort):
+            _put_str(out, _document_text(part))
+        out += _struct.pack("<QQ", int(skip), int(limit))
+        self._send(b"O", out)
+        results, error = self._replies()
+        if error is not None:
+            raise error
+        return results[-1]
+
     def cursor(self):
         return Cursor(self)
 
@@ -1153,6 +1180,98 @@ class Connection:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def _document_text(part):
+    """A filter, document, update, projection or sort as JSON text: a
+    string as it is, ``None`` empty, a list of ``(field, direction)`` pairs
+    (a sort, as pymongo writes it) as such pairs, anything else
+    ``json.dumps``'d (a ``dict``'s keys in their order)."""
+    if part is None:
+        return ""
+    if isinstance(part, str):
+        return part
+    if isinstance(part, list) and part and all(isinstance(p, tuple) for p in part):
+        part = [list(p) for p in part]
+    return _json.dumps(part, ensure_ascii=False, allow_nan=False)
+
+
+class UpdateResult:
+    """What an update or a replacement did: ``matched``, ``modified`` (the
+    documents it changed), ``upserted_id`` (the ``_id`` of the document an
+    upsert inserted, else ``None``)."""
+
+    def __init__(self, matched, modified, upserted_id):
+        self.matched, self.modified, self.upserted_id = matched, modified, upserted_id
+
+    def __repr__(self):
+        return f"UpdateResult(matched={self.matched}, modified={self.modified}, upserted_id={self.upserted_id!r})"
+
+
+class Collection:
+    """A collection's documents (``Connection.collection(name)``).  Filters,
+    documents, updates and projections are dicts (or JSON texts); a sort is
+    a dict, a list of ``(field, 1 or -1)`` pairs, or JSON text — its fields
+    in their order.  Documents come back as dicts."""
+
+    def __init__(self, conn, name):
+        self.conn, self.name = conn, name
+
+    def find(self, filter=None, projection=None, sort=None, skip=0, limit=0):
+        """The documents ``filter`` matches (``None``: all), a list."""
+        r = self.conn._document(1, self.name, filter, projection, sort, skip, limit)
+        return [row[0] for row in r.rows]
+
+    def find_one(self, filter=None, projection=None, sort=None):
+        """The first document ``filter`` matches, or ``None``."""
+        found = self.find(filter, projection, sort, 0, 1)
+        return found[0] if found else None
+
+    def count_documents(self, filter=None):
+        """How many documents ``filter`` matches."""
+        return self.conn._document(2, self.name, filter).rows[0][0]
+
+    count = count_documents
+
+    def insert_one(self, document):
+        """Inserts ``document``; its ``_id`` (made where it has none)."""
+        return self.conn._document(3, self.name, None, document).rows[0][0]
+
+    def insert_many(self, documents):
+        """Inserts ``documents``, in their order; their ``_id``s."""
+        documents = list(documents)
+        if all(isinstance(d, str) for d in documents):
+            body = "[" + ", ".join(documents) + "]"
+        else:
+            body = [_json.loads(d) if isinstance(d, str) else d for d in documents]
+        return [row[0] for row in self.conn._document(3, self.name, None, body).rows]
+
+    def _updated(self, op, filter, body, many, upsert):
+        row = self.conn._document(op, self.name, filter, body, many=many, upsert=upsert).rows[0]
+        return UpdateResult(row[0], row[1], row[2])
+
+    def update_one(self, filter, update, upsert=False):
+        """Updates the first document ``filter`` matches by ``update``'s
+        operators (``{"$set": …}``); with ``upsert``, inserts one where
+        none matches.  An ``UpdateResult``."""
+        return self._updated(4, filter, update, False, upsert)
+
+    def update_many(self, filter, update, upsert=False):
+        """Updates every document ``filter`` matches."""
+        return self._updated(4, filter, update, True, upsert)
+
+    def replace_one(self, filter, document, upsert=False):
+        """Replaces the first document ``filter`` matches (its ``_id``
+        kept)."""
+        return self._updated(5, filter, document, False, upsert)
+
+    def delete_one(self, filter):
+        """Deletes the first document ``filter`` matches; how many (0, 1)."""
+        return self.conn._document(6, self.name, filter).count
+
+    def delete_many(self, filter):
+        """Deletes every document ``filter`` matches; how many."""
+        return self.conn._document(6, self.name, filter, many=True).count
 
 
 class _Transaction:

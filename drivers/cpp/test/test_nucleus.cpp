@@ -335,6 +335,60 @@ int main() {
         other.present_subject_key(who, secret);
         CHECK(other.query("SELECT body FROM " + t).rows[0][0].str() == "held");
     }
+    {
+        // A collection's documents by MongoDB's requests (the O message, protocol 9).
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE COLLECTION " + t);
+        db.query("CREATE TABLE " + t + "_audit (n INT)");
+        auto p = db.collection(t);
+        CHECK(p.insert_one(R"({"_id": 1, "name": "ann", "age": 34})").as<Json>().text == "1");
+        auto ids = p.insert_many({R"({"_id": 2, "name": "bob", "age": 25})", R"({"_id": 3, "name": "cy", "age": 40})"});
+        CHECK(ids.size() == 2 && ids[1].as<Json>().text == "3");
+        FindOptions o;
+        o.projection = R"({"name": 1, "_id": 0})";
+        o.sort = R"({"age": -1})";
+        o.skip = 1;
+        o.limit = 1;
+        auto found = p.find(R"({"age": {"$gte": 25}})", o);
+        CHECK(found.size() == 1 && found[0].text == R"({"name": "ann"})");
+        CHECK(p.count_documents(R"({"age": {"$gt": 30}})") == 2);
+        auto u = p.update_many("{}", R"({"$max": {"age": 30}})");
+        CHECK(u.matched == 3 && u.modified == 1 && u.upserted_id.is_null());
+        u = p.update_one(R"({"name": "dan"})", R"({"$set": {"age": 5}})", true);
+        CHECK(u.matched == 0 && u.modified == 0 && !u.upserted_id.is_null());
+        u = p.replace_one(R"({"_id": 3})", R"({"name": "cyrus"})");
+        CHECK(u.matched == 1 && u.modified == 1);
+        auto one = p.find_one(R"({"_id": 3})");
+        CHECK(one && one->text == R"({"_id": 3, "name": "cyrus"})");
+        // An update needs operators; a replacement has none.
+        for (int replace = 0; replace < 2; replace++) {
+            try {
+                if (replace) p.replace_one("{}", R"({"$set": {"a": 1}})");
+                else p.update_one("{}", R"({"name": "x"})");
+                CHECK(false);
+            } catch (const Error& e) {
+                CHECK(e.code() == "22023");
+            }
+        }
+        CHECK(p.delete_one(R"({"age": {"$gte": 30}})") == 1);
+        CHECK(p.delete_many("{}") == 3);
+        // In a transaction with a table: rolled back, then committed.
+        for (int commit = 0; commit < 2; commit++) {
+            db.query("BEGIN");
+            db.query("INSERT INTO " + t + "_audit VALUES (1)");
+            p.insert_one(R"({"_id": 9})");
+            db.query(commit ? "COMMIT" : "ROLLBACK");
+            CHECK(p.count_documents() == static_cast<uint64_t>(commit));
+            CHECK(db.query("SELECT count(*) FROM " + t + "_audit").rows[0][0].as<int64_t>() == commit);
+        }
+        try {
+            db.collection("cpp_nosuch").count_documents();
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "42P01");
+        }
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

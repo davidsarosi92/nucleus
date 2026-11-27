@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
+  9, the `O` message): `conn.collection(name)` → `Collection` — `find(filter,
+  projection, sort, skip, limit)`, `find_one`, `count_documents`,
+  `insert_one` / `insert_many` (their `_id`s), `update_one` /
+  `update_many` / `replace_one(filter, doc, upsert=)` → `UpdateResult`
+  (`matched`, `modified`, `upserted_id`), `delete_one` / `delete_many`;
+  dicts (or JSON texts) in, dicts out, a sort a dict or `(field, 1 | -1)`
+  pairs; in the connection's transaction (the embedded edition too).
 - The wheel carries `THIRD_PARTY.md` beside `COPYRIGHT`: the notices of
   the third-party code and data inside the embedded library (Snowball,
   BSD-3-Clause; Unicode tables, Unicode License v3).

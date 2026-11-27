@@ -524,6 +524,41 @@ public final class NucleusTest {
         }
     }
 
+    /** A collection's documents by MongoDB's requests (the O message, protocol 9). */
+    static void documents() {
+        String t = table();
+        try (NucleusClient db = db()) {
+            db.query("CREATE COLLECTION " + t);
+            db.query("CREATE TABLE " + t + "_audit (n INT)");
+            DocumentCollection p = db.collection(t);
+            equal(p.insertOne("{\"_id\": 1, \"name\": \"ann\", \"age\": 34}"), new Json("1"), "insertOne");
+            equal(p.insertMany(List.of("{\"_id\": 2, \"name\": \"bob\", \"age\": 25, \"tags\": [\"x\"]}",
+                    "{\"_id\": 3, \"name\": \"cy\", \"age\": 40}")), List.of(new Json("2"), new Json("3")), "insertMany");
+            equal(p.find("{\"age\": {\"$gte\": 25}}", "{\"name\": 1, \"_id\": 0}", "{\"age\": -1}", 1, 1),
+                    List.of(new Json("{\"name\": \"ann\"}")), "find");
+            equal(p.countDocuments("{\"age\": {\"$gt\": 30}}"), 2L, "countDocuments");
+            equal(p.updateMany("{}", "{\"$max\": {\"age\": 30}}", false), new DocumentCollection.UpdateResult(3, 1, null), "updateMany");
+            DocumentCollection.UpdateResult u = p.updateOne("{\"name\": \"dan\"}", "{\"$set\": {\"age\": 5}}", true);
+            check(u.matched() == 0 && u.modified() == 0 && u.upsertedId() != null, "an upsert");
+            equal(p.replaceOne("{\"_id\": 3}", "{\"name\": \"cyrus\"}", false), new DocumentCollection.UpdateResult(1, 1, null), "replaceOne");
+            equal(p.findOne("{\"_id\": 3}"), new Json("{\"_id\": 3, \"name\": \"cyrus\"}"), "findOne");
+            equal(errorCode(() -> p.updateOne("{}", "{\"name\": \"x\"}", false)), "22023", "an update needs operators");
+            equal(errorCode(() -> p.replaceOne("{}", "{\"$set\": {\"a\": 1}}", false)), "22023", "a replacement has none");
+            equal(p.deleteOne("{\"age\": {\"$gte\": 30}}"), 1L, "deleteOne");
+            equal(p.deleteMany("{}"), 3L, "deleteMany");
+            for (boolean commit : new boolean[] {false, true}) {
+                db.query("BEGIN");
+                db.query("INSERT INTO " + t + "_audit VALUES (1)");
+                p.insertOne("{\"_id\": 9}");
+                db.query(commit ? "COMMIT" : "ROLLBACK");
+                long want = commit ? 1 : 0;
+                equal(p.countDocuments("{}"), want, "the collection in the transaction");
+                equal(db.query("SELECT count(*) FROM " + t + "_audit").rows().get(0).get(0), want, "the table in it");
+            }
+            equal(errorCode(() -> db.collection("java_nosuch").countDocuments("{}")), "42P01", "no such collection");
+        }
+    }
+
     private static void run(String name, Runnable test) {
         test.run();
         passed++;
@@ -560,6 +595,7 @@ public final class NucleusTest {
         run("copy and load", NucleusTest::copyAndLoad);
         run("pipelines", NucleusTest::pipelines);
         run("encrypted columns", NucleusTest::encryptedColumns);
+        run("documents", NucleusTest::documents);
         return passed;
     }
 
@@ -573,7 +609,7 @@ public final class NucleusTest {
         run("own transport", NucleusTest::ownTransport);
         run("encrypted columns' vectors", NucleusTest::encryptedColumnVectors);
         run("a subject's key", NucleusTest::subjectKey);
-        check(cases == 13 && passed == 21, "all tests ran");
+        check(cases == 14 && passed == 22, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

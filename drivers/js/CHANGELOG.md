@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A collection's documents (nucleus PLAN.md §M16 Q4, protocol version
+  9, the `O` message): `db.collection(name)` → `Collection` — `find(filter,
+  { projection, sort, skip, limit })`, `findOne`, `countDocuments`,
+  `insertOne` / `insertMany` (their `_id`s), `updateOne` / `updateMany`
+  / `replaceOne(filter, doc, { upsert })` → `{ matched, modified,
+  upsertedId }`, `deleteOne` / `deleteMany`; objects (or JSON texts) in,
+  objects out; in the connection's transaction (embedded and WebAssembly
+  too).
 - The package carries `wasm/THIRD_PARTY.md` beside `wasm/LICENSE`: the
   notices of the third-party code and data inside `nucleus.wasm`
   (Snowball, BSD-3-Clause; Unicode tables, Unicode License v3).

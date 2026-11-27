@@ -36,6 +36,7 @@ pub mod decimal;
 pub mod definitions;
 mod distinct;
 pub mod dml;
+pub mod documents;
 pub mod drift;
 mod eager;
 pub mod embedding;

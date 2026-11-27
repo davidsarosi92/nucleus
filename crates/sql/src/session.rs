@@ -2299,10 +2299,14 @@ fn modify(
 }
 
 /// `WITH … statement` with data-modifying CTEs or before `INSERT`,
-/// `UPDATE` or `DELETE`: the CTEs' statements run first, in order, each
-/// given the CTEs before it — their `RETURNING` rows kept —, then the
-/// statement, given them all.  Each sees the writes of those before it
-/// (PostgreSQL's all read the statement's snapshot).
+/// `UPDATE` or `DELETE`: the CTEs run first, in order, each given the
+/// CTEs before it — a query's rows and a data-modifying statement's
+/// `RETURNING` rows kept (a query read once, where it stands, as
+/// PostgreSQL materializes it: a statement after it reads what it read,
+/// not what was written since) —, then the statement, given them all.
+/// A part reading a table itself sees the writes of the parts before it
+/// (PostgreSQL's all read the statement's snapshot); `WITH RECURSIVE`'s
+/// queries are bound where they are read.
 fn with_statement(
     txn: &mut dyn KvTxn,
     reg: &Registry,
@@ -2315,6 +2319,31 @@ fn with_statement(
     let mut given = Vec::with_capacity(ctes.len());
     for cte in ctes {
         given.push(match cte {
+            crate::ast::StatementCte::Query(cte) if !recursive => {
+                let ro: &dyn KvTxn = &*txn;
+                let mut binder = Binder::new(ro, reg).checked();
+                binder.give_ctes(&given)?;
+                let bound = binder.query(&cte.query)?;
+                let plan = optimize(bound.plan, ro);
+                let mut ctx = Ctx::new(ro, reg, params);
+                ctx.needed = crate::prune::needed(&plan);
+                let mut rows = Vec::new();
+                for row in exec::build(&plan, &ctx, None)? {
+                    rows.push(row?);
+                    crate::budget::charge_rows(rows.len())?;
+                }
+                GivenCte::Rows {
+                    name: cte.name.clone(),
+                    aliases: cte.columns.clone(),
+                    columns: bound
+                        .scope
+                        .cols
+                        .into_iter()
+                        .map(|c| (c.name, c.ty))
+                        .collect(),
+                    rows,
+                }
+            }
             crate::ast::StatementCte::Query(cte) => GivenCte::Query {
                 cte: cte.clone(),
                 recursive,
