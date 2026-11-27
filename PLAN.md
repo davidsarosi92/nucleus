@@ -243,6 +243,7 @@ are marked ✅.
 | D19 | HTTP and GraphQL front ends | ✅ **First `ncp` over HTTP and WebSocket, then GraphQL as an optional module** (2026-11-22): browsers and many serverless and edge runtimes cannot open a TCP connection, so the gap is a transport, not a new protocol — the same `ncp` messages over HTTP (a request at a time) and WebSocket (sessions, streams, subscriptions), with the same login, roles and budgets (principle 11; prior art: Neon's serverless driver, PlanetScale's HTTP API, libSQL's Hrana); it also carries MCP over HTTP (§M14.10's "left for later").  GraphQL comes after it, not before §M16.6, as `modules/graphql` (principle 12): its schema read from `nc_catalog` (tables, foreign keys, comments, collections), each request compiled to **one** plan (no N+1, as pg_graphql and PostGraphile do), permissions from row-level security (§M14.25), depth and cost from the statement budget, subscriptions on live queries (§M16.6).  Not now: models write SQL better than GraphQL and reach nucleus through MCP already; the agreed order to F2 stands | GraphQL now, in the core (a second protocol shaping nucleus's interface, against principle 11); never (frontend developers who expect GraphQL go to Hasura or PostGraphile over a compatibility protocol) |
 | D20 | gRPC and REST front ends | ✅ **Optional modules after §M16.6** (2026-11-27): `modules/grpc` and `modules/rest`, each mapped onto `ncp` (principle 11: no second protocol inside) with the same login, roles, row-level security and statement budgets.  gRPC because it is the common tongue of service meshes and its server streams fit changefeeds (§M16.5) and live queries (§M16.6): a generic `Query` / `Subscribe` service, and per-table services with their `.proto` generated from `nc_catalog` (as `nucleus codegen` generates types); HTTP/2 is a dependency, so a module and the core stays free of it.  REST as a resource API generated from the catalog (prior art: PostgREST), beside D19's GraphQL module.  Both after §M16.6, whose subscriptions they carry | in the core (a dependency and a second interface shaping nucleus); never (users of gRPC or REST put a service in front) |
 | D21 | External wire protocols (FIX, ITCH and the like) | ✅ **Adapters, not the core** (2026-11-27): §M16.5 gets an extension point — a module that maps an external wire protocol onto a stream's appends (ingest) or a changefeed's subscription (egress) — and a protocol such as FIX (sessions between trading parties) or ITCH (market data) is an adapter module on it, like §M24's connectors.  So the streams are designed for it from the start: per-stream sequence numbers with gap detection and replay from an offset (what FIX's resend requests and ITCH's rewind need), nanosecond timestamps, a guaranteed order.  nucleus is then the system of record, tick store and analysis behind such a protocol, not the microsecond hot path (matching, feed handling) | in the core (nucleus partly a trading gateway, outside its aim); none (a separate service translates) |
+| D22 | Document query language (§M16) | ✅ **SQL/JSON the core, a filter document a front end compiled to it** (2026-11-27, after a prototype): a MongoDB-style filter (`{"age": {"$gt": 30}, "tags": "vip"}`) compiles to lax SQL/JSON path predicates over `doc` (`doc @? '$ ? (@.age > 30)'`) — the same `Expr`, the same planner, no second language inside.  Its semantics are MongoDB's, which are lax mode's (arrays unwrapped, no comparison across types, a missing field matches `null` and `$ne`), so nucleus adds no rule of its own.  On a collection a path index is multi-valued (its entries unwrap arrays along the path, as every MongoDB index does), so a filter's conditions are served by it.  The filter is everywhere: `ncp` messages, the drivers' `find`, `ncsql`, and in SQL `doc @? json_filter('…')`, folded to a constant when bound.  The prototype, on 22 tasks over 3,000 irregular documents: the filter compiled answered as MongoDB 8 in all 22; the SQL developers and models write (`->>`, `::int`) differed in 12 (5 errors, 7 silently wrong) | SQL/JSON only (the filter syntax only in `--mongo-compat`: the form models and document developers write fluently left out); the filter only on collections (two languages for one table); strict semantics (not what the filter's users expect); an exact path index beside a separate lax one (two notions to learn) |
 
 ---
 
@@ -296,7 +297,7 @@ are marked ✅.
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
 | **F2 — NoSQL** | M15 | Document model | ✅ (2026-11-27) study written (2026-11-20), steps D1–D5 (re-split 2026-11-25): D1 the form, D2 upsert, D3 collections, D4 path indexes, D5 multi-valued indexes; the bug hunt after them (upserts under concurrent writers, documents differentially and killed mid-write). Next: §M16, starting with the query language's decision |
-| | M16 | Document queries (shared executor) + document server | ⬜ |
+| | M16 | Document queries (shared executor) + document server | ⬜ the query language decided (2026-11-27, D22: SQL/JSON the core, a MongoDB-style filter compiled to lax paths); steps Q1–Q5 proposed |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
 | | M16.7 | Sync: embedded databases on devices kept in sync with a server, offline first | ⬜ |
@@ -14061,7 +14062,29 @@ result, a profile), and the shape models write best.
    end, 2026-11-25: it is used there), with D1–D5 built: the candidates are SQL/JSON over `doc` (what
    exists) and a JSON filter document (`{"age": {"$gt": 30}}`, the
    operators models write fluently), compiled to the same `Expr` —
-   the second a front end, never a second planner.
+   the second a front end, never a second planner.  **Decided
+   2026-11-27 (D22): both** — SQL/JSON the core, the filter document a
+   front end compiled to lax SQL/JSON path predicates, with MongoDB's
+   semantics (which are lax mode's); a collection's path indexes
+   multi-valued; the filter in `ncp`, the drivers, `ncsql` and SQL
+   (`json_filter`).  *The prototype* (a compiler of the filter to SQL
+   text, outside the repository): 22 tasks — equality, ranges, `$in`,
+   `$nin`, `$ne`, `$exists`, `$type`, `$size`, `$all`, `$regex` (with
+   `i`), `$elemMatch`, `$not`, `$or`, `$nor`, `null` — over 3,000
+   generated documents as real ones are irregular (an age a string at
+   times, tags a string or an array, an address an object or an array,
+   fields missing or `null`); MongoDB 8 the oracle.  The filter
+   compiled: 22 of 22 as MongoDB, on nucleus (whose lax paths matched
+   PostgreSQL 18's on every probe).  The SQL a developer or a model
+   writes for the same tasks (`(doc->>'age')::int > 30`, `doc->'tags' @>
+   '["vip"]'`, `json_array_length`): 12 of 22 differ — 5 errors (`'forty'`
+   is no integer, a scalar has no length) and 7 silently wrong (a tag
+   given as a string, an address array, `NOT` of a missing field's
+   `NULL`).  The price, measured over 180,000 documents: a lax path
+   predicate is evaluated a row at a time and no index serves it yet
+   (68 ms for an equality an expression index answers in 6.6 ms; a scan
+   1.3× a `->>` comparison's, `$elemMatch` 0.5× the `EXISTS` subquery's)
+   — what §M16's index step is for.
 
 *Steps (agreed 2026-11-20, in this order; built after F1's whole run;
 split 2026-11-25 with the user into pieces closed one by one — the
@@ -14446,13 +14469,46 @@ found missing, and the open issues.
 
 ### §M16 — Document queries + document server ⬜
 
-- **First, the decision on the query language** (moved here from M15,
-  2026-11-25): SQL/JSON over `doc` and a JSON filter document compiled
-  to the same `Expr` (§M15 item 8), with a prototype of the filter,
-  judged on what developers and models write; recorded in §M15's study.
-- Filter language (Mongo-style) **and/or** SQL/JSON functions — as that
-  decision says.
+- **The decision on the query language** ✅ (2026-11-27, D22; the
+  prototype and its numbers in §M15's study, item 8): SQL/JSON the
+  core; a MongoDB-style filter document a front end compiled to lax
+  SQL/JSON path predicates (MongoDB's semantics are lax mode's); a
+  collection's path indexes multi-valued; the filter in `ncp`, the
+  drivers, `ncsql` and SQL.
 - Compiles to the same logical plan as SQL.
+
+*Steps (proposed 2026-11-27, each closed by itself):*
+
+- **Q1 — the filter compiler**: a filter document to a lax path
+  predicate (an AST, not text) — equality (a whole object or array
+  too), `$eq $ne $gt $gte $lt $lte $in $nin $exists $type $size $all
+  $regex $options $elemMatch $not $and $or $nor`, dotted paths; an
+  operator it does not know an error naming it; `json_filter(text)` in
+  SQL, folded to a constant when its argument is one.  Checked against
+  MongoDB 8 differentially (the prototype's tasks, then random filters
+  over random documents, as the bug hunt's `docfuzz`).
+- **Q2 — indexes for it**: a collection's path index multi-valued (its
+  entries unwrap arrays along the path, lax mode's way; the exact value
+  stays an expression index, `((doc -> 'a'))`); the planner probes one
+  from a lax predicate's conjuncts (equality, ranges, `$in`, `$all`,
+  `exists`) and keeps the predicate as the filter; a lax predicate's
+  evaluation made cheaper where it loses to `->>`.  Measured against
+  MongoDB and PostgreSQL's GIN.
+- **Q3 — reads and writes by filter**: `find` (filter, projection,
+  sort, skip, limit), count, `update` by operators (`$set $unset $inc
+  $mul $min $max $rename $push $pull $addToSet $pop`, upsert) compiled
+  to the `json_*` functions in one rewrite of the row, `replace`,
+  `delete` — as SQL statements first, so they are one plan.
+- **Q4 — the document server**: `ncp` messages for them, a document API
+  in every nucleus driver and `ncsql`, in the same sessions and
+  transactions as SQL.
+- **Q5 — `--mongo-compat`**: the MongoDB wire protocol's subset (OP_MSG:
+  hello, find, insert, update, delete, count, getMore, the commands
+  `mongosh` and drivers send first), the same compiler, Extended JSON
+  mapped to and from BSON's types (§M15 item 4); `mongosh` and one
+  standard driver run CRUD and queries.
+- Not in §M16: aggregation pipelines — SQL answers them (a pipeline
+  stage-by-stage compiler may follow if users ask).
 - A transaction can span SQL tables and document collections.
 - **Document server:** documents travel over `ncp` (D8): new messages for
   collections, and document APIs in every nucleus driver and in `ncsql`,

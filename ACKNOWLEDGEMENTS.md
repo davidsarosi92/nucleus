@@ -156,7 +156,7 @@ checked against.
 - **pg_jsonschema's names; the `jsonschema` crate's compiled keywords** — schema checks. J5.
 - **PostgreSQL `jsonb_extract_path`** — a `->` chain fused. §M15 D1.
 - **PostgreSQL `INSERT … ON CONFLICT` (its documentation)** — the upsert's form and meaning: arbiters inferred from a key's parts, `excluded`, a row affected twice refused (`21000`), the update policy's `USING` an error. §M15 D2.
-- **MongoDB (its documentation)** — a collection's shape: every document keyed by `_id`, one made where absent, any id but an array; a collection's JSON Schema validator (`WITH (schema = …)`). §M15 D3; dotted paths naming an index's fields (`CREATE INDEX ON c (a.b.c)`). §M15 D4. Its multikey index (an entry per array element, a field's array expanded) and MySQL's multi-valued index (its documentation): §M15 D5.
+- **MongoDB (its documentation)** — a collection's shape: every document keyed by `_id`, one made where absent, any id but an array; a collection's JSON Schema validator (`WITH (schema = …)`). §M15 D3; dotted paths naming an index's fields (`CREATE INDEX ON c (a.b.c)`). §M15 D4. Its multikey index (an entry per array element, a field's array expanded) and MySQL's multi-valued index (its documentation): §M15 D5. Its query filter documents — the operators and their matching rules (arrays unwrapped, no comparison across types), which SQL/JSON's lax mode (SQL:2016; PostgreSQL's `jsonpath`) shares — chosen as nucleus's filter front end, compiled to lax path predicates: §M16 (D22).
 - **MongoDB `_id` rules and multikey indexes; MySQL multi-valued indexes; Oracle 23ai JSON collections; DocumentDB / FerretDB** — the collection design. §M15.
 
 ## Wire protocol, drivers and compatibility
