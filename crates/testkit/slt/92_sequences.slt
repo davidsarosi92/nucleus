@@ -1,0 +1,320 @@
+# Sequences (issue #23): CREATE / ALTER / DROP SEQUENCE, nextval,
+# currval, setval, lastval, as PostgreSQL's.  Checked against
+# PostgreSQL 18 in one session (scripts/slt-pg.py --session).
+
+statement ok
+CREATE SEQUENCE s
+
+statement error 55000
+SELECT currval('s')
+
+statement error 55000
+SELECT lastval()
+
+query III
+SELECT nextval('s'), nextval('s'), currval('s')
+----
+1 2 2
+
+query I
+SELECT lastval()
+----
+2
+
+# setval: currval follows (with is_called), lastval does not
+query I
+SELECT setval('s', 10)
+----
+10
+
+query II
+SELECT currval('s'), nextval('s')
+----
+10 11
+
+query I
+SELECT setval('s', 20, false)
+----
+20
+
+query I
+SELECT nextval('s')
+----
+20
+
+# Names as regclass reads them
+query I
+SELECT nextval('public.s') - nextval('S')
+----
+-1
+
+statement error 42P01
+SELECT nextval('nope')
+
+statement error 42P07
+CREATE SEQUENCE s
+
+statement ok
+CREATE SEQUENCE IF NOT EXISTS s
+
+statement error 42P07
+CREATE TABLE s (a int)
+
+# Options
+statement ok
+CREATE SEQUENCE small AS smallint MAXVALUE 3
+
+query III
+SELECT nextval('small'), nextval('small'), nextval('small')
+----
+1 2 3
+
+statement error 2200H
+SELECT nextval('small')
+
+statement error 22003
+SELECT setval('small', 4)
+
+statement ok
+CREATE SEQUENCE down INCREMENT -1
+
+query II
+SELECT nextval('down'), nextval('down')
+----
+-1 -2
+
+statement ok
+CREATE SEQUENCE ring INCREMENT BY -2 MINVALUE -3 CYCLE
+
+query IIII
+SELECT nextval('ring'), nextval('ring'), nextval('ring'), nextval('ring')
+----
+-1 -3 -1 -3
+
+statement ok
+CREATE SEQUENCE big START WITH 9223372036854775806
+
+query II
+SELECT nextval('big'), nextval('big')
+----
+9223372036854775806 9223372036854775807
+
+statement error 2200H
+SELECT nextval('big')
+
+statement error 22023
+CREATE SEQUENCE bad INCREMENT 0
+
+statement error 22023
+CREATE SEQUENCE bad MINVALUE 5 MAXVALUE 5
+
+statement error 22023
+CREATE SEQUENCE bad START 0
+
+statement error 22023
+CREATE SEQUENCE bad AS integer MAXVALUE 3000000000
+
+statement error 22023
+CREATE SEQUENCE bad AS text
+
+statement error 22023
+CREATE SEQUENCE bad CACHE 0
+
+# ALTER: options (the next value follows the last by the new ones),
+# RESTART, RENAME
+statement ok
+CREATE SEQUENCE a START 100
+
+query I
+SELECT nextval('a')
+----
+100
+
+statement ok
+ALTER SEQUENCE a INCREMENT BY 5
+
+query I
+SELECT nextval('a')
+----
+105
+
+statement ok
+ALTER SEQUENCE a RESTART WITH 7
+
+query I
+SELECT nextval('a')
+----
+7
+
+statement ok
+ALTER SEQUENCE a RESTART
+
+query I
+SELECT nextval('a')
+----
+100
+
+statement error 22023
+ALTER SEQUENCE a MAXVALUE 50
+
+statement ok
+ALTER SEQUENCE a RENAME TO b
+
+statement error 42P01
+SELECT nextval('a')
+
+query I
+SELECT nextval('b')
+----
+105
+
+statement ok
+ALTER SEQUENCE IF EXISTS nope RESTART
+
+statement error 42P01
+ALTER SEQUENCE nope RESTART
+
+# A value taken is never given back
+statement ok
+CREATE SEQUENCE t
+
+statement ok
+BEGIN
+
+query I
+SELECT nextval('t')
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+SELECT nextval('t')
+----
+2
+
+# A read-only transaction refuses nextval and setval
+statement ok
+BEGIN READ ONLY
+
+statement error 25006
+SELECT nextval('t')
+
+statement ok
+ROLLBACK
+
+# As a column's default; DROP refuses while one calls it
+statement ok
+CREATE TABLE items (id bigint DEFAULT nextval('t') PRIMARY KEY, name text)
+
+statement ok
+INSERT INTO items (name) VALUES ('x'), ('y')
+
+query IT rowsort
+SELECT * FROM items
+----
+3 x
+4 y
+
+# A column added with it: each row its own value; DDL spends none
+statement ok
+ALTER TABLE items ADD COLUMN n bigint DEFAULT nextval('t')
+
+query ITI rowsort
+SELECT * FROM items
+----
+3 x 5
+4 y 6
+
+query I
+SELECT nextval('t')
+----
+7
+
+# NOT NULL too: each row's own value
+statement ok
+ALTER TABLE items ADD COLUMN m bigint NOT NULL DEFAULT nextval('t')
+
+query I
+SELECT count(DISTINCT m) FROM items WHERE m > 7
+----
+2
+
+statement ok
+ALTER TABLE items DROP COLUMN n
+
+statement error 2BP01
+DROP SEQUENCE t
+
+statement ok
+DROP SEQUENCE t CASCADE
+
+statement error 23502
+INSERT INTO items (name) VALUES ('z')
+
+statement ok
+DROP TABLE items
+
+# Privileges: USAGE for nextval and currval, UPDATE for setval
+statement ok
+CREATE USER slt_seq_u
+
+statement ok
+SET ROLE slt_seq_u
+
+statement error 42501
+SELECT nextval('s')
+
+statement ok
+RESET ROLE
+
+statement ok
+GRANT USAGE ON SEQUENCE s TO slt_seq_u
+
+statement ok
+SET ROLE slt_seq_u
+
+query B
+SELECT nextval('s') = currval('s')
+----
+true
+
+statement error 42501
+SELECT setval('s', 1)
+
+statement ok
+RESET ROLE
+
+statement ok
+REVOKE USAGE ON SEQUENCE s FROM slt_seq_u
+
+statement ok
+DROP USER slt_seq_u
+
+# nucleus-only: the catalog's view
+query TBTIIIIBIT
+SELECT name, owner = current_user, data_type, start_value, min_value, max_value, increment_by, cycle, cache_size, owned_by FROM nc_catalog.sequences WHERE name IN ('ring', 'small') ORDER BY name
+----
+ring true bigint -1 -3 -1 -2 true 1 NULL
+small true smallint 1 1 3 1 false 1 NULL
+
+# nucleus-only: the value last handed out
+query I
+SELECT last_value FROM nc_catalog.sequences WHERE name = 'down'
+----
+-2
+
+# nucleus-only: and the statements that make them
+query T
+SELECT definition FROM nc_catalog.definitions WHERE kind = 'sequence' AND name IN ('ring', 'small', 'big') ORDER BY name
+----
+CREATE SEQUENCE big START WITH 9223372036854775806
+CREATE SEQUENCE ring INCREMENT BY -2 MINVALUE -3 CYCLE
+CREATE SEQUENCE small AS smallint MAXVALUE 3
+
+statement ok
+DROP SEQUENCE IF EXISTS nope, s, small, down, ring, big, b
+
+statement error 42P01
+DROP SEQUENCE s

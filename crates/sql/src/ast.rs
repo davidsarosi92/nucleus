@@ -365,6 +365,33 @@ pub enum Statement {
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
     },
+    /// `CREATE SEQUENCE [IF NOT EXISTS] name options` (issue #23).
+    CreateSequence {
+        /// Its name.
+        name: String,
+        /// Its options.
+        options: Vec<crate::sequences::SeqOption>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+    },
+    /// `ALTER SEQUENCE [IF EXISTS] name …`.
+    AlterSequence {
+        /// Its name.
+        name: String,
+        /// What changes.
+        action: crate::sequences::AlterSequence,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
+    /// `DROP SEQUENCE [IF EXISTS] name, … [CASCADE | RESTRICT]`.
+    DropSequence {
+        /// Their names.
+        names: Vec<String>,
+        /// `IF EXISTS`.
+        if_exists: bool,
+        /// `CASCADE`: the defaults calling them dropped too.
+        cascade: bool,
+    },
     /// `DROP MODEL [IF EXISTS] name`.
     DropModel {
         /// Its name.

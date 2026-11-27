@@ -81,6 +81,7 @@ codes! {
     active_txn => "25001",
     no_active_txn => "25P01",
     invalid_savepoint => "3B001",
+    sequence_limit => "2200H",
     read_only => "25006",
     feature => "0A000",
     bad_copy_format => "22P04",

@@ -1096,6 +1096,30 @@ impl Writer {
         }
     }
 
+    /// Checks column `c`'s default as DDL does: evaluated, unless it is
+    /// volatile — bound only, as a `nextval` would spend a value.
+    pub fn check_default(&self, c: usize, ctx: &Ctx) -> Result<()> {
+        if self.volatile_default(c) {
+            return Ok(());
+        }
+        self.default_of(c, ctx).map(|_| ())
+    }
+
+    /// Whether column `c`'s default calls a volatile function.
+    pub fn volatile_default(&self, c: usize) -> bool {
+        let mut volatile = false;
+        if let Some(e) = &self.parts.defaults[c] {
+            e.walk(&mut |x| {
+                if let Expr::Call(f, _) = x
+                    && f.volatility() == crate::ext::Volatility::Volatile
+                {
+                    volatile = true;
+                }
+            });
+        }
+        volatile
+    }
+
     /// Checks NOT NULL, lengths and CHECK constraints of a full row.
     pub fn validate(&self, row: &Row, ctx: &Ctx) -> Result<()> {
         let t = &self.table;

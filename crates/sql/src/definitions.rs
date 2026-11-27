@@ -247,6 +247,12 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
         );
     }
 
+    // Sequences (before the tables whose defaults call them; `OWNED BY`
+    // after them).
+    for s in crate::sequences::all(txn)? {
+        def("sequence", &s.name, None, crate::sequences::definition(&s));
+    }
+
     // Types: enums, then what types were taught.
     for e in crate::enums::all(txn)? {
         let labels = e

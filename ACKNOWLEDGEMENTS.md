@@ -108,6 +108,8 @@ checked against.
 - **SQLite `SQLITE_MAX_EXPR_DEPTH`; DuckDB `max_expression_depth`** — expression depth bounded. §M14.29 S2.
 - **Benchmarking method: Raasveldt, Holanda, Gubner & Mühleisen, "Fair Benchmarking Considered Difficult" (DBTest 2018); Georges, Buytaert & Eeckhout (OOPSLA 2007); Mytkowicz et al. (ASPLOS 2009); Uta et al. (NSDI 2020); Kalibera & Jones (ISMM 2013); pyperf and hyperfine** — §M14.31; §M27.
 - **YCSB's scrambled Zipfian** — LSM read workloads. §M14.28 L5.
+- **PostgreSQL's subtransactions; InnoDB's undo records by savepoint** — savepoints as an undo note per savepoint, kept per key. Issue #24.
+- **PostgreSQL's sequences (`SEQ_LOG_VALS`, values logged ahead and skipped after a crash); Oracle's sequence `CACHE`** — a sequence's value outside transactions, a reservation written ahead and grown while it is fast. Issue #23.
 
 ## Compression and encodings
 

@@ -369,6 +369,8 @@ pub struct Session {
     /// … for this identity (held, so a new one is never at its address):
     /// a plan was checked for who ran it.
     catalog_who: Arc<crate::access::Who>,
+    /// Its `currval`s and `lastval` ([`crate::sequences`]).
+    sequences: Arc<std::sync::Mutex<crate::sequences::SessionValues>>,
     /// Statements as parsed, by their text ([`Session::parse`]).
     parsed: crate::by_text::ByText<String, Parsed>,
     /// Statements' keys in the statistics, by their text
@@ -484,6 +486,7 @@ impl Session {
             audited: true,
             catalog: Default::default(),
             catalog_who: Arc::new(crate::access::Who::system()),
+            sequences: Default::default(),
             parsed: Default::default(),
             normalized: Default::default(),
             presented: Default::default(),
@@ -945,8 +948,22 @@ impl Session {
             self.catalog = Default::default();
             self.catalog_who = self.who.clone();
         }
+        // Whether a transaction would be read-only as declared: there
+        // `nextval` is refused, as PostgreSQL refuses it.
+        let read_only = self.who.ceiling.read_only
+            || self.read_as_of().is_some()
+            || self
+                .block
+                .as_ref()
+                .is_some_and(|b| b.mode.read_only == Some(true) || b.mode.as_of.is_some());
+        let values = self.sequences.clone();
+        if let Ok(mut v) = values.lock() {
+            v.read_only = read_only;
+        }
         let cache = std::mem::take(&mut self.catalog);
-        let (out, cache) = crate::catalog_cache::with(cache, || f(self));
+        let (out, cache) = crate::sequences::with_session(&values, || {
+            crate::catalog_cache::with(cache, || f(self))
+        });
         self.catalog = cache;
         out
     }
@@ -3267,6 +3284,30 @@ pub(crate) fn execute_statement(
             crate::models::drop(txn, name, *if_exists)?;
             Output::Command("DROP MODEL".into())
         }
+        Statement::CreateSequence {
+            name,
+            options,
+            if_not_exists,
+        } => {
+            crate::sequences::create(txn, name, options, *if_not_exists)?;
+            Output::Command("CREATE SEQUENCE".into())
+        }
+        Statement::AlterSequence {
+            name,
+            action,
+            if_exists,
+        } => {
+            crate::sequences::alter(txn, name, action, *if_exists)?;
+            Output::Command("ALTER SEQUENCE".into())
+        }
+        Statement::DropSequence {
+            names,
+            if_exists,
+            cascade,
+        } => {
+            crate::sequences::drop(txn, names, *if_exists, *cascade)?;
+            Output::Command("DROP SEQUENCE".into())
+        }
         Statement::SetRole(_) | Statement::Reset(_) => unreachable!("handled by the session"),
         Statement::SetRowSecurity {
             table,
@@ -3920,7 +3961,12 @@ fn add_column(
         return Ok(());
     }
     let w = dml::Writer::new(&*txn, reg, t.clone())?;
-    let fill = {
+    // (A volatile default — `nextval` — is each row's own, and not spent
+    // here.)
+    let volatile = w.volatile_default(t.columns.len() - 1);
+    let fill = if volatile {
+        Value::Null
+    } else {
         let ctx = Ctx::new(&*txn, reg, &[]);
         w.default_of(t.columns.len() - 1, &ctx)?
     };
@@ -3928,7 +3974,10 @@ fn add_column(
     // none rewritten (issue #18) — nor read, so no write to the table
     // makes the change fail.  A row a writer stores meanwhile under the
     // old definition is one of them.
-    if column.references.is_none() && column.check.is_none() && missing_fits(&*txn, reg, &t, &fill)?
+    if !volatile
+        && column.references.is_none()
+        && column.check.is_none()
+        && missing_fits(&*txn, reg, &t, &fill)?
     {
         // By its place in a stored row ([`Table::stored_at`]).
         let c = t.stored_width() - 1;
@@ -3949,7 +3998,8 @@ fn add_column(
             .is_some()
     };
     if has_rows {
-        if fill.is_null() && column.not_null {
+        // (A volatile default: each row's own, made as it is rewritten.)
+        if fill.is_null() && column.not_null && !volatile {
             return Err(Error::not_null_violation(format!(
                 "column \"{}\" of relation \"{table}\" contains null values",
                 column.name
@@ -4535,7 +4585,7 @@ pub(crate) fn create_table(
     let ctx = Ctx::new(&*txn, reg, &[]);
     for (i, c) in table.columns.iter().enumerate() {
         if c.default.is_some() {
-            w.default_of(i, &ctx)?;
+            w.check_default(i, &ctx)?;
         }
     }
     for (_, text) in &table.checks {
@@ -4948,7 +4998,7 @@ fn alter_column_type(
     {
         let ctx = Ctx::new(&*txn, reg, &[]);
         if new.columns[c].default.is_some() {
-            w.default_of(c, &ctx)?;
+            w.check_default(c, &ctx)?;
         }
     }
     // Every row written again whole (a partitioned table's are its
@@ -5009,7 +5059,7 @@ fn type_in_place(
         let mut new = old.clone();
         new.columns[c] = col.clone();
         let w = dml::Writer::new(&*txn, reg, new)?;
-        w.default_of(c, &Ctx::new(&*txn, reg, &[]))?;
+        w.check_default(c, &Ctx::new(&*txn, reg, &[]))?;
     }
     crate::validating::give_type(txn, old, c, col)
 }

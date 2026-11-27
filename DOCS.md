@@ -2231,6 +2231,8 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 1B <version u64>` | a migration applied: its name, checksum, when and by whom (§8.34) |
 | `00 1C <table id>` | a table being moved to another engine: the id its keys are copied under (§4.6) |
 | `00 1D <name>` | a property graph: its owner, vertex and edge tables, keys, ends, labels and properties (§M14.34 G4) |
+| `00 1E <name>` | a sequence: its id, owner, type, increment, bounds, start, cache, cycle, `OWNED BY` and version (issue #23) |
+| `00 1F <id u64>` | a sequence's reservation: the furthest value it may have handed out, and whether one was; `00 1F` alone the next sequence id |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -3791,6 +3793,42 @@ PostgreSQL's `CopyOutResponse`, `CopyData` and `CopyDone` (psql's
 default, as rows of one text column, `copy`.  To a server-side file:
 `0A000`.
 
+**Sequences** (issue #23).  `CREATE SEQUENCE [IF NOT EXISTS] name [AS
+smallint | integer | bigint] [INCREMENT [BY] n] [MINVALUE n | NO
+MINVALUE] [MAXVALUE n | NO MAXVALUE] [START [WITH] n] [CACHE n] [[NO]
+CYCLE] [OWNED BY t.c | NONE]`, `ALTER SEQUENCE [IF EXISTS] name options
+| RESTART [[WITH] n] | RENAME TO new`, `DROP SEQUENCE [IF EXISTS] name,
+… [CASCADE]`; `nextval(name)`, `currval(name)`, `setval(name, n [,
+is_called])`, `lastval()` — PostgreSQL's defaults, checks and messages
+(`22023` for a bad option, `2200H` past a bound without `CYCLE`, `22003`
+for `setval` out of bounds, `55000` for `currval` / `lastval` before a
+`nextval` in the session, `25006` in a transaction read-only as declared;
+the name read as `regclass` reads it).  A sequence shares the tables'
+names (`42P07`).  Privileges: `USAGE` or `UPDATE` for `nextval`, `SELECT`
+or `USAGE` for `currval`, `UPDATE` for `setval` (`GRANT … ON SEQUENCE`);
+the maker owns it.  `DROP SEQUENCE` refuses while a default calls it
+(`2BP01`), `CASCADE` drops those defaults; `RENAME` rewrites them.  DDL
+never spends a value: a volatile default is bound, not evaluated, when a
+table is made or a column's type or default changes, and a column added
+with one gets each row's own value.  The definition is the catalog's,
+transactional; the value is not, as PostgreSQL's — a value is handed out
+once whatever becomes of its transaction, and takers never wait on one
+another.  It lives in memory, shared by the database's sessions, exact
+(`ALTER` makes no gap): what the store holds is a *reservation*, a value
+no smaller in the sequence's direction than any handed out, written by a
+transaction of its own before a value past the last one is handed out
+— 32 values at first, doubling while reservations come within a second,
+up to 4,096 (PostgreSQL logs 32 values ahead, `SEQ_LOG_VALS`).  After a
+crash or a restart a sequence goes on past its reservation: values may be
+skipped, never repeated.  `setval` and `RESTART` act at once, not with
+the transaction (PostgreSQL's `RESTART` is transactional).  A sequence's
+id comes from a counter advanced by a transaction of its own, so two
+made at once never share one.  The definition and the privilege decision
+are read through the session's catalog cache, the state kept by the
+session: `SELECT count(nextval('s')) FROM generate_series(1, 1000000)`
+281 ms (PostgreSQL 18: 194 ms), an `INSERT` of 200,000 rows keyed by one
+141 ms (PostgreSQL 18: 229 ms).
+
 Sessions: outside `BEGIN` every statement is its own transaction, retried
 up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the
 first statement (so `SET TRANSACTION` may follow `BEGIN`), an error moves
@@ -4033,6 +4071,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
 | `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms`, `tokens`, `throttled_ms`, `batch_tokens`, `requests_per_minute`, `tokens_per_minute`, `parallel` (the models the current role may call; the calls since the process started, §8.23, §8.27) |
 | `nc_catalog.model_providers` | `name`, `remote` (whether its calls reach the network) |
+| `nc_catalog.sequences` | `name`, `owner`, `data_type`, `start_value`, `min_value`, `max_value`, `increment_by`, `cycle`, `cache_size`, `last_value` (the last handed out; NULL before one), `owned_by` (the sequences the current role may use, read or set) |
 | `nc_catalog.chunk_tables` | `table_name`, `source`, `column_name`, `by`, `size`, `overlap`, `model` (the chunk tables and what they chunk, §8.26) |
 | `nc_catalog.embedding_jobs` | `table_name`, `column_name`, `model`, `kind` (`current`, `next`), `key`, `state` (`pending`, `retrying`, `failed`), `attempts`, `enqueued`, `next_attempt`, `error` (the embedding columns' queue, §8.24; the tables the current role may read) |
 | `nc_catalog.secrets` | `name`, `owner`, `source` (`value`, `env`), `env`, `created`, `changed` (the secrets the current role may use; never a value) |
@@ -4063,7 +4102,7 @@ indexes and constraints numbered after it (the module's `catalog.rs` has
 the table).
 One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
 `\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
-that need functions, sequences or permissions do not.  `pg_typeof(x)` and
+that need functions, sequences (`\ds`: not in `pg_class` yet) or permissions do not.  `pg_typeof(x)` and
 `to_regtype(name)` (a type's oid by its `pg_type` or SQL name, NULL when
 there is none) are among its functions too.  PostgreSQL's text search —
 `tsvector`, `tsquery`, `to_tsvector`, `to_tsquery`, `@@` — is the

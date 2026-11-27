@@ -485,7 +485,7 @@ fn begin_type(
         let mut new = t.clone();
         v.apply(&mut new);
         let w = crate::dml::Writer::new(&*txn, reg, new)?;
-        w.default_of(c, &crate::expr::Ctx::new(&*txn, reg, &[]))?;
+        w.check_default(c, &crate::expr::Ctx::new(&*txn, reg, &[]))?;
     }
     record(txn, &mut t, v).map(Some)
 }

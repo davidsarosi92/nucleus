@@ -14382,6 +14382,33 @@ found missing, and the open issues.
   filter would leave: nothing; the binder's type check repeats the
   signature's, for PostgreSQL's message).  Not yet: multidimensional
   array literals (`ARRAY[[1,2],[3,4]]`, `42601`).
+- Issue #23, first step — sequences: `CREATE`, `ALTER` (options,
+  `RESTART`, `RENAME`), `DROP SEQUENCE`, `nextval`, `currval`, `setval`,
+  `lastval`, `GRANT … ON SEQUENCE`, `nc_catalog.sequences`, their
+  definitions; PostgreSQL's defaults, checks and messages.  The
+  definition is the catalog's; the value is not transactional (as
+  PostgreSQL's): kept in memory per database, exact, and the store holds
+  a reservation written by a transaction of its own before values past
+  it are handed out — 32 at first (PostgreSQL's `SEQ_LOG_VALS`), doubling
+  while they come within a second, up to 4,096.  After a crash a
+  sequence skips what was reserved, never repeats.  Ids come from a
+  counter of their own (two sequences made at once never share one).
+  Found on the way: `CREATE TABLE`, `ALTER COLUMN TYPE`, `SET DEFAULT`
+  and `ADD COLUMN` evaluated a default once to check it, which spends a
+  `nextval`; a volatile default is now bound only, and a column added
+  with one gets each row's own value.  Measured against PostgreSQL 18:
+  `count(nextval('s'))` over a million rows first 1,180 ms (PostgreSQL
+  194) — the privilege check per call cloned ACLs and roles; the
+  decision, the definition and the state are now kept through the
+  session's catalog cache: 281 ms; an `INSERT` of 200,000 rows keyed by
+  a sequence 141 ms (PostgreSQL 229).  Tested by `92_sequences.slt`
+  (79 of 79 records as PostgreSQL 18 has them, in one session; its
+  catalog records nucleus's) and `crates/sql/tests/sequences.rs` (eight
+  sessions at once take 4,000 values, each once, no gap; a reopen goes
+  on past the reservation, after `setval` and `ALTER … INCREMENT` too;
+  a crash at every point of 40 inserts never repeats a key); twelve
+  mutations, each failing.  Next: `serial` and identity columns, `OWNED
+  BY`'s drop, `pg_get_serial_sequence`; then `pg_class`, schema diffs.
 
 ### §M16 — Document queries + document server ⬜
 

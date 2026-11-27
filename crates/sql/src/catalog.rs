@@ -1747,7 +1747,8 @@ pub fn next_rowids(txn: &mut dyn KvTxn, table: &Table, n: u64) -> Result<i64> {
 /// their table of one id at once, one of each engine, may leave the
 /// B+tree one's keys in the LSM tree: the right rows, the other engine.
 pub fn create_table(txn: &mut dyn KvTxn, mut table: Table) -> Result<Table> {
-    if get_table(txn, &table.name)?.is_some() {
+    if get_table(txn, &table.name)?.is_some() || crate::sequences::get(txn, &table.name)?.is_some()
+    {
         return Err(Error::duplicate_table(format!(
             "relation \"{}\" already exists",
             table.name

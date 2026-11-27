@@ -834,7 +834,7 @@ fn set_default(
     if default.is_some() {
         // Bound, and of the column's type.
         let w = crate::dml::Writer::new(&*txn, reg, t.clone())?;
-        w.default_of(c, &Ctx::new(&*txn, reg, &[]))?;
+        w.check_default(c, &Ctx::new(&*txn, reg, &[]))?;
     }
     catalog::update_table(txn, &t)
 }

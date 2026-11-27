@@ -105,6 +105,7 @@ pub mod schema_diff;
 pub mod sealed;
 pub mod secrets;
 pub mod segment;
+pub mod sequences;
 pub mod session;
 pub mod sessions;
 pub mod sorter;

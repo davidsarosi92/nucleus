@@ -24,15 +24,16 @@ use nucleus_kv::{Kv, KvTxn, Timestamp};
 use crate::error::Result;
 
 /// The catalog's key ranges, `[start, end)`: every catalog key but the
-/// counters (sequences `00 02`, hidden row ids `00 03`) and the audit log
-/// (`00 12`, `00 13`), which ordinary writes change.
+/// counters (ids `00 02`, hidden row ids `00 03`, sequences' values `00
+/// 1F`) and the audit log (`00 12`, `00 13`), which ordinary writes change.
 const WATCHED: [(&[u8], &[u8]); 4] = [
     (&[0x00, 0x00], &[0x00, 0x02]),
     (&[0x00, 0x04], &[0x00, 0x12]),
     // Secrets (`00 14`), models (`00 15`).
     (&[0x00, 0x14], &[0x00, 0x16]),
     // Property graphs (`00 1D`): a plan of `GRAPH_TABLE` is made of one.
-    (&[0x00, 0x1D], &[0x00, 0x1E]),
+    // Sequences' definitions (`00 1E`; not their values, `00 1F`).
+    (&[0x00, 0x1D], &[0x00, 0x1F]),
 ];
 
 /// Asks `kv` to watch the catalog.
@@ -49,6 +50,11 @@ pub(crate) enum Part {
     Table,
     /// A model's definition (`Option<Model>`).
     Model,
+    /// A sequence's definition (`Option<Arc<Sequence>>`).
+    Sequence,
+    /// Whether the session may call a sequence's functions (`bool`), by
+    /// the sequence's name and the privileges asked.
+    SequenceUse,
     /// A database setting's value.
     Setting,
     /// An object's ACL (of a kind of object).

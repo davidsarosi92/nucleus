@@ -467,7 +467,7 @@ fn start(
     {
         let w = dml::Writer::new(&*txn, reg, new.clone())?;
         if new.columns[c].default.is_some() {
-            w.default_of(c, &Ctx::new(&*txn, reg, &[]))?;
+            w.check_default(c, &Ctx::new(&*txn, reg, &[]))?;
         }
     }
     let at = Conversion::hidden(&t);

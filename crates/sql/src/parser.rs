@@ -547,6 +547,11 @@ impl<'a> Parser<'a> {
             {
                 self.pos += 1;
                 Kind::Model
+            } else if self.peek_kw("sequence")
+                && matches!(self.peek_at(1), Some(Token::Word(w) | Token::Quoted(w)) if w != "to" && w != "from")
+            {
+                self.pos += 1;
+                Kind::Sequence
             } else {
                 self.eat_kw("table");
                 Kind::Table
@@ -1578,6 +1583,16 @@ impl<'a> Parser<'a> {
         if self.eat_kws(&["access", "rule"]) {
             return self.create_access_rule();
         }
+        if self.eat_kw("sequence") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.relation()?;
+            let options = self.sequence_options(false)?;
+            return Ok(Statement::CreateSequence {
+                name,
+                options,
+                if_not_exists,
+            });
+        }
         if self.eat_kw("model") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.ident()?;
@@ -2390,6 +2405,22 @@ impl<'a> Parser<'a> {
             let name = self.ident()?;
             return Ok(Statement::DropModel { name, if_exists });
         }
+        if self.eat_kw("sequence") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let mut names = vec![self.relation()?];
+            while self.eat_op(",") {
+                names.push(self.relation()?);
+            }
+            let cascade = self.eat_kw("cascade");
+            if !cascade {
+                self.eat_kw("restrict");
+            }
+            return Ok(Statement::DropSequence {
+                names,
+                if_exists,
+                cascade,
+            });
+        }
         if self.eat_kw("role") || self.eat_kw("user") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let mut names = vec![self.ident()?];
@@ -2571,8 +2602,94 @@ impl<'a> Parser<'a> {
         Ok(Statement::AlterType { type_name, action })
     }
 
+    /// A sequence's options, in any order (`RESTART` only in `ALTER`).
+    fn sequence_options(&mut self, alter: bool) -> Result<Vec<crate::sequences::SeqOption>> {
+        use crate::sequences::SeqOption as O;
+        let mut out = Vec::new();
+        loop {
+            out.push(if self.eat_kw("as") {
+                O::As(self.ident()?)
+            } else if self.eat_kw("increment") {
+                self.eat_kw("by");
+                O::Increment(self.signed_int()?)
+            } else if self.eat_kws(&["no", "minvalue"]) {
+                O::MinValue(None)
+            } else if self.eat_kws(&["no", "maxvalue"]) {
+                O::MaxValue(None)
+            } else if self.eat_kws(&["no", "cycle"]) {
+                O::Cycle(false)
+            } else if self.eat_kw("minvalue") {
+                O::MinValue(Some(self.signed_int()?))
+            } else if self.eat_kw("maxvalue") {
+                O::MaxValue(Some(self.signed_int()?))
+            } else if self.eat_kw("start") {
+                self.eat_kw("with");
+                O::Start(self.signed_int()?)
+            } else if alter && self.eat_kw("restart") {
+                let with = self.eat_kw("with");
+                if with || matches!(self.peek(), Some(Token::Number(_))) || self.peek_op("-") {
+                    O::Restart(Some(self.signed_int()?))
+                } else {
+                    O::Restart(None)
+                }
+            } else if self.eat_kw("cache") {
+                O::Cache(self.signed_int()?)
+            } else if self.eat_kw("cycle") {
+                O::Cycle(true)
+            } else if self.eat_kws(&["owned", "by"]) {
+                if self.eat_kw("none") {
+                    O::OwnedBy(None)
+                } else {
+                    let table = self.ident()?;
+                    self.expect_op(".")?;
+                    O::OwnedBy(Some((table, self.ident()?)))
+                }
+            } else {
+                break;
+            });
+        }
+        Ok(out)
+    }
+
+    /// A whole number with an optional sign, as a 64-bit integer.
+    fn signed_int(&mut self) -> Result<i64> {
+        let neg = self.eat_op("-");
+        if !neg {
+            self.eat_op("+");
+        }
+        match self.next() {
+            Some(Token::Number(n)) => {
+                let text = if neg { format!("-{n}") } else { n };
+                text.parse().map_err(|_| {
+                    Error::invalid_parameter(format!(
+                        "invalid value \"{text}\": a whole number of 64 bits"
+                    ))
+                })
+            }
+            _ => Err(self.error("expected a whole number")),
+        }
+    }
+
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
+        if self.eat_kw("sequence") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.relation()?;
+            let action = if self.eat_kws(&["rename", "to"]) {
+                crate::sequences::AlterSequence::Rename(self.ident()?)
+            } else {
+                let options = self.sequence_options(true)?;
+                if options.is_empty() {
+                    return Err(self.error("expected a sequence option"));
+                }
+                crate::sequences::AlterSequence::Options(options)
+            };
+            return Ok(Statement::AlterSequence {
+                name,
+                action,
+                if_exists,
+            });
+        }
         if self.eat_kw("collection") {
             let name = self.relation()?;
             let action = if self.eat_kws(&["rename", "to"]) {

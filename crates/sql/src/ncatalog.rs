@@ -361,6 +361,22 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ),
     ("model_providers", &[("name", T), ("remote", B)]),
     (
+        "sequences",
+        &[
+            ("name", T),
+            ("owner", T),
+            ("data_type", T),
+            ("start_value", I),
+            ("min_value", I),
+            ("max_value", I),
+            ("increment_by", I),
+            ("cycle", B),
+            ("cache_size", I),
+            ("last_value", I),
+            ("owned_by", T),
+        ],
+    ),
+    (
         "chunk_tables",
         &[
             ("table_name", T),
@@ -1107,6 +1123,38 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::TimestampTz(j.enqueued),
                     j.next_attempt.map_or(Value::Null, Value::TimestampTz),
                     j.error.map_or(Value::Null, text),
+                ]);
+            }
+        }
+        "sequences" => {
+            // The sequences the current role may use or read.
+            let checker = crate::privileges::Checker::new();
+            for s in crate::sequences::all(txn)? {
+                if !checker.has(
+                    txn,
+                    crate::privileges::Kind::Sequence,
+                    &s.name,
+                    crate::privileges::USAGE
+                        | crate::privileges::SELECT
+                        | crate::privileges::UPDATE,
+                    None,
+                )? {
+                    continue;
+                }
+                let last = crate::sequences::last_value(txn, &s)?;
+                out.push(vec![
+                    text(s.name.clone()),
+                    text(s.owner.clone()),
+                    text(crate::sequences::type_word(s.ty).to_string()),
+                    Value::Int(s.start),
+                    Value::Int(s.min),
+                    Value::Int(s.max),
+                    Value::Int(s.increment),
+                    Value::Bool(s.cycle),
+                    Value::Int(s.cache),
+                    last.map_or(Value::Null, Value::Int),
+                    s.owned_by
+                        .map_or(Value::Null, |(t, c)| text(format!("{t}.{c}"))),
                 ]);
             }
         }
