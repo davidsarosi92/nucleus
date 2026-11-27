@@ -100,6 +100,29 @@ impl WriteSet {
         }
     }
 
+    /// Takes the writes of `keys` out (a savepoint rolled back to); the
+    /// bytes they took, about.
+    pub(crate) fn remove_all(&mut self, keys: &std::collections::HashSet<Vec<u8>>) -> usize {
+        let mut gone = 0;
+        match self {
+            WriteSet::Sorted(v) => v.retain(|(k, w)| {
+                let keep = !keys.contains(k);
+                if !keep {
+                    gone += k.len() + w.as_ref().map_or(0, Vec::len);
+                }
+                keep
+            }),
+            WriteSet::Map(m) => {
+                for k in keys {
+                    if let Some(w) = m.remove(k) {
+                        gone += k.len() + w.map_or(0, |v| v.len());
+                    }
+                }
+            }
+        }
+        gone
+    }
+
     pub(crate) fn first_key(&self) -> Option<&Vec<u8>> {
         match self {
             WriteSet::Sorted(v) => v.first().map(|(k, _)| k),

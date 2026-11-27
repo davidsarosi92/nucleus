@@ -1168,7 +1168,16 @@ such a database opens.  Every walk over versions skips them.
 `begin()` / `begin_with(TxnOptions { isolation, read_only, at })`.
 `Transaction`: `get`, `put`, `delete`, `scan(start, end)` (ascending;
 merges the transaction's own writes), `commit() -> Timestamp`,
-`rollback()`; dropping it rolls back.  `Timestamp` is opaque outside the
+`rollback()`; dropping it rolls back.  `savepoint()`,
+`release_savepoint()`, `rollback_to_savepoint()` (nested; issue #24):
+from a savepoint on, each key's first write notes the transaction's own
+write of it before — held in memory, else its spilled intent (read from
+the tree), else none — and a rollback to it puts those back, deleting the
+intents spilled since of keys it had none of (under the commit lock); a
+release hands its notes to the savepoint outside it, the older note
+kept.  While one is set, a fresh range's writes go through the write set
+(not the WAL-less path, D16), a range written so before looked up in the
+tree by `put_new`.  `Timestamp` is opaque outside the
 crate (principle 3): compared, printed and parsed (`Display`, `FromStr`),
 never computed with.  `Engine`: `visible`, `checkpoint`,
 `vacuum`, `intents_pending`, `version_count`, `intent_count`,
@@ -3782,7 +3791,14 @@ Sessions: outside `BEGIN` every statement is its own transaction, retried
 up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the
 first statement (so `SET TRANSACTION` may follow `BEGIN`), an error moves
 the block to *failed* (`25P02` until `ROLLBACK`; `COMMIT` then rolls
-back).  `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED` all run
+back).  Savepoints as PostgreSQL's: `SAVEPOINT name`, `ROLLBACK [WORK |
+TRANSACTION] TO [SAVEPOINT] name` (the writes after it taken back, the
+savepoints inside it gone, the block no longer failed), `RELEASE
+[SAVEPOINT] name` (it and those inside it gone, their writes kept); a
+name used twice means the newest; outside a block `25P01`, an unknown
+name `3B001` (the block failed).  The block's savepoints before its first
+statement are set on its transaction when it begins.  What a statement
+read stays read: a serializable block validates it at `COMMIT` still.  `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED` all run
 as snapshot isolation; `SERIALIZABLE` as §5.2.  `SET
 default_transaction_isolation`; `SHOW transaction_isolation |
 server_version | …`.

@@ -13,7 +13,8 @@ it is (and not run): what nucleus does differently on purpose, recorded.
 PostgreSQL is reached through `psql` (`--psql`, default: a `postgres:18-alpine`
 container started for the run, removed after).  Each script runs in a
 fresh database; each record in a session of its own, so a script keeps
-its state in tables, not in session settings.  Values are formatted as
+its state in tables, not in session settings — or, with `--session`, all
+of them in one session (a script with transaction blocks).  Values are formatted as
 the test kit's runner formats them (`NULL`, `(empty)`, booleans `t`/`f`
 in text columns and `true`/`false` in `B` ones, reals to three places).
 """
@@ -51,6 +52,26 @@ class Pg:
         p = subprocess.run(self.base + ["-X", "-q", "-A", "-t", "-F", SEP, "-d", db],
                            input=script, capture_output=True, text=True)
         return p.stdout, p.stderr
+
+    def session(self, db, sqls):
+        """Runs every statement of `sqls` in one session: each one's
+        (stdout, stderr)."""
+        script = "\\pset null NULL\n\\set VERBOSITY sqlstate\n"
+        for i, sql in enumerate(sqls):
+            script += f"\\echo @@slt {i}\n\\warn @@slt {i}\n{sql}\n;\n"
+        p = subprocess.run(self.base + ["-X", "-q", "-A", "-t", "-F", SEP, "-d", db],
+                           input=script, capture_output=True, text=True)
+
+        def split(text):
+            parts = [""] * len(sqls)
+            at = None
+            for line in text.split("\n"):
+                if line.startswith("@@slt "):
+                    at = int(line.split()[1])
+                elif at is not None:
+                    parts[at] += line + "\n"
+            return parts
+        return list(zip(split(p.stdout), split(p.stderr)))
 
     def fresh(self, db):
         self.raw("postgres", f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
@@ -112,9 +133,9 @@ def cell(s, ty):
     return "(empty)" if s == "" else s
 
 
-def run(pg, db, rec):
+def run(pg, db, rec, done=None):
     """('error', code) or ('rows', [lines]) or ('ok', None)."""
-    out, err = pg.raw(db, rec["sql"])
+    out, err = done if done is not None else pg.raw(db, rec["sql"])
     errors = [l for l in err.splitlines() if l.startswith("ERROR:")]
     if errors:
         return "error", errors[0].split()[1]
@@ -140,6 +161,7 @@ def main():
     a.add_argument("mode", choices=["check", "fill"])
     a.add_argument("script")
     a.add_argument("--psql", help="a psql command line (default: a container)")
+    a.add_argument("--session", action="store_true", help="every record in one session")
     args = a.parse_args()
     text = open(args.script, encoding="utf-8").read()
     lines, recs = records(text)
@@ -149,10 +171,12 @@ def main():
     try:
         pg.fresh(db)
         replaced = {}
-        for rec in recs:
-            if rec["only"] or rec["header"].startswith("connection"):
-                continue
-            kind, got = run(pg, db, rec)
+        todo = [r for r in recs if not (r["only"] or r["header"].startswith("connection"))]
+        done = {}
+        if args.session:
+            done = dict(zip((r["start"] for r in todo), pg.session(db, [r["sql"] for r in todo])))
+        for rec in todo:
+            kind, got = run(pg, db, rec, done.get(rec["start"]))
             words = rec["header"].split()
             want_error = words[1] == "error"
             if args.mode == "check":

@@ -5,7 +5,8 @@
 //!   times — safe because the statement is all the transaction does.
 //! - Inside `BEGIN … COMMIT`, an error aborts the transaction: later
 //!   statements fail with `25P02` until `ROLLBACK` (or `COMMIT`, which then
-//!   rolls back).  A conflict at `COMMIT` is `40001`; the client retries.
+//!   rolls back), or `ROLLBACK TO` a savepoint set before it.  A conflict at
+//!   `COMMIT` is `40001`; the client retries.
 //! - The KV transaction starts with the first statement after `BEGIN`, so
 //!   `SET TRANSACTION` may follow `BEGIN`.
 //! - DDL is transactional: the catalog lives in the same store.
@@ -302,6 +303,9 @@ struct Block {
     /// An index dropped in it: its entries removed once it commits
     /// (`crate::online_index::after_statement`).
     dropped: bool,
+    /// Its savepoints' names, the innermost last: the transaction holds
+    /// one savepoint for each (set when it begins, for those before).
+    savepoints: Vec<String>,
 }
 
 /// The session setting whose time (or `commit n`) every statement and
@@ -964,6 +968,7 @@ impl Session {
                         mode: mode.clone(),
                         failed: false,
                         dropped: false,
+                        savepoints: Vec::new(),
                     });
                 }
                 Ok(Output::Command("BEGIN".into()))
@@ -989,6 +994,78 @@ impl Session {
                     t.rollback();
                 }
                 Ok(Output::Command("ROLLBACK".into()))
+            }
+            Statement::Savepoint(name) => {
+                let Some(block) = &mut self.block else {
+                    return Err(Error::no_active_txn(
+                        "SAVEPOINT can only be used in transaction blocks",
+                    ));
+                };
+                if block.failed {
+                    return Err(Error::in_failed_txn(
+                        "current transaction is aborted, commands ignored until end of transaction block",
+                    ));
+                }
+                if let Some(txn) = &mut block.txn
+                    && let Err(e) = txn.savepoint()
+                {
+                    block.failed = true;
+                    return Err(e.into());
+                }
+                block.savepoints.push(name.clone());
+                Ok(Output::Command("SAVEPOINT".into()))
+            }
+            Statement::RollbackTo(name) => {
+                let Some(block) = &mut self.block else {
+                    return Err(Error::no_active_txn(
+                        "ROLLBACK TO SAVEPOINT can only be used in transaction blocks",
+                    ));
+                };
+                // The innermost of the name (names may repeat).
+                let Some(at) = block.savepoints.iter().rposition(|n| n == name) else {
+                    block.failed = true;
+                    return Err(Error::invalid_savepoint(format!(
+                        "savepoint \"{name}\" does not exist"
+                    )));
+                };
+                if let Some(txn) = &mut block.txn {
+                    // The ones inside it go, their writes now its own.
+                    for _ in at + 1..block.savepoints.len() {
+                        txn.release_savepoint();
+                    }
+                    if let Err(e) = txn.rollback_to_savepoint() {
+                        block.failed = true;
+                        return Err(e.into());
+                    }
+                }
+                block.savepoints.truncate(at + 1);
+                block.failed = false;
+                Ok(Output::Command("ROLLBACK".into()))
+            }
+            Statement::Release(name) => {
+                let Some(block) = &mut self.block else {
+                    return Err(Error::no_active_txn(
+                        "RELEASE SAVEPOINT can only be used in transaction blocks",
+                    ));
+                };
+                if block.failed {
+                    return Err(Error::in_failed_txn(
+                        "current transaction is aborted, commands ignored until end of transaction block",
+                    ));
+                }
+                let Some(at) = block.savepoints.iter().rposition(|n| n == name) else {
+                    block.failed = true;
+                    return Err(Error::invalid_savepoint(format!(
+                        "savepoint \"{name}\" does not exist"
+                    )));
+                };
+                if let Some(txn) = &mut block.txn {
+                    for _ in at..block.savepoints.len() {
+                        txn.release_savepoint();
+                    }
+                }
+                block.savepoints.truncate(at);
+                Ok(Output::Command("RELEASE".into()))
             }
             Statement::SetTableOptions { table, options } => {
                 // Copied in transactions of its own, while others use
@@ -1658,6 +1735,9 @@ impl Session {
                 | Statement::Begin(_)
                 | Statement::Commit
                 | Statement::Rollback
+                | Statement::Savepoint(_)
+                | Statement::RollbackTo(_)
+                | Statement::Release(_)
                 | Statement::SetTransaction(_)
                 | Statement::Set { .. }
                 | Statement::Reset(_)
@@ -1726,7 +1806,12 @@ impl Session {
                     }
                     None => {}
                 }
-                block.txn = Some(self.kv.begin(opts)?);
+                let mut txn = self.kv.begin(opts)?;
+                // The block's savepoints so far: none has a write after it.
+                for _ in &block.savepoints {
+                    txn.savepoint()?;
+                }
+                block.txn = Some(txn);
                 block.now = crate::datetime::from_system(self.kv.wall_clock());
             }
             let txn = block.txn.as_mut().expect("just started");
@@ -3461,6 +3546,9 @@ pub(crate) fn execute_statement(
         Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackTo(_)
+        | Statement::Release(_)
         | Statement::SetTransaction(_)
         | Statement::Set { .. }
         | Statement::Show(_) => {

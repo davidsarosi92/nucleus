@@ -975,6 +975,20 @@ pub trait KvTxn: Send {
 
     /// Discards the transaction's writes.
     fn rollback(self: Box<Self>);
+
+    /// Sets a savepoint (SQL's `SAVEPOINT`): a rollback to it takes back
+    /// every write after it; nested, the innermost first.
+    fn savepoint(&mut self) -> Result<()> {
+        Err(Error::Storage("savepoints are not supported here".into()))
+    }
+
+    /// Forgets the innermost savepoint, its writes kept.
+    fn release_savepoint(&mut self) {}
+
+    /// Takes back every write after the innermost savepoint, which stays.
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        Err(Error::Storage("savepoints are not supported here".into()))
+    }
 }
 
 /// The keys starting with `prefix`, as scan bounds' upper end: the smallest
@@ -1837,6 +1851,18 @@ impl KvTxn for LocalTxn {
 
     fn rollback(self: Box<Self>) {
         self.0.rollback();
+    }
+
+    fn savepoint(&mut self) -> Result<()> {
+        Ok(self.0.savepoint()?)
+    }
+
+    fn release_savepoint(&mut self) {
+        self.0.release_savepoint();
+    }
+
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        Ok(self.0.rollback_to_savepoint()?)
     }
 }
 

@@ -1,0 +1,322 @@
+# Savepoints (issue #24): SAVEPOINT, ROLLBACK TO [SAVEPOINT],
+# RELEASE [SAVEPOINT], as PostgreSQL's.  Checked against PostgreSQL 18.
+
+statement ok
+CREATE TABLE sp (id int PRIMARY KEY, v text UNIQUE, n int)
+
+statement ok
+CREATE INDEX sp_n ON sp (n)
+
+# Only in a transaction block
+statement error 25P01
+SAVEPOINT a
+
+statement error 25P01
+ROLLBACK TO SAVEPOINT a
+
+statement error 25P01
+RELEASE SAVEPOINT a
+
+# The writes after a savepoint taken back, the ones before kept
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO sp VALUES (1, 'one', 10)
+
+statement ok
+SAVEPOINT a
+
+statement ok
+INSERT INTO sp VALUES (2, 'two', 20)
+
+statement ok
+UPDATE sp SET n = 11 WHERE id = 1
+
+statement ok
+ROLLBACK TO SAVEPOINT a
+
+statement ok
+INSERT INTO sp VALUES (3, 'three', 30)
+
+query ITI rowsort
+SELECT * FROM sp
+----
+1 one 10
+3 three 30
+
+statement ok
+COMMIT
+
+query ITI rowsort
+SELECT * FROM sp
+----
+1 one 10
+3 three 30
+
+# The secondary indexes agree
+query I
+SELECT id FROM sp WHERE n = 11
+----
+
+query I
+SELECT id FROM sp WHERE n = 10
+----
+1
+
+# A failed statement recovered from: the block goes on
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT s
+
+statement error 23505
+INSERT INTO sp VALUES (4, 'one', 40)
+
+statement error 25P02
+SELECT 1
+
+statement error 25P02
+SAVEPOINT t
+
+statement error 25P02
+RELEASE s
+
+statement ok
+ROLLBACK TO s
+
+statement ok
+INSERT INTO sp VALUES (4, 'four', 40)
+
+statement ok
+COMMIT
+
+query ITI rowsort
+SELECT * FROM sp
+----
+1 one 10
+3 three 30
+4 four 40
+
+# Nested: a release keeps the writes, now the outer one's
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT a
+
+statement ok
+DELETE FROM sp WHERE id = 1
+
+statement ok
+SAVEPOINT b
+
+statement ok
+UPDATE sp SET v = 'THREE' WHERE id = 3
+
+statement ok
+RELEASE SAVEPOINT b
+
+query T rowsort
+SELECT v FROM sp
+----
+THREE
+four
+
+statement ok
+ROLLBACK TO a
+
+query T rowsort
+SELECT v FROM sp
+----
+four
+one
+three
+
+# A rollback to a takes back the writes after the savepoints inside it,
+# and removes them
+statement ok
+INSERT INTO sp VALUES (29, 'twenty-nine', 290)
+
+statement ok
+SAVEPOINT b
+
+statement ok
+INSERT INTO sp VALUES (30, 'thirty', 300)
+
+statement ok
+SAVEPOINT c
+
+statement ok
+INSERT INTO sp VALUES (31, 'thirty-one', 310)
+
+statement ok
+ROLLBACK TO a
+
+query I
+SELECT count(*) FROM sp WHERE id >= 29
+----
+0
+
+statement error 3B001
+RELEASE b
+
+statement error 25P02
+SELECT 1
+
+statement ok
+ROLLBACK
+
+# A name used twice: the newest
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT x
+
+statement ok
+INSERT INTO sp VALUES (10, 'ten', 100)
+
+statement ok
+SAVEPOINT x
+
+statement ok
+INSERT INTO sp VALUES (11, 'eleven', 110)
+
+statement ok
+ROLLBACK TO x
+
+query I rowsort
+SELECT id FROM sp WHERE id >= 10
+----
+10
+
+statement ok
+RELEASE x
+
+statement ok
+ROLLBACK TO x
+
+query I rowsort
+SELECT id FROM sp WHERE id >= 10
+----
+
+statement ok
+COMMIT
+
+# An unknown savepoint fails the block
+statement ok
+BEGIN
+
+statement error 3B001
+ROLLBACK TO nowhere
+
+statement error 25P02
+SELECT 1
+
+statement ok
+ROLLBACK
+
+# Before the block's first statement, and a key reused after
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT first
+
+statement ok
+INSERT INTO sp VALUES (20, 'twenty', 200)
+
+statement ok
+ROLLBACK TO SAVEPOINT first
+
+statement ok
+INSERT INTO sp VALUES (20, 'twenty again', 201)
+
+statement ok
+INSERT INTO sp VALUES (21, 'twenty', 210) ON CONFLICT (id) DO NOTHING
+
+statement ok
+COMMIT
+
+query ITI rowsort
+SELECT * FROM sp WHERE id >= 20
+----
+20 twenty again 201
+21 twenty 210
+
+# DDL taken back
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT d
+
+statement ok
+CREATE TABLE sp2 (a int)
+
+statement ok
+INSERT INTO sp2 VALUES (1)
+
+statement ok
+DROP INDEX sp_n
+
+statement ok
+ROLLBACK TO d
+
+statement error 42P01
+SELECT * FROM sp2
+
+statement ok
+ROLLBACK TO d
+
+statement ok
+ALTER TABLE sp ADD COLUMN w int DEFAULT 5
+
+statement ok
+SAVEPOINT e
+
+statement ok
+ALTER TABLE sp DROP COLUMN w
+
+statement ok
+ROLLBACK TO e
+
+query I
+SELECT sum(w) FROM sp
+----
+25
+
+statement ok
+COMMIT
+
+query I
+SELECT id FROM sp WHERE n = 40
+----
+4
+
+# Spelled with and without the keywords, and with ROLLBACK WORK
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT "Mixed"
+
+statement ok
+SAVEPOINT plain
+
+statement ok
+ROLLBACK WORK TO SAVEPOINT plain
+
+statement ok
+ROLLBACK TRANSACTION TO "Mixed"
+
+statement ok
+RELEASE "Mixed"
+
+statement ok
+COMMIT
+
+statement ok
+DROP TABLE sp

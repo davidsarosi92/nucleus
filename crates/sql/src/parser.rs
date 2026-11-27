@@ -1096,9 +1096,23 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Commit)
             }
             "rollback" | "abort" => {
+                let abort = w == "abort";
                 self.pos += 1;
                 let _ = self.eat_kw("transaction") || self.eat_kw("work");
+                if !abort && self.eat_kw("to") {
+                    self.eat_kw("savepoint");
+                    return Ok(Statement::RollbackTo(self.ident()?));
+                }
                 Ok(Statement::Rollback)
+            }
+            "savepoint" => {
+                self.pos += 1;
+                Ok(Statement::Savepoint(self.ident()?))
+            }
+            "release" => {
+                self.pos += 1;
+                self.eat_kw("savepoint");
+                Ok(Statement::Release(self.ident()?))
             }
             "set" => self.set(),
             "grant" => self.grant(),

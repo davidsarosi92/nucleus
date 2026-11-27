@@ -613,6 +613,12 @@ pub enum Statement {
     Commit,
     /// `ROLLBACK`.
     Rollback,
+    /// `SAVEPOINT name`.
+    Savepoint(String),
+    /// `ROLLBACK TO [SAVEPOINT] name`.
+    RollbackTo(String),
+    /// `RELEASE [SAVEPOINT] name`.
+    Release(String),
     /// `SET TRANSACTION …`.
     SetTransaction(TxnMode),
     /// `SET name = value`.

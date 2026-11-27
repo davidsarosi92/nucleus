@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1106,6 +1106,8 @@ impl Engine {
             gap: None,
             empty: Mutex::new(Vec::new()),
             mirrors: None,
+            savepoints: Vec::new(),
+            restoring: false,
         })
     }
 
@@ -2530,6 +2532,18 @@ pub struct Transaction {
     /// The mirrored prefixes its writes met ([`Engine::mirror`]), as they
     /// were at its first such write.
     mirrors: Option<Arc<Vec<(Vec<u8>, Vec<u8>)>>>,
+    /// Its savepoints, the innermost last ([`Transaction::savepoint`]).
+    savepoints: Vec<Savepoint>,
+    /// Restoring a savepoint's keys: their writes not remembered again.
+    restoring: bool,
+}
+
+/// A savepoint: for each key written since, this transaction's own write
+/// of it before the first such write (`None`: it had none) — held in
+/// memory or spilled as an intent.
+#[derive(Debug, Default)]
+struct Savepoint {
+    undo: HashMap<Vec<u8>, Option<Option<Vec<u8>>>>,
 }
 
 /// Ranges a transaction remembers the store as empty in, at most.
@@ -2930,6 +2944,16 @@ impl Transaction {
         if !self.engine.opts.wal_minimal {
             return Ok(Unlogged::No);
         }
+        // Under a savepoint every write goes through the write set, where
+        // a rollback to it can take it back; a range written without the
+        // WAL before is looked at in the tree (`put_new`).
+        if !self.savepoints.is_empty() {
+            return Ok(if self.fresh[i].mode == FreshMode::Unlogged {
+                Unlogged::Behind
+            } else {
+                Unlogged::No
+            });
+        }
         if self.fresh[i].mode == FreshMode::Untried {
             self.fresh[i].mode = if self.register_unlogged(i)? {
                 FreshMode::Unlogged
@@ -3101,10 +3125,16 @@ impl Transaction {
     /// mirrored prefix ([`Engine::mirror`]) — spilling when past the
     /// memory allowed (after both: a spill checks the pair together).
     fn record(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        if !self.savepoints.is_empty() && !self.restoring {
+            self.remember(key)?;
+        }
         self.hold(key, value);
         if self.engine.mirroring.load(Ordering::Acquire) > 0
             && let Some(to) = self.mirrored(key)
         {
+            if !self.savepoints.is_empty() && !self.restoring {
+                self.remember(&to)?;
+            }
             self.hold(&to, value);
         }
         if self.write_bytes > self.engine.opts.txn_memory {
@@ -3552,6 +3582,122 @@ impl Transaction {
     pub fn rollback(mut self) {
         self.done = true;
         crate::metrics::ROLLBACKS.inc();
+    }
+
+    /// Sets a savepoint: [`rollback_to_savepoint`] takes back every write
+    /// after it, the transaction going on (SQL's `SAVEPOINT`).  Nested:
+    /// the innermost is the one rolled back to or released.  While one is
+    /// set, writes go through the write set (not the WAL-less path of
+    /// fresh ranges, D16), so that they can be taken back.
+    ///
+    /// [`rollback_to_savepoint`]: Transaction::rollback_to_savepoint
+    pub fn savepoint(&mut self) -> Result<()> {
+        // (Writes gathered for the WAL-less path, before it, are kept
+        // whatever becomes of it.)
+        self.savepoints.push(Savepoint::default());
+        Ok(())
+    }
+
+    /// Forgets the innermost savepoint, its writes kept — now after the
+    /// one outside it, if any (SQL's `RELEASE SAVEPOINT`).
+    pub fn release_savepoint(&mut self) {
+        if let Some(top) = self.savepoints.pop()
+            && let Some(below) = self.savepoints.last_mut()
+        {
+            for (key, before) in top.undo {
+                below.undo.entry(key).or_insert(before);
+            }
+        }
+    }
+
+    /// Takes back every write after the innermost savepoint, which stays
+    /// set (SQL's `ROLLBACK TO SAVEPOINT`): each key written since holds
+    /// this transaction's own write before again, or none — its intent,
+    /// if it spilled since, deleted.  What it read stays read (a
+    /// serializable transaction's reads are validated still).
+    pub fn rollback_to_savepoint(&mut self) -> Result<()> {
+        let Some(top) = self.savepoints.last_mut() else {
+            return Ok(());
+        };
+        let undo = std::mem::take(&mut top.undo);
+        if undo.is_empty() {
+            return Ok(());
+        }
+        let mut gone = std::collections::HashSet::new();
+        let mut intents = Vec::new();
+        self.restoring = true;
+        for (key, before) in undo {
+            match before {
+                Some(v) => self.hold(&key, v.as_deref()),
+                None => {
+                    if self.spilled.is_some()
+                        && self
+                            .span
+                            .as_ref()
+                            .is_some_and(|(lo, hi)| *lo <= key && key <= *hi)
+                    {
+                        intents.push(key.clone());
+                    }
+                    gone.insert(key);
+                }
+            }
+        }
+        self.restoring = false;
+        let bytes = self.writes.remove_all(&gone);
+        self.write_bytes = self
+            .write_bytes
+            .saturating_sub(bytes + gone.len() * WRITE_OVERHEAD);
+        // What it knew of the store around those keys no longer holds.
+        self.gap = None;
+        lock(&self.empty).clear();
+        if let (Some(id), false) = (self.spilled, intents.is_empty()) {
+            let engine = Arc::clone(&self.engine);
+            let last = lock(&engine.commit);
+            intents.sort();
+            let ops = intents
+                .iter()
+                .map(|k| (encode_key(k, intent_ts(id)), None))
+                .collect();
+            engine.store.write(Batch { meta: *last, ops })?;
+        }
+        Ok(())
+    }
+
+    /// Notes, for the innermost savepoint, `key`'s own write before its
+    /// first write since: held, else spilled, else none.
+    fn remember(&mut self, key: &[u8]) -> Result<()> {
+        let Some(top) = self.savepoints.last() else {
+            return Ok(());
+        };
+        if top.undo.contains_key(key) {
+            return Ok(());
+        }
+        let before = match self.writes.get(key) {
+            Some(w) => Some(w.clone()),
+            None => self.own_intent(key)?,
+        };
+        if let Some(top) = self.savepoints.last_mut() {
+            top.undo.insert(key.to_vec(), before);
+        }
+        Ok(())
+    }
+
+    /// This transaction's spilled write of `key`, if it has one.
+    fn own_intent(&self, key: &[u8]) -> Result<Option<Option<Vec<u8>>>> {
+        let Some(id) = self.spilled else {
+            return Ok(None);
+        };
+        if !self
+            .span
+            .as_ref()
+            .is_some_and(|(lo, hi)| lo.as_slice() <= key && key <= hi.as_slice())
+        {
+            return Ok(None);
+        }
+        let tree = self.engine.store.read()?;
+        Ok(tree
+            .get(&encode_key(key, intent_ts(id)))?
+            .and_then(|v| decode_value(&v).map(|w| w.map(<[u8]>::to_vec))))
     }
 }
 

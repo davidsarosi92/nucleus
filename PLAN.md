@@ -14339,6 +14339,32 @@ as keys; path and array indexes are chosen by the planner and measured;
 the form's choice measured (D1).  The query language is decided at
 §M16's start.
 
+**The issues after §M15** (2026-11-27, before §M16): what the bug hunt
+found missing, and the open issues.
+
+- Issue #24, first step — savepoints: `SAVEPOINT`, `ROLLBACK TO
+  [SAVEPOINT]`, `RELEASE [SAVEPOINT]`, nested, a name used twice meaning
+  the newest, PostgreSQL's errors (`25P01` outside a block, `3B001` an
+  unknown name, `25P02` in a failed block but for `ROLLBACK TO`).  ORMs
+  nest transactions with them (Django's `atomic`, SQLAlchemy's
+  `begin_nested`, Rails' `requires_new`).  The transaction keeps an undo
+  note per savepoint: each key's first write after it notes the
+  transaction's own write before — in memory, else its spilled intent,
+  else none — and a rollback to it puts those back and deletes the
+  intents spilled since (a key taken back is free for another writer at
+  once; PostgreSQL's subtransaction gives up its row locks so).  A
+  release hands its notes outward, the older kept.  No cost without a
+  savepoint (one branch per write).  The idea is the undo log of every
+  engine with savepoints (PostgreSQL's subtransactions, InnoDB's undo
+  records by savepoint); nucleus keeps it per key, not per write, as
+  its write set does.  Tested by `crates/txn/tests/savepoints.rs` (a
+  model through random writes, nested savepoints and spills; a fresh
+  range written without the WAL) and `90_savepoints.slt`, 92 of 92
+  records as PostgreSQL 18 has them — checked in one session
+  (`scripts/slt-pg.py --session`, new).  Twelve mutations, each failing;
+  one more showed the savepoint's flush of the WAL-less writes needless
+  (they precede it and stay), taken out.
+
 ### §M16 — Document queries + document server ⬜
 
 - **First, the decision on the query language** (moved here from M15,
