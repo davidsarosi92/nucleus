@@ -8906,7 +8906,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1–J5 ✅, 2026-11-14)
+### §M14.15 — JSON ✅ (J1–J5 2026-11-14; performance items 2026-11-18)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -9444,6 +9444,14 @@ put it but `text`, which it can neither query nor index.
   where `jsonschema` would need that tree built first (a parse of the
   document, ~1 µs here).  (`JSON_TABLE`'s row loop: done 2026-11-18,
   J3c — under PostgreSQL's time.)
+
+**Closed (2026-11-27).**  Done when met: `slt/65_json.slt`–`68_json_table.slt`
+filled from and checked against PostgreSQL 18's `jsonb` by
+`scripts/slt-pg.py`; the performance items after J5 — the `CHECK`'s
+writer cache, `JSON_TABLE`'s row loop, JSON Schema's checks — done as
+recorded above.  What is left against other libraries (JSON output 2×
+serde's, JSON Schema 1.9× the `jsonschema` crate's) is the binary
+form read in place, kept on purpose; not a lag against PostgreSQL.
 
 ### §M14.16 — Migrations and code generation ✅
 
