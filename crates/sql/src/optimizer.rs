@@ -1405,10 +1405,16 @@ fn key_bound(p: &Expr, key: &Expr) -> Option<(BinaryOp, Expr)> {
 /// or an expression (with statistics only: they bind it,
 /// [`Stats::key_parts`]).
 pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Access {
+    // An equality on key part `k` — or, a multi-valued part (PLAN.md
+    // §M15 D5), a value a condition on its array implies.
     let eq = |k: &Expr| {
         preds
             .iter()
-            .filter_map(|p| key_bound(p, k).map(|b| (p, b)))
+            .filter_map(|p| {
+                key_bound(p, k)
+                    .or_else(|| crate::multikey::probe(p, k))
+                    .map(|b| (p, b))
+            })
             .find(|(_, (op, _))| *op == BinaryOp::Eq)
     };
     let columns = |cols: &[usize]| cols.iter().map(|&c| Expr::Column(c)).collect::<Vec<_>>();
@@ -1443,24 +1449,30 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
         };
         let mut exact = Vec::new();
         let mut prefix = Vec::new();
+        let mut used: Vec<Expr> = Vec::new();
         for (pos, k) in keys.iter().enumerate() {
             let Some((p, (op, e))) = eq(k) else { break };
-            if index.is_some() && applied_exactly(key_ty(pos), op, &e) {
+            // A multi-valued part's value says a row may match: its
+            // condition is the filter's still, and the estimate's.
+            let multi = crate::multikey::of(k).is_some();
+            if index.is_some() && !multi && applied_exactly(key_ty(pos), op, &e) {
                 exact.push(p.clone());
             }
+            used.push(if multi {
+                p.clone()
+            } else {
+                bin(BinaryOp::Eq, k, &e)
+            });
             prefix.push(e);
         }
         let (mut lower, mut upper) = (Bound::Unbounded, Bound::Unbounded);
-        let mut used: Vec<Expr> = prefix
-            .iter()
-            .zip(&keys)
-            .map(|(e, k)| bin(BinaryOp::Eq, k, e))
-            .collect();
         if let Some(next) = keys.get(prefix.len()) {
-            for (p, (op, e)) in preds
-                .iter()
-                .filter_map(|p| key_bound(p, next).map(|b| (p, b)))
-            {
+            let multi = crate::multikey::of(next).is_some();
+            for (p, (op, e)) in preds.iter().filter_map(|p| {
+                key_bound(p, next)
+                    .or_else(|| crate::multikey::probe(p, next))
+                    .map(|b| (p, b))
+            }) {
                 let slot = match op {
                     BinaryOp::Gt | BinaryOp::GtEq => &mut lower,
                     BinaryOp::Lt | BinaryOp::LtEq => &mut upper,
@@ -1472,6 +1484,12 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
                     } else {
                         Bound::Included(e.clone())
                     };
+                    if multi {
+                        // Two conditions' bounds may be met by two
+                        // elements, not one: a multi-valued part takes one.
+                        used.push(p.clone());
+                        break;
+                    }
                     if index.is_some() && applied_exactly(key_ty(prefix.len()), op, &e) {
                         exact.push(p.clone());
                     }

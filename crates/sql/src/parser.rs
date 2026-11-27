@@ -1453,10 +1453,19 @@ impl<'a> Parser<'a> {
                         exprs.push(Some(text));
                     } else {
                         // `a.b.c`: a path in a collection's documents
-                        // (PLAN.md §M15 D4), made an expression there.
-                        while self.eat_op(".") {
-                            name.push('.');
-                            name.push_str(&self.ident()?);
+                        // (PLAN.md §M15 D4), made an expression there;
+                        // `tags[*]`, `items[*].sku`: each element's (D5).
+                        loop {
+                            if self.eat_op(".") {
+                                name.push('.');
+                                name.push_str(&self.ident()?);
+                            } else if self.eat_op("[") {
+                                self.expect_op("*")?;
+                                self.expect_op("]")?;
+                                name.push_str("[*]");
+                            } else {
+                                break;
+                            }
                         }
                         columns.push(name);
                         exprs.push(None);

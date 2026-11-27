@@ -81,6 +81,7 @@ pub mod metrics;
 pub mod migrations;
 pub mod models;
 pub mod moments;
+pub mod multikey;
 pub mod narrow;
 pub mod ncatalog;
 pub mod online_index;

@@ -318,8 +318,9 @@ fn backfill(
             for r in rows.take(size) {
                 let (key, row) = r?;
                 let pk = pk_suffix(&t, &key);
-                let (k, unique) = keys.entry(&*txn, &view, &row, pk, i)?;
-                entries.push((k, pk.to_vec(), unique));
+                for (k, unique) in keys.entry(&*txn, &view, &row, pk, i)? {
+                    entries.push((k, pk.to_vec(), unique));
+                }
                 last = Some(key);
             }
         }

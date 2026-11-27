@@ -291,6 +291,15 @@ impl Index {
         self.exprs.iter().any(Option::is_some)
     }
 
+    /// Whether a key part is multi-valued (PLAN.md §M15 D5): a row may
+    /// have several entries, so a scan reads each row once.
+    pub fn multi(&self) -> bool {
+        self.exprs
+            .iter()
+            .flatten()
+            .any(|e| crate::multikey::is_multi_sql(&e.sql))
+    }
+
     /// Whether the index reads column `c`: a key part of it, or a column
     /// an expression part reads.
     pub fn uses(&self, c: usize) -> bool {

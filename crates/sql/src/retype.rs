@@ -644,7 +644,10 @@ fn backfill(kv: &Arc<dyn Kv>, reg: &Registry, table: &str) -> Result<()> {
         for (key, row, ext, entries) in writes {
             storage.write(txn, &sh.view, &key, &ext, Some(&row))?;
             let pk = pk_suffix(&t, &key).to_vec();
-            for (i, (k, unique)) in entries {
+            for (i, (k, unique)) in entries
+                .into_iter()
+                .flat_map(|(i, es)| es.into_iter().map(move |e| (i, e)))
+            {
                 if unique && txn.get(&k)?.is_some() {
                     return Err(Error::unique_violation(format!(
                         "converted to the column's new type, two rows have the same value in unique index \"{}\"",

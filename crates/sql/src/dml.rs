@@ -54,7 +54,12 @@ pub fn bind_index_expr(
     table: &Table,
     sql: &str,
 ) -> Result<(Expr, Option<DataType>)> {
-    let (x, ty) = binder.expr(&parse_expr(sql)?, &table_scope(table))?;
+    let parsed = parse_expr(sql)?;
+    // A multi-valued part (PLAN.md §M15 D5): its array's elements.
+    let (x, ty) = match crate::multikey::bind(binder, table, &parsed)? {
+        Some((x, ty)) => (x, Some(ty)),
+        None => binder.expr(&parsed, &table_scope(table))?,
+    };
     if let Some(p) = immutability_problem(&x, table) {
         return Err(Error::invalid_object_definition(format!(
             "an index expression must be immutable; {sql} uses {p}"
@@ -106,6 +111,9 @@ pub struct IndexKeys {
     last: Vec<usize>,
     /// The B-tree indexes' positions.
     btrees: Vec<usize>,
+    /// Per index, its multi-valued part's position (PLAN.md §M15 D5): an
+    /// entry per value of it.
+    multi: Vec<Option<usize>>,
     /// The other indexes' positions and methods.
     methods: Vec<(usize, Arc<dyn IndexMethod>)>,
 }
@@ -144,10 +152,18 @@ impl IndexKeys {
             }
             maps.push(per);
         }
+        let multi = maps
+            .iter()
+            .map(|per| {
+                per.iter()
+                    .position(|m| m.as_ref().is_some_and(|m| crate::multikey::of(m).is_some()))
+            })
+            .collect();
         Ok(Self {
             maps,
             last,
             btrees,
+            multi,
             methods,
         })
     }
@@ -177,8 +193,14 @@ impl IndexKeys {
         Ok(())
     }
 
+    /// Whether index `i` has a multi-valued part: entries per value.
+    pub fn is_multi(&self, i: usize) -> bool {
+        self.multi[i].is_some()
+    }
+
     /// Every B-tree entry of `row` (primary key bytes `pk`): the index's
-    /// position, the key and whether it takes part in uniqueness.
+    /// position, the key and whether it takes part in uniqueness — one
+    /// an index, or (a multi-valued one) one per distinct value.
     pub fn entries(
         &self,
         txn: &dyn KvTxn,
@@ -194,18 +216,18 @@ impl IndexKeys {
             outer: None,
             ctx: &ctx,
         };
-        self.btrees
-            .iter()
-            .filter(|&&i| self.last[i] < row.len())
-            .map(|&i| {
-                let (k, unique) = self.entry_in(&env, t, row, pk, i)?;
-                Ok((i, k, unique))
-            })
-            .collect()
+        let mut out = Vec::with_capacity(self.btrees.len());
+        for &i in self.btrees.iter().filter(|&&i| self.last[i] < row.len()) {
+            for (k, unique) in self.entry_in(&env, t, row, pk, i)? {
+                out.push((i, k, unique));
+            }
+        }
+        Ok(out)
     }
 
-    /// Index `i`'s entry of `row` alone ([`entries`](Self::entries)'
-    /// `i`-th): what an index build needs, not every index's.
+    /// Index `i`'s entries of `row` alone ([`entries`](Self::entries)'
+    /// of index `i`; one but a multi-valued index's): what an index build
+    /// needs, not every index's.
     pub fn entry(
         &self,
         txn: &dyn KvTxn,
@@ -213,7 +235,7 @@ impl IndexKeys {
         row: &Row,
         pk: &[u8],
         i: usize,
-    ) -> Result<(Vec<u8>, bool)> {
+    ) -> Result<Vec<(Vec<u8>, bool)>> {
         static NONE: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
         let ctx = Ctx::new(txn, NONE.get_or_init(Registry::empty), &[]);
         let env = Env {
@@ -231,16 +253,35 @@ impl IndexKeys {
         row: &Row,
         pk: &[u8],
         i: usize,
-    ) -> Result<(Vec<u8>, bool)> {
+    ) -> Result<Vec<(Vec<u8>, bool)>> {
         let maps = &self.maps[i];
         let mut vals = Vec::with_capacity(maps.len());
-        for (&c, m) in t.indexes[i].columns.iter().zip(maps) {
+        let mut each = None;
+        for (j, (&c, m)) in t.indexes[i].columns.iter().zip(maps).enumerate() {
             vals.push(match m {
                 None => row[c].clone(),
+                Some(e) if self.multi[i] == Some(j) => {
+                    let (part, array) = crate::multikey::of(e).expect("a multi-valued part");
+                    each = Some(part.values(&array.eval(env)?)?);
+                    Value::Null
+                }
                 Some(e) => e.eval(env)?,
             });
         }
-        Ok(index_key(t, i, vals, pk))
+        let (Some(j), Some(values)) = (self.multi[i], each) else {
+            return Ok(vec![index_key(t, i, vals, pk)]);
+        };
+        let mut out: Vec<(Vec<u8>, bool)> = values
+            .into_iter()
+            .map(|v| {
+                let mut vals = vals.clone();
+                vals[j] = v;
+                index_key(t, i, vals, pk)
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
     }
 }
 
@@ -276,8 +317,9 @@ impl IndexBuild {
         pk: &[u8],
     ) -> Result<()> {
         for (s, &i) in self.sorters.iter_mut().zip(&self.indexes) {
-            let (k, unique) = keys.entry(txn, t, row, pk, i)?;
-            s.entries.push(&k, pk, unique);
+            for (k, unique) in keys.entry(txn, t, row, pk, i)? {
+                s.entries.push(&k, pk, unique);
+            }
             s.spill_past_budget()?;
         }
         Ok(())
@@ -1912,9 +1954,10 @@ fn arbiter_keys(
         match *a {
             ArbiterAt::Key => keys.push((row_key_of(&w.table, row, None), true)),
             ArbiterAt::Index(i) => {
-                let (k, unique) = w.keys.entry(txn, wt, row, &[], i)?;
-                if unique {
-                    keys.push((k, false));
+                for (k, unique) in w.keys.entry(txn, wt, row, &[], i)? {
+                    if unique {
+                        keys.push((k, false));
+                    }
                 }
             }
         }
@@ -2482,11 +2525,14 @@ pub fn update_rows(
         let mut olds = w.keys.entries(&*txn, t, old, old_pk)?;
         let news = w.keys.entries(&*txn, t, new, new_pk)?;
         for (i, nk, unique) in news {
-            // The same index's old entry (a row without its hidden value
-            // has no shadow entry).
-            if let Some(at) = olds.iter().position(|(j, _, _)| *j == i) {
+            // The same entry there before: kept, or (the row moved)
+            // pointed at the new key.  Matched by key, not by index — a
+            // multi-valued index has several (PLAN.md §M15 D5); the old
+            // entries left are dropped below (a row without its hidden
+            // value has no shadow entry).
+            if let Some(at) = olds.iter().position(|(j, k, _)| *j == i && *k == nk) {
                 let (_, ok, old_unique) = olds.swap_remove(at);
-                if ok == nk && old_pk == new_pk {
+                if old_pk == new_pk {
                     continue;
                 }
                 drop_entry(txn, &w.table, i, &ok, old_unique, old_pk)?;
@@ -2916,8 +2962,9 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
                 uncharged = 0;
             }
             let pk = pk_suffix(table, &key);
-            let (k, unique) = keys.entry(ro, table, &row, pk, i)?;
-            to(&k, pk, unique)?;
+            for (k, unique) in keys.entry(ro, table, &row, pk, i)? {
+                to(&k, pk, unique)?;
+            }
         }
         crate::budget::charge_scans(uncharged)
     };

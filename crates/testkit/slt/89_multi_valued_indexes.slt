@@ -1,0 +1,313 @@
+# Multi-valued indexes (PLAN.md §M15 D5): an entry per element of an
+# array.  nucleus-only — PostgreSQL refuses a set-returning function in
+# an index; the conditions themselves (@>, = ANY, @?) are PostgreSQL's
+# and checked against it in 65–68.
+
+statement ok
+CREATE TABLE p (id int PRIMARY KEY, doc json, tags text[])
+
+statement ok
+INSERT INTO p VALUES (1, '{"tags": ["a", "b", "a"], "items": [{"sku": "x", "n": 1}, {"sku": "y", "n": 5}]}', ARRAY['red', 'blue']), (2, '{"tags": ["b"], "items": [{"sku": "y", "n": 9}]}', ARRAY['blue']), (3, '{"tags": "a", "items": {"sku": "x", "n": 2}}', ARRAY[]::text[]), (4, '{"tags": [], "items": []}', NULL), (5, '{"other": 1}', ARRAY['red', NULL])
+
+# Filler, so that an index is cheaper than a full scan
+statement ok
+INSERT INTO p SELECT i, json_build_object('tags', json_build_array('f' || (i % 40)), 'items', json_build_array(json_build_object('sku', 'f', 'n', 0))), ARRAY['f'] FROM generate_series(100, 2099) i
+
+statement ok
+CREATE INDEX p_tags ON p ((json_array_elements(doc -> 'tags')))
+
+statement ok
+CREATE INDEX p_sku ON p ((json_array_elements(doc -> 'items') ->> 'sku'))
+
+statement ok
+CREATE INDEX p_n ON p ((json_array_elements(doc -> 'items') -> 'n'), id)
+
+statement ok
+CREATE INDEX p_arr ON p ((unnest(tags)))
+
+query TT
+SELECT name, columns FROM nc_catalog.indexes WHERE table_name = 'p' ORDER BY name
+----
+p_arr {(unnest(tags))}
+p_n {"(json_array_elements(doc -> 'items') -> 'n')",id}
+p_pkey {id}
+p_sku {"(json_array_elements(doc -> 'items') ->> 'sku')"}
+p_tags {"(json_array_elements(doc -> 'tags'))"}
+
+# A row is read once, however many of its elements match
+query I rowsort
+SELECT id FROM p WHERE doc -> 'tags' @> '"a"'
+----
+1
+3
+
+query T
+EXPLAIN SELECT id FROM p WHERE doc -> 'tags' @> '"a"'
+----
+Project: #0
+  Index Scan using p_tags on p ((json_array_elements(doc -> 'tags')) = "a") filter: @>(json,json)(->(json,text)(#1, 'tags'), "a")
+
+query I
+SELECT count(*) FROM p WHERE doc -> 'tags' @> '["a", "b"]'
+----
+1
+
+# Through the document: the path to the array, then its element
+query I rowsort
+SELECT id FROM p WHERE doc @> '{"tags": ["b"]}'
+----
+1
+2
+
+query T
+EXPLAIN SELECT id FROM p WHERE doc @> '{"tags": ["b"]}'
+----
+Project: #0
+  Index Scan using p_tags on p ((json_array_elements(doc -> 'tags')) = "b") filter: @>(json,json)(#1, {"tags": ["b"]})
+
+# An element's field (as text); an object no array is its one element
+query I rowsort
+SELECT id FROM p WHERE doc -> 'items' @> '[{"sku": "x"}]'
+----
+1
+
+query I rowsort
+SELECT id FROM p WHERE doc @> '{"items": {"sku": "x"}}'
+----
+3
+
+query T
+EXPLAIN SELECT id FROM p WHERE doc -> 'items' @> '[{"sku": "y"}]'
+----
+Project: #0
+  Index Scan using p_sku on p ((json_array_elements(doc -> 'items') ->> 'sku') = 'y') filter: @>(json,json)(->(json,text)(#1, 'items'), [{"sku": "y"}])
+
+# An SQL array's elements
+query I rowsort
+SELECT id FROM p WHERE 'red' = ANY(tags)
+----
+1
+5
+
+query T
+EXPLAIN SELECT id FROM p WHERE 'blue' = ANY(tags)
+----
+Project: #0
+  Index Scan using p_arr on p ((unnest(tags)) = 'blue') filter: 'blue' = ANY (#2)
+
+# Ranges by a strict path's filter; a lax one is no bound (it unwraps
+# arrays on its way, which the index does not)
+query I rowsort
+SELECT id FROM p WHERE doc @? 'strict $.items[*] ? (@.n > 4)'
+----
+1
+2
+
+query T
+EXPLAIN SELECT id FROM p WHERE doc @? 'strict $.items[*] ? (@.n > 4)'
+----
+Project: #0
+  Index Scan using p_n on p ((json_array_elements(doc -> 'items') -> 'n') > 4) filter: @?(json,jsonpath)(#1, strict $."items"[*]?(@."n" > 4))
+
+query I rowsort
+SELECT id FROM p WHERE doc @? 'strict $.items[*].sku ? (@ == "y")'
+----
+1
+2
+
+query T
+EXPLAIN SELECT id FROM p WHERE doc @? '$.items[*] ? (@.n > 4)'
+----
+Project: #0
+  Seq Scan on p filter: @?(json,jsonpath)(#1, $."items"[*]?(@."n" > 4))
+
+# Kept on every write
+statement ok
+UPDATE p SET doc = json_set(doc, '{tags}', '["c", "a"]') WHERE id = 2
+
+statement ok
+UPDATE p SET tags = ARRAY['green'] WHERE id = 1
+
+statement ok
+DELETE FROM p WHERE id = 3
+
+query I rowsort
+SELECT id FROM p WHERE doc -> 'tags' @> '"a"'
+----
+1
+2
+
+query I rowsort
+SELECT id FROM p WHERE 'red' = ANY(tags)
+----
+5
+
+query I
+SELECT count(*) FROM p WHERE 'green' = ANY(tags)
+----
+1
+
+# Its definition is the expression's
+query T
+SELECT definition FROM nc_catalog.definitions WHERE name = 'p_sku'
+----
+CREATE INDEX p_sku ON p ((json_array_elements(doc -> 'items') ->> 'sku'))
+
+# An array further below the document
+statement ok
+CREATE TABLE deep (id int PRIMARY KEY, doc json)
+
+statement ok
+INSERT INTO deep SELECT i, json_build_object('a', json_build_object('b', json_build_array('v' || (i % 500)))) FROM generate_series(1, 2000) i
+
+statement ok
+CREATE INDEX deep_ab ON deep ((json_array_elements(doc -> 'a' -> 'b')))
+
+query I
+SELECT count(*) FROM deep WHERE doc @> '{"a": {"b": ["v7"]}}'
+----
+4
+
+query T
+EXPLAIN SELECT count(*) FROM deep WHERE doc @> '{"a": {"b": ["v7"]}}'
+----
+Aggregate: count(*)
+  Index Scan using deep_ab on deep ((json_array_elements(doc -> 'a' -> 'b')) = "v7") filter: @>(json,json)(#1, {"a": {"b": ["v7"]}})
+
+# What a multi-valued part may not be
+statement error 0A000
+CREATE UNIQUE INDEX ON p ((json_array_elements(doc -> 'tags')))
+
+statement ok
+CREATE TABLE empty (doc json, tags text[])
+
+statement error 0A000
+CREATE INDEX ON empty ((json_array_elements(doc -> 'tags')), (unnest(tags)))
+
+statement error 42804
+CREATE INDEX ON p ((unnest(doc)))
+
+statement error 42804
+CREATE INDEX ON p ((json_array_elements(id)))
+
+statement error 42804
+CREATE INDEX ON p ((json_array_elements_text(doc) -> 'k'))
+
+# On a collection: `tags[*]`, `items[*].sku` (one [*] a path)
+statement ok
+CREATE COLLECTION orders
+
+statement ok
+INSERT INTO orders (doc) SELECT json_build_object('_id', i, 'tags', json_build_array('f'), 'items', json_build_array(json_build_object('sku', 'f'))) FROM generate_series(100, 2099) i
+
+statement ok
+INSERT INTO orders (doc) VALUES ('{"_id": 1, "tags": ["new", "gift"], "items": [{"sku": "a", "qty": 2}, {"sku": "b", "qty": 7}]}'), ('{"_id": 2, "tags": ["gift"], "items": [{"sku": "b", "qty": 1}]}'), ('{"_id": 3, "items": [{"sku": ["c", "d"], "qty": 3}]}')
+
+statement ok
+CREATE INDEX ON orders (tags[*])
+
+statement ok
+CREATE INDEX ON orders (items[*].sku)
+
+query TT
+SELECT name, columns FROM nc_catalog.indexes WHERE table_name = 'orders' ORDER BY name
+----
+orders_items_sku_idx {"(json_array_elements(doc -> 'items') -> 'sku')"}
+orders_pkey {_id}
+orders_tags_idx {"(json_array_elements(doc -> 'tags'))"}
+
+query T rowsort
+SELECT _id FROM orders WHERE doc @> '{"tags": ["gift"]}'
+----
+1
+2
+
+# A field holding an array: its elements
+query T rowsort
+SELECT _id FROM orders WHERE doc @> '{"items": [{"sku": ["d"]}]}'
+----
+3
+
+query T
+EXPLAIN SELECT _id FROM orders WHERE doc @> '{"items": [{"sku": "b"}]}'
+----
+Project: #0
+  Index Scan using orders_items_sku_idx on orders ((json_array_elements(doc -> 'items') -> 'sku') = "b") filter: @>(json,json)(#1, {"items": [{"sku": "b"}]})
+
+statement error 0A000
+CREATE INDEX ON orders (items[*].parts[*])
+
+# A multi-valued part after others: a range of the first parts holds a
+# row once per element, read once (a lookup join too)
+statement ok
+CREATE TABLE m (id int PRIMARY KEY, g int, arr text[])
+
+statement ok
+INSERT INTO m SELECT i, i % 50, ARRAY['x' || (i % 3), 'y', 'z' || i] FROM generate_series(1, 3000) i
+
+statement ok
+CREATE INDEX m_g_arr ON m (g, (unnest(arr)))
+
+statement ok
+ANALYZE m
+
+query I
+SELECT count(*) FROM m WHERE g = 7
+----
+60
+
+query T
+EXPLAIN SELECT count(*) FROM m WHERE g = 7
+----
+Aggregate: count(*)
+  Index Scan using m_g_arr on m (g = 7) (rows=60)
+
+query I
+SELECT count(*) FROM m WHERE g = 7 AND 'y' = ANY(arr)
+----
+60
+
+query I
+SELECT count(*) FROM (VALUES (7), (8)) v(g) JOIN m ON m.g = v.g
+----
+120
+
+query I
+SELECT count(*) FROM m WHERE g = 3 AND 'x0' = ANY(arr)
+----
+20
+
+statement ok
+CREATE TABLE m2 (id int PRIMARY KEY, g int, arr text[])
+
+statement ok
+INSERT INTO m2 SELECT i, i % 5000, ARRAY['x' || (i % 3), 'y', 'z' || i] FROM generate_series(1, 30000) i
+
+statement ok
+CREATE INDEX m2_g_arr ON m2 (g, (unnest(arr)))
+
+statement ok
+CREATE TABLE one (g int)
+
+statement ok
+INSERT INTO one VALUES (7)
+
+statement ok
+ANALYZE m2
+
+statement ok
+ANALYZE one
+
+query T
+EXPLAIN SELECT count(*) FROM one JOIN m2 ON m2.g = one.g
+----
+Aggregate: count(*)
+  Project: #0
+    Index Nested Loop
+      Seq Scan on one (rows=1)
+      Index Scan using m2_g_arr on m2 (g = outer1.#0) (rows=6)
+
+query I
+SELECT count(*) FROM one JOIN m2 ON m2.g = one.g
+----
+6

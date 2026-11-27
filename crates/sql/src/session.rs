@@ -3549,8 +3549,12 @@ pub(crate) fn define_index(
                     && t.column(&c[k]).is_none()
                     && k < columns.len() - partition_by.len()
                 {
-                    x[k] = Some(crate::collection::path_sql(&c[k]));
-                    paths[k] = Some(std::mem::take(&mut c[k]).replace('.', "_"));
+                    x[k] = Some(crate::collection::path_sql(&c[k])?);
+                    paths[k] = Some(
+                        std::mem::take(&mut c[k])
+                            .replace("[*]", "")
+                            .replace('.', "_"),
+                    );
                 }
             }
         }
@@ -5005,9 +5009,21 @@ pub(crate) fn bind_index_exprs(
 ) -> Result<()> {
     use crate::binder::{Need, require};
     let mut binder = Binder::new(txn, reg);
+    let mut multi = 0;
     for (k, e) in ix.exprs.iter_mut().enumerate() {
         let Some(e) = e else { continue };
         let (x, ty) = dml::bind_index_expr(&mut binder, t, &e.sql)?;
+        // A multi-valued part (PLAN.md §M15 D5): one an index, which
+        // cannot be unique (a row's own values would be its duplicates).
+        if crate::multikey::of(&x).is_some() {
+            multi += 1;
+            if ix.unique {
+                return Err(Error::feature("a multi-valued index part cannot be UNIQUE"));
+            }
+            if multi > 1 {
+                return Err(Error::feature("an index has one multi-valued part at most"));
+            }
+        }
         let needs: &[Need] = if ix.unique {
             &[Need::KeyEncoding, Need::Equality]
         } else {

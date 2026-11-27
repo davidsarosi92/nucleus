@@ -1779,6 +1779,40 @@ NOTHING` 1.02× (the intervals overlap) — PostgreSQL skips a taken row
 without writing, as nucleus does, and both pay a lookup a row; nucleus's
 is a descent of the tree for each (half the conflict path's time).
 
+## Multi-valued indexes
+
+PLAN.md §M15 D5: an index entry per array element (`bash bench/all.sh
+multikey`; `bench/multikey.py`).  200,000 documents `{"_id", "tags": [3
+of 1,000], "items": [3 × {"sku": one of 5,000, "qty": 0–999}]}`, loaded
+with the indexes there (`load`); then 100 lookups a case, a different
+value each: `tag` — `doc @> '{"tags": ["t…"]}'`, about 600 documents;
+`sku` — `doc @> '{"items": [{"sku": "s…"}]}'`, about 120; `qty range` —
+`doc @? 'strict $.items[*] ? (@.qty > n)'`, about 1,800.  nucleus a
+collection with `tags[*]`, `items[*].sku`, `items[*].qty` indexes, as a
+server (its Python client, a round trip a lookup); PostgreSQL 18 native
+and tuned, one GIN index (`jsonb_path_ops`; it serves no range, so
+`qty range` is its full scan), `\timing`:
+
+| multikey | nucleus (s) | postgresql (s) |
+|---|---:|---:|
+| load | 3.00 [2.98–3.09] ±11% ⚠ | 2.22 [2.08–2.25] ±6% |
+| tag | 0.131 [0.127–0.151] ±11% ⚠ | 0.038 [0.037–0.040] ±15% ⚠ |
+| sku | 0.033 [0.033–0.039] ±43% ⚠ | 0.017 [0.016–0.017] ±10% |
+| qty range | 2.29 [2.26–2.34] ±6% | 2.93 [2.93–2.95] ±0% |
+
+Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-27.2.1-arm64-arm-64bit-Mach-O — postgresql 18.7 (Homebrew) — nucleus 00fa28eff+changes — 2026-11-27T08:33:41+00:00
+
+A lookup 3.4× PostgreSQL's time by a tag, 1.9× by a sku; a range 0.78×
+(PostgreSQL has no index for it).  MongoDB 8 (`mongo:8` in Docker, its
+multikey indexes, mongosh inside the container), one run of the script
+the same day — not through the method: Docker's VM could not hold it
+beside other containers for a second — load 20.7 s, tag 0.052 s, sku
+0.068 s, qty range 0.124 s (its index answers the range; nucleus keeps
+the condition and checks it again on each row).  Where nucleus's time
+goes: the row behind each entry fetched by its primary key, about 0.9
+µs a row (the cost of any secondary index), and a strict path's
+re-check, about 1.5 µs a row — gh #22.
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (`bash bench/all.sh

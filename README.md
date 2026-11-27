@@ -12,7 +12,7 @@ Elle as strong snapshot isolation and strict serializability), the KV contract, 
 SQL dialect (joins of every kind, CTEs, foreign keys, upserts (`INSERT … ON CONFLICT`), collections of documents (`CREATE COLLECTION`); integers by width,
 `real` and `double`, `numeric`, text and `char(n)`, `bytea` — large
 values stored out of line —, date, time and timestamps, intervals,
-`inet` / `cidr`, `uuid`, `json` — one binary type, read in place, with `jsonb`'s operators, SQL/JSON paths and the standard's `JSON_VALUE` / `JSON_QUERY` / `JSON_TABLE` / `JSON_OBJECT`, indexed by expression indexes and a containment index (`USING json`) —, enums and arrays) with a cost-based optimizer, its own system catalog
+`inet` / `cidr`, `uuid`, `json` — one binary type, read in place, with `jsonb`'s operators, SQL/JSON paths and the standard's `JSON_VALUE` / `JSON_QUERY` / `JSON_TABLE` / `JSON_OBJECT`, indexed by expression indexes, multi-valued indexes on arrays' elements and a containment index (`USING json`) —, enums and arrays) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`;
 results stream, read a batch at a time through a cursor, or columnar —
 straight into numpy, Arrow, pandas and polars) —

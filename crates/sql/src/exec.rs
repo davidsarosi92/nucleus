@@ -1732,6 +1732,9 @@ fn scan_range<'a>(
         labels: crate::enums::Labels::default(),
         sealed,
         from_entries,
+        seen: index
+            .filter(|&i| table.indexes[i].multi())
+            .map(|_| std::collections::HashSet::new()),
         keys: Vec::new(),
         rows: Vec::new(),
         ready: std::collections::VecDeque::new(),
@@ -1850,6 +1853,9 @@ struct IndexRows<'a> {
     /// The columns wanted are the entries' ([`FromEntries`]): no row
     /// fetched.
     from_entries: Option<FromEntries<'a>>,
+    /// A multi-valued index's (PLAN.md §M15 D5): the rows' keys read,
+    /// each row read once however many of its entries the range holds.
+    seen: Option<std::collections::HashSet<Vec<u8>>>,
     keys: Vec<Vec<u8>>,
     rows: Vec<Option<Row>>,
     ready: std::collections::VecDeque<(Vec<u8>, Row)>,
@@ -1871,6 +1877,11 @@ impl IndexRows<'_> {
             let mut k = Vec::with_capacity(self.base.len() + pk.len());
             k.extend_from_slice(&self.base);
             k.extend_from_slice(&pk);
+            if let Some(seen) = &mut self.seen
+                && !seen.insert(k.clone())
+            {
+                continue;
+            }
             match &self.from_entries {
                 Some(f) => {
                     let row = f.row(self.table, &entry, &pk)?;
@@ -3019,6 +3030,9 @@ impl<'a> KeyLookup<'a> {
         };
         let columns = match index {
             None => table.primary_key.len(),
+            // A multi-valued index's range may hold a row more than once
+            // (PLAN.md §M15 D5): read through the plan, which reads it once.
+            Some(i) if table.indexes.get(*i)?.multi() => return None,
             Some(i) => table.indexes.get(*i)?.columns.len(),
         };
         if prefix.is_empty() || prefix.len() > columns {

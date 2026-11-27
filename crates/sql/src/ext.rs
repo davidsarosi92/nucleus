@@ -307,6 +307,12 @@ pub trait ScalarFunction: Send + Sync {
         self.volatility() != Volatility::Volatile
     }
 
+    /// A multi-valued index part's ([`crate::multikey::Each`]): itself.
+    /// By default none.
+    fn as_each(&self) -> Option<&crate::multikey::Each> {
+        None
+    }
+
     /// For a function of two arguments that can be true only when its
     /// first lies in a range computed from its second (`inet <<= cidr`):
     /// two functions of the second giving that range's bounds, inclusive,

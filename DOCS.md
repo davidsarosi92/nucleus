@@ -7530,7 +7530,40 @@ not its key.  `_id` and `doc` are columns, so a field named `doc` is
 indexed by its expression; a key holding a dot or reading as an array
 position is too.  On a table a path is no column (`42703`, the hint
 naming the expression to index); an index method's index takes columns
-only (`0A000`).  `nc_catalog.collections` lists them (name, owner, schema,
+only (`0A000`).
+
+**Multi-valued indexes** (§M15 D5, `multikey`): a B-tree key part may
+be the elements of an array — `CREATE INDEX ON t
+((json_array_elements(doc -> 'tags')))`, `((unnest(tags)))` for an SQL
+array, `((json_array_elements(doc -> 'items') ->> 'sku'))` for each
+element's field; on a collection `tags[*]` and `items[*].sku` (one `[*]`
+a path, `0A000` otherwise).  A row has an entry per distinct value
+(MySQL's multi-valued index, MongoDB's multikey one): a value that is no
+array is its one element; an element's field that holds an array gives
+its elements (so a containment through the field finds the row); a row
+with none has no entry.  One such part an index, which is not `UNIQUE`
+(`0A000`); `unnest` takes an SQL array, the json functions json, a key
+only after json elements (`42804`).  Bound, the part is a call of
+`multikey::Each` on its array: `dml::IndexKeys` gives an index's entries
+as a list (one per value), every writer keeps them — an update matches
+its old and new entries by key —, and an index build, an online one and
+the integrity check take them as they come.  A scan of such an index
+reads each row once (`IndexRows` remembers the row keys it read), and a
+lookup join reads it through the plan.  The optimizer (`multikey::probe`)
+finds a bound on the part in a condition on its array and keeps the
+condition as the filter (an entry says a row may match; no condition is
+applied exactly): `a @> c` with `c` a constant — `a` the part's array or
+a json value it is a path below (`doc @> '{"tags": ["x"]}'`), `c` taken
+down that path, to its first element if an array, down the part's keys,
+a scalar —; `c = ANY(a)` of an SQL array; `x @? 'strict $.k…[*].f… ?
+(@.g… op c)'` (or a conjunct of the filter, `c op @…` too) — an
+equality or a range, the path to `[*]` the part's array below `x` and
+the keys after it the part's.  A lax path is no bound: lax unwraps
+arrays on the way to `[*]`, which the part's array does not, so a row
+could match the path with no entry.  Two conditions are never combined
+into one range on the part (two elements may meet them).  Not served:
+`a ? 'x'` (true of an object with key `x` too, which has no entry `x`),
+`JSON_EXISTS` (its `ON ERROR TRUE` would hold where the path fails).  `nc_catalog.collections` lists them (name, owner, schema,
 storage, engine); `nc_catalog.definitions` gives `CREATE COLLECTION …
 WITH (…)`, and schema diffs set or reset a changed schema in place
 (another storage is a note: the documents would go).  ncsql's `\d` says

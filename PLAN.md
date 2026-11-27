@@ -293,7 +293,7 @@ are marked ✅.
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
-| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅, D3 collections ✅, D4 path indexes ✅ (2026-11-27) |
+| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅, D3 collections ✅, D4 path indexes ✅, D5 multi-valued indexes ✅ (2026-11-27); next: the bug hunt |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
@@ -13929,7 +13929,7 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1–D4 ✅)
+### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1–D5 ✅)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
@@ -14229,7 +14229,47 @@ multi-valued one, the language decision moved to §M16's start):*
   planner's rules for `@>`, `= ANY`, `[*]` paths and `JSON_EXISTS`, a
   scan reading a row once per match; measured against PostgreSQL's GIN
   and MongoDB's multikey index (in Docker).  The largest piece of
-  engine work in M15.
+  engine work in M15. ✅ (2026-11-27).  A B-tree key part may be
+  `json_array_elements(A)` (`_text`, `jsonb_` spellings) or `unnest(A)`,
+  then `->` / `->>` keys; on a collection `tags[*]`, `items[*].sku`.
+  Bound to a marker call (`multikey::Each`) that the writers recognise:
+  `dml::IndexKeys` gives each index a list of entries — the distinct
+  values (MySQL's multi-valued index, MongoDB's multikey one, from
+  their documentation): a non-array is its one element, an element's
+  field holding an array gives its elements, a row with none has no
+  entry.  Every writer keeps them (an update pairs old and new entries
+  by key, not by position — a mutant pairing by position is killed),
+  the builds (plain, online, retype) and `check` take them as lists.
+  A scan of such an index reads each row once (`IndexRows` remembers
+  the row keys), a key lookup refuses one (`KeyLookup::of`), a lookup
+  join reads it as a scan.  The planner (`multikey::probe`) bounds the
+  part from `a @> c` (the part's array or a json value it is a path
+  below, `c` taken down that path, its first element, the part's keys,
+  to a scalar), `c = ANY(a)`, and a strict `@?` path's filter (an
+  equality or a range, `c op @…` mirrored); the condition is always
+  kept as the filter.  Unsound forms found and left out: a lax path
+  (it unwraps arrays on its way to `[*]`, so a row can match it with
+  no entry), two conditions combined into one range on the part (two
+  elements can meet them — a multi part takes one bound; mutant
+  killed), `?` (true of an object with the key), `JSON_EXISTS` (`ON
+  ERROR TRUE`).  One such part an index, not `UNIQUE` (`0A000`).
+  Tests: `89_multi_valued_indexes.slt` (plans, writes, definitions,
+  errors, a collection, a part after others and a lookup join),
+  `tests/multi_valued.rs` (random documents in every storage: each
+  indexed condition answers as on a table without the index, through
+  300 random writes and an online build, `check` whole); 22 mutants,
+  all killed (four after new tests).  Measured (`bench/multikey.py`,
+  200,000 documents, 100 lookups, ms, nucleus / PostgreSQL 18 GIN
+  `jsonb_path_ops` / MongoDB 8 in Docker): load with the indexes 3133 /
+  2305 / 20650; a tag (~600 documents) 126 / 37 / 52; an item's sku
+  (~120) 36 / 17 / 68; a quantity range (~1,800) 2286 / 2919 (GIN
+  serves no range) / 124.  Behind the gap (gh #22): the row behind each
+  entry fetched by its primary key, ~0.9 µs a row, the general cost of
+  a secondary index (`g = 37 AND doc IS NOT NULL` 0.70 ms for 601 rows,
+  0.16 ms with no fetch) where PostgreSQL's bitmap heap scan reads the
+  heap in order; a strict path's re-check ~1.5 µs a row; the dedup set
+  ~0.15 ms of 600 rows.  Perf items, waiting.  Not done: more than one
+  multi part, `UNIQUE`, `[*]` twice in a path, an index-only count.
 
 **Done when:** `INSERT … ON CONFLICT` behaves as PostgreSQL's under
 concurrent writers; collections exist in the catalog and SQL, with ids

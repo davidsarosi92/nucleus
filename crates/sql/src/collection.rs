@@ -166,13 +166,33 @@ pub(crate) fn alter(
 /// (a.b.c)`, PLAN.md §M15 D4) as the expression that reads it, `doc ->
 /// 'a' -> 'b' -> 'c'`: the json value there, as the query's `->` chain
 /// or `#> '{a,b,c}'` binds — so the index serves either.
-pub fn path_sql(path: &str) -> String {
+///
+/// `tags[*]` is each element of the array there (PLAN.md §M15 D5), a
+/// multi-valued part: `json_array_elements(doc -> 'tags')`, and
+/// `items[*].sku` each element's field, `json_array_elements(doc ->
+/// 'items') -> 'sku'` ([`crate::multikey`]); one `[*]` a path.
+pub fn path_sql(path: &str) -> Result<String> {
+    let keys = |path: &str, sql: &mut String| {
+        for key in path.split('.').filter(|k| !k.is_empty()) {
+            sql.push_str(" -> ");
+            sql.push_str(&literal(key));
+        }
+    };
     let mut sql = DOC.to_string();
-    for key in path.split('.') {
-        sql.push_str(" -> ");
-        sql.push_str(&literal(key));
+    match path.split_once("[*]") {
+        None => keys(path, &mut sql),
+        Some((_, rest)) if rest.contains("[*]") => {
+            return Err(Error::feature(format!(
+                "a path indexes the elements of one array: {path} has more than one [*]"
+            )));
+        }
+        Some((array, rest)) => {
+            keys(array, &mut sql);
+            sql = format!("json_array_elements({sql})");
+            keys(rest, &mut sql);
+        }
     }
-    sql
+    Ok(sql)
 }
 
 /// A collection's JSON Schema, if it has one.
