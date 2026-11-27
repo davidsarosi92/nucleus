@@ -980,7 +980,7 @@ impl Writer {
             )?,
         };
         let keys = Arc::clone(&parts.keys);
-        let storage = crate::storage::of(&table)?;
+        let storage = crate::changefeed::wrap(&table, crate::storage::of(&table)?);
         catalog::validate_table(txn, &table.name)?;
         let chunked = if table.referenced_by.is_empty() {
             Vec::new()
@@ -2784,7 +2784,7 @@ pub fn delete_rows(
         (None, Some(b)) => IndexKeys::new(&*txn, reg, b)?,
         (None, None) => IndexKeys::new(&*txn, reg, t)?,
     };
-    let storage = crate::storage::of(t)?;
+    let storage = crate::changefeed::wrap(t, crate::storage::of(t)?);
     catalog::validate_table(&*txn, &t.name)?;
     let embedded: Vec<usize> = crate::embedding::columns_of(t).collect();
     // A column's type being changed: the rows with their hidden values,
@@ -2967,6 +2967,7 @@ fn deletes_by_key(txn: &dyn KvTxn, t: &Table) -> Result<bool> {
         || !t.indexes.is_empty()
         || !t.building.is_empty()
         || !t.referenced_by.is_empty()
+        || !t.changefeeds.is_empty()
         || crate::embedding::columns_of(t).next().is_some()
     {
         return Ok(false);

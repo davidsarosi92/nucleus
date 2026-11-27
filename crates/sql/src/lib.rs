@@ -92,6 +92,7 @@ pub mod parser;
 pub mod partition;
 pub mod quantile;
 
+pub mod changefeed;
 pub mod plan;
 pub mod policies;
 pub mod privileges;

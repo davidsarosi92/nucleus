@@ -1,0 +1,219 @@
+# Changefeeds (PLAN.md §M16.5 S3, D23): a stream every write of its
+# table appends to in the writing transaction.  nucleus-only.
+
+statement ok
+CREATE TABLE accounts (id INT PRIMARY KEY, owner TEXT, balance INT)
+
+statement ok
+INSERT INTO accounts VALUES (1, 'Ann', 100)
+
+statement ok
+CREATE CHANGEFEED account_changes ON accounts WITH (before, retention = '30 days')
+
+statement ok
+CREATE CHANGEFEED IF NOT EXISTS account_changes ON accounts
+
+statement error 42P07
+CREATE CHANGEFEED account_changes ON accounts
+
+statement ok
+CREATE CHANGEFEED lean ON accounts
+
+# Rows there before it are not its changes
+query I
+SELECT count(*) FROM account_changes
+----
+0
+
+statement ok
+INSERT INTO accounts VALUES (2, 'Bob', 50), (3, 'Cy', 0)
+
+statement ok
+UPDATE accounts SET balance = balance + 10 WHERE id = 2
+
+statement ok
+DELETE FROM accounts WHERE id = 3
+
+# Rolled back: no change
+statement ok
+BEGIN
+
+statement ok
+UPDATE accounts SET balance = 0
+
+statement ok
+ROLLBACK
+
+# A savepoint's changes go with it
+statement ok
+BEGIN
+
+statement ok
+UPDATE accounts SET owner = 'Ann B' WHERE id = 1
+
+statement ok
+SAVEPOINT s
+
+statement ok
+DELETE FROM accounts WHERE id = 1
+
+statement ok
+ROLLBACK TO SAVEPOINT s
+
+statement ok
+COMMIT
+
+query ITTTT
+SELECT seq, op, key, after, before FROM account_changes ORDER BY seq
+----
+1 insert {"id": 2} {"id": 2, "owner": "Bob", "balance": 50} NULL
+2 insert {"id": 3} {"id": 3, "owner": "Cy", "balance": 0} NULL
+3 update {"id": 2} {"id": 2, "owner": "Bob", "balance": 60} {"id": 2, "owner": "Bob", "balance": 50}
+4 delete {"id": 3} NULL {"id": 3, "owner": "Cy", "balance": 0}
+5 update {"id": 1} {"id": 1, "owner": "Ann B", "balance": 100} {"id": 1, "owner": "Ann", "balance": 100}
+
+# Without before: the key and the row after
+query ITTT
+SELECT seq, op, key, before FROM lean ORDER BY seq
+----
+1 insert {"id": 2} NULL
+2 insert {"id": 3} NULL
+3 update {"id": 2} NULL
+4 delete {"id": 3} NULL
+5 update {"id": 1} NULL
+
+# A key changed: deleted under the old, inserted under the new
+statement ok
+UPDATE accounts SET id = 20 WHERE id = 2
+
+query ITT
+SELECT seq, op, key FROM lean WHERE seq > 5 ORDER BY seq
+----
+6 delete {"id": 2}
+7 insert {"id": 20}
+
+# Upserts, TRUNCATE: each row's change
+statement ok
+INSERT INTO accounts VALUES (1, 'Ann', 1), (4, 'Dee', 4) ON CONFLICT (id) DO UPDATE SET balance = excluded.balance
+
+statement ok
+INSERT INTO accounts VALUES (4, 'x', 0) ON CONFLICT DO NOTHING
+
+# A row of several passed over: the others' changes only
+statement ok
+INSERT INTO accounts VALUES (30, 'a', 1), (4, 'x', 0), (31, 'b', 2) ON CONFLICT DO NOTHING
+
+# A statement that fails: none of its changes
+statement error 23505
+INSERT INTO accounts VALUES (32, 'c', 3), (4, 'x', 0)
+
+statement ok
+TRUNCATE accounts
+
+query ITT
+SELECT seq, op, key FROM lean WHERE seq > 7 ORDER BY seq
+----
+8 update {"id": 1}
+9 insert {"id": 4}
+10 insert {"id": 30}
+11 insert {"id": 31}
+12 delete {"id": 1}
+13 delete {"id": 4}
+14 delete {"id": 20}
+15 delete {"id": 30}
+16 delete {"id": 31}
+
+# Consumed as any stream
+query IT
+CONSUME op FROM lean GROUP audit LIMIT 2
+----
+1 insert
+2 insert
+
+# Its entries are its table's
+statement error 0A000
+INSERT INTO lean (op, key) VALUES ('insert', '{}')
+
+statement error 0A000
+UPDATE lean SET op = 'x'
+
+# A table without a primary key: its hidden row id
+statement ok
+CREATE TABLE notes (body TEXT)
+
+statement ok
+CREATE CHANGEFEED note_changes ON notes
+
+statement ok
+INSERT INTO notes VALUES ('hello')
+
+query TB
+SELECT op, (key ->> 'rowid') IS NOT NULL FROM note_changes
+----
+insert true
+
+# The catalog
+query TT
+SELECT name, changefeed_of FROM nc_catalog.streams ORDER BY name
+----
+account_changes accounts
+lean accounts
+note_changes notes
+
+# Not on a stream, a feed
+statement ok
+CREATE STREAM events (n INT)
+
+statement error 42809
+CREATE CHANGEFEED f ON events
+
+statement error 42809
+CREATE CHANGEFEED f ON lean
+
+statement error 22023
+CREATE CHANGEFEED f ON accounts WITH (before = maybe)
+
+statement error 42P01
+CREATE CHANGEFEED f ON nowhere
+
+statement error 42809
+DROP CHANGEFEED events
+
+# The table goes only with its feeds
+statement error 2BP01
+DROP TABLE accounts
+
+statement ok
+DROP CHANGEFEED lean
+
+statement ok
+DROP TABLE notes CASCADE
+
+query T
+SELECT name FROM nc_catalog.streams ORDER BY name
+----
+account_changes
+events
+
+statement ok
+INSERT INTO accounts VALUES (5, 'Eve', 5)
+
+query IT
+SELECT seq, op FROM account_changes WHERE seq > 16 ORDER BY seq
+----
+17 insert
+
+statement ok
+DROP CHANGEFEED IF EXISTS lean
+
+statement error 42P01
+DROP CHANGEFEED lean
+
+statement ok
+DROP CHANGEFEED account_changes
+
+statement ok
+DROP TABLE accounts
+
+statement ok
+DROP STREAM events

@@ -100,7 +100,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// rows were stored ([`Table::missing`]); version 28 the places of
 /// columns dropped that rows still store ([`Table::gone`]); version 29
 /// whether it is a collection ([`Table::collection`]); version 30 the
-/// identity columns; version 31 a stream's retention ([`Table::stream`]);
+/// identity columns; version 31 a stream's retention and the table a
+/// changefeed follows ([`Table::stream`]), a table's changefeeds
+/// ([`Table::changefeeds`]);
 /// older versions still read.
 const TABLE_VERSION: u8 = 31;
 
@@ -414,6 +416,19 @@ pub struct StreamSpec {
     pub retention: Option<crate::datetime::Interval>,
     /// How many entries are kept at most.
     pub max_entries: Option<u64>,
+    /// A changefeed (`CREATE CHANGEFEED`, [`crate::changefeed`]): the id
+    /// of the table whose changes it holds.
+    pub source: Option<u32>,
+}
+
+/// A changefeed of a table ([`Table::changefeeds`]): the feed's id (its
+/// keys' prefix) and whether its entries hold the row before a change.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Changefeed {
+    /// The feed's table id.
+    pub id: u32,
+    /// `WITH (before)`.
+    pub before: bool,
 }
 
 /// A table definition.
@@ -477,6 +492,8 @@ pub struct Table {
     pub collection: bool,
     /// A stream (`CREATE STREAM`, [`crate::stream`]): its retention.
     pub stream: Option<StreamSpec>,
+    /// The changefeeds its writes append to ([`crate::changefeed`]).
+    pub changefeeds: Vec<Changefeed>,
     /// `SET SUBJECT (column, …)`: the columns that say whose a row is —
     /// `FORGET SUBJECT` erases the rows any of them names
     /// ([`crate::forget`]).
@@ -843,11 +860,24 @@ impl Table {
 
     /// [`index_prefix`](Self::index_prefix) appended to `out`.
     pub fn push_index_prefix(&self, out: &mut Vec<u8>, index_id: u32) {
-        out.push(DATA);
-        out.extend_from_slice(&self.id.to_be_bytes());
-        out.extend_from_slice(&index_id.to_be_bytes());
+        push_index_prefix_of(out, self.id, index_id);
     }
+}
 
+/// [`Table::index_prefix`] of the table with id `id`.
+pub fn index_prefix_of(id: u32, index_id: u32) -> Vec<u8> {
+    let mut k = Vec::with_capacity(INDEX_PREFIX_LEN);
+    push_index_prefix_of(&mut k, id, index_id);
+    k
+}
+
+fn push_index_prefix_of(out: &mut Vec<u8>, id: u32, index_id: u32) {
+    out.push(DATA);
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(&index_id.to_be_bytes());
+}
+
+impl Table {
     /// The end of index `index_id`'s keys (past every key with its prefix):
     /// the next index's prefix, the prefixes being of one length.
     pub fn index_end(&self, index_id: u32) -> [u8; INDEX_PREFIX_LEN] {
@@ -1221,7 +1251,15 @@ impl Table {
                     None => w.u8(0),
                     Some(n) => w.u8(1).u64(n),
                 };
+                match s.source {
+                    None => w.u8(0),
+                    Some(id) => w.u8(1).u32(id),
+                };
             }
+        }
+        w.u32(self.changefeeds.len() as u32);
+        for f in &self.changefeeds {
+            w.u32(f.id).u8(u8::from(f.before));
         }
         w.0
     }
@@ -1527,12 +1565,30 @@ impl Table {
                 0 => None,
                 _ => Some(r.u64()?),
             };
+            let source = match r.u8()? {
+                0 => None,
+                _ => Some(r.u32()?),
+            };
             Some(StreamSpec {
                 retention,
                 max_entries,
+                source,
             })
         } else {
             None
+        };
+        let changefeeds = if version >= 31 {
+            let n = r.u32()?;
+            let mut out = Vec::new();
+            for _ in 0..n {
+                out.push(Changefeed {
+                    id: r.u32()?,
+                    before: r.u8()? == 1,
+                });
+            }
+            out
+        } else {
+            Vec::new()
         };
         let building = if version >= 24 {
             let n = building_n;
@@ -1569,6 +1625,7 @@ impl Table {
             memory,
             collection,
             stream,
+            changefeeds,
             subject,
             converting,
             building,
@@ -2567,7 +2624,12 @@ mod tests {
                     micros: 0,
                 }),
                 max_entries: Some(1000),
+                source: Some(9),
             }),
+            changefeeds: vec![Changefeed {
+                id: 12,
+                before: true,
+            }],
             converting: Some(Conversion {
                 column: 1,
                 ty: DataType::Numeric,

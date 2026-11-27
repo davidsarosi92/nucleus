@@ -52,7 +52,7 @@ pub const HEAD_INDEX: u32 = u32::MAX - 6;
 /// The index id consumer groups' positions are kept under.
 pub const CONSUMERS_INDEX: u32 = u32::MAX - 7;
 /// The tag a `bigint` key value starts with ([`crate::encoding`]).
-const BIGINT_TAG: u8 = 0x02;
+pub(crate) const BIGINT_TAG: u8 = 0x02;
 
 fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
@@ -93,6 +93,17 @@ pub(crate) fn of(txn: &dyn KvTxn, name: &str) -> Result<Table> {
     Ok(t)
 }
 
+/// A changefeed's entries are its table's changes: not inserted.
+fn refuse_feed(t: &Table) -> Result<()> {
+    if t.stream.as_ref().is_some_and(|s| s.source.is_some()) {
+        return Err(Error::feature(format!(
+            "an INSERT into changefeed \"{}\": its entries are its table's changes",
+            t.name
+        )));
+    }
+    Ok(())
+}
+
 fn refused(what: &str) -> Error {
     Error::feature(format!(
         "{what} a stream's entries: they are appended, and trimmed by its retention"
@@ -122,7 +133,7 @@ fn encode(t: &Table, row: &Row) -> Vec<u8> {
 
 /// Writes the entry's number and the commit's time (nanoseconds since
 /// the Unix epoch) into an [`encode`]d row: its first two columns.
-fn fill(v: &mut [u8], n: u64, nanos: u64) {
+pub(crate) fn fill(v: &mut [u8], n: u64, nanos: u64) {
     let columns = usize::from(u16::from_le_bytes([v[1], v[2]]));
     let at = 3 + 2 * (columns.saturating_sub(1) / crate::encoding::STRIDE);
     let micros = (nanos / 1000) as i64 - crate::datetime::UNIX_TO_PG_MICROS;
@@ -162,6 +173,7 @@ impl TableStorage for StreamStorage {
     }
 
     fn insert(&self, txn: &mut dyn KvTxn, t: &Table, _: &[u8], row: &Row) -> Result<bool> {
+        refuse_feed(t)?;
         txn.append(&head_key(t), &entries_prefix(t), &encode(t, row), fill)?;
         Ok(true)
     }
@@ -178,6 +190,7 @@ impl TableStorage for StreamStorage {
         _: &Row,
         encoded: Vec<u8>,
     ) -> Result<bool> {
+        refuse_feed(t)?;
         txn.append(&head_key(t), &entries_prefix(t), &encoded, fill)?;
         Ok(true)
     }

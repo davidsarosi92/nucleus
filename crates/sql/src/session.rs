@@ -3009,6 +3009,51 @@ pub(crate) fn execute_statement(
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE STREAM".into())
         }
+        Statement::CreateChangefeed {
+            name,
+            table,
+            if_not_exists,
+            options,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE CHANGEFEED".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            crate::changefeed::create(txn, reg, name, table, options)?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
+            Output::Command("CREATE CHANGEFEED".into())
+        }
+        Statement::DropChangefeed { names, if_exists } => {
+            let mut there = Vec::new();
+            for name in names {
+                match catalog::get_table(&*txn, name)? {
+                    None if *if_exists => {}
+                    None => {
+                        return Err(Error::undefined_table(format!(
+                            "changefeed \"{name}\" does not exist"
+                        )));
+                    }
+                    Some(_) => {
+                        crate::changefeed::check_drop(&*txn, name)?;
+                        there.push(name.clone());
+                    }
+                }
+            }
+            if !there.is_empty() {
+                let drop = Statement::DropTable {
+                    names: there,
+                    if_exists: false,
+                    cascade: false,
+                };
+                execute_statement(txn, reg, &drop, params, sink)?;
+            }
+            Output::Command("DROP CHANGEFEED".into())
+        }
         Statement::DropStream { names, if_exists } => {
             let mut there = Vec::new();
             for name in names {
@@ -3208,6 +3253,18 @@ pub(crate) fn execute_statement(
                 match catalog::get_table(&*txn, name)? {
                     Some(mut t) => {
                         checker.require_owner(&*txn, crate::privileges::Kind::Table, name)?;
+                        // Its changefeeds (with CASCADE) first; a feed
+                        // leaves its table's list.
+                        let feeds = crate::changefeed::on_drop(txn, &t, names, *cascade)?;
+                        if !feeds.is_empty() {
+                            let drop = Statement::DropTable {
+                                names: feeds,
+                                if_exists: false,
+                                cascade: false,
+                            };
+                            execute_statement(txn, reg, &drop, params, sink)?;
+                            t = catalog::table(&*txn, name)?;
+                        }
                         crate::graphs::cascade(txn, name, None, *cascade)?;
                         crate::privileges::forget(txn, crate::privileges::Kind::Table, name)?;
                         crate::policies::forget(txn, name)?;
@@ -4741,6 +4798,7 @@ pub(crate) fn create_table(
         memory: None,
         collection: false,
         stream: None,
+        changefeeds: Vec::new(),
         engine: opts.engine,
         relative_directory: true,
     };

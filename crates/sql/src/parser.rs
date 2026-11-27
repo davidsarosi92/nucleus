@@ -1704,6 +1704,19 @@ impl<'a> Parser<'a> {
             self.expect_op(")")?;
             return Ok(Statement::CreateEnum { name, labels });
         }
+        if self.eat_kw("changefeed") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.relation()?;
+            self.expect_kw("on")?;
+            let table = self.relation()?;
+            let options = self.table_options()?;
+            return Ok(Statement::CreateChangefeed {
+                name,
+                table,
+                if_not_exists,
+                options,
+            });
+        }
         if self.eat_kw("stream") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.relation()?;
@@ -2414,6 +2427,14 @@ impl<'a> Parser<'a> {
                 names.push(self.relation()?);
             }
             return Ok(Statement::DropStream { names, if_exists });
+        }
+        if self.eat_kw("changefeed") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let mut names = vec![self.relation()?];
+            while self.eat_op(",") {
+                names.push(self.relation()?);
+            }
+            return Ok(Statement::DropChangefeed { names, if_exists });
         }
         if self.eat_kw("collection") {
             let if_exists = self.eat_kws(&["if", "exists"]);

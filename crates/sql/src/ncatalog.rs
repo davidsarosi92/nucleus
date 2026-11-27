@@ -13,7 +13,7 @@
 //! | `nc_catalog.schemas` | schema (of the session's registry) |
 //! | `nc_catalog.tables` | table |
 //! | `nc_catalog.collections` | collection (`CREATE COLLECTION`), its JSON Schema |
-//! | `nc_catalog.streams` | stream (`CREATE STREAM`): its retention, last `seq` and its time |
+//! | `nc_catalog.streams` | stream (`CREATE STREAM`, `CREATE CHANGEFEED`): its retention, last `seq` and its time, the table a changefeed follows |
 //! | `nc_catalog.consumers` | consumer group of a stream: its position and how far behind it is |
 //! | `nc_catalog.columns` | column |
 //! | `nc_catalog.indexes` | index (the primary index is index 0) |
@@ -410,6 +410,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("last_seq", I),
             ("last_time", DataType::TimestampTz),
             ("engine", T),
+            ("changefeed_of", T),
         ],
     ),
     (
@@ -1107,6 +1108,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Int(last),
                     at.map_or(Value::Null, Value::TimestampTz),
                     text(t.engine.name().to_string()),
+                    crate::changefeed::source_of(txn, t)?.map_or(Value::Null, text),
                 ]);
             }
         }

@@ -988,6 +988,13 @@ pub fn authorize_ddl(
         | Statement::CreateSequence { .. } => {
             c.require(txn, Kind::Schema, "public", CREATE, None)?
         }
+        // A feed shows every row its table writes: its owner's to make.
+        Statement::CreateChangefeed { table, .. } => {
+            c.require(txn, Kind::Schema, "public", CREATE, None)?;
+            if crate::catalog::get_table(txn, table)?.is_some() {
+                c.require_owner(txn, Kind::Table, table)?;
+            }
+        }
         Statement::CreateSecret { .. }
         | Statement::CreateModel { .. }
         | Statement::RecordMigration { .. }

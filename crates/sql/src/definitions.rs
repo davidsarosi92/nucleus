@@ -471,6 +471,40 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
         );
     }
     for t in by_shape(Shape::Stream) {
+        let spec = t.stream.clone().unwrap_or_default();
+        if let Some(source) = spec.source {
+            // A changefeed: its table's, its options.
+            let Some(s) = tables.iter().find(|s| s.id == source) else {
+                continue;
+            };
+            let mut options = Vec::new();
+            if let Some(f) = s.changefeeds.iter().find(|f| f.id == t.id)
+                && f.before
+            {
+                options.push(("before".to_string(), "true".to_string()));
+            }
+            if let Some(r) = spec.retention {
+                options.push(("retention".to_string(), r.to_string()));
+            }
+            if let Some(n) = spec.max_entries {
+                options.push(("max_entries".to_string(), n.to_string()));
+            }
+            if t.engine != catalog::TableEngine::BTree {
+                options.push(("engine".to_string(), t.engine.name().to_string()));
+            }
+            def(
+                "changefeed",
+                &t.name,
+                Some(&t.name),
+                format!(
+                    "CREATE CHANGEFEED {} ON {}{}",
+                    ident(&t.name),
+                    ident(&s.name),
+                    with(&options)
+                ),
+            );
+            continue;
+        }
         // Its columns after seq and time, its constraints but the key.
         let mut parts: Vec<String> = t.columns[2..]
             .iter()
@@ -485,7 +519,6 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
             }
             parts.push(format!("CONSTRAINT {} {}", ident(&c.name), c.definition));
         }
-        let spec = t.stream.clone().unwrap_or_default();
         let mut options = Vec::new();
         if let Some(r) = spec.retention {
             options.push(("retention".to_string(), r.to_string()));

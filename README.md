@@ -263,8 +263,12 @@ projection, sort, update and upsert), and in nucleus's own protocol,
 every driver (`db.collection("people").find(…)`) and the shell
 (`db.people.find(…)`), in the same transactions as SQL — and, with
 `--mongo-compat` (an optional module, as PostgreSQL's protocol is),
-`mongosh` and MongoDB's drivers.  Then streams and changefeeds, live queries and sync
-(§F2).  See
+`mongosh` and MongoDB's drivers.  Streams have begun (§M16.5): append-only
+tables numbered by the commit (`CREATE STREAM`, consumer groups whose
+position moves in the consumer's transaction — exactly once) and
+changefeeds (`CREATE CHANGEFEED f ON t`: every committed change of a
+table, in commit order, appended in the writing transaction).  Then task
+queues, live queries and sync (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 

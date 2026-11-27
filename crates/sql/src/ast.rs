@@ -182,6 +182,26 @@ pub enum Statement {
         /// `WITH (…)`.
         options: Vec<(String, String)>,
     },
+    /// `CREATE CHANGEFEED [IF NOT EXISTS] name ON table [WITH (before,
+    /// retention = …, max_entries = …, engine = …)]`: a stream of the
+    /// table's changes (PLAN.md §M16.5 S3).
+    CreateChangefeed {
+        /// The feed.
+        name: String,
+        /// The table.
+        table: String,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// `WITH (…)`.
+        options: Vec<(String, String)>,
+    },
+    /// `DROP CHANGEFEED [IF EXISTS] name, …`.
+    DropChangefeed {
+        /// The feeds.
+        names: Vec<String>,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP STREAM [IF EXISTS] name, …`.
     DropStream {
         /// The streams.

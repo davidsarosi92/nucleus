@@ -14784,6 +14784,29 @@ pgmq / River (leases, visibility, dead letters).
   stream that every write of `t` appends to in its own transaction
   (`op`, the key, the row after, optionally before, as `json`); in
   order, every committed change, none of a rolled-back one.
+  *Done:* a feed is a stream of `(op, key, after, before)` whose
+  entries the table's writes append (`crate::changefeed`): the table
+  keeps its feeds' ids, its writers' storage is wrapped so each row's
+  insert, update or delete appends an entry in the same transaction —
+  so rollbacks, savepoints and failed statements take both back and the
+  commit numbers the entries in commit order (D23).  The making
+  transaction validates the table's key range, so a write committed
+  after its snapshot by a writer that saw no feed fails it: its
+  snapshot and the feed are every change between them (the replay test
+  copies the table in that transaction and gets the table back).  The
+  statement's name is CockroachDB's (`CREATE CHANGEFEED`), the entry's
+  shape Debezium's (`op`, `key`, `before`, `after`) — their documentation
+  read, nothing of their source.  Not yet: partitioned tables, chunk
+  tables, tables with subject columns; the rows there before a feed are
+  not offered as a snapshot in it (read them in the making transaction).
+  Tests: `slt/98_changefeeds.slt` (every storage path),
+  `crates/sql/tests/changefeeds.rs` (the replay under four concurrent
+  writers on row, column and LSM storage; the race around the feed's
+  making, deterministic); mutations — the range validated, the op, the
+  row before, the delete's entry, the wrap, the fast delete's guard —
+  each failing; the batch's entries cut at its stop survives as
+  equivalent (a batch stops only at a duplicate, and the statement fails
+  with its entries).
 - **S4 — clients:** `ncp` messages to wait on a stream; every driver's
   consumer API (a group's next batch processed in a transaction, the
   offset moved with it) and producer; `ncsql`.

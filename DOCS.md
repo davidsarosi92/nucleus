@@ -7996,7 +7996,7 @@ COMMIT;                                                               -- both, o
   before the transaction that reads (outside one, or as its own
   statement).
 - **Catalog:** `nc_catalog.streams` (name, owner, retention,
-  `max_entries`, `last_seq`, `last_time`, engine) and
+  `max_entries`, `last_seq`, `last_time`, engine, `changefeed_of`) and
   `nc_catalog.consumers` (stream, `consumer_group`, position, lag);
   `nucleus dump --schema` writes `CREATE STREAM` (its consumer groups and
   entries are data: `BACKUP` keeps them, numbers and all); `\d` says
@@ -8010,6 +8010,67 @@ scripts run), `crates/sql/tests/streams.rs` (four producers writing an
 order and its event in each transaction while three consumers of one
 group bill every event exactly once; retention by count and by time;
 a waiter woken by a commit).
+
+### 8.44 Changefeeds (`changefeed`, §M16.5 S3)
+
+A changefeed is a stream (§8.43) that every write of its table appends
+to, in the writing transaction:
+
+```sql
+CREATE CHANGEFEED account_changes ON accounts WITH (before, retention = '30 days');
+UPDATE accounts SET balance = balance + 10 WHERE id = 2;
+SELECT seq, op, key, after, before FROM account_changes;
+--  3 | update | {"id": 2} | {"id": 2, "owner": "Bob", "balance": 60} | {"id": 2, "owner": "Bob", "balance": 50}
+CONSUME op, key, after FROM account_changes GROUP search_index LIMIT 500;
+```
+
+- **Its entries:** `seq`, `time` (the commit's, as any stream's), `op`
+  (`insert`, `update`, `delete`), `key` (the row's primary key as a
+  `json` object; `{"rowid": n}` for a table without one), `after` (the
+  row as a `json` object; `NULL` for a delete) and `before` (the row it
+  replaced or deleted — only `WITH (before)`; otherwise `NULL`).  A row
+  whose key an `UPDATE` changes is a `delete` under the old key and an
+  `insert` under the new.  Upserts give an `insert` or an `update` for
+  each row written, none for a row `DO NOTHING` passed over; `TRUNCATE`
+  and expiry give a `delete` per row.  The rows there before the feed
+  was made are not its changes.
+- **Every committed change, in commit order, none rolled back:** the
+  table's writers' storage is wrapped (`changefeed::wrap`, in
+  `dml::Writer` and `delete_rows`), so a row's write and its entry are
+  one transaction's — a statement that fails, a `ROLLBACK`, a `ROLLBACK
+  TO SAVEPOINT` take both back — and the entry is numbered at the commit
+  (§8.43).  The table keeps its feeds' ids (`Table::changefeeds`); a
+  writer reads the table's definition validated at its commit, so a
+  write begun before a feed was made fails on it (`40001`) and runs again
+  with it.  The transaction making the feed validates the table's whole
+  key range (`KvTxn::validate_range`): a write committed after its
+  snapshot by a writer that saw no feed fails that commit instead.  So
+  what the feed's making transaction reads of the table and what the
+  feed holds after it are, between them, every change — a copy made in
+  that transaction and the feed replayed onto it give the table.  The
+  key-only fast delete is not used for a table with feeds.  Changes made
+  by statements that rewrite a table's rows without changing them
+  (another storage, a column retyped) are not changes.
+- **A stream:** consumer groups, `stream_wait`, retention, `ALTER STREAM`
+  and the catalog as any stream's; inserting into it is refused
+  (`0A000`).  `nc_catalog.streams.changefeed_of` names its table.
+- **Made by its table's owner** (with `CREATE` on the schema): its
+  entries show every row written.  Not yet on a partitioned table or a
+  partition, a chunk table, a stream, or a table with subject columns
+  (their copies in a feed would outlive `FORGET SUBJECT`).
+- **Dropped:** `DROP CHANGEFEED f` (or `DROP STREAM`); its table is
+  dropped only with its feeds — `DROP TABLE t` is refused (`2BP01`)
+  while it has one, `DROP TABLE t CASCADE` drops them first.  `nucleus
+  dump --schema` writes `CREATE CHANGEFEED f ON t WITH (…)`.
+
+Tests: `slt/98_changefeeds.slt` (the entries of each kind of write,
+rollbacks and savepoints, a key changed, upserts, `TRUNCATE`, a failed
+statement, a table without a key, refusals, dropping; every storage path
+the scripts run), `crates/sql/tests/changefeeds.rs` (a feed made while
+four writers insert, update, delete and upsert, its table copied in the
+same transaction, replayed onto the copy in `seq` order gives the table
+— row, column and LSM storage, three seeds each; a write between the
+feed's snapshot and its commit fails the commit).
 
 ## 9. Server (`nucleus-server`)
 
