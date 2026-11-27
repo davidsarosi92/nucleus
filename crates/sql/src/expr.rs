@@ -257,6 +257,12 @@ pub enum Func {
     Cardinality,
     /// `array_append(array, element)`.
     ArrayAppend,
+    /// `arraycontains(a, b)`: `a @> b`.
+    ArrayContains,
+    /// `arraycontained(a, b)`: `a <@ b`.
+    ArrayContained,
+    /// `arrayoverlap(a, b)`: `a && b`.
+    ArrayOverlap,
     /// `regexp_replace(text, pattern, replacement [, flags])`.
     RegexpReplace,
 }
@@ -319,6 +325,9 @@ impl Func {
             Func::ArrayLength => "array_length",
             Func::Cardinality => "cardinality",
             Func::ArrayAppend => "array_append",
+            Func::ArrayContains => "arraycontains",
+            Func::ArrayContained => "arraycontained",
+            Func::ArrayOverlap => "arrayoverlap",
             Func::RegexpReplace => "regexp_replace",
         }
     }

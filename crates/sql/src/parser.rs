@@ -97,7 +97,6 @@ const RESERVED: &[&str] = &[
     "where",
     "group",
     "order",
-    "by",
     "having",
     "window",
     "limit",

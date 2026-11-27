@@ -95,6 +95,36 @@ EXPLAIN SELECT id FROM p WHERE 'blue' = ANY(tags)
 Project: #0
   Index Scan using p_arr on p ((unnest(tags)) = 'blue') filter: 'blue' = ANY (#2)
 
+# Containment of a constant array: by one of its elements, the filter kept
+query I rowsort
+SELECT id FROM p WHERE tags @> ARRAY['blue', 'red']
+----
+1
+
+query I rowsort
+SELECT id FROM p WHERE ARRAY['blue'] <@ tags
+----
+1
+2
+
+query T
+EXPLAIN SELECT id FROM p WHERE tags @> ARRAY['blue', 'red']
+----
+Project: #0
+  Index Scan using p_arr on p ((unnest(tags)) = 'blue') filter: arraycontains(#2, ARRAY['blue', 'red'])
+
+query T
+EXPLAIN SELECT id FROM p WHERE '{red}' <@ tags
+----
+Project: #0
+  Index Scan using p_arr on p ((unnest(tags)) = 'red') filter: arraycontained({red}, #2)
+
+# An empty one holds in every row: no bound
+query I
+SELECT count(*) FROM p WHERE tags @> '{}'
+----
+2004
+
 # Ranges by a strict path's filter; a lax one is no bound (it unwraps
 # arrays on its way, which the index does not)
 query I rowsort

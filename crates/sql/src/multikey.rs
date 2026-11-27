@@ -422,6 +422,36 @@ fn contained(pred: &Expr, part: &Expr) -> Option<Expr> {
                 crate::json::value(at.to_vec())
             }))
         }
+        // `array @> c` / `c <@ array`, `c` a constant array: an element of
+        // `c` (the rows holding all of them hold it; with none, every row
+        // holds them — no bound).
+        Expr::Call(f, args)
+            if each.kind == Kind::Array
+                && args.len() == 2
+                && matches!(f.name(), "arraycontains" | "arraycontained") =>
+        {
+            let (x, c) = if f.name() == "arraycontains" {
+                (&args[0], &args[1])
+            } else {
+                (&args[1], &args[0])
+            };
+            if *x != *array {
+                return None;
+            }
+            let element = |v: &Value| !matches!(v, Value::Null | Value::Array(_));
+            match c {
+                Expr::Literal(Value::Array(items)) => items
+                    .iter()
+                    .find(|v| element(v))
+                    .cloned()
+                    .map(Expr::Literal),
+                Expr::Array(items) => items.iter().find_map(|e| match e {
+                    Expr::Literal(v) if element(v) => Some(Expr::Literal(v.clone())),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        }
         Expr::AnyAll {
             left,
             op: crate::ast::BinaryOp::Eq,

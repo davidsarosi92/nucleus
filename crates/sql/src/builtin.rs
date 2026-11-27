@@ -101,6 +101,9 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
     (Func::ArrayLength, &["array_length"], 2..=2),
     (Func::Cardinality, &["cardinality"], 1..=1),
     (Func::ArrayAppend, &["array_append"], 2..=2),
+    (Func::ArrayContains, &["arraycontains"], 2..=2),
+    (Func::ArrayContained, &["arraycontained"], 2..=2),
+    (Func::ArrayOverlap, &["arrayoverlap"], 2..=2),
     (Func::RegexpReplace, &["regexp_replace"], 3..=4),
 ];
 
@@ -235,6 +238,9 @@ impl ScalarFunction for BuiltinFn {
             | Func::ArrayLength
             | Func::Cardinality
             | Func::ArrayAppend
+            | Func::ArrayContains
+            | Func::ArrayContained
+            | Func::ArrayOverlap
             | Func::RegexpReplace => arrays_and_regex(self.func, args),
             f => crate::expr::func(f, args.to_vec()),
         }
@@ -302,6 +308,19 @@ fn substr_batch(args: &[&Vector], len: usize, sel: &Sel) -> Option<Vector> {
 
 /// The array functions and `regexp_replace`, which take `NULL`s their
 /// own way.
+/// An array's elements, the arrays inside it opened (a multidimensional
+/// array's, in order).
+fn flat(items: &[Value]) -> Vec<&Value> {
+    let mut out = Vec::with_capacity(items.len());
+    for v in items {
+        match v {
+            Value::Array(inner) => out.extend(flat(inner)),
+            v => out.push(v),
+        }
+    }
+    out
+}
+
 fn arrays_and_regex(f: Func, args: &[Value]) -> Result<Value> {
     let as_int = |i: usize| match args.get(i) {
         Some(Value::Int(n)) => Some(*n),
@@ -355,6 +374,43 @@ fn arrays_and_regex(f: Func, args: &[Value]) -> Result<Value> {
             let mut items = array(0).cloned().unwrap_or_default();
             items.push(args.get(1).cloned().unwrap_or(Value::Null));
             Value::Array(items)
+        }
+        Func::ArrayContains | Func::ArrayContained | Func::ArrayOverlap => {
+            let (Some(a), Some(b)) = (array(0), array(1)) else {
+                return Ok(Value::Null);
+            };
+            let (mut a, mut b) = (flat(a), flat(b));
+            if f == Func::ArrayContained {
+                std::mem::swap(&mut a, &mut b);
+            }
+            // As PostgreSQL's: elements compared by equality, a NULL equal
+            // to none; duplicates and dimensions do not matter.
+            let has = |x: &Value| -> Result<bool> {
+                for y in &a {
+                    if crate::expr::binary(crate::ast::BinaryOp::Eq, (*y).clone(), (*x).clone())?
+                        .truth()?
+                        == Some(true)
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+            if f == Func::ArrayOverlap {
+                for x in &b {
+                    if has(x)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Value::Bool(false)
+            } else {
+                for x in &b {
+                    if !has(x)? {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Value::Bool(true)
+            }
         }
         Func::RegexpReplace => {
             let (Some(Value::Text(s)), Some(Value::Text(p)), Some(Value::Text(rep))) =
@@ -533,6 +589,29 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
                 vec![Arg::Keep, et.map_or(Arg::Keep, Arg::Untyped)],
                 Returns::Type(t(0).or_else(|| t1.and_then(DataType::array_of))),
             ))
+        }
+        Func::ArrayContains | Func::ArrayContained | Func::ArrayOverlap => {
+            // Two arrays of one type (PostgreSQL's `anyarray`); an untyped
+            // side takes the other's.
+            match (t(0), t(1)) {
+                (Some(a), Some(b)) if a != b => Err(Error::undefined_function(format!(
+                    "function {}({a}, {b}) does not exist",
+                    f.name()
+                ))),
+                (Some(a), _) | (None, Some(a)) if a.element().is_none() => {
+                    Err(Error::undefined_function(format!(
+                        "function {}({a}, …) does not exist",
+                        f.name()
+                    )))
+                }
+                (a, b) => {
+                    let ty = a.or(b);
+                    Ok(Signature::new(
+                        vec![ty.map_or(Arg::Keep, Arg::Untyped); 2],
+                        Returns::Type(Some(Bool)),
+                    ))
+                }
+            }
         }
         Func::Coalesce | Func::Greatest | Func::Least => {
             Ok(Signature::new(vec![Arg::Common; n], Returns::Common))

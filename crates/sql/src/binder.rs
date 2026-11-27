@@ -1805,7 +1805,7 @@ impl<'a> Binder<'a> {
             };
             for e in &s.group_by {
                 // GROUP BY 1 / GROUP BY alias: select-list items.
-                let resolved = self.group_item(e, &s.items)?;
+                let resolved = self.group_item(e, &s.items, &scope)?;
                 let (x, t) = self.expr(resolved, &scope)?;
                 require(t, &[Need::Equality, Need::Hashing], "GROUP BY")?;
                 g.group.push(x);
@@ -2100,8 +2100,15 @@ impl<'a> Binder<'a> {
         Ok(bound)
     }
 
-    /// `GROUP BY` items that are positions or aliases of the select list.
-    fn group_item<'e>(&self, e: &'e ast::Expr, items: &'e [SelectItem]) -> Result<&'e ast::Expr> {
+    /// `GROUP BY` items that are positions or aliases of the select list —
+    /// a bare name an alias only when no column of the `FROM` has it, as
+    /// in SQL-92 and PostgreSQL (its `findTargetlistEntrySQL92`).
+    fn group_item<'e>(
+        &self,
+        e: &'e ast::Expr,
+        items: &'e [SelectItem],
+        scope: &Scope,
+    ) -> Result<&'e ast::Expr> {
         let exprs: Vec<(&ast::Expr, Option<&String>)> = items
             .iter()
             .filter_map(|i| match i {
@@ -2119,10 +2126,14 @@ impl<'a> Binder<'a> {
                 }
                 exprs[n as usize - 1].0
             }
-            ast::Expr::Column { table: None, name } => exprs
-                .iter()
-                .find(|(_, a)| a.is_some_and(|a| a == name))
-                .map_or(e, |(x, _)| x),
+            ast::Expr::Column { table: None, name }
+                if !scope.cols.iter().any(|c| c.name == *name) =>
+            {
+                exprs
+                    .iter()
+                    .find(|(_, a)| a.is_some_and(|a| a == name))
+                    .map_or(e, |(x, _)| x)
+            }
             _ => e,
         })
     }
@@ -3725,6 +3736,19 @@ impl<'a> Binder<'a> {
             }
             if let Some(f) = self.registry.operator(op, a, b).cloned() {
                 return self.call(f, vec![l, r]);
+            }
+            // An array's containment and overlap (PostgreSQL's `anyarray`
+            // operators: both sides of one type).
+            if a == b
+                && a.element().is_some()
+                && let Some(f) = match op {
+                    "@>" => Some(crate::expr::Func::ArrayContains),
+                    "<@" => Some(crate::expr::Func::ArrayContained),
+                    "&&" => Some(crate::expr::Func::ArrayOverlap),
+                    _ => None,
+                }
+            {
+                return self.call(crate::builtin::func(f), vec![l, r]);
             }
             if let Some(o) = catalog::get_operator(self.txn, op, name(Some(a)), name(Some(b)))? {
                 let f = self

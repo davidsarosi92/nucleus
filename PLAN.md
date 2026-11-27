@@ -14364,6 +14364,24 @@ found missing, and the open issues.
   (`scripts/slt-pg.py --session`, new).  Twelve mutations, each failing;
   one more showed the savepoint's flush of the WAL-less writes needless
   (they precede it and stay), taken out.
+- Issue #24, second step — an array's `@>`, `<@` and `&&`
+  (`arraycontains`, `arraycontained`, `arrayoverlap`, PostgreSQL's
+  names): two arrays of one type, elements by equality, a `NULL` equal
+  to none.  `a @> c` and `c <@ a`, `c` a constant array, are served by
+  a multi-valued `(unnest(a))` index (§M15 D5) through `c`'s first
+  element, the condition kept as the filter; `a && c` would be a union
+  of probes, one per element — not yet (with issue #22's lookups).
+  `by` is no longer reserved (PostgreSQL's is unreserved): a column
+  may be called so.  Found on the way and fixed: a bare name in `GROUP
+  BY` was taken as a select-list alias before a column of the `FROM`
+  (`SELECT count(*) AS x … GROUP BY x` grouped by the count, `42803`);
+  SQL-92's rule, PostgreSQL's, looks at the columns first.  Tested by
+  `91_array_operators.slt` (27 of 27 records as PostgreSQL 18 has
+  them) and `89_multi_valued_indexes.slt`'s plans; nine mutations, seven
+  failing, two equivalent (a `NULL` element probed finds what the
+  filter would leave: nothing; the binder's type check repeats the
+  signature's, for PostgreSQL's message).  Not yet: multidimensional
+  array literals (`ARRAY[[1,2],[3,4]]`, `42601`).
 
 ### §M16 — Document queries + document server ⬜
 

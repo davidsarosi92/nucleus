@@ -2434,7 +2434,8 @@ subqueries and functions in `FROM` (`generate_series`, `unnest`, any
 scalar function; `WITH ORDINALITY`), `LATERAL` before a subquery or a
 function (functions are lateral without it, as PostgreSQL's), alias
 column lists (`AS t (a, b)`),
-`WHERE`, `GROUP BY` (expressions, positions, aliases; `GROUPING SETS`,
+`WHERE`, `GROUP BY` (expressions, positions, aliases — a bare name a
+column of the `FROM` first, as in SQL-92 and PostgreSQL; `GROUPING SETS`,
 `ROLLUP`, `CUBE`, `()`, `GROUP BY DISTINCT`, with `GROUPING(…)` — a
 grouping per set, their rows together, §8.4), `HAVING`, `WINDOW
 name AS (…)`, `UNION |
@@ -2450,7 +2451,10 @@ linear-time), `CASE`, `CAST` / `::`, typed literals (`INTERVAL '90' DAY`,
 `INTERVAL '5' DAY TO HOUR`: a bare number counts the last field, the
 value cut below it, as in PostgreSQL), `E'…'` strings,
 `COLLATE` (accepted, ignored: text compares bytewise), `OPERATOR(op)`,
-`$n`, `extract(field FROM x)`, `position(sub IN s)`, `substring(s FROM n
+`$n`, an array's `@>`, `<@` and `&&` (PostgreSQL's: two arrays of one
+type, else `42883`; every element of the right found in the left, or
+one in both, by equality — a `NULL` element equal to none, duplicates
+and dimensions ignored; issue #24), `extract(field FROM x)`, `position(sub IN s)`, `substring(s FROM n
 FOR m)`, `overlay(s PLACING r FROM n [FOR m])`, `trim([LEADING | TRAILING |
 BOTH] [chars] FROM s)`.  Functions: `lower upper length trim substr
 left right replace repeat strpos concat lpad rpad ltrim rtrim btrim
@@ -2459,7 +2463,7 @@ ceil sign mod sqrt power regexp_replace version now current_timestamp
 current_date localtimestamp clock_timestamp extract date_part date_trunc
 make_date age justify_days justify_hours justify_interval to_timestamp
 array_length array_upper array_lower cardinality array_append
-array_to_string pg_typeof current_user current_database current_schema
+arraycontains arraycontained arrayoverlap array_to_string pg_typeof current_user current_database current_schema
 current_setting snapshot_commit` (the last: the commit the statement's
 transaction reads, §8.28; and the catalog functions of §8.11); aggregates `count
 sum avg min max string_agg array_agg bool_and bool_or every any_value` (the
@@ -7572,7 +7576,9 @@ reads each row once (`IndexRows` remembers the row keys it read), and a
 lookup join reads it through the plan.  The optimizer (`multikey::probe`)
 finds a bound on the part in a condition on its array and keeps the
 condition as the filter (an entry says a row may match; no condition is
-applied exactly): `a @> c` with `c` a constant — `a` the part's array or
+applied exactly): `a @> c` (or `c <@ a`) of an SQL array, `c` a constant
+array — its first element that is not `NULL` (an empty `c` holds in
+every row: no bound; `a && c` is not served yet); `a @> c` with `c` a constant — `a` the part's array or
 a json value it is a path below (`doc @> '{"tags": ["x"]}'`), `c` taken
 down that path, to its first element if an array, down the part's keys,
 a scalar —; `c = ANY(a)` of an SQL array; `x @? 'strict $.k…[*].f… ?
