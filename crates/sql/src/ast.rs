@@ -2090,4 +2090,33 @@ pub enum TableChange {
         /// `SET NOT NULL`.
         not_null: bool,
     },
+    /// An identity column's change: `ALTER [COLUMN] c ADD GENERATED …
+    /// AS IDENTITY`, `SET GENERATED …`, `SET option`, `RESTART`, `DROP
+    /// IDENTITY`.
+    Identity {
+        /// The column.
+        column: String,
+        /// The change.
+        change: IdentityChange,
+    },
+}
+
+/// What `ALTER COLUMN` changes of an identity column.
+#[derive(Clone, Debug, PartialEq)]
+pub enum IdentityChange {
+    /// `ADD GENERATED ALWAYS | BY DEFAULT AS IDENTITY [(options)]`.
+    Add(Auto),
+    /// `SET GENERATED ALWAYS | BY DEFAULT`, its sequence's options and
+    /// `RESTART` — each as written, in order.
+    Set {
+        /// `SET GENERATED ALWAYS` (`Some(true)`) or `BY DEFAULT`.
+        always: Option<bool>,
+        /// The sequence's options.
+        options: Vec<crate::sequences::SeqOption>,
+    },
+    /// `DROP IDENTITY [IF EXISTS]`.
+    Drop {
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
 }

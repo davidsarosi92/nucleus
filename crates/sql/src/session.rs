@@ -3975,8 +3975,8 @@ fn add_column(
             .clone()
             .filter(|_| matches!(column.auto, Some(crate::ast::Auto::Identity { .. }))),
     });
-    if let Some(a) = &auto {
-        crate::sequences::make_auto(txn, table, column, ty, a)?;
+    if let (Some(a), Some(kind)) = (&auto, &column.auto) {
+        crate::sequences::make_auto(txn, table, &column.name, kind, ty, a)?;
     }
     if let Some(check) = &column.check {
         t.checks
@@ -4682,7 +4682,10 @@ pub(crate) fn create_table(
     }
     catalog::update_table(txn, &table)?;
     for (i, ty, identity) in autos {
-        crate::sequences::make_auto(txn, name, &specs[i], ty, &identity)?;
+        let s = &specs[i];
+        if let Some(auto) = &s.auto {
+            crate::sequences::make_auto(txn, name, &s.name, auto, ty, &identity)?;
+        }
     }
     Ok(())
 }

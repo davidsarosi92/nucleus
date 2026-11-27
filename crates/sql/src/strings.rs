@@ -27,6 +27,8 @@ enum F {
     Initcap,
     Overlay,
     Cbrt,
+    QuoteIdent,
+    QuoteLiteral,
 }
 
 struct StrFn(F, &'static str);
@@ -153,7 +155,7 @@ impl ScalarFunction for StrFn {
 
     fn arity(&self) -> RangeInclusive<usize> {
         match self.0 {
-            F::Reverse | F::Initcap | F::Cbrt => 1..=1,
+            F::Reverse | F::Initcap | F::Cbrt | F::QuoteIdent | F::QuoteLiteral => 1..=1,
             F::Ltrim | F::Rtrim | F::Btrim => 1..=2,
             F::Lpad | F::Rpad => 2..=3,
             F::SplitPart | F::Translate => 3..=3,
@@ -170,7 +172,7 @@ impl ScalarFunction for StrFn {
             F::Ltrim | F::Rtrim | F::Btrim => (vec![Text; n], Text),
             F::SplitPart => (vec![Text, Text, Integer], Text),
             F::Translate => (vec![Text; 3], Text),
-            F::Reverse | F::Initcap => (vec![Text], Text),
+            F::Reverse | F::Initcap | F::QuoteIdent | F::QuoteLiteral => (vec![Text], Text),
             F::Overlay => ([Text, Text, Integer, Integer][..n].to_vec(), Text),
             F::Cbrt => (vec![Float], Float),
             // The separator text; the values any type, as text.
@@ -234,6 +236,18 @@ impl ScalarFunction for StrFn {
             F::SplitPart => split_part(t(0)?, t(1)?, int(&args[2])?)?,
             F::Translate => translate(t(0)?, t(1)?, t(2)?),
             F::Reverse => t(0)?.chars().rev().collect(),
+            // Quoted where it must be (as `definitions` writes names).
+            F::QuoteIdent => crate::definitions::ident(t(0)?),
+            // PostgreSQL's: `E'…'` when it holds a backslash.
+            F::QuoteLiteral => {
+                let s = t(0)?;
+                let body = s.replace('\'', "''");
+                if s.contains('\\') {
+                    format!("E'{}'", body.replace('\\', "\\\\"))
+                } else {
+                    format!("'{body}'")
+                }
+            }
             F::Initcap => initcap(t(0)?),
             F::Overlay => {
                 let count = args.get(3).map(int).transpose()?;
@@ -273,6 +287,8 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
         (F::ConcatWs, "concat_ws"),
         (F::Translate, "translate"),
         (F::Reverse, "reverse"),
+        (F::QuoteIdent, "quote_ident"),
+        (F::QuoteLiteral, "quote_literal"),
         (F::Initcap, "initcap"),
         (F::Overlay, "overlay"),
         (F::Cbrt, "cbrt"),

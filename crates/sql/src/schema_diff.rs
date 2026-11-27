@@ -27,9 +27,12 @@
 //! (foreign keys too, even of a table dropped after, so tables that
 //! reference each other drop in any order), then the tables' columns and
 //! constraints that go, then the types and models nothing uses any more;
-//! then models and types are made, tables, the tables' new columns and
-//! changes, and last what depends on them (indexes, foreign keys,
-//! comments, settings, policies).
+//! then models, types and sequences are made (a sequence changed is
+//! altered in place, its value kept), tables, the tables' new columns and
+//! changes (an identity column's by `ADD GENERATED`, `SET GENERATED`,
+//! `SET` options, `DROP IDENTITY`), the sequences no default calls any
+//! more dropped, and last what depends on them (indexes, foreign keys,
+//! sequences' owners, comments, settings, policies).
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,6 +42,7 @@ use crate::catalog::{self, ConstraintKind, Table};
 use crate::definitions::{self, Definition, column_sql, ident, literal};
 use crate::error::Result;
 use crate::ncatalog::type_text;
+use crate::sequences::Sequence;
 
 /// The statements from one schema to another, and what they leave to a
 /// person.
@@ -72,7 +76,7 @@ impl Diff {
 }
 
 /// The kinds columns and tables are made of.
-const BASE: [&str; 5] = ["model", "type", "ordering", "operator", "cast"];
+const BASE: [&str; 6] = ["model", "type", "ordering", "operator", "cast", "sequence"];
 /// The kinds that are tables.
 const TABLES: [&str; 5] = [
     "table",
@@ -113,8 +117,15 @@ pub fn diff(from: &dyn KvTxn, to: &dyn KvTxn) -> Result<Diff> {
         .into_iter()
         .map(|t| (t.name.clone(), t))
         .collect();
+    let seqs = |txn: &dyn KvTxn| -> Result<HashMap<String, Sequence>> {
+        Ok(crate::sequences::all(txn)?
+            .into_iter()
+            .map(|s| (s.name.clone(), s))
+            .collect())
+    };
+    let (sa, sb) = (seqs(from)?, seqs(to)?);
     let mut out = Diff::default();
-    let (mut drops, mut base_drops) = (Vec::new(), Vec::new());
+    let (mut drops, mut base_drops, mut seq_drops) = (Vec::new(), Vec::new(), Vec::new());
     let (mut removals, mut additions) = (Vec::new(), Vec::new());
     let (mut base, mut tables, mut rest) = (Vec::new(), Vec::new(), Vec::new());
     // Definitions that changed and were dealt with in place.
@@ -148,9 +159,21 @@ pub fn diff(from: &dyn KvTxn, to: &dyn KvTxn) -> Result<Diff> {
                         table_changes(
                             &ta[&d.name],
                             &tb[&d.name],
+                            (&sa, &sb),
                             (&mut removals, &mut additions),
                             &mut out.notes,
                         );
+                        true
+                    }
+                    // Its options as they are to be (its value kept).
+                    "sequence" => {
+                        let s = &sb[&d.name];
+                        base.push(format!(
+                            "ALTER SEQUENCE {} AS {} {}",
+                            ident(&d.name),
+                            crate::sequences::type_word(s.ty),
+                            sequence_options(s)
+                        ));
                         true
                     }
                     "ordering" => {
@@ -195,7 +218,11 @@ pub fn diff(from: &dyn KvTxn, to: &dyn KvTxn) -> Result<Diff> {
             continue;
         }
         if let Some(s) = drop_sql(d) {
-            if BASE.contains(&d.kind) {
+            // A sequence once no default calls it: after the tables'
+            // changes.
+            if d.kind == "sequence" {
+                seq_drops.push(s);
+            } else if BASE.contains(&d.kind) {
                 base_drops.push(s);
             } else {
                 drops.push(s);
@@ -213,7 +240,10 @@ pub fn diff(from: &dyn KvTxn, to: &dyn KvTxn) -> Result<Diff> {
         }
     }
     rename_hints(&a, &b, &in_a, &in_b, &mut out.notes);
-    out.statements = [drops, removals, base_drops, base, tables, additions, rest].concat();
+    out.statements = [
+        drops, removals, base_drops, base, tables, additions, seq_drops, rest,
+    ]
+    .concat();
     Ok(out)
 }
 
@@ -264,6 +294,8 @@ fn drop_sql(d: &Definition) -> Option<String> {
         "row security" => alter("DISABLE ROW LEVEL SECURITY"),
         "policy" => Some(format!("DROP POLICY {name} ON {table}")),
         "property graph" => Some(format!("DROP PROPERTY GRAPH {name}")),
+        "sequence" => Some(format!("DROP SEQUENCE {name}")),
+        "owned by" => Some(format!("ALTER SEQUENCE {name} OWNED BY NONE")),
         _ => None,
     }
 }
@@ -273,6 +305,7 @@ fn drop_sql(d: &Definition) -> Option<String> {
 fn table_changes(
     a: &Table,
     b: &Table,
+    (sa, sb): (&HashMap<String, Sequence>, &HashMap<String, Sequence>),
     (removals, out): (&mut Vec<String>, &mut Vec<String>),
     notes: &mut Vec<String>,
 ) {
@@ -345,7 +378,68 @@ fn table_changes(
         if type_text(ca) != type_text(cb) {
             out.push(alter(format!("TYPE {}", type_text(cb))));
         }
-        if ca.default != cb.default {
+        // An identity column: its default its sequence's.
+        let mut ca_default = &ca.default;
+        match (&ca.identity, &cb.identity) {
+            (None, None) => {}
+            (Some(_), None) => {
+                out.push(alter("DROP IDENTITY".into()));
+                ca_default = &None;
+            }
+            (None, Some(i)) => {
+                if ca.default.is_some() {
+                    out.push(alter("DROP DEFAULT".into()));
+                }
+                if ca.nullable {
+                    out.push(alter("SET NOT NULL".into()));
+                }
+                out.push(alter(format!(
+                    "ADD GENERATED {} AS IDENTITY (SEQUENCE NAME {}{})",
+                    if i.always { "ALWAYS" } else { "BY DEFAULT" },
+                    ident(&i.sequence),
+                    sb.get(&i.sequence)
+                        .map(crate::sequences::options_sql)
+                        .unwrap_or_default()
+                )));
+                continue;
+            }
+            (Some(x), Some(y)) => {
+                if x.sequence != y.sequence {
+                    out.push(format!(
+                        "ALTER SEQUENCE {} RENAME TO {}",
+                        ident(&x.sequence),
+                        ident(&y.sequence)
+                    ));
+                }
+                if x.always != y.always {
+                    out.push(alter(format!(
+                        "SET GENERATED {}",
+                        if y.always { "ALWAYS" } else { "BY DEFAULT" }
+                    )));
+                }
+                if let (Some(p), Some(q)) = (sa.get(&x.sequence), sb.get(&y.sequence))
+                    && sequence_options(p) != sequence_options(q)
+                {
+                    let set: Vec<String> = sequence_option_list(q)
+                        .into_iter()
+                        .map(|o| format!("SET {o}"))
+                        .collect();
+                    out.push(alter(set.join(" ")));
+                }
+                if ca.nullable != cb.nullable {
+                    out.push(alter(
+                        if cb.nullable {
+                            "DROP NOT NULL"
+                        } else {
+                            "SET NOT NULL"
+                        }
+                        .into(),
+                    ));
+                }
+                continue;
+            }
+        }
+        if *ca_default != cb.default {
             out.push(alter(match &cb.default {
                 Some(d) => format!("SET DEFAULT {d}"),
                 None => "DROP DEFAULT".into(),
@@ -400,6 +494,23 @@ fn table_changes(
             c.1
         ));
     }
+}
+
+/// Every option of sequence `s` but its type, as `ALTER SEQUENCE` takes
+/// them (so whatever they were, they are these after).
+fn sequence_options(s: &Sequence) -> String {
+    sequence_option_list(s).join(" ")
+}
+
+fn sequence_option_list(s: &Sequence) -> Vec<String> {
+    vec![
+        format!("INCREMENT BY {}", s.increment),
+        format!("MINVALUE {}", s.min),
+        format!("MAXVALUE {}", s.max),
+        format!("START WITH {}", s.start),
+        format!("CACHE {}", s.cache),
+        if s.cycle { "CYCLE" } else { "NO CYCLE" }.to_string(),
+    ]
 }
 
 /// An enum whose labels `to` extends in order: `ADD VALUE` for each new

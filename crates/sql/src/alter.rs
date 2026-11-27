@@ -90,6 +90,7 @@ pub(crate) fn alter_table(
             }
             Ok(())
         }
+        TableChange::Identity { column, change } => identity(txn, table, column, change),
         TableChange::SetNotNull { column, not_null } => {
             for t in family(&*txn, table, "change a column of")? {
                 set_not_null(txn, reg, &t, column, *not_null)?;
@@ -847,6 +848,100 @@ fn set_default(
         w.check_default(c, &Ctx::new(&*txn, reg, &[]))?;
     }
     catalog::update_table(txn, &t)
+}
+
+/// `ALTER TABLE t ALTER COLUMN column ADD GENERATED … AS IDENTITY | SET
+/// GENERATED … | SET option | RESTART | DROP IDENTITY` (PostgreSQL's,
+/// with its checks).
+fn identity(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    column: &str,
+    change: &crate::ast::IdentityChange,
+) -> Result<()> {
+    use crate::ast::IdentityChange as C;
+    let mut t = catalog::table(&*txn, table)?;
+    let c = column_of(&t, column)?;
+    privileges::Checker::new().require_owner(&*txn, Kind::Table, table)?;
+    if t.partition_by.is_some() || t.partition_of.is_some() {
+        return Err(Error::feature(
+            "identity columns of partitioned tables and partitions are not supported yet",
+        ));
+    }
+    let not_identity = || {
+        Error::prerequisite(format!(
+            "column \"{column}\" of relation \"{table}\" is not an identity column"
+        ))
+    };
+    match change {
+        C::Add(auto) => {
+            if t.columns[c].identity.is_some() {
+                return Err(Error::prerequisite(format!(
+                    "column \"{column}\" of relation \"{table}\" is already an identity column"
+                )));
+            }
+            let ty = t.columns[c].ty;
+            let identity = crate::sequences::auto_identity(&*txn, table, column, auto, ty)?;
+            if t.columns[c].nullable && !t.primary_key.contains(&c) {
+                return Err(Error::prerequisite(format!(
+                    "column \"{column}\" of relation \"{table}\" must be declared NOT NULL before identity can be added"
+                )));
+            }
+            if t.columns[c].default.is_some() || t.columns[c].generated.is_some() {
+                return Err(Error::prerequisite(format!(
+                    "column \"{column}\" of relation \"{table}\" already has a default value"
+                )));
+            }
+            refuse_kept(&t, c, "change the default of")?;
+            crate::sequences::make_auto(txn, table, column, auto, ty, &identity)?;
+            t.columns[c].default = Some(crate::sequences::auto_default(&identity));
+            t.columns[c].identity = Some(identity);
+            catalog::update_table(txn, &t)
+        }
+        C::Set { always, options } => {
+            let Some(identity) = t.columns[c].identity.clone() else {
+                return Err(not_identity());
+            };
+            if options
+                .iter()
+                .any(|o| matches!(o, crate::sequences::SeqOption::OwnedBy(_)))
+            {
+                return Err(Error::syntax(
+                    "an identity column's sequence is owned by it",
+                ));
+            }
+            if let Some(a) = always
+                && *a != identity.always
+            {
+                t.columns[c].identity = Some(crate::catalog::Identity {
+                    always: *a,
+                    ..identity.clone()
+                });
+                catalog::update_table(txn, &t)?;
+            }
+            if !options.is_empty() {
+                crate::sequences::alter(
+                    txn,
+                    &identity.sequence,
+                    &crate::sequences::AlterSequence::Options(options.clone()),
+                    false,
+                )?;
+            }
+            Ok(())
+        }
+        C::Drop { if_exists } => {
+            let Some(identity) = t.columns[c].identity.take() else {
+                return if *if_exists {
+                    Ok(())
+                } else {
+                    Err(not_identity())
+                };
+            };
+            t.columns[c].default = None;
+            catalog::update_table(txn, &t)?;
+            crate::sequences::remove(txn, &identity.sequence)
+        }
+    }
 }
 
 /// `ALTER TABLE t ALTER COLUMN column SET NOT NULL | DROP NOT NULL`, on

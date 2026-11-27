@@ -2277,40 +2277,13 @@ impl<'a> Parser<'a> {
             } else if self.peek_kws(&["generated", "always", "as", "identity"])
                 || self.peek_kws(&["generated", "by", "default", "as", "identity"])
             {
-                self.pos += 1;
-                let always = self.eat_kw("always");
-                if !always {
-                    self.expect_kw("by")?;
-                    self.expect_kw("default")?;
-                }
-                self.expect_kw("as")?;
-                self.expect_kw("identity")?;
                 if c.default.is_some() || c.auto.is_some() {
                     return Err(Error::syntax(format!(
                         "multiple default values specified for column \"{}\"",
                         c.name
                     )));
                 }
-                let (mut name, mut options) = (None, Vec::new());
-                if self.eat_op("(") {
-                    loop {
-                        if self.eat_kws(&["sequence", "name"]) {
-                            name = Some(self.ident()?);
-                            continue;
-                        }
-                        let more = self.sequence_options(false)?;
-                        if more.is_empty() {
-                            break;
-                        }
-                        options.extend(more);
-                    }
-                    self.expect_op(")")?;
-                }
-                c.auto = Some(crate::ast::Auto::Identity {
-                    always,
-                    name,
-                    options,
-                });
+                c.auto = Some(self.identity_spec()?);
             } else if self.eat_kw("generated") {
                 if c.generated.is_some() {
                     return Err(Error::syntax(format!(
@@ -2701,6 +2674,90 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
+    /// `GENERATED ALWAYS | BY DEFAULT AS IDENTITY [(SEQUENCE NAME n,
+    /// options)]`.
+    fn identity_spec(&mut self) -> Result<crate::ast::Auto> {
+        self.expect_kw("generated")?;
+        let always = self.eat_kw("always");
+        if !always {
+            self.expect_kw("by")?;
+            self.expect_kw("default")?;
+        }
+        self.expect_kw("as")?;
+        self.expect_kw("identity")?;
+        let (mut name, mut options) = (None, Vec::new());
+        if self.eat_op("(") {
+            loop {
+                if self.eat_kws(&["sequence", "name"]) {
+                    name = Some(self.ident()?);
+                    continue;
+                }
+                let more = self.sequence_options(false)?;
+                if more.is_empty() {
+                    break;
+                }
+                options.extend(more);
+            }
+            self.expect_op(")")?;
+        }
+        Ok(crate::ast::Auto::Identity {
+            always,
+            name,
+            options,
+        })
+    }
+
+    /// After `ALTER [COLUMN] c`: an identity column's change, if one —
+    /// `ADD GENERATED …`, `DROP IDENTITY [IF EXISTS]`, or `SET GENERATED
+    /// …`, `SET option` and `RESTART [[WITH] n]` (any of them, one after
+    /// another).
+    fn identity_change(&mut self) -> Result<Option<crate::ast::IdentityChange>> {
+        use crate::ast::IdentityChange as C;
+        if self.peek_kws(&["add", "generated"]) {
+            self.pos += 1;
+            return Ok(Some(C::Add(self.identity_spec()?)));
+        }
+        if self.eat_kws(&["drop", "identity"]) {
+            return Ok(Some(C::Drop {
+                if_exists: self.eat_kws(&["if", "exists"]),
+            }));
+        }
+        let at = self.pos;
+        let (mut always, mut options) = (None, Vec::new());
+        loop {
+            if self.eat_kws(&["set", "generated"]) {
+                always = Some(if self.eat_kw("always") {
+                    true
+                } else {
+                    self.expect_kw("by")?;
+                    self.expect_kw("default")?;
+                    false
+                });
+            } else if self.peek_kws(&["restart"]) {
+                options.extend(self.sequence_options(true)?);
+            } else if self.peek_kw("set")
+                && !self.peek_kws(&["set", "not"])
+                && !self.peek_kws(&["set", "default"])
+                && !self.peek_kws(&["set", "data"])
+                && !self.peek_kws(&["set", "model"])
+            {
+                self.pos += 1;
+                let more = self.sequence_options(true)?;
+                if more.is_empty() {
+                    self.pos -= 1;
+                    break;
+                }
+                options.extend(more);
+            } else {
+                break;
+            }
+        }
+        if self.pos == at {
+            return Ok(None);
+        }
+        Ok(Some(C::Set { always, options }))
+    }
+
     /// A whole number with an optional sign, as a 64-bit integer.
     fn signed_int(&mut self) -> Result<i64> {
         let neg = self.eat_op("-");
@@ -3065,6 +3122,12 @@ impl<'a> Parser<'a> {
                         column,
                         default: None,
                     },
+                });
+            }
+            if let Some(change) = self.identity_change()? {
+                return Ok(Statement::AlterTable {
+                    table,
+                    change: TableChange::Identity { column, change },
                 });
             }
             for (words, not_null) in [

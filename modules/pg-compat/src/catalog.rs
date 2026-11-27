@@ -23,7 +23,8 @@
 //! | unique constraint | `t + 500 + index id` |
 //! | check constraint `j` | `t + 700 + j` |
 //! | foreign key `j` | `t + 800 + j` |
-//! | catalog table `k` | `12000 + k` |
+//! | catalog table `k` | PostgreSQL's (`pg_class` 1259, …: [`catalog_oid`]), else `12000 + k` |
+//! | sequence | `1000000000 + sequence id` |
 //!
 //! Unique indexes named `…_key` (the names UNIQUE constraints get) are shown
 //! as constraints.  Everything belongs to one role, `nucleus` (oid 10).
@@ -34,6 +35,7 @@ use std::sync::Arc;
 
 use nucleus_kv::KvTxn;
 use nucleus_sql::ext::catalog::{self, Column, ConstraintKind, FkAction, Table};
+use nucleus_sql::ext::sequences::{self, Sequence};
 use nucleus_sql::ext::{
     Arg, ArgInfo, CallContext, CatalogView, DataType, Error, Module, Registry, Result, Returns,
     Row, ScalarFunction, Signature, Value, Volatility,
@@ -530,6 +532,68 @@ const DEFS: &[Def] = &[
             ("ordinal_position", I),
         ],
     },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_sequence",
+        cols: &[
+            ("seqrelid", I),
+            ("seqtypid", I),
+            ("seqstart", I),
+            ("seqincrement", I),
+            ("seqmax", I),
+            ("seqmin", I),
+            ("seqcache", I),
+            ("seqcycle", B),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_depend",
+        cols: &[
+            ("classid", I),
+            ("objid", I),
+            ("objsubid", I),
+            ("refclassid", I),
+            ("refobjid", I),
+            ("refobjsubid", I),
+            ("deptype", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_sequences",
+        cols: &[
+            ("schemaname", T),
+            ("sequencename", T),
+            ("sequenceowner", T),
+            ("data_type", T),
+            ("start_value", I),
+            ("min_value", I),
+            ("max_value", I),
+            ("increment_by", I),
+            ("cycle", B),
+            ("cache_size", I),
+            ("last_value", I),
+        ],
+    },
+    Def {
+        ns: NS_INFO,
+        name: "sequences",
+        cols: &[
+            ("sequence_catalog", T),
+            ("sequence_schema", T),
+            ("sequence_name", T),
+            ("data_type", T),
+            ("numeric_precision", I),
+            ("numeric_precision_radix", I),
+            ("numeric_scale", I),
+            ("start_value", T),
+            ("minimum_value", T),
+            ("maximum_value", T),
+            ("increment", T),
+            ("cycle_option", T),
+        ],
+    },
 ];
 
 fn ns_name(ns: i64) -> Option<&'static str> {
@@ -961,8 +1025,48 @@ fn column_attrs(t: &Table, c: usize) -> (String, i64, i64, bool, bool, i64, &'st
     )
 }
 
-fn relations(tables: &[Table], registry: &Registry) -> Vec<Rel> {
+/// Catalog table `k`'s oid: PostgreSQL's for those whose oid clients
+/// compare with (`classid = 'pg_class'::regclass`), else `12000 + k`.
+fn catalog_oid(k: usize) -> i64 {
+    match DEFS[k].name {
+        "pg_class" => 1259,
+        "pg_attribute" => 1249,
+        "pg_type" => 1247,
+        "pg_namespace" => 2615,
+        "pg_constraint" => 2606,
+        "pg_index" => 2610,
+        "pg_description" => 2609,
+        "pg_depend" => 2608,
+        "pg_sequence" => 2224,
+        _ => 12_000 + k as i64,
+    }
+}
+
+/// A sequence's oid: past the tables' and indexes'.
+fn seq_oid(s: &Sequence) -> i64 {
+    1_000_000_000 + s.id as i64
+}
+
+fn relations(txn: &dyn KvTxn, tables: &[Table], registry: &Registry) -> Result<Vec<Rel>> {
     let mut out = Vec::new();
+    // Sequences: relkind S, PostgreSQL's three columns.
+    for s in sequences::all(txn)? {
+        out.push(Rel {
+            oid: seq_oid(&s),
+            name: s.name.clone(),
+            ns: NS_PUBLIC,
+            kind: "S",
+            am: 0,
+            cols: [("last_value", 20), ("log_cnt", 20), ("is_called", 16)]
+                .into_iter()
+                .map(|(n, ty)| (n.to_string(), ty, -1, true, false, 0, ""))
+                .collect(),
+            checks: 0,
+            has_index: false,
+            has_triggers: false,
+            table: None,
+        });
+    }
     for t in tables {
         out.push(Rel {
             oid: rel_oid(t),
@@ -1000,7 +1104,7 @@ fn relations(tables: &[Table], registry: &Registry) -> Vec<Rel> {
     }
     for (k, d) in DEFS.iter().enumerate() {
         out.push(Rel {
-            oid: 12_000 + k as i64,
+            oid: catalog_oid(k),
             name: d.name.to_string(),
             ns: d.ns,
             kind: if d.ns == NS_INFO { "v" } else { "r" },
@@ -1048,7 +1152,7 @@ fn relations(tables: &[Table], registry: &Registry) -> Vec<Rel> {
             table: None,
         });
     }
-    out
+    Ok(out)
 }
 
 /// A constraint in `pg_constraint`.
@@ -1224,7 +1328,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             }
         }
         "pg_class" => {
-            for rel in relations(&tables, registry) {
+            for rel in relations(txn, &tables, registry)? {
                 out.push(r(&[
                     ("oid", int(rel.oid)),
                     ("relname", text(rel.name)),
@@ -1270,7 +1374,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             }
         }
         "pg_attribute" => {
-            for rel in relations(&tables, registry) {
+            for rel in relations(txn, &tables, registry)? {
                 for (i, (name, typ, typmod, notnull, hasdef, coll, generated)) in
                     rel.cols.into_iter().enumerate()
                 {
@@ -1576,6 +1680,89 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 ]));
             }
         }
+        "pg_sequence" => {
+            for s in sequences::all(txn)? {
+                out.push(r(&[
+                    ("seqrelid", int(seq_oid(&s))),
+                    ("seqtypid", int(type_oid(s.ty))),
+                    ("seqstart", int(s.start)),
+                    ("seqincrement", int(s.increment)),
+                    ("seqmax", int(s.max)),
+                    ("seqmin", int(s.min)),
+                    ("seqcache", int(s.cache)),
+                    ("seqcycle", Value::Bool(s.cycle)),
+                ]));
+            }
+        }
+        // The dependencies psql reads: a sequence on the column owning it
+        // (`a`; `i` for an identity column's).
+        "pg_depend" => {
+            for s in sequences::all(txn)? {
+                let Some((tn, cn)) = &s.owned_by else {
+                    continue;
+                };
+                let Some(t) = tables.iter().find(|t| t.name == *tn) else {
+                    continue;
+                };
+                let Some(c) = t.column(cn) else {
+                    continue;
+                };
+                let identity = t.columns[c]
+                    .identity
+                    .as_ref()
+                    .is_some_and(|i| i.sequence == s.name);
+                out.push(r(&[
+                    ("classid", int(1259)),
+                    ("objid", int(seq_oid(&s))),
+                    ("objsubid", int(0)),
+                    ("refclassid", int(1259)),
+                    ("refobjid", int(rel_oid(t))),
+                    ("refobjsubid", int(c as i64 + 1)),
+                    ("deptype", text(if identity { "i" } else { "a" })),
+                ]));
+            }
+        }
+        "pg_sequences" => {
+            for s in sequences::all(txn)? {
+                let last = sequences::last_value(txn, &s)?;
+                out.push(r(&[
+                    ("schemaname", text("public")),
+                    ("sequencename", text(s.name.clone())),
+                    ("sequenceowner", text(s.owner.clone())),
+                    ("data_type", text(sequences::type_word(s.ty))),
+                    ("start_value", int(s.start)),
+                    ("min_value", int(s.min)),
+                    ("max_value", int(s.max)),
+                    ("increment_by", int(s.increment)),
+                    ("cycle", Value::Bool(s.cycle)),
+                    ("cache_size", int(s.cache)),
+                    ("last_value", last.map_or(Value::Null, int)),
+                ]));
+            }
+        }
+        "sequences" => {
+            for s in sequences::all(txn)? {
+                let bits = match s.ty {
+                    DataType::SmallInt => 16,
+                    DataType::Integer => 32,
+                    _ => 64,
+                };
+                out.push(r(&[
+                    ("sequence_catalog", text("nucleus")),
+                    ("sequence_schema", text("public")),
+                    ("sequence_name", text(s.name.clone())),
+                    ("data_type", text(sequences::type_word(s.ty))),
+                    ("numeric_precision", int(bits)),
+                    ("numeric_precision_radix", int(2)),
+                    ("numeric_scale", int(0)),
+                    ("start_value", text(s.start.to_string())),
+                    ("minimum_value", text(s.min.to_string())),
+                    ("maximum_value", text(s.max.to_string())),
+                    ("increment", text(s.increment.to_string())),
+                    ("cycle_option", text(if s.cycle { "YES" } else { "NO" })),
+                ]));
+            }
+        }
         "pg_tables" => {
             for t in &tables {
                 out.push(r(&[
@@ -1753,15 +1940,20 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
 
 // ------------------------------------------------------------- functions
 
-fn relation_by_oid(tables: &[Table], registry: &Registry, oid: i64) -> Option<String> {
-    relations(tables, registry)
+fn relation_by_oid(
+    txn: &dyn KvTxn,
+    tables: &[Table],
+    registry: &Registry,
+    oid: i64,
+) -> Result<Option<String>> {
+    Ok(relations(txn, tables, registry)?
         .into_iter()
         .find(|r| r.oid == oid)
-        .map(|r| r.name)
+        .map(|r| r.name))
 }
 
 /// `'name'::regclass` / `'16384'::regclass`: the relation's oid.
-fn regclass_oid(tables: &[Table], registry: &Registry, s: &str) -> Result<i64> {
+fn regclass_oid(txn: &dyn KvTxn, tables: &[Table], registry: &Registry, s: &str) -> Result<i64> {
     let s = s.trim();
     if let Ok(oid) = s.parse::<i64>() {
         return Ok(oid);
@@ -1771,7 +1963,7 @@ fn regclass_oid(tables: &[Table], registry: &Registry, s: &str) -> Result<i64> {
         Some((a, b)) => (Some(a.trim_matches('"')), b.trim_matches('"')),
         None => (None, unquoted),
     };
-    relations(tables, registry)
+    relations(txn, tables, registry)?
         .into_iter()
         .find(|r| r.name == name && schema.is_none_or(|sch| ns_name(r.ns) == Some(sch)))
         .map(|r| r.oid)
@@ -1954,9 +2146,11 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
     };
     Ok(match f {
         PgFn::RegClass => match args.first() {
-            Some(Value::Text(s)) => Value::Int(regclass_oid(&catalog::tables(txn)?, registry, s)?),
+            Some(Value::Text(s)) => {
+                Value::Int(regclass_oid(txn, &catalog::tables(txn)?, registry, s)?)
+            }
             Some(Value::Int(oid)) => Value::Text(
-                relation_by_oid(&catalog::tables(txn)?, registry, *oid)
+                relation_by_oid(txn, &catalog::tables(txn)?, registry, *oid)?
                     .unwrap_or_else(|| oid.to_string()),
             ),
             _ => Value::Null,
@@ -1989,7 +2183,7 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
         // On the search path: public and pg_catalog.
         PgFn::TableIsVisible => match as_int(0) {
             Some(oid) => Value::Bool(
-                relations(&catalog::tables(txn)?, registry)
+                relations(txn, &catalog::tables(txn)?, registry)?
                     .iter()
                     .find(|r| r.oid == oid)
                     .is_none_or(|r| r.ns == NS_PUBLIC || r.ns == NS_CATALOG),
@@ -2010,7 +2204,7 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
             };
             let tables = catalog::tables(txn)?;
             let column = as_int(1).filter(|c| *c > 0);
-            relations(&tables, registry)
+            relations(txn, &tables, registry)?
                 .into_iter()
                 .find(|r| r.oid == oid && r.kind == "i")
                 .and_then(|r| match column {

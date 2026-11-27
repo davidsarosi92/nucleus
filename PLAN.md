@@ -14422,10 +14422,27 @@ found missing, and the open issues.
   Tested by `93_identity.slt` (PostgreSQL 18 in one session: every
   record but the nucleus-only definitions as it has them),
   `01_pg_catalog.slt`, the definitions' replay; seventeen mutations, each failing but one
-  equivalent (a NOT NULL the parser set twice: now once).  Next: `ALTER
-  COLUMN … ADD | SET GENERATED`, `DROP IDENTITY`, `RESTART`;
-  `pg_class` / `pg_sequences` / `information_schema.sequences`;
-  sequences in schema diffs.
+  equivalent (a NOT NULL the parser set twice: now once).
+- Issue #23, third step (closes it) — `ALTER COLUMN … ADD GENERATED …
+  AS IDENTITY`, `SET GENERATED`, `SET` options, `RESTART`, `DROP
+  IDENTITY [IF EXISTS]` (PostgreSQL's checks: `55000`, `22023`);
+  pg-compat: sequences in `pg_class` (relkind `S`), `pg_sequence`,
+  `pg_sequences`, `information_schema.sequences`, `pg_depend` (a
+  sequence's owner column) — so `psql`'s `\ds` and `\d sequence` print
+  what PostgreSQL's do, "Owned by" and "Sequence for identity column"
+  too; `quote_ident` and `quote_literal`, which `\d` calls (missing until
+  now).  Found on the way: pg-compat's `pg_class` row had oid 12001 while
+  `pg_description` (and `pg_depend`) named it 1259, PostgreSQL's — a
+  join on `classid = 'pg_class'::regclass` found nothing; the catalog
+  tables clients compare with now have PostgreSQL's oids.  Schema diffs:
+  sequences made, dropped (after the tables' defaults let them go) and
+  altered in place (every option, the value kept); identity columns
+  added, changed and dropped by `ALTER COLUMN`; owners by `ALTER SEQUENCE
+  … OWNED BY`.  Tested by `94_identity_alter.slt` (as PostgreSQL 18, in
+  one session), pg-compat's `04_sequences.slt` (as PostgreSQL 18), the
+  schema diff both ways, `75_strings.slt`; thirteen mutations, each failing.  Not yet: identity
+  columns of partitioned tables; `'name'::regclass::text` gives the oid,
+  not the name (as for tables).
 
 ### §M16 — Document queries + document server ⬜
 

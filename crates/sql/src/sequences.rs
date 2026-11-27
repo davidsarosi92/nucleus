@@ -629,6 +629,26 @@ pub fn prepare_auto(
     let Some(auto) = &spec.auto else {
         return Ok(None);
     };
+    let identity = auto_identity(txn, table, &spec.name, auto, ty)?;
+    spec.default = Some(auto_default(&identity));
+    spec.not_null = true;
+    Ok(Some(identity))
+}
+
+/// The default of a column whose values are `identity`'s sequence's.
+pub fn auto_default(identity: &crate::catalog::Identity) -> String {
+    format!("nextval({})", literal_name(&identity.sequence))
+}
+
+/// Column `column` of `table`, of type `ty`, as `auto` asks: its
+/// sequence's name (`always` meaningful for an identity only).
+pub fn auto_identity(
+    txn: &dyn KvTxn,
+    table: &str,
+    column: &str,
+    auto: &crate::ast::Auto,
+    ty: DataType,
+) -> Result<crate::catalog::Identity> {
     if !matches!(
         ty,
         DataType::SmallInt | DataType::Integer | DataType::BigInt
@@ -648,14 +668,12 @@ pub fn prepare_auto(
             }
             name.clone()
         }
-        _ => free_name(txn, table, &spec.name)?,
+        _ => free_name(txn, table, column)?,
     };
-    spec.default = Some(format!("nextval({})", literal_name(&name)));
-    spec.not_null = true;
-    Ok(Some(crate::catalog::Identity {
+    Ok(crate::catalog::Identity {
         always: matches!(auto, crate::ast::Auto::Identity { always: true, .. }),
         sequence: name,
-    }))
+    })
 }
 
 /// The sequence of a column [`prepare_auto`] prepared: of the column's
@@ -663,12 +681,13 @@ pub fn prepare_auto(
 pub fn make_auto(
     txn: &mut dyn KvTxn,
     table: &str,
-    spec: &crate::ast::ColumnSpec,
+    column: &str,
+    auto: &crate::ast::Auto,
     ty: DataType,
     identity: &crate::catalog::Identity,
 ) -> Result<()> {
     let mut options = vec![SeqOption::As(type_word(ty).into())];
-    if let Some(crate::ast::Auto::Identity { options: o, .. }) = &spec.auto {
+    if let crate::ast::Auto::Identity { options: o, .. } = auto {
         if o.iter()
             .any(|o| matches!(o, SeqOption::OwnedBy(_) | SeqOption::As(_)))
         {
@@ -680,8 +699,14 @@ pub fn make_auto(
     }
     create(txn, &identity.sequence, &options, false)?;
     let mut s = existing(&*txn, &identity.sequence)?;
-    s.owned_by = Some((table.to_string(), spec.name.clone()));
+    s.owned_by = Some((table.to_string(), column.to_string()));
     put(txn, &s)
+}
+
+/// Sequence `name` gone, as its column or table goes (no check).
+pub fn remove(txn: &mut dyn KvTxn, name: &str) -> Result<()> {
+    txn.delete(&def_key(name))?;
+    crate::privileges::forget(txn, Kind::Sequence, name)
 }
 
 /// The sequences owned by `table`'s columns (by `column` only, given).
@@ -723,8 +748,7 @@ pub fn drop_owned(
             .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
         }
         rewrite_defaults(txn, &s.name, None)?;
-        txn.delete(&def_key(&s.name))?;
-        crate::privileges::forget(txn, Kind::Sequence, &s.name)?;
+        remove(txn, &s.name)?;
     }
     Ok(())
 }

@@ -93,6 +93,12 @@ pub mod catalog {
     pub use crate::roles::{Membership, Role, all as roles, memberships};
 }
 
+/// The sequences as modules see them, read-only ([`crate::sequences`]):
+/// their definitions and the values last handed out.
+pub mod sequences {
+    pub use crate::sequences::{Sequence, all, last_value, type_word};
+}
+
 /// The `vector` type as modules see it ([`crate::vectors`]): its values
 /// from and to components, checked as the type checks them.
 pub mod vectors {

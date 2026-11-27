@@ -106,3 +106,19 @@ SELECT initcap(first || ' ' || coalesce(last, '')), lpad(code, 4, '0'), concat_w
 ----
 Ada Lovelace 0007 ada LOVELACE
 Alan  0042 alan
+
+# quote_ident / quote_literal: quoted where they must be
+query TTTT
+SELECT quote_ident('abc'), quote_ident('Abc'), quote_ident('select'), quote_ident('a"b')
+----
+abc "Abc" "select" "a""b"
+
+query TTT
+SELECT quote_literal('it''s'), quote_literal('a\b'), quote_ident('1a')
+----
+'it''s' E'a\\b' "1a"
+
+query T
+SELECT quote_literal(NULL)
+----
+NULL

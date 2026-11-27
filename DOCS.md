@@ -2460,7 +2460,7 @@ and dimensions ignored; issue #24), `extract(field FROM x)`, `position(sub IN s)
 FOR m)`, `overlay(s PLACING r FROM n [FOR m])`, `trim([LEADING | TRAILING |
 BOTH] [chars] FROM s)`.  Functions: `lower upper length trim substr
 left right replace repeat strpos concat lpad rpad ltrim rtrim btrim
-split_part concat_ws translate reverse initcap overlay cbrt coalesce nullif greatest least abs round trunc floor
+split_part concat_ws translate reverse initcap overlay quote_ident quote_literal cbrt coalesce nullif greatest least abs round trunc floor
 ceil sign mod sqrt power regexp_replace version now current_timestamp
 current_date localtimestamp clock_timestamp extract date_part date_trunc
 make_date age justify_days justify_hours justify_interval to_timestamp
@@ -3854,8 +3854,14 @@ AS IDENTITY (SEQUENCE NAME s options)`, a sequence another column owns
 `pg_attribute.attidentity` (`a`, `d`) and `information_schema.columns
 .is_identity`.  The table record (version 30 on) keeps each column's
 identity after the rest: `0`, `1 <sequence>` (`ALWAYS`) or `2
-<sequence>`.  Not yet: `ALTER COLUMN … ADD GENERATED`, `SET GENERATED`,
-`DROP IDENTITY`, `RESTART`.
+<sequence>`.  `ALTER TABLE t ALTER [COLUMN] c ADD GENERATED ALWAYS | BY
+DEFAULT AS IDENTITY [(options)]` makes a column one (`NOT NULL` already,
+without a default: `55000` otherwise, `22023` not an integer); `SET
+GENERATED ALWAYS | BY DEFAULT`, `SET option` and `RESTART [[WITH] n]`
+(in any number, one after another) change it and its sequence; `DROP
+IDENTITY [IF EXISTS]` makes it a plain column (`NOT NULL` kept), its
+sequence dropped — `55000` on a column that is not one.  Not on a
+partitioned table or a partition yet (`0A000`).
 
 Sessions: outside `BEGIN` every statement is its own transaction, retried
 up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the
@@ -4115,22 +4121,28 @@ PostgreSQL's catalog names, so the same catalog is also shown as
 `pg_type`, `pg_index`, `pg_constraint`, `pg_am`, `pg_collation`,
 `pg_roles`, `pg_database`, `pg_tablespace`, `pg_tables`, `pg_indexes`,
 `pg_statistic_ext` (each `CREATE STATISTICS`, its columns by
-`pg_get_statisticsobjdef_columns`), and empty `pg_policy`, `pg_trigger`,
+`pg_get_statisticsobjdef_columns`), `pg_sequence`, `pg_sequences`
+(`last_value` the last handed out), `pg_depend` (only a sequence's on
+the column owning it: `a`, `i` for an identity's), and empty `pg_policy`, `pg_trigger`,
 `pg_inherits`, `pg_publication*`, `pg_description`, `pg_auth_members`) and
 `information_schema` (`schemata`, `tables`, `columns`,
-`table_constraints`, `key_column_usage`), with the functions their queries
+`table_constraints`, `key_column_usage`, `sequences`), with the functions their queries
 call (`format_type`, `pg_get_expr`, `pg_get_indexdef`,
 `pg_get_constraintdef`, `pg_get_userbyid`, `pg_table_is_visible`,
 `pg_partition_ancestors`, `has_*_privilege`, `obj_description`, …) and
 `::regclass` / `regtype` / `regnamespace` casts (`regclass` maps a name to
 an oid and an oid to a name).  Unqualified `pg_*` names resolve to these
 unless a user table has the name.  Oids: PostgreSQL's for types,
-namespaces and access methods; a table is `16384 + 1000 × table id`, its
-indexes and constraints numbered after it (the module's `catalog.rs` has
-the table).
+namespaces, access methods and the catalog tables clients compare with
+(`pg_class` 1259, `pg_attribute`, `pg_type`, `pg_namespace`,
+`pg_constraint`, `pg_index`, `pg_description`, `pg_depend`,
+`pg_sequence`); a table is `16384 + 1000 × table id`, its indexes and
+constraints numbered after it; a sequence `1000000000 + its id`,
+relkind `S` in `pg_class` (the module's `catalog.rs` has the table).
 One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
-`\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
-that need functions, sequences (`\ds`: not in `pg_class` yet) or permissions do not.  `pg_typeof(x)` and
+`\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l`, `\ds` and `\d sequence`
+(its owner column too) work; `\df` and others that need functions or
+permissions do not.  `pg_typeof(x)` and
 `to_regtype(name)` (a type's oid by its `pg_type` or SQL name, NULL when
 there is none) are among its functions too.  PostgreSQL's text search —
 `tsvector`, `tsquery`, `to_tsvector`, `to_tsquery`, `@@` — is the
@@ -7223,15 +7235,19 @@ definitions (§8.33) by kind, name and table, and a table both have by
 its catalog structure: what only the old schema has is dropped, what only
 the new has is created, what changed is dropped and created again —
 except what changes in place: a table's columns (`ADD`, `DROP`, `ALTER
-COLUMN … TYPE`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`) and
-constraints, an enum's new labels (`ADD VALUE … BEFORE`), an ordering's
-mapping, a table's settings (storage, expiry, subject, row security).
+COLUMN … TYPE`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, an
+identity's `ADD GENERATED`, `SET GENERATED`, `SET` options and `DROP
+IDENTITY`) and constraints, an enum's new labels (`ADD VALUE … BEFORE`),
+an ordering's mapping, a sequence's options (`ALTER SEQUENCE … AS …`
+with every option, its value kept), a table's settings (storage, expiry,
+subject, row security).
 The order: what depends on tables dropped (foreign keys always
 explicitly, so tables that reference each other drop in any order), the
 tables' columns and constraints that go, the types and models nothing
-uses any more; then models and types made, tables, new columns and
-changes, and last indexes, foreign keys, comments, settings and
-policies.  What a diff cannot see or must not do is a `--` note, not a
+uses any more; then models, types and sequences made, tables, new
+columns and changes, the sequences no default calls any more dropped,
+and last indexes, foreign keys, sequences' owners (`ALTER SEQUENCE …
+OWNED BY`), comments, settings and policies.  What a diff cannot see or must not do is a `--` note, not a
 statement: a column or table that may have been renamed (a drop and an
 add with the same type or columns: the note gives the `RENAME`), a
 changed primary key or partitioning, a partition, memory store or chunk
