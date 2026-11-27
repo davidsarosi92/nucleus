@@ -2068,6 +2068,20 @@ fn arbiters(binder: &mut Binder, t: &Table, target: &ast::ConflictTarget) -> Res
             let scope = table_scope(t);
             let mut want: Vec<(Option<usize>, Option<Expr>)> = Vec::new();
             for p in parts {
+                // On a collection a name that is no column is a path in
+                // its documents, as an index's part (§M15 D4): `u`, `a.b`.
+                if t.collection
+                    && let ast::Expr::Column { table, name } = p
+                    && (table.is_some() || t.column(name).is_none())
+                {
+                    let path = match table {
+                        Some(q) => format!("{q}.{name}"),
+                        None => name.clone(),
+                    };
+                    let sql = crate::collection::path_sql(&path)?;
+                    want.push((None, Some(bind_index_expr(binder, t, &sql)?.0)));
+                    continue;
+                }
                 if let ast::Expr::Column { name, .. } = p {
                     let c = t.column(name).ok_or_else(|| {
                         Error::undefined_column(format!("column \"{name}\" does not exist"))

@@ -903,17 +903,31 @@ impl<'a> Binder<'a> {
                 not_null: true,
             });
         }
+        // One column named otherwise (`json_array_elements`'s `value`):
+        // the alias names it too, as PostgreSQL's whole-row reference to
+        // a scalar result is the value — `FROM json_array_elements(x) e
+        // WHERE e ->> 'k' = …` — a hidden copy, out of `*`.
+        let alias_too = cols.len() == 1 && cols[0].name != qual && columns.is_empty();
         let mut scope = Scope { cols };
         rename_columns(&mut scope, &qual, columns)?;
-        Ok(Bound {
-            plan: Plan::Function {
-                func,
-                args: bound,
-                width: scope.cols.len(),
-                ordinality,
-            },
-            scope,
-        })
+        let width = scope.cols.len();
+        let mut plan = Plan::Function {
+            func,
+            args: bound,
+            width,
+            ordinality,
+        };
+        if alias_too {
+            let mut copy = scope.cols[0].clone();
+            copy.name = qual.clone();
+            copy.hidden = true;
+            scope.cols.push(copy);
+            plan = Plan::Project {
+                input: Box::new(plan),
+                exprs: vec![Expr::Column(0), Expr::Column(0)],
+            };
+        }
+        Ok(Bound { plan, scope })
     }
 
     /// A reference to CTE `name`, if one is in scope.

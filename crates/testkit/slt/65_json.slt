@@ -478,6 +478,24 @@ x
 NULL
 {"a": 1}
 
+# The alias names the one column too (PostgreSQL's whole-row reference
+# to a scalar result is the value); `*` shows the column once
+query TTT
+SELECT e ->> 'a', e.value ->> 'a', value ->> 'a' FROM jsonb_array_elements('[{"a": 1}, {"a": "x"}]') e ORDER BY 1
+----
+1 1 1
+x x x
+
+query T
+SELECT * FROM jsonb_array_elements_text('["p"]') AS e
+----
+p
+
+query I
+SELECT count(*) FROM (VALUES ('[{"s": "x"}, {"s": "y"}]'::jsonb)) t(d) WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(t.d) e WHERE e ->> 's' = 'y')
+----
+1
+
 query T
 SELECT * FROM jsonb_object_keys('{"b":1,"a":2,"c":{"d":3}}')
 ----

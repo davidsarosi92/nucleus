@@ -2261,14 +2261,14 @@ impl<'a> Parser<'a> {
         }
         if self.eat_kws(&["by", "default"]) || self.peek_kws(&["always", "as", "identity"]) {
             return Err(Error::feature(
-                "identity columns are not supported: use a sequence's nextval() as the default",
+                "identity columns are not supported yet: a key by uuidv7() as the default (DEFAULT uuidv7()) is ordered by time",
             ));
         }
         self.expect_kw("always")?;
         self.expect_kw("as")?;
         if self.peek_kws(&["identity"]) {
             return Err(Error::feature(
-                "identity columns are not supported: use a sequence's nextval() as the default",
+                "identity columns are not supported yet: a key by uuidv7() as the default (DEFAULT uuidv7()) is ordered by time",
             ));
         }
         self.expect_op("(")?;

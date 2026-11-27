@@ -14274,6 +14274,54 @@ multi-valued one, the language decision moved to §M16's start):*
   ~0.15 ms of 600 rows.  Perf items, waiting.  Not done: more than one
   multi part, `UNIQUE`, `[*]` twice in a path, an index-only count.
 
+**The bug hunt after D2–D5** (2026-11-27; agreed 2026-11-25: after
+the steps, so that the searchers cover them).  Two new searchers, each
+against the release build:
+- *Documents, differentially*: the same random documents in a table
+  without indexes and in variants that differ physically — row, column
+  and LSM tables with multi-valued, path, expression and unique
+  indexes, a table with the json containment index, a collection with
+  `tags[*]`, `items[*].sku`, `k`, `a.b` and a unique path — some
+  indexes built before the rows, some after (online too); random
+  writes (inserts, updates through `json_set`, deletes, `INSERT … ON
+  CONFLICT` by the key or the unique path, `DO NOTHING` / `DO UPDATE …
+  WHERE`, a key twice in one statement), alone or a few in a block on a
+  connection per table, committed or rolled back; random conditions
+  (`@>` through paths, `->`, `->>`, `#>`, strict and lax `@?`, `?`,
+  `?|`, `= ANY`), each under the session settings of the 2026-11-22
+  fuzzer; every statement's rows or SQLSTATE and every table's contents
+  after a write compared.  72,000 steps (43,000 queries, 34,000
+  writes): two findings, below; after them nothing.
+- *Upserts under concurrent writers* (the "done when" below): 8 and 32
+  clients upserting six hot keys at once — by the primary key (row,
+  column and LSM tables), a unique secondary index, a collection's
+  `_id` and a collection's unique path — at snapshot and serializable
+  isolation, one to three in a block, with `DO NOTHING` tokens beside;
+  a serialization failure retried.  Every counter equals its
+  acknowledged upserts, no key has two rows, every token was inserted
+  by exactly one client: 957,000 commits, 680,000 serialization
+  failures retried, nothing wrong — PostgreSQL's behaviour at
+  `REPEATABLE READ` (at `READ COMMITTED` it waits and never fails;
+  nucleus has no weaker level than snapshot).
+
+Found and fixed:
+- `ON CONFLICT (email)` on a collection named a column, not the path its
+  unique index was made by (`CREATE UNIQUE INDEX ON c (email)`): `42703`.
+  An arbiter's part on a collection is now read as an index's part is
+  (D4: a name no column is a path, `a.b` too).  `88_collections.slt`.
+- `FROM json_array_elements(x) e … e ->> 'k'`: `e` was only the
+  table's name, its one column `value`; in PostgreSQL the alias names
+  the scalar result too (a whole-row reference to it is the value).
+  Now a hidden copy of the column carries the alias's name (out of `*`).
+  `65_json.slt`, 113/113 as PostgreSQL 18 has them.
+- The identity-column error advised "a sequence's `nextval()`", which
+  nucleus does not have; it names `DEFAULT uuidv7()` now.
+
+Found missing (issues, not bugs): `SAVEPOINT`, the array operators
+`@>` / `<@` / `&&` (#16), sequences, `serial` and identity columns
+(#23), `by` as a column name (PostgreSQL's keyword is unreserved;
+#16).
+
 **Done when:** `INSERT … ON CONFLICT` behaves as PostgreSQL's under
 concurrent writers; collections exist in the catalog and SQL, with ids
 as keys; path and array indexes are chosen by the planner and measured;

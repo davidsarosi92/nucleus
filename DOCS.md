@@ -6697,7 +6697,10 @@ as numbers — a float's non-finite values as strings —, times in ISO
 path, new [, after])` (a position out of range adds at that end),
 `json_extract_path(j, k, …)` and `_text`; in `FROM`, `json_each`,
 `json_each_text`, `json_array_elements`, `json_array_elements_text`
-(their columns `key`, `value`) and `json_object_keys`; aggregates
+(their columns `key`, `value`; with one column, the alias names it too,
+as PostgreSQL's whole-row reference to a scalar result is the value:
+`FROM json_array_elements(x) e WHERE e ->> 'k' = …`, a hidden copy out
+of `*`) and `json_object_keys`; aggregates
 `json_agg(x)` (`NULL`s as `null`) and `json_object_agg(k, v)`.  Errors
 are PostgreSQL's (`22023 cannot delete from scalar`, `22P02 path
 element at position 1 is not an integer: "x"`, `22004` a `NULL` path
@@ -7511,7 +7514,8 @@ as well).
 Everything else is the table's: documents are inserted, replaced,
 updated by the JSON functions (`json_set`, `#-`, `||`), deleted and
 upserted (`INSERT … ON CONFLICT (_id) DO UPDATE SET doc = c.doc ||
-excluded.doc`) in SQL; indexes on fields are expression indexes
+excluded.doc`; an arbiter's part named as an index's — `ON CONFLICT
+(email)`, `(login.name)` — is a path, as in `CREATE INDEX`) in SQL; indexes on fields are expression indexes
 (`CREATE INDEX ON c ((doc ->> 'name'))`), and every storage and engine
 holds them.
 

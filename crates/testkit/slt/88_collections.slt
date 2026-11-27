@@ -114,6 +114,39 @@ INSERT INTO people (doc) VALUES ('{"_id": 7, "seen": true}'), ('{"_id": 9, "name
 statement ok
 DELETE FROM people WHERE doc ->> 'name' = 'Hal'
 
+# By a unique path: the arbiter spelt as the index's part
+statement ok
+CREATE COLLECTION accounts
+
+statement ok
+CREATE UNIQUE INDEX ON accounts (email)
+
+statement ok
+CREATE UNIQUE INDEX ON accounts (login.name)
+
+statement ok
+INSERT INTO accounts (doc) VALUES ('{"_id": 1, "email": "a@x", "login": {"name": "ann"}, "n": 1}')
+
+query T
+INSERT INTO accounts (doc) VALUES ('{"_id": 2, "email": "a@x", "n": 5}') ON CONFLICT (email) DO UPDATE SET doc = json_set(accounts.doc, '{n}', excluded.doc -> 'n') RETURNING doc
+----
+{"n": 5, "_id": 1, "email": "a@x", "login": {"name": "ann"}}
+
+query T
+INSERT INTO accounts (doc) VALUES ('{"_id": 3, "login": {"name": "ann"}}') ON CONFLICT (login.name) DO NOTHING RETURNING doc
+----
+
+statement error 42P10
+INSERT INTO accounts (doc) VALUES ('{"_id": 4}') ON CONFLICT (nickname) DO NOTHING
+
+query I
+SELECT count(*) FROM accounts
+----
+1
+
+statement ok
+DROP COLLECTION accounts
+
 query I
 SELECT count(*) FROM people
 ----
