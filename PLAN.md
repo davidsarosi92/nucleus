@@ -241,6 +241,8 @@ are marked ✅.
 | D17 | Sync policy (§M14.20 W1) | ✅ **`sync = ordered` by default, `full` as a setting** (2026-11-02): `ordered` asks the OS for ordered writes — on macOS `F_BARRIERFSYNC` — so the database is never corrupt and a crash of the process or the OS loses nothing, but a power loss may lose the last commits; `full` flushes the drive's cache at each commit (`F_FULLFSYNC`), so a commit survives power loss.  Where the OS has no cheaper ordering (Linux's `fdatasync`), both are the same.  PostgreSQL's and SQLite's defaults on macOS are the weaker of the two | `full` always (today's behaviour: every commit and checkpoint pays a drive-cache flush) |
 | D18 | Format changes for speed (§M14.20 W7) | ✅ **Now** (2026-11-02), each with its version bumped and the older format still read (principle 6): column offsets in the row format, column chunks as extents, a batch's WAL record laid out as the tree applies it | later, behind a migration |
 | D19 | HTTP and GraphQL front ends | ✅ **First `ncp` over HTTP and WebSocket, then GraphQL as an optional module** (2026-11-22): browsers and many serverless and edge runtimes cannot open a TCP connection, so the gap is a transport, not a new protocol — the same `ncp` messages over HTTP (a request at a time) and WebSocket (sessions, streams, subscriptions), with the same login, roles and budgets (principle 11; prior art: Neon's serverless driver, PlanetScale's HTTP API, libSQL's Hrana); it also carries MCP over HTTP (§M14.10's "left for later").  GraphQL comes after it, not before §M16.6, as `modules/graphql` (principle 12): its schema read from `nc_catalog` (tables, foreign keys, comments, collections), each request compiled to **one** plan (no N+1, as pg_graphql and PostGraphile do), permissions from row-level security (§M14.25), depth and cost from the statement budget, subscriptions on live queries (§M16.6).  Not now: models write SQL better than GraphQL and reach nucleus through MCP already; the agreed order to F2 stands | GraphQL now, in the core (a second protocol shaping nucleus's interface, against principle 11); never (frontend developers who expect GraphQL go to Hasura or PostGraphile over a compatibility protocol) |
+| D20 | gRPC and REST front ends | ✅ **Optional modules after §M16.6** (2026-11-27): `modules/grpc` and `modules/rest`, each mapped onto `ncp` (principle 11: no second protocol inside) with the same login, roles, row-level security and statement budgets.  gRPC because it is the common tongue of service meshes and its server streams fit changefeeds (§M16.5) and live queries (§M16.6): a generic `Query` / `Subscribe` service, and per-table services with their `.proto` generated from `nc_catalog` (as `nucleus codegen` generates types); HTTP/2 is a dependency, so a module and the core stays free of it.  REST as a resource API generated from the catalog (prior art: PostgREST), beside D19's GraphQL module.  Both after §M16.6, whose subscriptions they carry | in the core (a dependency and a second interface shaping nucleus); never (users of gRPC or REST put a service in front) |
+| D21 | External wire protocols (FIX, ITCH and the like) | ✅ **Adapters, not the core** (2026-11-27): §M16.5 gets an extension point — a module that maps an external wire protocol onto a stream's appends (ingest) or a changefeed's subscription (egress) — and a protocol such as FIX (sessions between trading parties) or ITCH (market data) is an adapter module on it, like §M24's connectors.  So the streams are designed for it from the start: per-stream sequence numbers with gap detection and replay from an offset (what FIX's resend requests and ITCH's rewind need), nanosecond timestamps, a guaranteed order.  nucleus is then the system of record, tick store and analysis behind such a protocol, not the microsecond hot path (matching, feed handling) | in the core (nucleus partly a trading gateway, outside its aim); none (a separate service translates) |
 
 ---
 
@@ -14312,6 +14314,12 @@ for free, and what developers otherwise assemble from several systems:
 - Changefeeds (CDC, moved here from §M25): a table's committed changes as
   a stream, from the MVCC versions.
 - Clients: `ncp` messages for subscribing, and the drivers' consumer API.
+- **Protocol adapters** (D21, 2026-11-27): an extension point for a module
+  mapping an external wire protocol onto appends (ingest) or a changefeed
+  subscription (egress); the streams keep per-stream sequence numbers with
+  gap detection and replay from an offset, nanosecond timestamps and a
+  guaranteed order, so that adapters such as FIX or ITCH can be written
+  as modules (here or by others, beside §M24's connectors).
 - **Task queues**: a stream with competing consumers, leases, retries,
   delays, priorities and a dead-letter stream — the queue an AI agent or
   a pipeline needs, transactional with the data it changes.
@@ -14346,6 +14354,12 @@ commit that affects it — built on the changefeeds (§M16.5).
 
 **Done when:** subscribers see exactly the query's result after each
 commit, under concurrent writes, in every driver.
+
+After it (D19, D20): the optional front-end modules that carry its
+subscriptions — `modules/graphql`, `modules/grpc` (a generic `Query` /
+`Subscribe` service and per-table services, `.proto` from `nc_catalog`)
+and `modules/rest` (a resource API from the catalog) — each mapped onto
+`ncp`.
 
 ### §M16.7 — Sync: devices and a server ⬜
 
