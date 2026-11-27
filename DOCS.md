@@ -6672,8 +6672,13 @@ A chain of `->` by constant keys or positions, ending in `->` or `->>`
 (`doc -> 'address' -> 'geo' ->> 'lat'`), is bound as one call,
 `->(json,path)` / `->>(json,path)` (`EXPLAIN` shows it): the document's
 bytes walked to the value, no value between copied out — each `->`
-alone copies its value (PLAN.md §M15 D1).  `#>`, `#>>`, `?|`, `?&` and
-`json_extract_path` read their keys in place, nothing copied a row.
+alone copies its value (PLAN.md §M15 D1).  `#>` / `#>>` by a constant
+path none of whose keys reads as an integer (`doc #> '{address,geo}'`)
+are bound as the chain they mean (`json::funcs::Path::of_array`), so an
+expression index on either spelling serves both (§M15 D4); a key reading
+as an integer indexes an array under `#>` but not under `->`, so such a
+path is left as it is.  `#>`, `#>>`, `?|`, `?&` and `json_extract_path`
+read their keys in place, nothing copied a row.
 
 An untyped right side (`doc -> 'name'`, `doc -> $1`) is `text` where
 the operator has a `text` form (as PostgreSQL's `unknown`), else the
@@ -7508,7 +7513,24 @@ updated by the JSON functions (`json_set`, `#-`, `||`), deleted and
 upserted (`INSERT … ON CONFLICT (_id) DO UPDATE SET doc = c.doc ||
 excluded.doc`) in SQL; indexes on fields are expression indexes
 (`CREATE INDEX ON c ((doc ->> 'name'))`), and every storage and engine
-holds them.  `nc_catalog.collections` lists them (name, owner, schema,
+holds them.
+
+**Path indexes** (§M15 D4): on a collection, `CREATE [UNIQUE] INDEX
+[name] ON c (a.b.c, …)` — a key part that names no column (`a.b.c`, or
+`name` alone) is a path in the documents, the expression index `doc ->
+'a' -> 'b' -> 'c'` (`collection::path_sql`; the keys split at the dots,
+each quoted as a literal), named `c_a_b_c_idx` when unnamed.  It holds
+the json value there (a document without it: a `NULL` key), so it serves
+the query's `doc -> 'a' -> 'b' -> 'c' = '…'` or `doc #> '{a,b,c}' = '…'`
+— both bound as the same one walk — as any expression index (equality,
+ranges in json's order, `UNIQUE`), and its definition is the
+expression's.  A text comparison (`doc ->> 'name' = 'x'`) wants an index
+on that expression (`((doc ->> 'name'))`): a json value's text form is
+not its key.  `_id` and `doc` are columns, so a field named `doc` is
+indexed by its expression; a key holding a dot or reading as an array
+position is too.  On a table a path is no column (`42703`, the hint
+naming the expression to index); an index method's index takes columns
+only (`0A000`).  `nc_catalog.collections` lists them (name, owner, schema,
 storage, engine); `nc_catalog.definitions` gives `CREATE COLLECTION …
 WITH (…)`, and schema diffs set or reset a changed schema in place
 (another storage is a note: the documents would go).  ncsql's `\d` says
@@ -7522,7 +7544,11 @@ inserts, replacements, upserts, deletes and a field index, ids in the
 order the documents came; who may make, change and drop one; the
 definition's options;
 `tests/schema_diff.rs` (`a_collections_schema_changed_in_place`);
-pg-compat's `01_pg_catalog.slt`.
+pg-compat's `01_pg_catalog.slt`.  Path indexes: the same slt (names,
+expressions, plans for both spellings, `UNIQUE`, missing fields, the
+definition, a quoted key, three deep) and `69_expression_indexes.slt`
+(`#>` / `#>>` bound as the chain; integer keys left alone — checked
+against PostgreSQL 18); `a_path_on_a_table_says_what_a_path_is`.
 
 ## 9. Server (`nucleus-server`)
 

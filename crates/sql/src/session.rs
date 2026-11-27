@@ -3538,6 +3538,24 @@ pub(crate) fn define_index(
         }
         (c, x, o, p, w)
     };
+    // A collection's part naming no column is a path in its documents
+    // (PLAN.md §M15 D4): `a.b.c` the expression `doc -> 'a' -> 'b' -> 'c'`.
+    let mut paths = vec![None; columns.len()];
+    let (columns, exprs) = &{
+        let (mut c, mut x) = (columns.clone(), exprs.clone());
+        if let Some(t) = catalog::get_table(txn, table)?.filter(|t| t.collection) {
+            for k in 0..c.len() {
+                if x[k].is_none()
+                    && t.column(&c[k]).is_none()
+                    && k < columns.len() - partition_by.len()
+                {
+                    x[k] = Some(crate::collection::path_sql(&c[k]));
+                    paths[k] = Some(std::mem::take(&mut c[k]).replace('.', "_"));
+                }
+            }
+        }
+        (c, x)
+    };
     let has_exprs = exprs.iter().any(Option::is_some);
     if let Some(m) = &access {
         if *unique {
@@ -3578,9 +3596,11 @@ pub(crate) fn define_index(
             let parts: Vec<String> = columns
                 .iter()
                 .zip(exprs)
-                .map(|(c, e)| match e {
-                    None => c.clone(),
-                    Some(e) => expr_part_name(e),
+                .zip(&paths)
+                .map(|((c, e), p)| match (p, e) {
+                    (Some(p), _) => p.clone(),
+                    (None, None) => c.clone(),
+                    (None, Some(e)) => expr_part_name(e),
                 })
                 .collect();
             let base = format!("{table}_{}_idx", parts.join("_"));
@@ -3613,8 +3633,16 @@ pub(crate) fn define_index(
             if e.is_some() {
                 return Ok(0); // set when the expression is bound
             }
-            t.column(c)
-                .ok_or_else(|| Error::undefined_column(format!("column \"{c}\" does not exist")))
+            t.column(c).ok_or_else(|| {
+                let e = Error::undefined_column(format!("column \"{c}\" does not exist"));
+                match c.split_once('.') {
+                    Some((col, key)) => e.with_hint(format!(
+                        "A path (a.b) names a field of a collection's documents; for a json \
+                         column, index the expression: (({col} -> '{key}'))"
+                    )),
+                    None => e,
+                }
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     let mut plain = Vec::new();

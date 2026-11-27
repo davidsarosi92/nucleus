@@ -162,6 +162,19 @@ pub(crate) fn alter(
     }
 }
 
+/// Path `a.b.c` in a collection's documents (`CREATE INDEX ON c
+/// (a.b.c)`, PLAN.md §M15 D4) as the expression that reads it, `doc ->
+/// 'a' -> 'b' -> 'c'`: the json value there, as the query's `->` chain
+/// or `#> '{a,b,c}'` binds — so the index serves either.
+pub fn path_sql(path: &str) -> String {
+    let mut sql = DOC.to_string();
+    for key in path.split('.') {
+        sql.push_str(" -> ");
+        sql.push_str(&literal(key));
+    }
+    sql
+}
+
 /// A collection's JSON Schema, if it has one.
 pub fn schema(t: &Table) -> Option<String> {
     let (_, text) = t.checks.iter().find(|(n, _)| n == SCHEMA_CHECK)?;

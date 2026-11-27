@@ -187,3 +187,18 @@ fn its_definition_keeps_every_option() {
         .to_vec()
     );
 }
+
+#[test]
+fn a_path_on_a_table_says_what_a_path_is() {
+    let mut s = Session::new(open(4));
+    s.execute("CREATE TABLE t (id int PRIMARY KEY, doc json)")
+        .unwrap();
+    let e = s.execute("CREATE INDEX ON t (doc.a)").unwrap_err();
+    assert_eq!(e.code, "42703");
+    assert!(
+        e.hint
+            .as_deref()
+            .is_some_and(|h| h.contains("((doc -> 'a'))")),
+        "{e:?}"
+    );
+}

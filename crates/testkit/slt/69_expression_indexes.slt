@@ -94,6 +94,37 @@ Project: #0
 statement ok
 DROP INDEX users_first_tag
 
+# `#>` / `#>>` by a constant path bind as the chain of `->` they mean, so
+# an index on either spelling serves both (PLAN.md §M15 D4); a key that
+# reads as an integer indexes an array under `#>` only, and is left so.
+statement ok
+CREATE INDEX users_doc_name ON users ((doc -> 'name'))
+
+query IT
+SELECT id, doc #>> '{name}' FROM users WHERE doc #> '{name}' = '"bob"'
+----
+2 bob
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT id FROM users WHERE doc #> '{name}' = '"bob"'
+----
+Project: #0
+  Index Scan using users_doc_name on users ((doc -> 'name') = "bob") filter: (->(json,text)(#3, 'name') = "bob")
+
+query TTTT
+SELECT doc #> '{tags,0}', doc #>> '{tags,0}', doc -> 'tags' -> '0', doc #> '{tags, 0 }' FROM users WHERE id = 1
+----
+"a" a NULL "a"
+
+query TT
+SELECT doc #> '{}', doc #>> '{nothing,here}' FROM users WHERE id = 2
+----
+{"age": 25, "name": "bob"} NULL
+
+statement ok
+DROP INDEX users_doc_name
+
 # A unique expression: two rows may not share a name, NULLs aside.
 statement error 23505
 INSERT INTO users VALUES (5, 'x@y.z', 1, '{"name": "ann"}')

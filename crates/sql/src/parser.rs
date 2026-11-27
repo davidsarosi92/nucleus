@@ -1445,13 +1445,19 @@ impl<'a> Parser<'a> {
                     exprs.push(Some(text));
                 } else {
                     let save = self.pos;
-                    let name = self.ident()?;
+                    let mut name = self.ident()?;
                     if self.peek_op("(") {
                         self.pos = save;
                         let (_, text) = self.text_of(|p| p.expr())?;
                         columns.push(String::new());
                         exprs.push(Some(text));
                     } else {
+                        // `a.b.c`: a path in a collection's documents
+                        // (PLAN.md §M15 D4), made an expression there.
+                        while self.eat_op(".") {
+                            name.push('.');
+                            name.push_str(&self.ident()?);
+                        }
                         columns.push(name);
                         exprs.push(None);
                     }

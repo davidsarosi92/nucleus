@@ -92,6 +92,8 @@ pub(super) struct Func {
     body: Body,
     /// For `->` and `->>`: a step of a path, and whether it gives text.
     step: Option<bool>,
+    /// For `#>` and `#>>`: a path, and whether it gives text.
+    path: Option<bool>,
 }
 
 impl Func {
@@ -106,6 +108,7 @@ impl Func {
             volatility: Volatility::Immutable,
             body,
             step: None,
+            path: None,
         }
     }
 
@@ -113,6 +116,13 @@ impl Func {
     /// is bound as one [`Path`].
     fn step(mut self, text: bool) -> Self {
         self.step = Some(text);
+        self
+    }
+
+    /// `#>` (`false`) or `#>>` (`true`): by a constant path, bound as the
+    /// chain of `->` it means ([`Path::of_array`]).
+    fn path(mut self, text: bool) -> Self {
+        self.path = Some(text);
         self
     }
 
@@ -152,6 +162,9 @@ impl ScalarFunction for Func {
         self.volatility
     }
     fn rewrite(&self, args: &[Expr]) -> Option<Expr> {
+        if let Some(text) = self.path {
+            return Path::of_array(args, text);
+        }
         Path::chained(args, self.step?)
     }
     fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
@@ -190,6 +203,51 @@ impl Path {
         let mut all = inner.clone();
         all.push(k.clone());
         Some(Expr::Call(FnRef::new(Arc::new(Path { text })), all))
+    }
+
+    /// `x #> '{k1,…,kn}'` (or `#>>`, `text`) of bound `args`, the path a
+    /// constant of keys none of which reads as an integer, bound as `x ->
+    /// 'k1' -> … -> 'kn'` (`->>` last) binds — so an expression index on
+    /// either spelling serves both (PLAN.md §M15 D4).  (A key reading as
+    /// an integer indexes an array under `#>` but not under `->`.)
+    fn of_array(args: &[Expr], text: bool) -> Option<Expr> {
+        let [x, Expr::Literal(Value::Array(keys))] = args else {
+            return None;
+        };
+        let keys = keys.iter().map(|k| match k {
+            Value::Text(s) if s.trim().parse::<i64>().is_err() => Some(Expr::Literal(k.clone())),
+            _ => None,
+        });
+        let keys: Vec<Expr> = keys.collect::<Option<_>>()?;
+        let (last, init) = keys.split_last()?;
+        // As the binder binds the chain: each step on the one before.
+        let step = |text: bool, at: Expr, k: &Expr| {
+            Self::chained(&[at.clone(), k.clone()], text).unwrap_or_else(|| {
+                let f: Arc<dyn ScalarFunction> = Arc::new(field_step(text));
+                Expr::Call(FnRef::new(f), vec![at, k.clone()])
+            })
+        };
+        let at = init.iter().fold(x.clone(), |at, k| step(false, at, k));
+        Some(step(text, at, last))
+    }
+}
+
+/// `->(json,text)` (or `->>`, `text`): a field by its key.
+fn field_step(as_text: bool) -> Func {
+    let j = json();
+    if as_text {
+        Func::new(
+            "->>(json,text)",
+            vec![u(j), u(DataType::Text)],
+            DataType::Text,
+            |a| maybe_text(ops::field(jb(&a[0])?, text(&a[1])?)?),
+        )
+        .step(true)
+    } else {
+        Func::new("->(json,text)", vec![u(j), u(DataType::Text)], j, |a| {
+            Ok(maybe_json(ops::field(jb(&a[0])?, text(&a[1])?)?))
+        })
+        .step(false)
     }
 }
 
@@ -237,28 +295,8 @@ fn operators(r: &mut Registry) -> Result<()> {
     let ints = [DataType::SmallInt, DataType::Integer, DataType::BigInt];
     let func = |name, right, returns, body| Func::new(name, vec![u(j), u(right)], returns, body);
     let op = |name, right, returns, body| Arc::new(func(name, right, returns, body));
-    r.add_operator(
-        "->",
-        j,
-        DataType::Text,
-        Arc::new(
-            func("->(json,text)", DataType::Text, j, |a| {
-                Ok(maybe_json(ops::field(jb(&a[0])?, text(&a[1])?)?))
-            })
-            .step(false),
-        ),
-    )?;
-    r.add_operator(
-        "->>",
-        j,
-        DataType::Text,
-        Arc::new(
-            func("->>(json,text)", DataType::Text, DataType::Text, |a| {
-                maybe_text(ops::field(jb(&a[0])?, text(&a[1])?)?)
-            })
-            .step(true),
-        ),
-    )?;
+    r.add_operator("->", j, DataType::Text, Arc::new(field_step(false)))?;
+    r.add_operator("->>", j, DataType::Text, Arc::new(field_step(true)))?;
     for t in ints {
         r.add_operator(
             "->",
@@ -287,20 +325,26 @@ fn operators(r: &mut Registry) -> Result<()> {
         "#>",
         j,
         text_array(),
-        op("#>(json,text[])", text_array(), j, |a| {
-            Ok(maybe_json(ops::at_path(
-                jb(&a[0])?,
-                steps(elements(&a[1])?)?,
-            )?))
-        }),
+        Arc::new(
+            func("#>(json,text[])", text_array(), j, |a| {
+                Ok(maybe_json(ops::at_path(
+                    jb(&a[0])?,
+                    steps(elements(&a[1])?)?,
+                )?))
+            })
+            .path(false),
+        ),
     )?;
     r.add_operator(
         "#>>",
         j,
         text_array(),
-        op("#>>(json,text[])", text_array(), DataType::Text, |a| {
-            maybe_text(ops::at_path(jb(&a[0])?, steps(elements(&a[1])?)?)?)
-        }),
+        Arc::new(
+            func("#>>(json,text[])", text_array(), DataType::Text, |a| {
+                maybe_text(ops::at_path(jb(&a[0])?, steps(elements(&a[1])?)?)?)
+            })
+            .path(true),
+        ),
     )?;
     r.add_operator(
         "@>",

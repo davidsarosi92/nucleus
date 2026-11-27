@@ -241,3 +241,85 @@ SELECT doc FROM notes ORDER BY id
 ----
 {"a": 1}
 [1]
+
+# Path indexes (PLAN.md §M15 D4): `a.b.c` in a collection's documents —
+# the json value there, `doc -> 'a' -> 'b' -> 'c'`; a name that is no
+# column, a path of one key
+statement ok
+CREATE COLLECTION shop
+
+statement ok
+INSERT INTO shop (doc) SELECT json_build_object('_id', i, 'sku', 's' || i, 'dims', json_build_object('w', i % 10, 'h', i % 3)) FROM generate_series(1, 300) i
+
+statement ok
+CREATE INDEX ON shop (dims.w)
+
+statement ok
+CREATE UNIQUE INDEX shop_sku ON shop (sku)
+
+statement ok
+CREATE INDEX shop_wh ON shop (dims.w, dims.h, _id)
+
+query TT
+SELECT name, columns FROM nc_catalog.indexes WHERE table_name = 'shop' ORDER BY name
+----
+shop_dims_w_idx {"(doc -> 'dims' -> 'w')"}
+shop_pkey {_id}
+shop_sku {"(doc -> 'sku')"}
+shop_wh {"(doc -> 'dims' -> 'w')","(doc -> 'dims' -> 'h')",_id}
+
+query I
+SELECT count(*) FROM shop WHERE doc -> 'dims' -> 'w' = '3'
+----
+30
+
+query I
+SELECT count(*) FROM shop WHERE doc #> '{dims,w}' = '3' AND doc #> '{dims,h}' = '0'
+----
+10
+
+query T
+EXPLAIN SELECT doc FROM shop WHERE doc #> '{dims,w}' = '3'
+----
+Project: #1
+  Index Scan using shop_dims_w_idx on shop ((doc -> 'dims' -> 'w') = 3) filter: (->(json,path)(#1, 'dims', 'w') = 3)
+
+query T
+EXPLAIN SELECT doc FROM shop WHERE doc -> 'sku' = '"s42"'
+----
+Project: #1
+  Index Scan using shop_sku on shop ((doc -> 'sku') = "s42") filter: (->(json,text)(#1, 'sku') = "s42")
+
+statement error 23505
+INSERT INTO shop (doc) VALUES ('{"sku": "s7"}')
+
+# Documents without the field: NULL keys, as an expression index's
+statement ok
+INSERT INTO shop (doc) VALUES ('{"other": true}'), ('{"other": false}')
+
+query I
+SELECT count(*) FROM shop WHERE doc -> 'sku' IS NULL
+----
+2
+
+# The index is the expression's: its definition replays as one
+query T
+SELECT definition FROM nc_catalog.definitions WHERE name = 'shop_dims_w_idx'
+----
+CREATE INDEX shop_dims_w_idx ON shop ((doc -> 'dims' -> 'w'))
+
+# Deeper, and keys quoted
+statement ok
+CREATE INDEX shop_deep ON shop (dims.size.cm, "it's"."a.b")
+
+query T
+SELECT columns FROM nc_catalog.indexes WHERE name = 'shop_deep'
+----
+{"(doc -> 'dims' -> 'size' -> 'cm')","(doc -> 'it''s' -> 'a' -> 'b')"}
+
+# On a table, a path is no column
+statement error 42703
+CREATE INDEX ON notes (doc.a)
+
+statement error 0A000
+CREATE INDEX ON shop USING json (dims.w)

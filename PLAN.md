@@ -293,7 +293,7 @@ are marked ✅.
 | | M14.31 | Reliable measurement: a method every number nucleus publishes follows (environment recorded, repeated runs, spread and intervals, fair baselines, answers checked, one script to reproduce) | ✅ 2026-11-17 (P1a–P1d: the method, every section on it, one script, a second run reproducing) |
 | | M14.33 | Row tables and reads by key against a tuned PostgreSQL: the gaps the native baseline showed, profiled and closed | ✅ (2026-11-18) R1 the measurement fair (`\timing`, plans kept); R2 a read by key's plan kept by its shape, a Unix socket, the session's floor (1,000 reads 58.6 → 24.5 ms, PostgreSQL 24.0); R3 a row scan a leaf at a time, `VACUUM ANALYZE` after a load; R4 the joins (index nested loops within pipelines), rows decoded in their pages, the load's vacuum and checkpoint — row tables' geometric means TPC-H 1.27× → 0.65×, ClickBench 1.10× → 0.57× |
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
-| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅, D3 collections ✅ (2026-11-27) |
+| **F2 — NoSQL** | M15 | Document model | ◐ study written (2026-11-20), steps D1–D5 (re-split 2026-11-25); D1 ✅, D2 upsert ✅, D3 collections ✅, D4 path indexes ✅ (2026-11-27) |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
@@ -13929,7 +13929,7 @@ On the same KV contract and transaction machinery as SQL.  The query layer
 (planner + executor) is **shared**; only the frontend and the data-model
 mapping differ.
 
-### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1–D3 ✅)
+### §M15 — Document model ◐ (study written and steps agreed 2026-11-20; D1–D4 ✅)
 
 - Binary document encoding (JSON-compatible, fast field access).
 - Collections in the catalog; document id → key.
@@ -14203,7 +14203,27 @@ multi-valued one, the language decision moved to §M16's start):*
 - **D4 — path indexes**: `CREATE INDEX ON c (a.b.c)` for a collection —
   an expression index on the path's value (`doc #> '{a,b,c}'`) under
   another spelling, chosen by the planner as expression indexes are;
-  a small step.
+  a small step. ✅ (2026-11-27).  The parser keeps a dotted index part
+  as its name; on a collection a part naming no column becomes `doc ->
+  'a' -> 'b' -> 'c'` (`collection::path_sql`, the index named
+  `c_a_b_c_idx`) — the json value, the spelling D1 binds as one walk.
+  So that `doc #> '{a,b,c}'` finds the same index, `#>` / `#>>` by a
+  constant path are bound as that chain (`Path::of_array`; a key reading
+  as an integer is left: `#>` indexes arrays by it, `->` with text does
+  not — checked against PostgreSQL 18 in `69_expression_indexes.slt`,
+  67/67).  On a plain table a path is `42703` with a hint naming the
+  expression.  Tests: `88_collections.slt` (plans for both spellings,
+  `UNIQUE`, missing fields, definitions, quoting, depth), `69`,
+  `tests/collections.rs`; 11 mutants, all killed.  Not measured: an
+  expression index as before, and `#>` the same walk as before.  Seen,
+  not taken (a perf item, waits): a scan by a json key keeps its
+  condition as a filter checked again on each row (`Access::rest`) —
+  §M14.33 S17 makes integer, boolean and text equality exact; a json
+  equality would be too if json's key encoding is injective on
+  canonical bytes (to be proven, then measured).  Not done: a text
+  comparison (`->>`) served by the json-valued index (a number's and a
+  string's text can be equal, so it would probe several keys); numeric
+  path segments (`a.0.b`).
 - **D5 — multi-valued indexes**: a key part an expression giving a set
   (item 6), an entry per distinct element kept on every write, the
   planner's rules for `@>`, `= ANY`, `[*]` paths and `JSON_EXISTS`, a
