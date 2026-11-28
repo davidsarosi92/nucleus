@@ -114,6 +114,25 @@ try jobs.process("workers", limit: 100, timeoutMs: 30000) { entries in   // seq 
 _ = try jobs.wait(after: 0, timeoutMs: 1000)                               // the newest seq
 ```
 
+## Task queues
+
+A task queue's tasks (`CREATE QUEUE`; nucleus DOCS.md §8.45): added (a
+row), taken under a lease, each done exactly once — the work's writes and
+the task's `FINISH` committed together; a task whose work fails is failed
+into a retry after the backoff or, past its attempts, a dead letter; one
+whose lease ran out while it worked is left to the worker that took it
+again:
+
+```swift
+let jobs = db.queueOf("jobs")
+try jobs.add(["kind": .text("resize")])           // its id
+try jobs.process(limit: 10) { task in             // a row: id, attempt, the columns
+    try db.query("INSERT INTO thumbnails VALUES ($1)", [task[0]])
+}                                                 // tasks finished
+let task = try jobs.take(leaseMs: 60000)[0]       // or by hand: take, then
+try jobs.fail(task, error: "timeout")             // finish(task) / fail(...): "retry" | "dead"
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  `NucleusEmbedded` (its XCFramework) is the database,

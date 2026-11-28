@@ -1599,6 +1599,15 @@ impl Client {
         }
     }
 
+    /// A task queue's tasks (`CREATE QUEUE`, PLAN.md §M16.5 S5, S7):
+    /// added, taken under a lease, finished with their work, failed.
+    pub fn queue_of(&mut self, name: &str) -> QueueHandle<'_> {
+        QueueHandle {
+            client: self,
+            name: name.to_string(),
+        }
+    }
+
     /// Waits until stream `stream` has an entry after `after`, or
     /// `timeout_ms` has passed (a `w` message: the server waits holding no
     /// transaction); the stream's newest `seq`.
@@ -1843,6 +1852,181 @@ impl StreamHandle<'_> {
                 Err(e) => return Err(e),
             }
         }
+    }
+}
+
+/// A task a [`QueueHandle::take`] leased: its `id`, the attempt it is
+/// (finished or failed by that number), and the queue's columns after its
+/// own, in their order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Task {
+    /// The task's id.
+    pub id: i64,
+    /// Which attempt this is (1 the first).
+    pub attempt: i64,
+    /// The queue's columns.
+    pub values: Vec<Value>,
+}
+
+/// A task queue's tasks, through a [`Client`]'s session (see
+/// [`Client::queue_of`]).
+pub struct QueueHandle<'c> {
+    client: &'c mut Client,
+    name: String,
+}
+
+impl QueueHandle<'_> {
+    /// Adds a task (an `INSERT`, in the session's transaction): the values
+    /// of the columns named — the queue's own `priority` (lower first) and
+    /// `available_at` (a delay) among them if given.  Its id.
+    pub fn add(&mut self, columns: &[&str], values: &[Value]) -> Result<i64, Error> {
+        let names: Vec<String> = columns.iter().map(|c| quoted(c)).collect();
+        let marks: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
+        let sql = if columns.is_empty() {
+            format!(
+                "INSERT INTO {} DEFAULT VALUES RETURNING id",
+                quoted(&self.name)
+            )
+        } else {
+            format!(
+                "INSERT INTO {} ({}) VALUES ({}) RETURNING id",
+                quoted(&self.name),
+                names.join(", "),
+                marks.join(", ")
+            )
+        };
+        match self
+            .client
+            .rows(&sql, values)?
+            .first()
+            .and_then(|r| r.first())
+        {
+            Some(Value::Int(id)) => Ok(*id),
+            other => Err(Error::Protocol(format!("an added task's id: {other:?}"))),
+        }
+    }
+
+    /// The next available tasks, at most `limit`, leased for `lease_ms`
+    /// (`None`: the queue's lease) — `TAKE`, a transaction of its own
+    /// unless the session is in one.
+    pub fn take(&mut self, limit: u32, lease_ms: Option<u32>) -> Result<Vec<Task>, Error> {
+        let lease = lease_ms
+            .map(|ms| format!(" LEASE interval '{ms} milliseconds'"))
+            .unwrap_or_default();
+        let sql = format!(
+            "TAKE FROM {} LIMIT {}{lease}",
+            quoted(&self.name),
+            limit.max(1)
+        );
+        self.client
+            .rows(&sql, &[])?
+            .into_iter()
+            .map(|mut r| match (r.first(), r.get(1)) {
+                (Some(Value::Int(id)), Some(Value::Int(attempt))) => {
+                    let (id, attempt) = (*id, *attempt);
+                    Ok(Task {
+                        id,
+                        attempt,
+                        values: r.split_off(2),
+                    })
+                }
+                _ => Err(Error::Protocol(format!("a taken task: {r:?}"))),
+            })
+            .collect()
+    }
+
+    /// Finishes `task` (`FINISH TASK`: deleted, in the session's
+    /// transaction — the one its work is in).  `55000` if its attempt no
+    /// longer holds it.
+    pub fn finish(&mut self, task: &Task) -> Result<(), Error> {
+        let sql = format!("FINISH TASK $1 OF {} ATTEMPT $2", quoted(&self.name));
+        self.client
+            .execute(&sql, &[Value::Int(task.id), Value::Int(task.attempt)])
+            .map(|_| ())
+    }
+
+    /// Fails `task` (`FAIL TASK`): available again after `retry_after_ms`
+    /// or the queue's backoff, or — its last attempt — a dead letter.
+    /// `"retry"` or `"dead"`.
+    pub fn fail(
+        &mut self,
+        task: &Task,
+        error: Option<&str>,
+        retry_after_ms: Option<u32>,
+    ) -> Result<String, Error> {
+        let mut sql = format!("FAIL TASK $1 OF {} ATTEMPT $2", quoted(&self.name));
+        let mut params = vec![Value::Int(task.id), Value::Int(task.attempt)];
+        if let Some(e) = error {
+            params.push(Value::Text(e.into()));
+            sql.push_str(" ERROR $3");
+        }
+        if let Some(ms) = retry_after_ms {
+            sql.push_str(&format!(" RETRY AFTER interval '{ms} milliseconds'"));
+        }
+        match self
+            .client
+            .rows(&sql, &params)?
+            .first()
+            .and_then(|r| r.first())
+        {
+            Some(Value::Text(outcome)) => Ok(outcome.clone()),
+            other => Err(Error::Protocol(format!(
+                "a failed task's outcome: {other:?}"
+            ))),
+        }
+    }
+
+    /// Takes up to `limit` tasks (leased for `lease_ms`, `None`: the
+    /// queue's) and does each exactly once: in a transaction, `work` on
+    /// this session, then `FINISH`, then the commit — the work and the
+    /// task's end together.  A task whose work fails is rolled back and
+    /// failed with the error's text (retried after the backoff, or a dead
+    /// letter); a conflict (`40001`) runs its work again (ten times at
+    /// most, then the task is left to its lease), until its finish says
+    /// the lease ran out and another took it (`55000`): then it is left to
+    /// that one.  How many were finished.  Not in a transaction of the
+    /// caller's.
+    pub fn process<F>(
+        &mut self,
+        limit: u32,
+        lease_ms: Option<u32>,
+        mut work: F,
+    ) -> Result<usize, Error>
+    where
+        F: FnMut(&mut Client, &Task) -> Result<(), Error>,
+    {
+        let code = |e: &Error| match e {
+            Error::Server(s) => s.code.clone(),
+            _ => String::new(),
+        };
+        let mut finished = 0;
+        for task in self.take(limit, lease_ms)? {
+            for _ in 0..10 {
+                self.client.execute("BEGIN", &[])?;
+                let ended = work(self.client, &task).and_then(|()| {
+                    self.finish(&task)?;
+                    self.client.execute("COMMIT", &[]).map(|_| ())
+                });
+                let Err(e) = ended else {
+                    finished += 1;
+                    break;
+                };
+                if self.client.status() != TxnStatus::Idle {
+                    self.client.execute("ROLLBACK", &[])?;
+                }
+                match code(&e).as_str() {
+                    "40001" => continue,
+                    "55000" => {}
+                    _ => match self.fail(&task, Some(&e.to_string()), None) {
+                        Ok(_) => {}
+                        Err(f) if matches!(code(&f).as_str(), "40001" | "55000") => {}
+                        Err(f) => return Err(f),
+                    },
+                }
+                break;
+            }
+        }
+        Ok(finished)
     }
 }
 

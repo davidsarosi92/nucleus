@@ -21,7 +21,7 @@ class DatabaseTest {
     fun theDriversCasesInMemory() {
         Database.open().use { db ->
             NucleusTest.connector = Supplier { db.connect() }
-            assertEquals(15, NucleusTest.runCases())
+            assertEquals(16, NucleusTest.runCases())
         }
     }
 
@@ -32,7 +32,7 @@ class DatabaseTest {
         val name = "cases-${UUID.randomUUID()}"
         Database.open(context, name).use { db ->
             NucleusTest.connector = Supplier { db.connect() }
-            assertEquals(15, NucleusTest.runCases())
+            assertEquals(16, NucleusTest.runCases())
         }
         File(File(context.filesDir, "nucleus"), name).deleteRecursively()
     }

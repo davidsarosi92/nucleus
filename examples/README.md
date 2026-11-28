@@ -38,6 +38,17 @@ python3 examples/python/memory.py
 node examples/js/memory.ts :memory:
 ```
 
+**AI agents:** [`agents/`](agents) is the schema of what an agent keeps —
+conversation memory, semantic memory, run state with a log of its tool
+calls, a task queue between agents, an experiment on a branch — and one
+program running it, in Python and TypeScript; each step's tool call, log
+entry, new state and finish commit together:
+
+```sh
+python3 examples/agents/agents.py
+node examples/agents/agents.ts file:agent.db
+```
+
 **Without a server:** `anywhere` (Python and JavaScript) runs one program
 on a database inside the process — in a directory or in memory — or on a
 server, the connection string its only difference (PLAN.md §M14.23):

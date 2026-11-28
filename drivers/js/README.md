@@ -166,6 +166,25 @@ await jobs.process("workers", async (entries) => {   // objects, seq first
 await jobs.wait(0, 1000);                            // the newest seq
 ```
 
+## Task queues
+
+A task queue's tasks (`CREATE QUEUE`; nucleus DOCS.md §8.45): added (a
+row), taken under a lease, each done exactly once — the work's writes and
+the task's `FINISH` committed together; a task whose work fails is failed
+into a retry after the backoff or, past its attempts, a dead letter; one
+whose lease ran out while it worked is left to the worker that took it
+again:
+
+```ts
+const jobs = db.queueOf("jobs");
+await jobs.add({ kind: "resize", priority: 0 }); // its id
+await jobs.process(async (task) => {             // id, attempt, the columns
+  await db.query("INSERT INTO thumbnails VALUES ($1)", [task.id]);
+}, { limit: 10 });                               // tasks finished
+const [task] = await jobs.take(1, 60_000);       // or by hand: take, then
+await jobs.fail(task, "timeout");                // finish(task) / fail(...): "retry" | "dead"
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The edition in WebAssembly (`wasm/nucleus.wasm`)

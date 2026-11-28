@@ -1252,6 +1252,12 @@ export class Client {
     return new StreamOf(this, name);
   }
 
+  /** A task queue's tasks (`CREATE QUEUE`, nucleus DOCS.md section 8.45):
+   * added, taken under a lease, finished with their work, failed. */
+  queueOf(name: string): QueueOf {
+    return new QueueOf(this, name);
+  }
+
   /** Waits until stream `stream` has an entry after `after`, or
    * `timeoutMs` has passed — one message, the server waiting without
    * holding a transaction.  The stream's newest `seq`. */
@@ -1710,6 +1716,116 @@ export class StreamOf {
         if (!(e instanceof NucleusError && e.code === "40001")) throw e;
       }
     }
+  }
+}
+
+/** A task a queue's `take` leased: `id`, `attempt`, then the queue's
+ * columns. */
+export type Task = Record<string, Value>;
+
+/** A task queue's tasks (`Client.queueOf(name)`): `add` a task (an object
+ * by column), `take` the next ones under a lease, `finish` one in the
+ * connection's transaction (its work's), `fail` one, and `process` —
+ * tasks taken and each done exactly once. */
+export class QueueOf {
+  readonly client: Client;
+  readonly name: string;
+
+  constructor(client: Client, name: string) {
+    this.client = client;
+    this.name = name;
+  }
+
+  /** Adds a task: `values` by column — the queue's own `priority` (lower
+   * first) and `available_at` (a delay) among them if given.  In the
+   * connection's transaction.  Its id. */
+  async add(values: Record<string, Value> = {}): Promise<number> {
+    const names = Object.keys(values);
+    const sql =
+      names.length === 0
+        ? "INSERT INTO " + ident(this.name) + " DEFAULT VALUES RETURNING id"
+        : "INSERT INTO " +
+          ident(this.name) +
+          " (" +
+          names.map((n) => ident(n)).join(", ") +
+          ") VALUES (" +
+          names.map((_, i) => "$" + (i + 1)).join(", ") +
+          ") RETURNING id";
+    const r = await this.client.query(
+      sql,
+      names.map((n) => values[n]),
+    );
+    return Number(r.rows[0][0]);
+  }
+
+  /** The next available tasks, at most `limit`, leased for `leaseMs`
+   * (absent: the queue's lease) — `TAKE`, a transaction of its own unless
+   * the connection is in one. */
+  async take(limit = 1, leaseMs?: number): Promise<Task[]> {
+    const lease = leaseMs === undefined ? "" : " LEASE interval '" + Math.trunc(leaseMs) + " milliseconds'";
+    const r = await this.client.query("TAKE FROM " + ident(this.name) + " LIMIT " + Math.max(Math.trunc(limit), 1) + lease);
+    return r.records();
+  }
+
+  /** Finishes `task` (deleted, in the connection's transaction — the one
+   * its work is in); `55000` if its attempt no longer holds it. */
+  async finish(task: Task): Promise<void> {
+    await this.client.query("FINISH TASK $1 OF " + ident(this.name) + " ATTEMPT $2", [task.id, task.attempt]);
+  }
+
+  /** Fails `task`: available again after `retryAfterMs` or the queue's
+   * backoff, or — its last attempt — a dead letter.  `"retry"` or
+   * `"dead"`. */
+  async fail(task: Task, error?: string, retryAfterMs?: number): Promise<string> {
+    let sql = "FAIL TASK $1 OF " + ident(this.name) + " ATTEMPT $2";
+    const params: Value[] = [task.id, task.attempt];
+    if (error !== undefined) {
+      sql += " ERROR $3";
+      params.push(error);
+    }
+    if (retryAfterMs !== undefined) sql += " RETRY AFTER interval '" + Math.trunc(retryAfterMs) + " milliseconds'";
+    const r = await this.client.query(sql, params);
+    return String(r.rows[0][0]);
+  }
+
+  /** Takes up to `limit` tasks and does each exactly once: in a
+   * transaction, `work(task)` on this connection, then `finish`, then the
+   * commit — the work and the task's end together.  A task whose work
+   * throws is rolled back and failed with the error's message (retried
+   * after the backoff, or a dead letter); a conflict (`40001`) runs its
+   * work again, until its finish says the lease ran out and another took
+   * it (`55000`): then it is left to that one.  How many were finished.
+   * Not inside a transaction of the caller's. */
+  async process(
+    work: (task: Task) => Promise<void> | void,
+    options: { limit?: number; leaseMs?: number } = {},
+  ): Promise<number> {
+    const code = (e: unknown) => (e instanceof NucleusError ? e.code : undefined);
+    let finished = 0;
+    for (const task of await this.take(options.limit ?? 1, options.leaseMs)) {
+      for (let tries = 0; tries < 10; tries++) {
+        await this.client.query("BEGIN");
+        try {
+          await work(task);
+          await this.finish(task);
+          await this.client.query("COMMIT");
+          finished++;
+          break;
+        } catch (e) {
+          if (this.client.status !== "idle") await this.client.query("ROLLBACK");
+          if (code(e) === "40001") continue;
+          if (code(e) !== "55000") {
+            try {
+              await this.fail(task, e instanceof Error ? e.message : String(e));
+            } catch (f) {
+              if (code(f) !== "40001" && code(f) !== "55000") throw f;
+            }
+          }
+          break;
+        }
+      }
+    }
+    return finished;
   }
 }
 

@@ -7,6 +7,7 @@ import datetime as dt
 import decimal
 import os
 import sys
+import time
 import unittest
 import uuid
 
@@ -370,6 +371,77 @@ class Conformance(unittest.TestCase):
             with self.assertRaises(nucleus.ProgrammingError) as e:
                 c.collection("py_nosuch").count_documents({})
             self.assertEqual(e.exception.code, "42P01")
+
+    def test_queues(self):
+        # Tasks added, a priority first, taken under a lease, finished
+        # with their work, failed into a retry and a dead letter; process
+        # doing each once.
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE QUEUE {t} (kind TEXT NOT NULL) "
+                      "WITH (max_attempts = 2, backoff = '1 millisecond')")
+            c.execute(f"CREATE TABLE {t}_worked (id BIGINT PRIMARY KEY, kind TEXT)")
+            q = c.queue_of(t)
+            first = q.add({"kind": "one"})
+            urgent = q.add({"kind": "urgent", "priority": -1})
+            [task] = q.take(lease_ms=60000)
+            self.assertEqual((task["id"], task["attempt"], task["kind"]), (urgent, 1, "urgent"))
+            q.finish(task)
+            [task] = q.take(5)
+            self.assertEqual(task["id"], first)
+            self.assertEqual(q.fail(task, "try later", retry_after_ms=0), "retry")
+            [again] = q.take()
+            self.assertEqual(again["attempt"], 2)
+            with self.assertRaises(nucleus.DatabaseError) as e:
+                q.finish(task)
+            self.assertEqual(e.exception.code, "55000")
+            self.assertEqual(q.fail(again), "dead")
+            for i in range(6):
+                q.add({"kind": "bad" if i == 2 else f"t{i}"})
+
+            def work(task):
+                c.execute(f"INSERT INTO {t}_worked VALUES ($1, $2)", [task["id"], task["kind"]])
+                if task["kind"] == "bad":
+                    raise RuntimeError("bad work")
+
+            finished = 0
+            for _ in range(200):
+                if c.execute(f"SELECT count(*) FROM {t}").rows == [(0,)]:
+                    break
+                finished += q.process(work, limit=4)
+                time.sleep(0.002)
+            self.assertEqual(finished, 5)
+            self.assertEqual(c.execute(f"SELECT count(*) FROM {t}_worked").rows, [(5,)])
+            self.assertEqual(
+                c.execute(f"SELECT kind, attempts, error FROM {t}_dead ORDER BY seq").rows,
+                [("one", 2, "failed on attempt 2"), ("bad", 2, "bad work")])
+            with self.assertRaises(nucleus.ProgrammingError) as e:
+                c.queue_of("py_nosuch").take()
+            self.assertEqual(e.exception.code, "42P01")
+
+    @unittest.skipIf(EMBEDDED, "one connection to a database in the process")
+    def test_queue_conflict_runs_the_work_again(self):
+        # A conflict at the commit runs the task's work again; the task is
+        # finished once, the first try's writes gone.
+        t = table()
+        with connect() as c, connect() as other:
+            c.execute(f"CREATE QUEUE {t} (kind TEXT)")
+            c.execute(f"CREATE TABLE {t}_count (id INT PRIMARY KEY, n INT)")
+            c.execute(f"INSERT INTO {t}_count VALUES (1, 0)")
+            q = c.queue_of(t)
+            q.add({"kind": "counted"})
+            tries = []
+
+            def counting(task):
+                tries.append(task["attempt"])
+                c.execute(f"UPDATE {t}_count SET n = n + 1 WHERE id = 1")
+                if len(tries) == 1:
+                    other.execute(f"UPDATE {t}_count SET n = n + 100 WHERE id = 1")
+
+            self.assertEqual(q.process(counting), 1)
+            self.assertEqual(tries, [1, 1])
+            self.assertEqual(c.execute(f"SELECT n FROM {t}_count").rows, [(101,)])
+            self.assertEqual(c.execute(f"SELECT count(*) FROM {t}").rows, [(0,)])
 
     def test_streams(self):
         # A stream appended, a group's batches processed exactly once with

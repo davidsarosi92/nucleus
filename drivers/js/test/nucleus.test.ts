@@ -358,6 +358,80 @@ test("streams", async () => {
   await db.close();
 });
 
+test("queues", async () => {
+  // Tasks added, a priority first, taken under a lease, finished with
+  // their work, failed into a retry and a dead letter; process doing each
+  // once.
+  const db = await connect(options);
+  const t = table();
+  await db.query("CREATE QUEUE " + t + " (kind TEXT NOT NULL) WITH (max_attempts = 2, backoff = '1 millisecond')");
+  await db.query("CREATE TABLE " + t + "_worked (id BIGINT PRIMARY KEY, kind TEXT)");
+  const q = db.queueOf(t);
+  const first = await q.add({ kind: "one" });
+  const urgent = await q.add({ kind: "urgent", priority: -1 });
+  const [task] = await q.take(1, 60_000);
+  assert.deepEqual([Number(task.id), Number(task.attempt), task.kind], [urgent, 1, "urgent"]);
+  await q.finish(task);
+  const [next] = await q.take(5);
+  assert.equal(Number(next.id), first);
+  assert.equal(await q.fail(next, "try later", 0), "retry");
+  const [again] = await q.take();
+  assert.equal(Number(again.attempt), 2);
+  await assert.rejects(q.finish(next), (e: NucleusError) => e.code === "55000");
+  assert.equal(await q.fail(again), "dead");
+  for (let i = 0; i < 6; i++) await q.add({ kind: i === 2 ? "bad" : "t" + i });
+  const work = async (task: Record<string, Value>) => {
+    await db.query("INSERT INTO " + t + "_worked VALUES ($1, $2)", [task.id, task.kind]);
+    if (task.kind === "bad") throw new Error("bad work");
+  };
+  let finished = 0;
+  for (let i = 0; i < 200; i++) {
+    if (Number((await db.query("SELECT count(*) FROM " + t)).rows[0][0]) === 0) break;
+    finished += await q.process(work, { limit: 4 });
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  assert.equal(finished, 5);
+  assert.equal(Number((await db.query("SELECT count(*) FROM " + t + "_worked")).rows[0][0]), 5);
+  assert.deepEqual(
+    (await db.query("SELECT kind, attempts, error FROM " + t + "_dead ORDER BY seq")).rows.map((r) => [
+      r[0],
+      Number(r[1]),
+      r[2],
+    ]),
+    [
+      ["one", 2, "failed on attempt 2"],
+      ["bad", 2, "bad work"],
+    ],
+  );
+  await assert.rejects(db.queueOf("js_nosuch").take(), (e: NucleusError) => e.code === "42P01");
+  await db.close();
+});
+
+test("a queue's conflict runs the work again", { skip: embedded && "one connection to a database in the process" }, async () => {
+  // A conflict at the commit runs the task's work again; the task is
+  // finished once, the first try's writes gone.
+  const db = await connect(options);
+  const other = await connect(options);
+  const t = table();
+  await db.query("CREATE QUEUE " + t + " (kind TEXT)");
+  await db.query("CREATE TABLE " + t + "_count (id INT PRIMARY KEY, n INT)");
+  await db.query("INSERT INTO " + t + "_count VALUES (1, 0)");
+  const q = db.queueOf(t);
+  await q.add({ kind: "counted" });
+  const tries: number[] = [];
+  const finished = await q.process(async (task) => {
+    tries.push(Number(task.attempt));
+    await db.query("UPDATE " + t + "_count SET n = n + 1 WHERE id = 1");
+    if (tries.length === 1) await other.query("UPDATE " + t + "_count SET n = n + 100 WHERE id = 1");
+  });
+  assert.equal(finished, 1);
+  assert.deepEqual(tries, [1, 1]);
+  assert.equal(Number((await db.query("SELECT n FROM " + t + "_count")).rows[0][0]), 101);
+  assert.equal(Number((await db.query("SELECT count(*) FROM " + t)).rows[0][0]), 0);
+  await other.close();
+  await db.close();
+});
+
 test("a stream's wait wakes on a commit", { skip: embedded && "one connection to a database in the process" }, async () => {
   const db = await connect(options);
   const w = await connect(options);

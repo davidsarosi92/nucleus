@@ -432,6 +432,55 @@ int main() {
             CHECK(e.code() == "42P01");
         }
     }
+    {
+        // Tasks added, a priority first, taken under a lease, finished with
+        // their work, failed into a retry and a dead letter; process doing
+        // each once.
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE QUEUE " + t + " (kind TEXT NOT NULL) WITH (max_attempts = 2, backoff = '1 millisecond')");
+        db.query("CREATE TABLE " + t + "_worked (id BIGINT PRIMARY KEY, kind TEXT)");
+        auto q = db.queue_of(t);
+        int64_t first = q.add({"kind"}, {Value("one")});
+        int64_t urgent = q.add({"kind", "priority"}, {Value("urgent"), Value(-1)});
+        auto taken = q.take(1, 60000);
+        CHECK(taken.size() == 1 && taken[0].id == urgent && taken[0].attempt == 1 &&
+              taken[0].values[0].as<std::string>() == "urgent");
+        q.finish(taken[0]);
+        auto next = q.take(5);
+        CHECK(next.size() == 1 && next[0].id == first);
+        CHECK(q.fail(next[0], std::string("try later"), 0) == "retry");
+        auto again = q.take();
+        CHECK(again.size() == 1 && again[0].attempt == 2);
+        try {
+            q.finish(next[0]);
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "55000");
+        }
+        CHECK(q.fail(again[0]) == "dead");
+        for (int i = 0; i < 6; i++) q.add({"kind"}, {Value(i == 2 ? std::string("bad") : "t" + std::to_string(i))});
+        auto work = [&](const Task& task) {
+            db.query("INSERT INTO " + t + "_worked VALUES ($1, $2)", {Value(task.id), task.values[0]});
+            if (task.values[0].as<std::string>() == "bad") throw std::runtime_error("bad work");
+        };
+        size_t finished = 0;
+        for (int i = 0; i < 2000; i++) {
+            if (db.query("SELECT count(*) FROM " + t).rows[0][0].as<int64_t>() == 0) break;
+            finished += q.process(4, -1, work);
+        }
+        CHECK(finished == 5);
+        CHECK(db.query("SELECT count(*) FROM " + t + "_worked").rows[0][0].as<int64_t>() == 5);
+        auto dead = db.query("SELECT kind, error FROM " + t + "_dead ORDER BY seq").rows;
+        CHECK(dead.size() == 2 && dead[0][1].as<std::string>() == "failed on attempt 2" &&
+              dead[1][0].as<std::string>() == "bad" && dead[1][1].as<std::string>() == "bad work");
+        try {
+            db.queue_of("cpp_nosuch").take();
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "42P01");
+        }
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

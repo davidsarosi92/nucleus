@@ -1150,6 +1150,12 @@ class Connection:
         transaction, waited for — ``StreamOf``."""
         return StreamOf(self, name)
 
+    def queue_of(self, name):
+        """A task queue's tasks (``CREATE QUEUE``, nucleus DOCS.md section
+        8.45): added, taken under a lease, finished with their work,
+        failed — ``QueueOf``."""
+        return QueueOf(self, name)
+
     def wait_stream(self, stream, after, timeout_ms):
         """Waits until stream ``stream`` has an entry after ``after``, or
         ``timeout_ms`` has passed — one message, the server waiting
@@ -1307,6 +1313,100 @@ class StreamOf:
                 if conn.status != 0:
                     conn.execute("ROLLBACK")
                 raise
+
+
+# How many times a task's work runs again after conflicts before the task
+# is left to its lease.
+_CONFLICT_RETRIES = 10
+
+
+class QueueOf:
+    """A task queue's tasks (``Connection.queue_of(name)``): ``add`` a task
+    (a dict by column), ``take`` the next ones under a lease, ``finish``
+    one in the connection's transaction (its work's), ``fail`` one, and
+    ``process`` — tasks taken and each done exactly once.  A task is a
+    dict: ``id``, ``attempt``, then the queue's columns."""
+
+    def __init__(self, conn, name):
+        self._conn, self.name = conn, name
+
+    def add(self, values=None):
+        """Adds a task: ``values`` a dict of its columns — the queue's own
+        ``priority`` (lower first) and ``available_at`` (a delay) among
+        them if given.  In the connection's transaction.  Returns its
+        id."""
+        values = values or {}
+        names = list(values)
+        if not names:
+            sql = f"INSERT INTO {_ident(self.name)} DEFAULT VALUES RETURNING id"
+        else:
+            marks = ", ".join(f"${i}" for i in range(1, len(names) + 1))
+            sql = (f"INSERT INTO {_ident(self.name)} ({', '.join(_ident(n) for n in names)}) "
+                   f"VALUES ({marks}) RETURNING id")
+        return self._conn.execute(sql, [values[n] for n in names]).rows[0][0]
+
+    def take(self, limit=1, lease_ms=None):
+        """The next available tasks, at most ``limit``, leased for
+        ``lease_ms`` (``None``: the queue's lease) — ``TAKE``, a
+        transaction of its own unless the connection is in one."""
+        lease = f" LEASE interval '{int(lease_ms)} milliseconds'" if lease_ms is not None else ""
+        return self._conn.execute(
+            f"TAKE FROM {_ident(self.name)} LIMIT {max(int(limit), 1)}{lease}").records()
+
+    def finish(self, task):
+        """Finishes ``task`` (deleted, in the connection's transaction —
+        the one its work is in); ``55000`` if its attempt no longer holds
+        it."""
+        self._conn.execute(f"FINISH TASK $1 OF {_ident(self.name)} ATTEMPT $2",
+                           [task["id"], task["attempt"]])
+
+    def fail(self, task, error=None, retry_after_ms=None):
+        """Fails ``task``: available again after ``retry_after_ms`` or the
+        queue's backoff, or — its last attempt — a dead letter.  Returns
+        ``"retry"`` or ``"dead"``."""
+        sql = f"FAIL TASK $1 OF {_ident(self.name)} ATTEMPT $2"
+        params = [task["id"], task["attempt"]]
+        if error is not None:
+            sql += " ERROR $3"
+            params.append(str(error))
+        if retry_after_ms is not None:
+            sql += f" RETRY AFTER interval '{int(retry_after_ms)} milliseconds'"
+        return self._conn.execute(sql, params).rows[0][0]
+
+    def process(self, work, limit=1, lease_ms=None):
+        """Takes up to ``limit`` tasks and does each exactly once: in a
+        transaction, ``work(task)`` on this connection, then ``finish``,
+        then the commit — the work and the task's end together.  A task
+        whose work raises is rolled back and failed with the exception's
+        text (retried after the backoff, or a dead letter); a conflict
+        (``40001``) runs its work again, until its finish says the lease
+        ran out and another took it (``55000``): then it is left to that
+        one.  Returns how many were finished.  Not inside a transaction of
+        the caller's."""
+        conn, finished = self._conn, 0
+        for task in self.take(limit, lease_ms):
+            for _ in range(_CONFLICT_RETRIES):
+                conn.execute("BEGIN")
+                try:
+                    work(task)
+                    self.finish(task)
+                    conn.execute("COMMIT")
+                    finished += 1
+                    break
+                except Exception as e:
+                    if conn.status != 0:
+                        conn.execute("ROLLBACK")
+                    code = getattr(e, "code", None)
+                    if code == "40001":
+                        continue
+                    if code != "55000":
+                        try:
+                            self.fail(task, str(e))
+                        except DatabaseError as f:
+                            if f.code not in ("40001", "55000"):
+                                raise
+                    break
+        return finished
 
 
 class Collection:

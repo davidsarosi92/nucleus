@@ -8155,6 +8155,18 @@ SELECT task_id, attempts, error, kind FROM jobs_dead;
   --schema` writes `CREATE QUEUE q (…) WITH (…)`; `nc_catalog.queues`
   lists queues and their settings; `ncsql`'s `\d q` says "Queue".
 
+- **In the drivers** (§M16.5 S7): `queue_of(name)` (`queueOf` in
+  JavaScript, Java and Swift; the Rust client's `QueueHandle`) — `add`
+  (its id), `take(limit, lease)`, `finish(task)`, `fail(task, error,
+  retry_after)` and `process(work, limit, lease)`: tasks taken and each
+  done exactly once — in a transaction the work on the same connection,
+  then `FINISH`, then the commit; a task whose work fails is rolled back
+  and failed with the error's text; a conflict (`40001`) runs its work
+  again, until its finish says the lease ran out and another took it
+  (`55000`): then it is left to that one.  C has `nc_queue_process` (a
+  callback returning 0 to finish).  `examples/agents/` puts them to work
+  (§M16.5 S7).
+
 The planner reads a secondary B-tree index's range in its entries'
 order — its columns, then the primary key's — so an `ORDER BY` they
 satisfy needs no sort when the index's columns are never `NULL` (a

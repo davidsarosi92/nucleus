@@ -1225,6 +1225,14 @@ public final class NucleusClient implements AutoCloseable {
     }
 
     /**
+     * A task queue's tasks (nucleus DOCS.md §8.45): added, taken under a lease, finished with
+     * their work, failed.
+     */
+    public QueueOf queueOf(String name) {
+        return new QueueOf(this, name);
+    }
+
+    /**
      * Waits until stream {@code stream} has an entry after {@code after}, or {@code timeoutMs} has
      * passed — one message, the server waiting without holding a transaction. The stream's newest
      * {@code seq}.

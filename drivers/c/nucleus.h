@@ -330,6 +330,24 @@ typedef int (*nc_stream_work)(nc_conn *c, const nc_result *entries, void *arg);
 int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uint32_t limit,
                           uint32_t timeout_ms, nc_stream_work work, void *arg, nc_error *err);
 
+/* Task queues (nucleus DOCS.md 8.45).  Adding a task is an INSERT, taking
+ * TAKE FROM q LIMIT n, finishing FINISH TASK id OF q ATTEMPT n (in the
+ * work's transaction), failing FAIL TASK id OF q ATTEMPT n [ERROR text].
+ * The work on one task -- row `row` of `tasks`: id, attempt, then the
+ * queue's columns -- done on the same connection: 0 to finish it with its
+ * work, anything else to roll the work back and fail the task. */
+typedef int (*nc_task_work)(nc_conn *c, const nc_result *tasks, size_t row, void *arg);
+/* Takes up to limit tasks (leased for lease_ms, 0: the queue's lease) and
+ * does each exactly once: in a transaction, work, then FINISH, then the
+ * commit -- the work and the task's end together.  A task whose work
+ * refuses is rolled back and failed (retried after the backoff, or a dead
+ * letter); a conflict (40001) runs its work again, until its finish says
+ * the lease ran out and another took it (55000): then it is left to that
+ * one.  The tasks finished, or -1 with err.  Not inside a transaction of
+ * the caller's. */
+int64_t nc_queue_process(nc_conn *c, const char *queue, uint32_t limit, uint32_t lease_ms,
+                         nc_task_work work, void *arg, nc_error *err);
+
 /* Client-side encrypted columns (nucleus PLAN.md M14.30 K5, DOCS.md 11): a
  * value encrypted before it is sent and decrypted after it arrives, so the
  * server stores bytea ciphertext and never holds the key; equality through

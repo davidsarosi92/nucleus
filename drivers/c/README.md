@@ -102,6 +102,26 @@ int64_t n = nc_stream_process(db, "jobs", "workers", 100, 30000, work, NULL, &er
 int64_t newest = nc_wait_stream(db, "jobs", 0, 1000, &err);
 ```
 
+## Task queues
+
+A task queue's tasks (`CREATE QUEUE`; nucleus DOCS.md §8.45): added (a
+row), taken under a lease, each done exactly once — the work's writes and
+the task's `FINISH` committed together; a task whose work fails is failed
+into a retry after the backoff or, past its attempts, a dead letter; one
+whose lease ran out while it worked is left to the worker that took it
+again:
+
+```c
+/* row `row` of tasks: id, attempt, then the queue's columns; 0 finishes */
+static int work(nc_conn *c, const nc_result *tasks, size_t row, void *arg) { ... }
+
+int64_t finished = nc_queue_process(db, "jobs", 10, 0 /* the queue's lease */, work, NULL, &err);
+```
+
+Adding, taking, finishing and failing by hand are statements: `INSERT`,
+`TAKE FROM jobs LIMIT n`, `FINISH TASK id OF jobs ATTEMPT n` (in the
+work's transaction), `FAIL TASK id OF jobs ATTEMPT n ERROR 'why'`.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

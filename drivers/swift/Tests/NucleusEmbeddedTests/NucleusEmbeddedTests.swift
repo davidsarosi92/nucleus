@@ -27,6 +27,7 @@ final class NucleusEmbeddedTests: XCTestCase {
     func testTransactions() throws { try Conformance.transactions(connect()) }
     func testDocuments() throws { try Conformance.documents(connect()) }
     func testStreams() throws { try Conformance.streams(connect()) }
+    func testQueues() throws { try Conformance.queues(connect()) }
     func testCursors() throws { try Conformance.cursors(connect()) }
     func testCopyAndPipelines() throws { try Conformance.copyAndPipelines(connect()) }
 

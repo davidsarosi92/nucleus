@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Task queues (nucleus PLAN.md §M16.5 S7): `conn.queue_of(name)` →
+  `QueueOf` — `add(dict)` (its id), `take(limit, lease_ms)` (dicts: id,
+  attempt, the columns), `finish(task)`, `fail(task, error,
+  retry_after_ms)` ("retry" or "dead"), `process(work, limit=,
+  lease_ms=)`: each task done exactly once with its work, a failing one
+  failed, a conflict run again, a lost lease left.
 - Streams (nucleus PLAN.md §M16.5 S4, protocol version 10, the `w`
   message): `conn.stream_of(name)` → `StreamOf` — `append(dict)`,
   `consume(group, limit)` (dicts, in the connection's transaction),

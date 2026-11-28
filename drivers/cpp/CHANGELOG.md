@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Task queues (nucleus PLAN.md §M16.5 S7): `db.queue_of(name)` →
+  `QueueOf` — `add(columns, values)` (its id), `take(limit, lease_ms)`
+  (`Task`: id, attempt, values), `finish(task)`, `fail(task, error,
+  retry_after_ms)` ("retry" or "dead"), `process(limit, lease_ms, work)`:
+  each task done exactly once with its work, a failing one failed, a
+  conflict run again, a lost lease left.
 - Streams (nucleus PLAN.md §M16.5 S4, protocol version 10):
   `db.stream_of(name)` → `nucleus::StreamOf` — `append(columns,
   values)`, `consume(group, limit)` (in the connection's transaction),

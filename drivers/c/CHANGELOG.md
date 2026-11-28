@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Task queues (nucleus PLAN.md §M16.5 S7): `nc_queue_process(c, queue,
+  limit, lease_ms, work, arg, err)`: tasks taken and each done exactly
+  once — the work (`nc_task_work`, 0 to finish), `FINISH` and the commit
+  together; a refused task failed, a conflict run again, a lost lease
+  left.
 - Streams (nucleus PLAN.md §M16.5 S4, protocol version 10, the `w`
   message): `nc_wait_stream(db, stream, after, timeout_ms, &err)` waits
   for an entry past `after` (the server holds no transaction meanwhile)

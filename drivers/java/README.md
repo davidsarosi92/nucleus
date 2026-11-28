@@ -94,6 +94,24 @@ jobs.process("workers", 100, 30000, entries -> {     // maps, seq first
 jobs.await(0, 1000);                                  // the newest seq
 ```
 
+## Task queues
+
+A task queue's tasks (`CREATE QUEUE`; nucleus DOCS.md §8.45): added (a
+row), taken under a lease, each done exactly once — the work's writes and
+the task's `FINISH` committed together; a task whose work fails is failed
+into a retry after the backoff or, past its attempts, a dead letter; one
+whose lease ran out while it worked is left to the worker that took it
+again:
+
+```java
+QueueOf jobs = db.queueOf("jobs");
+jobs.add(Map.of("kind", "resize"));             // its id
+jobs.process(10, null, task ->                  // id, attempt, the columns
+        db.query("INSERT INTO thumbnails VALUES ($1)", task.get("id")));
+Map<String, Object> task = jobs.take(1, 60_000).get(0);   // or by hand
+jobs.fail(task, "timeout", null);               // finish(task) / fail(...): "retry" | "dead"
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

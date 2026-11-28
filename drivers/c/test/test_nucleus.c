@@ -1142,6 +1142,68 @@ static void streams(void) {
     nc_close(db);
 }
 
+/* A task's work: its id recorded; a "bad" task refused. */
+static int task_work(nc_conn *c, const nc_result *tasks, size_t row, void *arg) {
+    char sql[160];
+    nc_error err;
+    nc_result *r;
+    nc_value id = *nc_value_at(tasks, row, 0);
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1)", (const char *)arg);
+    r = nc_query(c, sql, &id, 1, &err);
+    if (!r) return 1;
+    nc_result_free(r);
+    return strcmp(text_of(tasks, row, 2), "bad") == 0;
+}
+
+/* A queue's tasks each done exactly once with their work, a refused one
+ * retried and then a dead letter, a lease given. */
+static void queues(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    nc_result *r;
+    char t[64], worked[80], sql[256];
+    int64_t finished = 0;
+    int i;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(worked, sizeof worked, "%s_worked", t);
+    snprintf(sql, sizeof sql,
+             "CREATE QUEUE %s (kind TEXT NOT NULL) WITH (max_attempts = 2, backoff = '1 millisecond')", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id BIGINT PRIMARY KEY)", worked);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "INSERT INTO %s (kind) VALUES ('a'), ('bad'), ('c'), ('d'), ('e')", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    /* A lease given: the first task taken alone. */
+    CHECK(nc_queue_process(db, t, 1, 60000, task_work, worked, &err) == 1);
+    for (i = 0; i < 2000; i++) {
+        int64_t n = nc_queue_process(db, t, 3, 0, task_work, worked, &err);
+        CHECK(n >= 0);
+        if (n < 0) break;
+        finished += n;
+        snprintf(sql, sizeof sql, "SELECT count(*) FROM %s", t);
+        r = must(db, sql, NULL, 0);
+        n = r ? strcmp(text_of(r, 0, 0), "0") : 0;
+        nc_result_free(r);
+        if (n == 0) break;
+    }
+    CHECK(finished == 3);
+    CHECK(nc_status(db) == 0);
+    snprintf(sql, sizeof sql, "SELECT count(*) FROM %s", worked);
+    r = must(db, sql, NULL, 0);
+    CHECK(r && strcmp(text_of(r, 0, 0), "4") == 0);
+    nc_result_free(r);
+    snprintf(sql, sizeof sql, "SELECT kind, attempts, error FROM %s_dead", t);
+    r = must(db, sql, NULL, 0);
+    CHECK(r && nc_rows(r) == 1 && strcmp(text_of(r, 0, 0), "bad") == 0 && strcmp(text_of(r, 0, 1), "2") == 0 &&
+          strcmp(text_of(r, 0, 2), "the work on the task failed") == 0);
+    nc_result_free(r);
+    CHECK(nc_queue_process(db, "c_nosuch", 1, 0, task_work, worked, &err) == -1 && strcmp(err.code, "42P01") == 0);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -1164,6 +1226,7 @@ int main(void) {
     subject_key();
     documents();
     streams();
+    queues();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

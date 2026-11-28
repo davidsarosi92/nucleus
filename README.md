@@ -263,7 +263,7 @@ projection, sort, update and upsert), and in nucleus's own protocol,
 every driver (`db.collection("people").find(…)`) and the shell
 (`db.people.find(…)`), in the same transactions as SQL — and, with
 `--mongo-compat` (an optional module, as PostgreSQL's protocol is),
-`mongosh` and MongoDB's drivers.  Streams have begun (§M16.5): append-only
+`mongosh` and MongoDB's drivers.  Streams are done (§M16.5): append-only
 tables numbered by the commit (`CREATE STREAM`, consumer groups whose
 position moves in the consumer's transaction — exactly once) and
 changefeeds (`CREATE CHANGEFEED f ON t`: every committed change of a
@@ -272,7 +272,10 @@ driver consuming them (`stream_of(name).process(group, work)`: a batch
 and its work committed together) and waiting without a transaction
 held, and task queues (`CREATE QUEUE`: `TAKE` leases the next task by
 priority, `FINISH TASK` in the work's transaction does it once, `FAIL
-TASK` retries with backoff or moves it to dead letters); a protocol
+TASK` retries with backoff or moves it to dead letters; every driver's
+`queue_of(name).process(work)` does each task once with its work, and
+[`examples/agents`](examples/agents) shows an agent's memory, run state
+and task queue built on them); a protocol
 reaches streams through an adapter module (a sample speaks
 newline-delimited JSON over TCP: appends, and entries replayed from a
 number, a gap named).  Then live

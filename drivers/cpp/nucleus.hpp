@@ -519,6 +519,7 @@ inline std::string Value::str() const {
 /// A connection; closes when destroyed.  One thread at a time.
 class Collection;
 class StreamOf;
+class QueueOf;
 
 class Connection {
 public:
@@ -698,6 +699,10 @@ public:
     /// A stream's entries (protocol 10; nucleus DOCS.md §8.43): appended,
     /// consumed by a group in this connection's transaction, waited for.
     StreamOf stream_of(const std::string& name);
+
+    /// A task queue's tasks (nucleus DOCS.md §8.45): added, taken under a
+    /// lease, finished with their work, failed.
+    QueueOf queue_of(const std::string& name);
 
     /// Waits until stream `stream` has an entry after `after`, or
     /// `timeout_ms` has passed — one message, the server waiting without
@@ -957,6 +962,136 @@ private:
 };
 
 inline StreamOf Connection::stream_of(const std::string& name) { return StreamOf(*this, name); }
+
+/// A task a queue's `take` leased: its id, the attempt it is (finished or
+/// failed by that number), and the queue's columns after its own.
+struct Task {
+    int64_t id = 0;
+    int64_t attempt = 0;
+    std::vector<Value> values;
+};
+
+/// A task queue's tasks (Connection::queue_of): `add` a task, `take` the
+/// next ones under a lease, `finish` one in the connection's transaction
+/// (its work's), `fail` one, and `process` — tasks taken and each done
+/// exactly once.
+class QueueOf {
+public:
+    QueueOf(Connection& db, std::string name) : db_(db), name_(std::move(name)) {}
+
+    /// Adds a task: its columns' values, in order — the queue's own
+    /// `priority` (lower first) and `available_at` (a delay) among them if
+    /// given.  In the connection's transaction.  Its id.
+    int64_t add(const std::vector<std::string>& columns, const std::vector<Value>& values) {
+        std::string sql = "INSERT INTO " + ident(name_);
+        if (columns.empty()) {
+            sql += " DEFAULT VALUES";
+        } else {
+            std::string names, marks;
+            for (size_t i = 0; i < columns.size(); i++) {
+                names += (i ? ", " : "") + ident(columns[i]);
+                marks += (i ? ", $" : "$") + std::to_string(i + 1);
+            }
+            sql += " (" + names + ") VALUES (" + marks + ")";
+        }
+        return db_.query(sql + " RETURNING id", values).rows[0][0].as<int64_t>();
+    }
+
+    /// The next available tasks, at most `limit`, leased for `lease_ms`
+    /// (negative: the queue's lease) — TAKE, a transaction of its own
+    /// unless the connection is in one.
+    std::vector<Task> take(int64_t limit = 1, int64_t lease_ms = -1) {
+        std::string sql = "TAKE FROM " + ident(name_) + " LIMIT " + std::to_string(limit < 1 ? 1 : limit);
+        if (lease_ms >= 0) sql += " LEASE interval '" + std::to_string(lease_ms) + " milliseconds'";
+        std::vector<Task> tasks;
+        for (auto& row : db_.query(sql).rows) {
+            Task t;
+            t.id = row[0].as<int64_t>();
+            t.attempt = row[1].as<int64_t>();
+            t.values.assign(row.begin() + 2, row.end());
+            tasks.push_back(std::move(t));
+        }
+        return tasks;
+    }
+
+    /// Finishes `task` (deleted, in the connection's transaction — the one
+    /// its work is in); 55000 if its attempt no longer holds it.
+    void finish(const Task& task) {
+        db_.query("FINISH TASK $1 OF " + ident(name_) + " ATTEMPT $2", {Value(task.id), Value(task.attempt)});
+    }
+
+    /// Fails `task`: available again after `retry_after_ms` (negative: the
+    /// queue's backoff), or — its last attempt — a dead letter.  "retry" or
+    /// "dead".
+    std::string fail(const Task& task, const std::optional<std::string>& error = std::nullopt,
+                     int64_t retry_after_ms = -1) {
+        std::string sql = "FAIL TASK $1 OF " + ident(name_) + " ATTEMPT $2";
+        std::vector<Value> params{Value(task.id), Value(task.attempt)};
+        if (error) {
+            sql += " ERROR $3";
+            params.emplace_back(*error);
+        }
+        if (retry_after_ms >= 0) sql += " RETRY AFTER interval '" + std::to_string(retry_after_ms) + " milliseconds'";
+        return db_.query(sql, params).rows[0][0].as<std::string>();
+    }
+
+    /// Takes up to `limit` tasks (leased for `lease_ms`, negative: the
+    /// queue's) and does each exactly once: in a transaction, `work(task)`
+    /// on this connection, then `finish`, then the commit — the work and
+    /// the task's end together.  A task whose work throws is rolled back
+    /// and failed with the exception's text (retried after the backoff, or
+    /// a dead letter); a conflict (40001) runs its work again, until its
+    /// finish says the lease ran out and another took it (55000): then it
+    /// is left to that one.  How many were finished.  Not inside a
+    /// transaction of the caller's.
+    template <class F> size_t process(int64_t limit, int64_t lease_ms, F work) {
+        auto lost = [](const Error& e) { return e.code() == "40001" || e.code() == "55000"; };
+        size_t finished = 0;
+        for (const Task& task : take(limit, lease_ms)) {
+            for (int tries = 0; tries < 10; tries++) {
+                std::string why;
+                db_.query("BEGIN");
+                try {
+                    work(task);
+                    finish(task);
+                    db_.query("COMMIT");
+                    finished++;
+                    break;
+                } catch (const Error& e) {
+                    if (db_.status() != 0) db_.query("ROLLBACK");
+                    if (e.code() == "40001") continue;
+                    if (e.code() == "55000") break;
+                    why = e.what();
+                } catch (const std::exception& e) {
+                    if (db_.status() != 0) db_.query("ROLLBACK");
+                    why = e.what();
+                }
+                try {
+                    fail(task, why);
+                } catch (const Error& e) {
+                    if (!lost(e)) throw;
+                }
+                break;
+            }
+        }
+        return finished;
+    }
+
+private:
+    static std::string ident(const std::string& s) {
+        std::string out = "\"";
+        for (char c : s) {
+            if (c == '"') out += '"';
+            out += c;
+        }
+        return out + "\"";
+    }
+
+    Connection& db_;
+    std::string name_;
+};
+
+inline QueueOf Connection::queue_of(const std::string& name) { return QueueOf(*this, name); }
 
 /// A client-side encrypted column's keys (nucleus PLAN.md §M14.30 K5,
 /// DOCS.md §11; the C driver's nc_column_key): from a 32-byte master key the

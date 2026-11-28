@@ -14,7 +14,10 @@ speak protocol version 10 (a stream's entries — `stream_of(name)`:
 transaction, `position`, `wait` (one `w` message, the server waiting
 without holding a transaction) and `process`, a group's next batch done
 exactly once with the work on it, in each language's case; C's
-`nc_wait_stream` and `nc_stream_process` —, DOCS.md §8.43; a subject's key presented for the rows its
+`nc_wait_stream` and `nc_stream_process` —, DOCS.md §8.43; a task
+queue's tasks — `queue_of(name)`: `add`, `take` under a lease, `finish`,
+`fail`, and `process`, each task done exactly once with its work; C's
+`nc_queue_process` —, DOCS.md §8.45; a subject's key presented for the rows its
 user holds the key of — `present_subject_key`, DOCS.md §8.40 — a message
 of its own, never a statement; a collection's documents by MongoDB's
 requests — `collection(name)`: `find`, `count_documents`, `insert_one`

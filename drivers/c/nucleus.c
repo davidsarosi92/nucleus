@@ -2653,6 +2653,76 @@ int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uin
     return out;
 }
 
+static int lease_lost(const nc_error *e) {
+    return strcmp(e->code, "40001") == 0 || strcmp(e->code, "55000") == 0;
+}
+
+int64_t nc_queue_process(nc_conn *c, const char *queue, uint32_t limit, uint32_t lease_ms,
+                         nc_task_work work, void *arg, nc_error *err) {
+    buf take = {0}, finish = {0}, fail = {0};
+    char tail[80];
+    nc_result *tasks = NULL;
+    int64_t out = -1, finished = 0;
+    size_t i, n;
+    if (lease_ms)
+        snprintf(tail, sizeof tail, " LIMIT %u LEASE interval '%u milliseconds'", limit ? limit : 1, lease_ms);
+    else
+        snprintf(tail, sizeof tail, " LIMIT %u", limit ? limit : 1);
+    put(&take, "TAKE FROM ", 10);
+    put_ident(&take, queue);
+    put(&take, tail, strlen(tail) + 1);
+    put(&finish, "FINISH TASK $1 OF ", 18);
+    put_ident(&finish, queue);
+    put(&finish, " ATTEMPT $2", 12);
+    put(&fail, "FAIL TASK $1 OF ", 16);
+    put_ident(&fail, queue);
+    put(&fail, " ATTEMPT $2 ERROR $3", 21);
+    if (take.failed || finish.failed || fail.failed) {
+        set_error(err, "53200", "out of memory");
+        goto done;
+    }
+    tasks = nc_query(c, (const char *)take.b, NULL, 0, err);
+    if (!tasks) goto done;
+    n = nc_rows(tasks);
+    for (i = 0; i < n; i++) {
+        nc_value p[3];
+        nc_error e2;
+        int worked = 0, tries, ok = 0;
+        e2.code[0] = 0;
+        p[0] = *nc_value_at(tasks, i, 0);
+        p[1] = *nc_value_at(tasks, i, 1);
+        /* A conflict (40001) runs the work again; a lease gone (55000) leaves it. */
+        for (tries = 0; tries < 10 && !ok; tries++) {
+            if (run_plain(c, "BEGIN", NULL, 0, err) != 0) goto done;
+            worked = work(c, tasks, i, arg);
+            if (worked == 0 && run_plain(c, (const char *)finish.b, p, 2, &e2) == 0 &&
+                run_plain(c, "COMMIT", NULL, 0, &e2) == 0) {
+                ok = 1;
+                break;
+            }
+            if (nc_status(c) != 0) run_plain(c, "ROLLBACK", NULL, 0, NULL);
+            if (worked != 0 || strcmp(e2.code, "40001") != 0) break;
+        }
+        if (ok) {
+            finished++;
+            continue;
+        }
+        if (worked == 0 && lease_lost(&e2)) continue;
+        p[2] = nc_text(worked != 0 ? "the work on the task failed" : e2.message);
+        if (run_plain(c, (const char *)fail.b, p, 3, &e2) != 0 && !lease_lost(&e2)) {
+            *err = e2;
+            goto done;
+        }
+    }
+    out = finished;
+done:
+    if (tasks) nc_result_free(tasks);
+    free(take.b);
+    free(finish.b);
+    free(fail.b);
+    return out;
+}
+
 /* ------------------------------------------------ encrypted columns (K5) */
 
 /* ChaCha20 and Poly1305 as RFC 8439 writes them, HChaCha20 as

@@ -576,6 +576,55 @@ public final class NucleusTest {
         }
     }
 
+    /**
+     * Tasks added, a priority first, taken under a lease, finished with their work, failed into a
+     * retry and a dead letter; process doing each once.
+     */
+    static void queues() {
+        String t = table();
+        try (NucleusClient db = db()) {
+            db.query("CREATE QUEUE " + t + " (kind TEXT NOT NULL) WITH (max_attempts = 2, backoff = '1 millisecond')");
+            db.query("CREATE TABLE " + t + "_worked (id BIGINT PRIMARY KEY, kind TEXT)");
+            QueueOf q = db.queueOf(t);
+            long first = q.add(Map.of("kind", "one"));
+            Map<String, Object> urgentTask = new java.util.LinkedHashMap<>();
+            urgentTask.put("kind", "urgent");
+            urgentTask.put("priority", -1L);
+            long urgent = q.add(urgentTask);
+            Map<String, Object> task = q.take(1, 60_000).get(0);
+            equal(List.of(((Number) task.get("id")).longValue(), ((Number) task.get("attempt")).longValue(), task.get("kind")),
+                    List.of(urgent, 1L, "urgent"), "a priority first");
+            q.finish(task);
+            Map<String, Object> next = q.take(5).get(0);
+            equal(((Number) next.get("id")).longValue(), first, "then in order");
+            equal(q.fail(next, "try later", 0), "retry", "failed: a retry");
+            Map<String, Object> again = q.take(1).get(0);
+            equal(((Number) again.get("attempt")).longValue(), 2L, "attempt 2");
+            equal(errorCode(() -> q.finish(next)), "55000", "a stale attempt");
+            equal(q.fail(again, null, null), "dead", "its last attempt");
+            for (int i = 0; i < 6; i++) q.add(Map.of("kind", i == 2 ? "bad" : "t" + i));
+            QueueOf.Work work = w -> {
+                db.query("INSERT INTO " + t + "_worked VALUES ($1, $2)", w.get("id"), w.get("kind"));
+                if ("bad".equals(w.get("kind"))) throw new IllegalStateException("bad work");
+            };
+            int finished = 0;
+            for (int i = 0; i < 200; i++) {
+                if (((Number) db.query("SELECT count(*) FROM " + t).rows().get(0).get(0)).longValue() == 0) break;
+                finished += q.process(4, null, work);
+                try {
+                    Thread.sleep(2);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            equal(finished, 5, "five finished");
+            equal(db.query("SELECT count(*) FROM " + t + "_worked").rows().get(0).get(0), 5L, "each once");
+            equal(db.query("SELECT kind, attempts, error FROM " + t + "_dead ORDER BY seq").rows(),
+                    List.of(List.of("one", 2, "failed on attempt 2"), List.of("bad", 2, "bad work")), "dead letters");
+            equal(errorCode(() -> db.queueOf("java_nosuch").take(1)), "42P01", "no queue");
+        }
+    }
+
     /** A stream's wait woken by another connection's commit. */
     static void streamWaitWakes() {
         String t = table();
@@ -671,6 +720,7 @@ public final class NucleusTest {
         run("encrypted columns", NucleusTest::encryptedColumns);
         run("documents", NucleusTest::documents);
         run("streams", NucleusTest::streams);
+        run("queues", NucleusTest::queues);
         return passed;
     }
 
@@ -685,7 +735,7 @@ public final class NucleusTest {
         run("encrypted columns' vectors", NucleusTest::encryptedColumnVectors);
         run("a subject's key", NucleusTest::subjectKey);
         run("a stream's wait wakes", NucleusTest::streamWaitWakes);
-        check(cases == 15 && passed == 24, "all tests ran");
+        check(cases == 16 && passed == 25, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

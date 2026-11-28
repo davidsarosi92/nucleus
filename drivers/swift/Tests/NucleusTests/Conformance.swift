@@ -228,6 +228,47 @@ enum Conformance {
         assertFails("42P01") { _ = try db.waitStream("swift_nosuch", after: 0, timeoutMs: 10) }
     }
 
+    /// Tasks added, a priority first, taken under a lease, finished with
+    /// their work, failed into a retry and a dead letter; process doing
+    /// each once.
+    static func queues(_ db: Connection) throws {
+        let t = table()
+        try db.query("CREATE QUEUE \(t) (kind TEXT NOT NULL) WITH (max_attempts = 2, backoff = '1 millisecond')")
+        try db.query("CREATE TABLE \(t)_worked (id BIGINT PRIMARY KEY, kind TEXT)")
+        let q = db.queueOf(t)
+        let first = try q.add(["kind": .text("one")])
+        let urgent = try q.add(["kind": .text("urgent"), "priority": .int(-1)])
+        let taken = try q.take(leaseMs: 60000)
+        XCTAssertEqual(taken.count, 1)
+        XCTAssertEqual(taken[0][0].intValue, urgent)
+        XCTAssertEqual(taken[0]["attempt"]?.intValue, 1)
+        XCTAssertEqual(taken[0]["kind"], .text("urgent"))
+        try q.finish(taken[0])
+        let next = try q.take(limit: 5)
+        XCTAssertEqual(next.map { $0[0].intValue }, [first])
+        XCTAssertEqual(try q.fail(next[0], error: "try later", retryAfterMs: 0), "retry")
+        let again = try q.take()
+        XCTAssertEqual(again[0]["attempt"]?.intValue, 2)
+        assertFails("55000") { try q.finish(next[0]) }
+        XCTAssertEqual(try q.fail(again[0]), "dead")
+        for i in 0..<6 { try q.add(["kind": .text(i == 2 ? "bad" : "t\(i)")]) }
+        struct Bad: Error, CustomStringConvertible { var description: String { "bad work" } }
+        var finished = 0
+        for _ in 0..<2000 {
+            if try db.query("SELECT count(*) FROM \(t)").rows[0][0].intValue == 0 { break }
+            finished += try q.process(limit: 4) { task in
+                try db.query("INSERT INTO \(t)_worked VALUES ($1, $2)", [task[0], task["kind"] ?? .null])
+                if task["kind"] == .text("bad") { throw Bad() }
+            }
+        }
+        XCTAssertEqual(finished, 5)
+        XCTAssertEqual(try db.query("SELECT count(*) FROM \(t)_worked").rows[0][0].intValue, 5)
+        let dead = try db.query("SELECT kind, error FROM \(t)_dead ORDER BY seq").rows
+        XCTAssertEqual(dead.map { $0[0] }, [.text("one"), .text("bad")])
+        XCTAssertEqual(dead.map { $0[1] }, [.text("failed on attempt 2"), .text("bad work")])
+        assertFails("42P01") { _ = try db.queueOf("swift_nosuch").take() }
+    }
+
     static func cursors(_ db: Connection) throws {
         // Ten billion rows: only what is read is produced.
         let big = try db.cursor("SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b",

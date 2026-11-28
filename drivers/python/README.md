@@ -151,6 +151,27 @@ jobs.process("workers", work, limit=100, timeout_ms=30000)  # entries processed
 jobs.wait(after=0, timeout_ms=1000)     # the newest seq
 ```
 
+## Task queues
+
+A task queue's tasks (`CREATE QUEUE`; nucleus DOCS.md §8.45): added (a
+row), taken under a lease, each done exactly once — the work's writes and
+the task's `FINISH` committed together; a task whose work fails is failed
+into a retry after the backoff or, past its attempts, a dead letter; one
+whose lease ran out while it worked is left to the worker that took it
+again:
+
+```python
+jobs = conn.queue_of("jobs")
+jobs.add({"kind": "resize", "priority": 0})   # its id
+
+def work(task):                         # a dict: id, attempt, the columns
+    conn.execute("INSERT INTO thumbnails VALUES ($1)", [task["id"]])
+
+jobs.process(work, limit=10)            # tasks finished
+[task] = jobs.take(lease_ms=60000)      # or by hand: take, then
+jobs.fail(task, "timeout")              # finish(task) / fail(...): "retry" | "dead"
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's library in the wheel is the database,

@@ -299,7 +299,7 @@ are marked ✅.
 | | M14.34 | Recursive queries and graphs: per-round adaptive joins over tables built once, `SEARCH` / `CYCLE`, `USING KEY`, SQL/PGQ graph patterns | ✅ 2026-11-23 (G1–G4) |
 | **F2 — NoSQL** | M15 | Document model | ✅ (2026-11-27) study written (2026-11-20), steps D1–D5 (re-split 2026-11-25): D1 the form, D2 upsert, D3 collections, D4 path indexes, D5 multi-valued indexes; the bug hunt after them (upserts under concurrent writers, documents differentially and killed mid-write). Next: §M16, starting with the query language's decision |
 | | M16 | Document queries (shared executor) + document server | ✅ (2026-11-27) the query language decided (D22: SQL/JSON the core, a MongoDB-style filter compiled to lax paths); Q1 the filter compiler, Q2 its indexes, Q3 find / update / upsert / projection / sort (MongoDB 8's answers, differentially), Q4 `ncp`'s `O` and every driver's collection, Q5 `--mongo-compat` (mongosh, pymongo). Next: §M16.5 streams |
-| | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
+| | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ✅ (2026-11-28) S1 streams (D23: dense offsets at commit), S2 consumer groups (exactly once), S3 changefeeds, S4 every client's wait / consume, S5 task queues (leases, retries, dead letters), S6 protocol adapters (D21; `modules/ndjson`), S7 crash and kill tests, every driver's `queue_of`, `examples/agents`. Next: §M16.6 live queries |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
 | | M16.7 | Sync: embedded databases on devices kept in sync with a server, offline first | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
@@ -14666,7 +14666,7 @@ found missing, and the open issues.
 in transactions that also touch tables; and with `--mongo-compat`,
 `mongosh` and a standard MongoDB driver run CRUD and queries.
 
-### §M16.5 — Streams: a transactional broker ⬜ (steps S1–S7, 2026-11-27)
+### §M16.5 — Streams: a transactional broker ✅ (steps S1–S7, 2026-11-27 – 2026-11-28)
 
 Not a Kafka replacement — what the ordered KV and transactions give almost
 for free, and what developers otherwise assemble from several systems:
@@ -14893,8 +14893,8 @@ pgmq / River (leases, visibility, dead letters).
   `ORDER BY … LIMIT` over an index range sorted the whole range — a
   take past 200 000 delayed and leased tasks now reads a handful.  Not
   yet: a lease extended while the work runs (a heartbeat; take with a
-  longer `LEASE`), the queue's own columns refused to `ALTER`, the
-  drivers' helpers (with S7's examples).  Tests: `slt/99_queues.slt`
+  longer `LEASE`), the queue's own columns refused to `ALTER` (the
+  drivers' helpers came with S7).  Tests: `slt/99_queues.slt`
   (every storage path), `crates/sql/tests/queues.rs` (four workers, 200
   tasks of three priorities, every seventh failing once: each task's
   work committed exactly once; a lost lease's work refused; a crashed
@@ -14997,6 +14997,41 @@ pgmq / River (leases, visibility, dead letters).
   (the lost lease's work fails on its conflict first; S5's script kills
   it).  Lesson: a mutation run needs a time limit per mutant (one made
   `TAKE` loop forever, and the run hung for hours).
+  *Done — the drivers' queues (2026-11-28):* `queue_of(name)` in every
+  driver (`queueOf` in JavaScript, Java and Swift; the Rust client's
+  `QueueHandle` and `Task`; C's `nc_queue_process`, C++'s `QueueOf` and
+  `Task`): `add`, `take` under a lease, `finish`, `fail`, and `process`
+  — each task taken done exactly once, its work, `FINISH` and the commit
+  together; a failing work rolled back and its task failed with the
+  error's text; a conflict (`40001`) runs the work again (ten times at
+  most, then the task is left to its lease) until the finish says the
+  lease ran out and another took it (`55000`), then the task is left to
+  that one — first written to leave on `40001` too, which left a task
+  that merely met another writer (two agents updating one run's state)
+  waiting out its whole lease; caught writing the agents' example.
+  Tests: a `queues` case in every driver (the embedded editions and
+  Android too: Java's cases 16) — a priority first, a lease given, a
+  retry and a stale attempt refused, a dead letter by failing and by a
+  work failing every time, each task's work once; the Rust client's with
+  three workers over 40 tasks on a real clock; a conflict run again in
+  Python and JavaScript (another connection writing the work's row
+  between its write and its commit: the work twice, the task once).
+  The iOS engine is 10,592,752 bytes (11 MiB budget).
+  *Done — the agents' patterns (2026-11-28):* `examples/agents/` —
+  `schema.sql` (conversation memory: turns by conversation; semantic
+  memory: a memory store; run state: runs and a stream of their tool
+  calls; the agents' task queue; an experiment on a branch) and one
+  program running it, `agents.py` and `agents.ts`: a conversation and
+  its context, a fact remembered and recalled, a run planned into tasks
+  in one transaction, a worker dying with a task under a short lease and
+  another finishing it after, a flaky tool failed into a retry, each
+  step's tool call, log entry, new state and finish committed together
+  (each step once: asserted), a change tried on a branch and the main
+  database untouched, the user forgotten.  CI runs both against a server
+  and in the process (`scripts/driver-tests.sh`).  The other drivers
+  carry the same patterns through their `stream_of` / `queue_of` and
+  their conformance cases; Python and TypeScript are where agents are
+  written, so the examples are there.
 
 ### §M16.6 — Live queries ⬜
 

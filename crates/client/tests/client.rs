@@ -2275,3 +2275,150 @@ fn streams_over_the_protocol() {
     // The session goes on.
     assert_eq!(c.rows("SELECT 1::bigint", &[]).unwrap(), [[Value::Int(1)]]);
 }
+
+/// Task queues over the protocol (PLAN.md §M16.5 S7): tasks added, a
+/// priority first, three workers processing every task exactly once with
+/// its work, a failing task retried and then a dead letter, a stale
+/// attempt refused.
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn queues_over_the_protocol() {
+    // On the real clock: a failed task's backoff runs out.
+    let addr = start_real(nucleus_server::Config::default());
+    let mut c = Client::connect(config(addr)).unwrap();
+    c.execute(
+        "CREATE QUEUE tasks (kind TEXT NOT NULL) WITH (max_attempts = 2, backoff = '1 millisecond'); \
+         CREATE TABLE worked (id BIGINT PRIMARY KEY, kind TEXT, by_worker INT)",
+        &[],
+    )
+    .unwrap();
+    let mut q = c.queue_of("tasks");
+    // A priority first, then in order; taken under a lease, finished.
+    let first = q.add(&["kind"], &[Value::Text("one".into())]).unwrap();
+    let urgent = q
+        .add(
+            &["kind", "priority"],
+            &[Value::Text("urgent".into()), Value::Integer(-1)],
+        )
+        .unwrap();
+    let taken = q.take(1, Some(60_000)).unwrap();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(
+        (taken[0].id, taken[0].attempt, &taken[0].values),
+        (urgent, 1, &vec![Value::Text("urgent".into())])
+    );
+    q.finish(&taken[0]).unwrap();
+    let again = q.take(5, None).unwrap();
+    assert_eq!(again.iter().map(|t| t.id).collect::<Vec<_>>(), [first]);
+    // Failed: available again (attempt 2); its old attempt refused.
+    assert_eq!(
+        q.fail(&again[0], Some("try later"), Some(0)).unwrap(),
+        "retry"
+    );
+    let retried = q.take(1, None).unwrap();
+    assert_eq!(retried[0].attempt, 2);
+    let e = q.finish(&again[0]).unwrap_err();
+    assert!(matches!(&e, Error::Server(s) if s.code == "55000"), "{e:?}");
+    assert_eq!(q.fail(&retried[0], None, None).unwrap(), "dead");
+    // Three workers, 40 tasks, one of them failing its work every time.
+    for i in 0..40 {
+        let kind = if i == 7 {
+            "bad".to_string()
+        } else {
+            format!("t{i}")
+        };
+        q.add(&["kind"], &[Value::Text(kind)]).unwrap();
+    }
+    let workers: Vec<_> = (0..3)
+        .map(|w| {
+            std::thread::spawn(move || {
+                let mut c = Client::connect(config(addr)).unwrap();
+                let mut finished = 0;
+                for _ in 0..1000 {
+                    let left = c.rows("SELECT count(*) FROM tasks", &[]).unwrap();
+                    if left == [[Value::Int(0)]] {
+                        break;
+                    }
+                    finished += c
+                        .queue_of("tasks")
+                        .process(3, None, |c, task| {
+                            let Value::Text(kind) = &task.values[0] else {
+                                panic!("{task:?}")
+                            };
+                            c.execute(
+                                "INSERT INTO worked VALUES ($1, $2, $3)",
+                                &[
+                                    Value::Int(task.id),
+                                    Value::Text(kind.clone()),
+                                    Value::Integer(w),
+                                ],
+                            )?;
+                            if kind == "bad" {
+                                return Err(Error::Protocol("bad work".into()));
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                finished
+            })
+        })
+        .collect();
+    let finished: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
+    assert_eq!(finished, 39);
+    assert_eq!(
+        c.rows("SELECT count(*), count(DISTINCT id) FROM worked", &[])
+            .unwrap(),
+        [[Value::Int(39), Value::Int(39)]],
+        "each task's work once, the failing one's rolled back"
+    );
+    assert_eq!(
+        c.rows(
+            "SELECT kind, attempts, error FROM tasks_dead ORDER BY seq",
+            &[]
+        )
+        .unwrap(),
+        [
+            [
+                Value::Text("one".into()),
+                Value::Integer(2),
+                Value::Text("failed on attempt 2".into())
+            ],
+            [
+                Value::Text("bad".into()),
+                Value::Integer(2),
+                Value::Text("protocol error: bad work".into())
+            ]
+        ]
+    );
+    // A conflict at the commit runs the work again: twice, the task once.
+    c.execute(
+        "CREATE TABLE counted (id INT PRIMARY KEY, n INT); INSERT INTO counted VALUES (1, 0)",
+        &[],
+    )
+    .unwrap();
+    c.queue_of("tasks")
+        .add(&["kind"], &[Value::Text("counted".into())])
+        .unwrap();
+    let mut other = Client::connect(config(addr)).unwrap();
+    let mut tries = 0;
+    let done = c
+        .queue_of("tasks")
+        .process(1, None, |c, _| {
+            tries += 1;
+            c.execute("UPDATE counted SET n = n + 1 WHERE id = 1", &[])?;
+            if tries == 1 {
+                other.execute("UPDATE counted SET n = n + 100 WHERE id = 1", &[])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!((done, tries), (1, 2));
+    assert_eq!(
+        c.rows("SELECT n FROM counted", &[]).unwrap(),
+        [[Value::Integer(101)]]
+    );
+    let e = c.queue_of("nowhere").take(1, None).unwrap_err();
+    assert!(matches!(&e, Error::Server(s) if s.code == "42P01"), "{e:?}");
+}
