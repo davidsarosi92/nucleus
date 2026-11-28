@@ -14974,6 +14974,29 @@ pgmq / River (leases, visibility, dead letters).
   mid-run; `examples/agents/` (conversation memory, semantic memory,
   run state, an agents' task queue, experiments on a branch) in Python
   and TypeScript, then every driver, run in CI.
+  *Done — the crash tests (2026-11-28):* `crates/sql/tests/streams_crash.rs`
+  — a workload of appends, consumers writing what they consume and
+  committing it with their position (some rolled back, as a consumer
+  dying before its commit), workers taking tasks and finishing them
+  with their work, failing them, abandoning them, time passing past
+  leases and backoffs, a changefeed on the work — crashed at every
+  600th of its I/O operations (dropped and torn unsynced writes), two
+  seeds, then reopened: the stream's numbers dense; the consumed entries
+  written exactly once, as appended; every task in one place (waiting,
+  done once, or a dead letter after its last attempt), none lost, none
+  made up (the insert in flight either way); the changefeed exactly
+  the work's inserts; `check` clean; and the work then carried to its
+  end with the same guarantees.  `editions/nucleus/tests/streams_kill.rs`
+  — two consumers and three workers over the network against `nucleus
+  server`, killed (`SIGKILL`) at a quarter, half and three quarters of
+  the work and started again, the clients reconnecting: 20 000 entries
+  each written once, 2000 tasks each done once with none dead, the
+  changefeed exact; about 4 s, steady over repeated runs.  Mutations:
+  a consumer's position one short, a dead letter left in its queue —
+  each failing; FINISH without its attempt check survives the kill test
+  (the lost lease's work fails on its conflict first; S5's script kills
+  it).  Lesson: a mutation run needs a time limit per mutant (one made
+  `TAKE` loop forever, and the run hung for hours).
 
 ### §M16.6 — Live queries ⬜
 

@@ -8229,6 +8229,17 @@ a refused `append` leaves the connection usable; a line is at most 16
 MiB (`54000`).  A protocol such as FIX or ITCH is a module of the same
 shape (D21).
 
+Streams, queues and changefeeds under crashes (§M16.5 S7):
+`crates/sql/tests/streams_crash.rs` crashes a workload of appends,
+consume-write-commit batches, tasks finished, failed and abandoned, and
+a changefeed, at its I/O operations on the simulation, and checks after
+reopening that a stream's numbers are dense, consumed entries were
+written exactly once, every task is in exactly one place and none was
+lost, the changefeed is exactly its table's changes — then carries the
+work to its end; `editions/nucleus/tests/streams_kill.rs` does the same
+over the network against a server killed (`SIGKILL`) three times while
+clients reconnect.
+
 Tests: `modules/ndjson/tests/adapter.rs` (over a socket: appends typed
 to the columns, a replay from a number and then entries live, gaps by
 `max_entries` and by a retention that trimmed all, refusals that keep
