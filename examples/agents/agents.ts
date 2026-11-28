@@ -180,8 +180,10 @@ if (!url.startsWith(":memory:")) {
   await db.query("DROP BRANCH agent_sandbox");
 }
 
-// And a user erased on request: their memories go, the rest stays.
-await db.forgetSubject("ann");
+// And a user erased on request: their memories go, the rest stays — and
+// no file holds them any more (found: the search after the scrub).
+const erased = await db.forgetSubject("ann");
+check(erased.rows === 2 && erased.scrubbed === true && (erased.found === 0 || erased.found === null), erased);
 check((await db.recall("agent_memory", "ann", "Szeged")).length === 0, "erased");
 await db.close();
 console.log("ok");

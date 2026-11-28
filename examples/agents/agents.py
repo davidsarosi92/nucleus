@@ -157,7 +157,9 @@ with nucleus.connect(url) as db:
         assert tried == 0 and kept == 4
         db.execute("DROP BRANCH agent_sandbox")
 
-    # And a user erased on request: their memories go, the rest stays.
-    db.forget_subject("ann")
+    # And a user erased on request: their memories go, the rest stays —
+    # and no file holds them any more (found: the search after the scrub).
+    erasure, rows, scrubbed, found = db.forget_subject("ann")
+    assert rows == 2 and scrubbed and found in (0, None), (rows, scrubbed, found)
     assert db.recall("agent_memory", "ann", "Szeged") == []
     print("ok")

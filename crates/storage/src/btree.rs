@@ -65,6 +65,28 @@ pub struct Found {
 /// A key range `[lo, hi)`; `None` is unbounded.
 pub type KeyRange = (Option<Vec<u8>>, Option<Vec<u8>>);
 
+/// Whether `key` is in one of `ranges`.
+fn within(ranges: &[KeyRange], key: &[u8]) -> bool {
+    ranges
+        .iter()
+        .any(|(s, e)| s.as_deref().is_none_or(|s| s <= key) && e.as_deref().is_none_or(|e| key < e))
+}
+
+/// Whether `[lo, hi)` (`None` unbounded) meets one of `ranges`.
+fn overlaps(ranges: &[KeyRange], lo: Option<&[u8]>, hi: Option<&[u8]>) -> bool {
+    ranges.iter().any(|(s, e)| {
+        let below_end = match (lo, e.as_deref()) {
+            (Some(lo), Some(e)) => lo < e,
+            _ => true,
+        };
+        let above_start = match (hi, s.as_deref()) {
+            (Some(hi), Some(s)) => s < hi,
+            _ => true,
+        };
+        below_end && above_start
+    })
+}
+
 /// `ranges` sorted, and those that overlap or touch made one.
 pub fn merge_ranges(mut ranges: Vec<KeyRange>) -> Vec<KeyRange> {
     ranges.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1819,6 +1841,146 @@ impl BTree {
         }
     }
 
+    // --------------------------------------------------------------- erasure
+
+    /// Erasure (PLAN.md §M14.24 R2b, issue #25): every separator in
+    /// `ranges` that is not the first key of the subtree after it — a key
+    /// removed since a split made it a separator, its bytes (a row's
+    /// primary key, an index entry's) kept in the internal node however
+    /// its versions were purged — made that first key, one the tree
+    /// holds; the nodes on the way written anew (split where a longer key
+    /// no longer fits), their old pages freed for a scrub to zero.  How
+    /// many were renewed.
+    pub fn renew_separators(&mut self, ranges: &[KeyRange]) -> Result<u64> {
+        let ranges = merge_ranges(ranges.to_vec());
+        let mut renewed = 0;
+        if ranges.is_empty() {
+            return Ok(0);
+        }
+        let (out, _) = self.renew_at(self.root, (None, None), &ranges, &mut renewed)?;
+        if renewed > 0 {
+            self.set_root(out)?;
+        }
+        Ok(renewed)
+    }
+
+    /// [`renew_separators`](Self::renew_separators) under page `id`, whose
+    /// keys are in `span` (`[lo, hi)`, `None` unbounded): where the node
+    /// went, and the first key under it.  A leaf is read in place, not
+    /// decoded: only its first key is wanted.
+    fn renew_at(
+        &mut self,
+        id: PageId,
+        span: (Option<&[u8]>, Option<&[u8]>),
+        ranges: &[KeyRange],
+        renewed: &mut u64,
+    ) -> Result<(Out, Option<Vec<u8>>)> {
+        {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            let v = View::new(&page).map_err(corrupt)?;
+            if v.is_leaf() {
+                let first = if v.is_empty() {
+                    None
+                } else {
+                    let mut k = Vec::new();
+                    v.key(0).map_err(corrupt)?.append_to(&mut k);
+                    Some(k)
+                };
+                return Ok((Out::One(id, 0), first));
+            }
+        }
+        let Node::Internal(mut node) = self.load(id)? else {
+            unreachable!("an internal node, read above")
+        };
+        let before = *renewed;
+        // The children first, from the last (a child split in two does not
+        // move the ones still to do), each child's first key kept: what
+        // the separator before it is checked against.
+        let mut firsts: Vec<Option<Option<Vec<u8>>>> = vec![None; node.children.len()];
+        for i in (0..node.children.len()).rev() {
+            let lo = if i == 0 {
+                span.0.map(<[u8]>::to_vec)
+            } else {
+                Some(node.keys[i - 1].clone())
+            };
+            let hi = match node.keys.get(i) {
+                Some(k) => Some(k.clone()),
+                None => span.1.map(<[u8]>::to_vec),
+            };
+            if !overlaps(ranges, lo.as_deref(), hi.as_deref()) {
+                continue;
+            }
+            let (out, first) = self.renew_at(
+                node.children[i],
+                (lo.as_deref(), hi.as_deref()),
+                ranges,
+                renewed,
+            )?;
+            match out {
+                Out::One(c, _) => {
+                    node.children[i] = c;
+                    firsts[i] = Some(first);
+                }
+                Out::Two(l, sep, r) => {
+                    node.children[i] = l;
+                    node.keys.insert(i, sep);
+                    node.children.insert(i + 1, r);
+                    // The separator moved up is one the child renewed
+                    // (or out of the ranges): nothing to check it against.
+                    firsts.insert(i + 1, None);
+                    firsts[i] = Some(first);
+                }
+            }
+        }
+        // Then its own: separator `i` is before child `i + 1`, whose span
+        // begins at it — so one in the ranges had its child walked above.
+        for i in 0..node.keys.len() {
+            if !within(ranges, &node.keys[i]) {
+                continue;
+            }
+            // (A subtree is empty only as the root: removals merge a
+            // child left small.)
+            let Some(Some(new)) = firsts[i + 1].take() else {
+                continue;
+            };
+            if new != node.keys[i] {
+                node.keys[i] = new;
+                *renewed += 1;
+            }
+        }
+        let first = match firsts[0].take() {
+            Some(f) => f,
+            None => self.first_key(node.children[0])?,
+        };
+        // Nothing renewed here or below: no child moved either.
+        if *renewed == before {
+            return Ok((Out::One(id, 0), first));
+        }
+        Ok((self.finish(id, Node::Internal(node))?, first))
+    }
+
+    /// The first key under page `id`, if any — the nodes on the way read
+    /// in place.
+    fn first_key(&self, mut id: PageId) -> Result<Option<Vec<u8>>> {
+        loop {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            let v = View::new(&page).map_err(corrupt)?;
+            if v.is_leaf() {
+                if v.is_empty() {
+                    return Ok(None);
+                }
+                let mut k = Vec::new();
+                v.key(0).map_err(corrupt)?.append_to(&mut k);
+                return Ok(Some(k));
+            }
+            id = v.child(0).map_err(corrupt)?;
+        }
+    }
+
     /// Frees every page of the tree (it must not be used afterwards).
     pub fn destroy(self) -> Result<()> {
         self.release_younger(None)
@@ -3095,6 +3257,185 @@ fn pack_leaf(entries: Vec<(Vec<u8>, Val)>) -> Vec<(Vec<u8>, Node)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The separators under `id` within `ranges` that are not the first
+    /// key of the subtree after them.
+    fn dead_keys(tree: &BTree, id: PageId, ranges: &[KeyRange], out: &mut Vec<Vec<u8>>) {
+        let Node::Internal(n) = tree.load(id).unwrap() else {
+            return;
+        };
+        for (i, k) in n.keys.iter().enumerate() {
+            if within(ranges, k) && tree.first_key(n.children[i + 1]).unwrap().as_ref() != Some(k) {
+                out.push(k.clone());
+            }
+        }
+        for &c in &n.children {
+            dead_keys(tree, c, ranges, out);
+        }
+    }
+
+    fn dead_separators(tree: &BTree, id: PageId, ranges: &[KeyRange]) -> usize {
+        let mut out = Vec::new();
+        dead_keys(tree, id, ranges, &mut out);
+        out.len()
+    }
+
+    /// Renewed separators longer than those they replace: the internal
+    /// nodes holding them split, up to a new root, and the tree still
+    /// holds what it held.
+    #[test]
+    fn renewed_separators_split_the_nodes_they_outgrow() {
+        use nucleus_platform::Platform;
+        let p = nucleus_platform::sim::SimPlatform::new(4);
+        p.fs().create_dir_all(std::path::Path::new("/db")).unwrap();
+        let pager = Arc::new(
+            crate::pager::Pager::create(p.fs(), std::path::Path::new("/db/data")).unwrap(),
+        );
+        let mut tree = BTree::create(Arc::new(BufferPool::new(pager, 1 << 14))).unwrap();
+        // Short keys, each followed by a long one, in no order: many
+        // leaves begin with a short key, so many separators are short.
+        let mut model = std::collections::BTreeMap::new();
+        for n in 0..30_000u64 {
+            let i = n * 7919 % 30_000;
+            let short = format!("k{i:07}").into_bytes();
+            let mut long = short.clone();
+            long.extend_from_slice(&[b'z'; 400]);
+            for k in [short, long] {
+                tree.insert(&k, b"v").unwrap();
+                model.insert(k, b"v".to_vec());
+            }
+        }
+        let shorts: Vec<Vec<u8>> = model.keys().filter(|k| k.len() == 8).cloned().collect();
+        for k in shorts {
+            assert!(tree.remove(&k).unwrap());
+            model.remove(&k);
+        }
+        let all: Vec<KeyRange> = vec![(None, None)];
+        let dead = dead_separators(&tree, tree.root, &all);
+        let (depth, pages) = {
+            let c = tree.check().unwrap();
+            (c.depth, c.pages.len())
+        };
+        assert_eq!(tree.renew_separators(&all).unwrap(), dead as u64);
+        assert_eq!(dead_separators(&tree, tree.root, &all), 0);
+        let c = tree.check().unwrap();
+        assert!(
+            c.pages.len() > pages && c.depth >= depth,
+            "dead {dead}: pages {pages} -> {}, depth {depth} -> {}",
+            c.pages.len(),
+            c.depth
+        );
+        let held: Vec<Vec<u8>> = tree
+            .range(Bound::Unbounded, Bound::Unbounded)
+            .unwrap()
+            .map(|e| e.unwrap().0)
+            .collect();
+        assert_eq!(held, model.keys().cloned().collect::<Vec<_>>());
+    }
+
+    /// Issue #25: keys a split made separators, removed, stay in the
+    /// internal nodes until renewed — within the ranges asked, each then
+    /// the first key of the subtree after it (some longer than the one it
+    /// replaced, so nodes split); the tree checks out and holds what it
+    /// held, and outside the ranges nothing changed.
+    #[test]
+    fn renewed_separators_are_keys_the_tree_holds() {
+        use nucleus_platform::Platform;
+        let p = nucleus_platform::sim::SimPlatform::new(3);
+        p.fs().create_dir_all(std::path::Path::new("/db")).unwrap();
+        let pager = Arc::new(
+            crate::pager::Pager::create(p.fs(), std::path::Path::new("/db/data")).unwrap(),
+        );
+        let mut tree = BTree::create(Arc::new(BufferPool::new(pager, 1 << 14))).unwrap();
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let mut model = std::collections::BTreeMap::new();
+        for i in 0..20_000u64 {
+            let mut k = format!(
+                "{}{:06}",
+                if i % 2 == 0 { 'a' } else { 'b' },
+                i * 7919 % 20_000
+            )
+            .into_bytes();
+            let tail = if next(4) == 0 { 150 } else { next(4) };
+            k.extend((0..tail).map(|_| b'a' + next(26) as u8));
+            let v = vec![next(256) as u8; 1 + next(60) as usize];
+            tree.insert(&k, &v).unwrap();
+            model.insert(k, v);
+        }
+        let keys: Vec<Vec<u8>> = model.keys().cloned().collect();
+        for k in keys {
+            if next(10) < 4 {
+                assert!(tree.remove(&k).unwrap());
+                model.remove(&k);
+            }
+        }
+        let a: Vec<KeyRange> = vec![(Some(b"a".to_vec()), Some(b"b".to_vec()))];
+        let b: Vec<KeyRange> = vec![(Some(b"b".to_vec()), None)];
+        let (dead_a, dead_b) = (
+            dead_separators(&tree, tree.root, &a),
+            dead_separators(&tree, tree.root, &b),
+        );
+        assert!(dead_a > 10 && dead_b > 10, "{dead_a} {dead_b}");
+        // The search for erased bytes finds a removed key in a separator,
+        // whole, though the node keeps the keys' common prefix apart.
+        let mut dead = Vec::new();
+        dead_keys(&tree, tree.root, &a, &mut dead);
+        tree.pool().sync().unwrap();
+        let found = crate::scan::find(p.fs(), std::path::Path::new("/db"), &dead).unwrap();
+        let named: BTreeSet<usize> = found.iter().map(|f| f.needle).collect();
+        assert_eq!(named.len(), dead.len());
+        let height = tree.check().unwrap().depth;
+        assert_eq!(tree.renew_separators(&a).unwrap(), dead_a as u64);
+        assert_eq!(dead_separators(&tree, tree.root, &a), 0);
+        assert_eq!(dead_separators(&tree, tree.root, &b), dead_b);
+        tree.check().unwrap();
+        assert!(tree.check().unwrap().depth >= height);
+        // Again: nothing left to renew.
+        assert_eq!(tree.renew_separators(&a).unwrap(), 0);
+        assert_eq!(tree.renew_separators(&b).unwrap(), dead_b as u64);
+        assert_eq!(dead_separators(&tree, tree.root, &[(None, None)]), 0);
+        tree.check().unwrap();
+        let held: Vec<(Vec<u8>, Vec<u8>)> = tree
+            .range(Bound::Unbounded, Bound::Unbounded)
+            .unwrap()
+            .map(|e| e.unwrap())
+            .collect();
+        assert_eq!(
+            held,
+            model
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        );
+        for (k, v) in &model {
+            assert_eq!(tree.get(k).unwrap().as_ref(), Some(v));
+        }
+        // One separator's key removed, the pages durable (copied on
+        // write): that one renewed, every node on its way written anew.
+        let one = {
+            let Node::Internal(n) = tree.load(tree.root).unwrap() else {
+                panic!("a tree of one leaf")
+            };
+            n.keys[n.keys.len() / 2].clone()
+        };
+        assert!(tree.remove(&one).unwrap());
+        model.remove(&one);
+        tree.pool().sync().unwrap();
+        let root = tree.root;
+        assert_eq!(tree.renew_separators(&[(None, None)]).unwrap(), 1);
+        assert_ne!(tree.root, root);
+        assert_eq!(dead_separators(&tree, tree.root, &[(None, None)]), 0);
+        tree.check().unwrap();
+        for (k, v) in &model {
+            assert_eq!(tree.get(k).unwrap().as_ref(), Some(v));
+        }
+    }
 
     /// `pack_cells` cuts a leaf where `pack_leaf` (decoded entries) does,
     /// over leaves of every shape: short and long keys sharing prefixes or

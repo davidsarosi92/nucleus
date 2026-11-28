@@ -26,7 +26,7 @@ use nucleus_platform::{File, FileSystem, OpenMode};
 
 use crate::cipher::PageCipher;
 use crate::error::{Error, Result};
-use crate::node::{LEAF, ValRef, View, decode_overflow};
+use crate::node::{INTERNAL, LEAF, ValRef, View, decode_overflow};
 use crate::page::{PAGE_SIZE, Page, PageId};
 
 /// Where a needle was found.
@@ -363,8 +363,11 @@ fn search_pages(
             n.search(page.payload(), usize::MAX, |_, needle| hit(id, needle));
         }
         // (An overflow page alone is found by the raw search; its chain's
-        // whole value through its leaf.)
-        if page.page_type() != LEAF {
+        // whole value through its leaf.)  An internal node's separators
+        // are keys too, kept with their common prefix apart as a leaf's
+        // are: whole, a key a split made one is found (issue #25).
+        let internal = page.page_type() == INTERNAL;
+        if page.page_type() != LEAF && !internal {
             continue;
         }
         let Ok(view) = View::new(&page) else {
@@ -375,6 +378,9 @@ fn search_pages(
                 key.clear();
                 k.append_to(&mut key);
                 n.search(&key, usize::MAX, |_, needle| hit(id, needle));
+            }
+            if internal {
+                continue;
             }
             let Ok(v) = view.value(i) else { continue };
             value.clear();

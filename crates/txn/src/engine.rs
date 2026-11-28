@@ -1429,6 +1429,19 @@ impl Engine {
         self.sweep_range(start, end, true)
     }
 
+    /// Erasure (issue #25): the tree's separators within the user key
+    /// ranges `ranges` (each `[start, end)`) that are keys no longer held
+    /// renewed from those it holds ([`Store::renew_separators`]) — after
+    /// [`purge_range`](Self::purge_range), before the store's scrub.  How
+    /// many were renewed.
+    pub fn renew_separators(&self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<u64> {
+        let ranges: Vec<_> = ranges
+            .iter()
+            .map(|(s, e)| (Some(first_version(s)), Some(first_version(e))))
+            .collect();
+        Ok(self.inner.store.renew_separators(&ranges)?)
+    }
+
     fn sweep_range(&self, start: &[u8], end: &[u8], past_history: bool) -> Result<u64> {
         let mut from = first_version(start);
         let to = first_version(end);

@@ -229,6 +229,88 @@ fn the_scrub_leaves_none_of_the_values_in_an_encrypted_database() {
     scrub_leaves_none(db_with(Some(PageCipher::new([6; 32]))));
 }
 
+/// A key deleted since a split made it a separator (issue #25): its
+/// bytes stayed in the internal node above the leaves, however its
+/// versions were purged — here a primary key that is the person's own
+/// address.  The scrub renews such separators from the keys the tree
+/// holds.
+#[test]
+fn the_scrub_leaves_no_key_of_hers_in_a_separator() {
+    let kv = db();
+    let mut s = Session::new(kv.clone());
+    s.execute(
+        "CREATE TABLE people (email text PRIMARY KEY, owner text, pad text); \
+         ALTER TABLE people SET SUBJECT (owner); \
+         INSERT INTO people SELECT 'user-' || lpad(g::text, 5, '0') || '@example.org', \
+             CASE WHEN g % 7 = 0 THEN 'alice' ELSE 'bob' END, repeat('x', 200) \
+             FROM generate_series(1, 3000) g",
+    )
+    .unwrap();
+    let hers: Vec<String> = (7..=3000)
+        .step_by(7)
+        .map(|g| format!("user-{g:05}@example.org"))
+        .collect();
+    let all: Vec<Vec<u8>> = hers.iter().map(|e| e.as_bytes().to_vec()).collect();
+    assert!(kv.find_bytes(&all).unwrap().unwrap() > 0);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 428 t 0"]);
+    for e in &hers {
+        assert_eq!(kv.find_bytes(&needle(e)).unwrap(), Some(0), "{e}");
+    }
+    // His are all there, each found by its key.
+    assert!(
+        kv.find_bytes(&needle("user-00001@example.org"))
+            .unwrap()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT count(*), count(*) FILTER (WHERE email = 'user-02999@example.org') FROM people"
+        ),
+        ["2572 1"]
+    );
+}
+
+/// The same in a table whose keys an LSM tree holds (PLAN.md §M14.28):
+/// its runs keep what was deleted until compacted.
+#[test]
+#[ignore = "issue #26: the scrub does not rewrite an LSM tree's runs"]
+fn the_scrub_leaves_none_of_hers_in_an_lsm_table() {
+    let local = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(7)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let kv: Arc<dyn Kv> = local.clone();
+    let mut s = Session::new(kv.clone());
+    s.execute(
+        "CREATE TABLE people (email text PRIMARY KEY, owner text, note text) WITH (engine = lsm); \
+         ALTER TABLE people SET SUBJECT (owner); \
+         INSERT INTO people SELECT 'user-' || lpad(g::text, 5, '0') || '@example.org', \
+             CASE WHEN g % 7 = 0 THEN 'alice' ELSE 'bob' END, 'note-' || g || '-' || md5(g::text) \
+             FROM generate_series(1, 3000) g",
+    )
+    .unwrap();
+    let hers: Vec<String> = (7..=3000)
+        .step_by(7)
+        .flat_map(|g| [format!("user-{g:05}@example.org"), format!("note-{g}-")])
+        .collect();
+    let all: Vec<Vec<u8>> = hers.iter().map(|e| e.as_bytes().to_vec()).collect();
+    // In the tree's runs, the log trimmed: the search reads them.
+    local.checkpoint().unwrap();
+    let before = kv.find_bytes(&all).unwrap().unwrap();
+    assert!(before > 400, "{before}");
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 428 t 0"]);
+    for e in &hers {
+        assert_eq!(kv.find_bytes(&needle(e)).unwrap(), Some(0), "{e}");
+    }
+    assert_eq!(texts(&mut s, "SELECT count(*) FROM people"), ["2572"]);
+}
+
 fn scrub_leaves_none(kv: Arc<dyn Kv>) {
     let mut s = Session::new(kv.clone());
     s.execute(

@@ -8349,6 +8349,31 @@ built.
     Not scrubbed: the server's logs (masked texts),
     files outside the directory (backups: R6 ✅, by their keys), session plan caches
     (a session's, gone with it), values under 8 bytes not searched for.
+    *Found later — separators (issue #25, 2026-11-28):* a key removed
+    since a split made it a separator stayed in the B+tree's internal
+    node, however its versions were purged — a memory store's row id
+    in a text index's tombstone key (`examples/agents` after
+    `memory.py`, every time: `agents.py` asserted nothing on `found`;
+    the "1 in 60" of `memory.py` / `memory.ts`).  And the search did not
+    decode internal nodes, so a separator split across their shared key
+    prefix was not found at all: a table keyed by e-mail addresses left
+    17 of 428 in separators with `found` 0.  Now the scrub renews the
+    separators in the ranges it reached before its checkpoints
+    (`BTree::renew_separators`: each not the first key of the subtree
+    after it made that key, nodes split where a longer one no longer
+    fits; the leaves read in place, only their first key) and the search
+    decodes internal nodes as leaves.  Tests: `tests/forget.rs`
+    (separators), `btree.rs` units (renewed under copy-on-write, nodes
+    split, ranges kept to, the search finding a removed separator
+    whole); mutation-checked.  Measured (erasure benchmark, ABBA, 100 000
+    rows): `FORGET` ≈349 → ≈358 ms, +2.7%.  Prior art: a B+tree's
+    separators need not be keys present (Bayer and McCreight; suffix
+    truncation, Bayer and Unterauer 1977, makes them shorter but still
+    derived from keys) — what erasure cannot allow of a removed one.
+    *Still open — LSM tables (issue #26):* a scrub does not rewrite an
+    LSM tree's runs, which keep deleted rows until compacted (`found`
+    61 of 856 after `FORGET` on an `engine = lsm` table checkpointed;
+    `tests/forget.rs`, ignored until fixed).
   - **R2c — the verification scan**: every file of the directory
     searched for the forgotten values (strings' bytes, vectors'),
     the data file's compressed values decompressed; its result in the

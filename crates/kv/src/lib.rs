@@ -1623,6 +1623,8 @@ impl Kv for Database {
         for (start, end) in ranges {
             versions += self.engine.purge_range(start, end)?;
         }
+        // The keys gone may be separators still (issue #25).
+        self.engine.renew_separators(ranges)?;
         let done = self
             .engine
             .store()

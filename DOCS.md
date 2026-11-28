@@ -860,11 +860,22 @@ every checkpoint while a scrub runs truncates with zeroing), then
 under the state lock and syncs (SQLite's `secure_delete`, at once rather
 than at each free).  Writes go on meanwhile.  What then remains is in the
 process's memory and, on a copy-on-write file system or a remapping
-disk, in blocks no file names.  **`scan::find(fs, dir, needles)`** is the
-proof: every file but `LOCK` searched raw (a mebibyte at a time), and the
-data file's leaves — reachable or free — decoded: keys put together from
-their shared prefix, packed values decompressed, overflow chains read;
-results once per file offset (per page for the data file).  Needles
+disk, in blocks no file names.  Before it, an erasure renews the tree's
+separators in the ranges it reached (`BTree::renew_separators`, issue
+#25): a separator is a leaf's first key as a split found it, kept in the
+internal nodes however that key was removed since — a row's primary key,
+an index entry's — so each that is not the first key of the subtree
+after it is made that key (one the tree holds), the nodes on the way
+written anew and split where a longer key no longer fits; the scrub's
+checkpoints then free and zero the old ones.  It reads the internal
+nodes and only the first key of each leaf below them (in place): ~3% of
+a `FORGET SUBJECT` on 100,000 rows.  **`scan::find(fs, dir, needles)`**
+is the proof: every file but `LOCK` searched raw (a mebibyte at a time),
+and the data file's leaves and internal nodes — reachable or free —
+decoded: keys put together from their shared prefix (a separator split
+across it is found whole), packed values decompressed, overflow chains
+read; results once per file offset (per page for the data file).  An LSM
+tree's runs are not yet rewritten by a scrub (issue #26).  Needles
 under 4 bytes are not looked for; each is anchored at the four-byte
 window the fewest other needles share (then the least like zeros and
 runs), and a place reaches the map of anchors only through a bitmap of

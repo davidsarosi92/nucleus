@@ -1295,7 +1295,8 @@ Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — n
 subjects — a subject column, a text with a text index, a 4-dimensional
 vector with an HNSW index — on real files; a subject's 100 texts are
 planted, erased by `FORGET SUBJECT`, and every file searched for them
-(`Kv::find_bytes`: the files raw and the data file's leaves decoded).
+(`Kv::find_bytes`: the files raw and the data file's leaves and internal
+nodes decoded).
 
 | erasure | nucleus |
 |---|---:|

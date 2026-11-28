@@ -2070,6 +2070,27 @@ impl Store {
         })
     }
 
+    /// Erasure (issue #25): this branch's tree's separators in `ranges`
+    /// (store keys) that are keys no longer held renewed from the keys it
+    /// holds ([`BTree::renew_separators`]), under the writer lock — what
+    /// an erasure runs before [`scrub`](Self::scrub), whose checkpoints
+    /// then write the nodes anew and zero the pages they leave.  Not
+    /// logged: a crash before the next checkpoint brings the old nodes
+    /// back, and the erasure's scrub with them is not done.  How many
+    /// were renewed.
+    pub fn renew_separators(&self, ranges: &[crate::btree::KeyRange]) -> Result<u64> {
+        self.check()?;
+        let b = &*self.b;
+        let _w = b.writer();
+        self.check()?;
+        b.writers_waiting.fetch_add(1, Ordering::AcqRel);
+        let mut tree = b.tree.write();
+        b.writers_waiting.fetch_sub(1, Ordering::AcqRel);
+        tree.tree
+            .renew_separators(ranges)
+            .inspect_err(|_| self.poison())
+    }
+
     /// The first, short half of a checkpoint (§M14.20 W4): under every
     /// branch's writer lock, each tree as it is now — its root, the LSN
     /// applied, the last batch's meta — frozen as the next committed state
