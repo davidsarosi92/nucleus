@@ -520,6 +520,7 @@ inline std::string Value::str() const {
 class Collection;
 class StreamOf;
 class QueueOf;
+class Subscription;
 
 class Connection {
 public:
@@ -703,6 +704,11 @@ public:
     /// A task queue's tasks (nucleus DOCS.md §8.45): added, taken under a
     /// lease, finished with their work, failed.
     QueueOf queue_of(const std::string& name);
+
+    /// Subscribes to a query (nucleus DOCS.md §8.47): its result now, kept
+    /// by Subscription::changes as commits change it.  Its parameters are
+    /// bound now.  Not inside a transaction.
+    Subscription subscribe(const std::string& sql, const std::vector<Value>& params = {});
 
     /// Waits until stream `stream` has an entry after `after`, or
     /// `timeout_ms` has passed — one message, the server waiting without
@@ -1092,6 +1098,90 @@ private:
 };
 
 inline QueueOf Connection::queue_of(const std::string& name) { return QueueOf(*this, name); }
+
+/// One row's change in a live query's batch: `diff` copies of `row` came
+/// (+n) or went (-n); an update is a -1 and a +1.
+struct Change {
+    int64_t diff = 0;
+    std::vector<Value> row;
+};
+
+/// A live query (Connection::subscribe): `rows()` its result as of the last
+/// batch, kept on this side — the first in the query's order, rows that
+/// come after appended, rows gone taken out; `changes(timeout_ms)` the next
+/// batch, applied; `close()`.
+class Subscription {
+public:
+    Subscription(Connection& db, const std::string& sql, const std::vector<Value>& params) : db_(db) {
+        static uint64_t next = 0;
+        name_ = "nc_live_" + std::to_string(++next);
+        Result r = db_.query("SUBSCRIBE " + name_ + " AS " + sql, params);
+        columns_.assign(r.columns.begin() + (r.columns.size() >= 2 ? 2 : 0), r.columns.end());
+        apply(r.rows);
+    }
+
+    /// Its name in the session (CHANGES and UNSUBSCRIBE take it).
+    const std::string& name() const { return name_; }
+    /// The query's columns.
+    const std::vector<Column>& columns() const { return columns_; }
+    /// The result as of the last batch.
+    const std::vector<std::vector<Value>>& rows() const { return rows_; }
+    /// The commit the last batch was read at (nc_ts).
+    int64_t at() const { return at_; }
+
+    /// The next batch (CHANGES … WAIT), applied to rows(): waiting up to
+    /// `timeout_ms` for a commit that changes the result; empty when none
+    /// came in time.  An error ends the subscription on the server (its
+    /// table dropped, a privilege taken back).
+    std::vector<Change> changes(uint32_t timeout_ms = 0) {
+        Result r = db_.query("CHANGES " + name_ + " WAIT $1", {Value(int64_t{timeout_ms})});
+        return apply(r.rows);
+    }
+
+    /// Ends it (UNSUBSCRIBE).
+    void close() { db_.query("UNSUBSCRIBE " + name_); }
+
+private:
+    static bool same(const std::vector<Value>& a, const std::vector<Value>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].index() != b[i].index() || a[i].str() != b[i].str()) return false;
+        }
+        return true;
+    }
+
+    std::vector<Change> apply(std::vector<std::vector<Value>>& batch) {
+        std::vector<Change> out;
+        for (auto& r : batch) {
+            if (r.size() < 2) throw Error("a live query's row without nc_ts, nc_diff", "08P01");
+            at_ = r[0].as<int64_t>();
+            Change c;
+            c.diff = r[1].as<int64_t>();
+            c.row.assign(r.begin() + 2, r.end());
+            if (c.diff > 0) {
+                for (int64_t i = 0; i < c.diff; i++) rows_.push_back(c.row);
+            } else {
+                for (int64_t i = 0; i < -c.diff; i++) {
+                    auto it = std::find_if(rows_.begin(), rows_.end(), [&](const auto& x) { return same(x, c.row); });
+                    if (it == rows_.end()) throw Error("a live query's batch took out a row it did not hold", "XX000");
+                    rows_.erase(it);
+                }
+            }
+            out.push_back(std::move(c));
+        }
+        return out;
+    }
+
+    Connection& db_;
+    std::string name_;
+    std::vector<Column> columns_;
+    std::vector<std::vector<Value>> rows_;
+    int64_t at_ = 0;
+};
+
+inline Subscription Connection::subscribe(const std::string& sql, const std::vector<Value>& params) {
+    return Subscription(*this, sql, params);
+}
 
 /// A client-side encrypted column's keys (nucleus PLAN.md §M14.30 K5,
 /// DOCS.md §11; the C driver's nc_column_key): from a 32-byte master key the

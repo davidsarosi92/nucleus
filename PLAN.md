@@ -15216,6 +15216,31 @@ commit that affects it.
   - Rust client, Python, JS (Node, browser, WebSocket), Java, C, C++,
     Swift. Embedded editions too.
   - Tests in each; the `nucleus sql` shell's `\watch`-like use.
+  - *Done (2026-11-28), except the shell.* A driver names its
+    subscriptions itself (`nc_live_…`). Each keeps the result as a list:
+    the first result in the query's order, rows that come appended, a
+    row gone taken out by equality (an error if it was not held).
+    - Rust client: `Client::subscribe` returns a `Subscription` (`rows`,
+      `columns`, `at`, `changes(&mut client, ms)` returning `Change`s,
+      `close`).
+    - Python: `conn.subscribe`, a context manager; `changes` returns
+      `(diff, row)` pairs.
+    - JS: `db.subscribe` returns a `Subscription` with
+      `changes(timeoutMs)`. Values are compared by content: bytes, dates,
+      arrays, objects.
+    - Java: `db.subscribe` returns an `AutoCloseable` `Subscription` with
+      `Change(diff, row)`; rows compared with `Arrays.deepEquals`.
+    - C: `nc_subscribe`, `nc_changes` and `nc_unsubscribe` answer the
+      `(nc_ts, nc_diff, …)` results, and the caller applies them.
+    - C++: a `Subscription` with `Change{diff, row}`.
+    - Swift: a `Subscription` with `Change(diff:row:)`.
+    - Tests in every driver: the first result, a batch after an insert
+      and an update, the end (`42704`). Python, JS, Java and the Rust
+      client also test a wait woken by another session's commit. The JS
+      tests run on Node, embedded and the browser's wasm; the Python and
+      Swift tests also run embedded. The Android conformance count is
+      now 17.
+    - The shell's use is left to S5, with the examples.
 - **S4 — less work per commit, measured.**
   - Skip a re-run when no commit touched the query's tables (from S1).
   - One run shared by subscriptions to the same query and parameters

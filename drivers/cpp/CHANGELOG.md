@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Live queries (nucleus PLAN.md §M16.6 S3): `db.subscribe(sql, params)`
+  → `Subscription` — `rows()` (the result, kept on this side), `at()`,
+  `changes(timeout_ms)` (the next batch as `Change{diff, row}`, applied),
+  `close()`.
 - Task queues (nucleus PLAN.md §M16.5 S7): `db.queue_of(name)` →
   `QueueOf` — `add(columns, values)` (its id), `take(limit, lease_ms)`
   (`Task`: id, attempt, values), `finish(task)`, `fail(task, error,

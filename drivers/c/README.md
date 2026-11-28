@@ -122,6 +122,23 @@ Adding, taking, finishing and failing by hand are statements: `INSERT`,
 `TAKE FROM jobs LIMIT n`, `FINISH TASK id OF jobs ATTEMPT n` (in the
 work's transaction), `FAIL TASK id OF jobs ATTEMPT n ERROR 'why'`.
 
+## Live queries
+
+A query's result as the commits change it (nucleus DOCS.md §8.47): rows
+of `(nc_ts, nc_diff, columns...)`, the first result each `+1`, then each
+batch of changes for the caller to apply.
+
+```c
+nc_value p = nc_bool(0);
+nc_result *r = nc_subscribe(db, "open_tasks", "SELECT id, title FROM tasks WHERE done = $1", &p, 1, &err);
+/* ... the first result ... */
+nc_result_free(r);
+r = nc_changes(db, "open_tasks", 30000, &err);   /* waits up to 30 s */
+/* each row: nc_ts, nc_diff (+n came, -n went), then the columns */
+nc_result_free(r);
+nc_unsubscribe(db, "open_tasks", &err);
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

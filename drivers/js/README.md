@@ -185,6 +185,19 @@ const [task] = await jobs.take(1, 60_000);       // or by hand: take, then
 await jobs.fail(task, "timeout");                // finish(task) / fail(...): "retry" | "dead"
 ```
 
+## Live queries
+
+A query's result kept as the commits change it (nucleus DOCS.md §8.47):
+
+```ts
+const s = await db.subscribe("SELECT id, title FROM tasks WHERE done = $1", [false]);
+console.log(s.rows); // the result now
+for (;;) {
+  for (const { diff, row } of await s.changes(30000)) console.log(diff, row); // +1 came, -1 went
+  render(s.rows); // kept on this side
+}
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The edition in WebAssembly (`wasm/nucleus.wasm`)

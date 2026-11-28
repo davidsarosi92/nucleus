@@ -1258,6 +1258,17 @@ export class Client {
     return new QueueOf(this, name);
   }
 
+  /** Subscribes to a query (`SUBSCRIBE`, nucleus DOCS.md section 8.47):
+   * its result now, kept by `Subscription.changes` as commits change it.
+   * `params` are bound now.  Not inside a transaction. */
+  async subscribe(sql: string, params: Value[] = []): Promise<Subscription> {
+    const name = "nc_live_" + ++subscriptions;
+    const r = await this.query("SUBSCRIBE " + name + " AS " + sql, params);
+    const s = new Subscription(this, name, r.columns.slice(2));
+    s.apply(r.rows);
+    return s;
+  }
+
   /** Waits until stream `stream` has an entry after `after`, or
    * `timeoutMs` has passed — one message, the server waiting without
    * holding a transaction.  The stream's newest `seq`. */
@@ -1634,6 +1645,100 @@ export interface UpdateResult {
   modified: number;
   /** The `_id` of the document an upsert inserted, else `null`. */
   upsertedId: Value;
+}
+
+/** How many subscriptions this process made: their names. */
+let subscriptions = 0;
+
+/** One row's change in a live query's batch: `diff` copies of `row` came
+ * (+n) or went (-n); an update is a -1 and a +1. */
+export interface Change {
+  diff: number;
+  row: Value[];
+}
+
+/** Whether two values are the same (bytes, dates, arrays and objects by
+ * what they hold). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") {
+    return typeof a === "bigint" || typeof b === "bigint" ? String(a) === String(b) : false;
+  }
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof Uint8Array && b instanceof Uint8Array) {
+    return a.length === b.length && a.every((x, i) => x === b[i]);
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((x, i) => sameValue(x, b[i]));
+  }
+  const ka = Object.keys(a as object);
+  const kb = Object.keys(b as object);
+  return (
+    ka.length === kb.length &&
+    ka.every((k) => sameValue((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+  );
+}
+
+/** A live query (`Client.subscribe(sql, params)`): `rows` its result as of
+ * the last batch, kept on this side — the first in the query's order, rows
+ * that come after appended, rows gone taken out; `changes(timeoutMs)` the
+ * next batch, applied; `close()`. */
+export class Subscription {
+  readonly client: Client;
+  /** Its name in the session (`CHANGES` and `UNSUBSCRIBE` take it). */
+  readonly name: string;
+  /** The query's columns. */
+  readonly columns: Column[];
+  /** The result as of the last batch. */
+  readonly rows: Value[][] = [];
+  /** The commit the last batch was read at (`nc_ts`). */
+  at = 0;
+
+  constructor(client: Client, name: string, columns: Column[]) {
+    this.client = client;
+    this.name = name;
+    this.columns = columns;
+  }
+
+  /** The next batch (`CHANGES … WAIT`), applied to `rows`: waiting up to
+   * `timeoutMs` for a commit that changes the result; `[]` when none came
+   * in time.  An error ends the subscription on the server (its table
+   * dropped, a privilege taken back). */
+  async changes(timeoutMs = 0): Promise<Change[]> {
+    const r = await this.client.query("CHANGES " + this.name + " WAIT $1", [timeoutMs]);
+    return this.apply(r.rows);
+  }
+
+  /** `rows` as objects by column name. */
+  records(): Record<string, Value>[] {
+    return this.rows.map((r) => Object.fromEntries(this.columns.map((c, i) => [c.name, r[i]])));
+  }
+
+  /** Ends it (`UNSUBSCRIBE`). */
+  async close(): Promise<void> {
+    await this.client.query("UNSUBSCRIBE " + this.name);
+  }
+
+  /** A batch's rows `(nc_ts, nc_diff, columns…)` applied. */
+  apply(rows: Value[][]): Change[] {
+    const out: Change[] = [];
+    for (const r of rows) {
+      this.at = Number(r[0]);
+      const diff = Number(r[1]);
+      const row = r.slice(2);
+      if (diff > 0) {
+        for (let i = 0; i < diff; i++) this.rows.push(row);
+      } else {
+        for (let i = 0; i < -diff; i++) {
+          const at = this.rows.findIndex((x) => sameValue(x, row));
+          if (at < 0) throw new NucleusError("a live query's batch took out a row it did not hold", "XX000");
+          this.rows.splice(at, 1);
+        }
+      }
+      out.push({ diff, row });
+    }
+    return out;
+  }
 }
 
 /** A stream's entries (`Client.streamOf(name)`): `append` a row (an

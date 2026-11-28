@@ -133,6 +133,17 @@ let task = try jobs.take(leaseMs: 60000)[0]       // or by hand: take, then
 try jobs.fail(task, error: "timeout")             // finish(task) / fail(...): "retry" | "dead"
 ```
 
+## Live queries
+
+A query's result kept as the commits change it (nucleus DOCS.md §8.47):
+
+```swift
+let s = try db.subscribe("SELECT id, title FROM tasks WHERE done = $1", [.bool(false)])
+for change in try s.changes(timeoutMs: 30000) { print(change.diff, change.row) } // +1 came, -1 went
+print(s.rows)  // kept on this side
+try s.close()
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  `NucleusEmbedded` (its XCFramework) is the database,

@@ -481,6 +481,38 @@ int main() {
             CHECK(e.code() == "42P01");
         }
     }
+    {
+        // A live query: its first result, a batch per change, its end
+        // (DOCS.md §8.47).
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, title TEXT, done BOOLEAN)");
+        db.query("INSERT INTO " + t + " VALUES (1, 'a', false), (2, 'b', true)");
+        auto s = db.subscribe("SELECT id, title FROM " + t + " WHERE done = $1 ORDER BY id", {Value(false)});
+        CHECK(s.columns().size() == 2 && s.columns()[0].name == "id");
+        CHECK(s.rows().size() == 1 && s.rows()[0][1].as<std::string>() == "a");
+        int64_t first = s.at();
+        CHECK(s.changes().empty());
+        db.query("INSERT INTO " + t + " VALUES (3, 'c', false)");
+        db.query("UPDATE " + t + " SET title = 'A' WHERE id = 1");
+        auto got = s.changes(1000);
+        CHECK(got.size() == 3);
+        CHECK(s.rows().size() == 2 && s.at() > first);
+        bool a = false, c = false;
+        for (const auto& r : s.rows()) {
+            a = a || r[1].as<std::string>() == "A";
+            c = c || r[1].as<std::string>() == "c";
+        }
+        CHECK(a && c);
+        auto name = s.name();
+        s.close();
+        try {
+            db.query("CHANGES " + name);
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "42704");
+        }
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

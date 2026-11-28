@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The shared Java conformance cases include live queries (17 cases).
 - The size budget is 10 MiB on arm64-v8a (was 9 MiB, at first 8 MiB):
   encryption at rest, JSON Schema, backups, the native protocol's server
   and faster scans and joins (nucleus PLAN.md §M14.15–§M14.33) took it

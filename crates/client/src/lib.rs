@@ -1608,6 +1608,26 @@ impl Client {
         }
     }
 
+    /// Subscribes to a query (`SUBSCRIBE`, PLAN.md §M16.6): its result
+    /// now, kept by [`Subscription::changes`] as the commits change it.
+    /// Its parameters are bound now.  Not inside a transaction.
+    pub fn subscribe(&mut self, sql: &str, params: &[Value]) -> Result<Subscription, Error> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let name = format!(
+            "nc_live_{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let reply = self.execute(&format!("SUBSCRIBE {name} AS {sql}"), params)?;
+        let mut s = Subscription {
+            name,
+            columns: reply.columns.into_iter().skip(2).collect(),
+            rows: Vec::new(),
+            at: 0,
+        };
+        s.apply(reply.rows)?;
+        Ok(s)
+    }
+
     /// Waits until stream `stream` has an entry after `after`, or
     /// `timeout_ms` has passed (a `w` message: the server waits holding no
     /// transaction); the stream's newest `seq`.
@@ -1741,6 +1761,103 @@ pub struct UpdateResult {
 /// An identifier quoted for SQL.
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// A live query ([`Client::subscribe`]; PLAN.md §M16.6): its result as
+/// of the last batch, kept on this side — the first in the query's order,
+/// rows that come after appended, rows gone taken out.
+#[derive(Clone, Debug)]
+pub struct Subscription {
+    name: String,
+    columns: Vec<Column>,
+    rows: Vec<Vec<Value>>,
+    at: i64,
+}
+
+/// One row's change in a [`Subscription`]'s batch: `diff` copies came
+/// (`+n`) or went (`-n`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    /// How many copies of the row came (`+n`) or went (`-n`).
+    pub diff: i64,
+    /// The row, as the query's columns.
+    pub row: Vec<Value>,
+}
+
+impl Subscription {
+    /// Its name in the session (`CHANGES` and `UNSUBSCRIBE` take it).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The query's columns.
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    /// The result as of the last batch.
+    pub fn rows(&self) -> &[Vec<Value>] {
+        &self.rows
+    }
+
+    /// The commit the last batch was read at (`nc_ts`).
+    pub fn at(&self) -> i64 {
+        self.at
+    }
+
+    /// The next batch of changes (`CHANGES … WAIT`), applied to
+    /// [`rows`](Self::rows): waiting up to `timeout_ms` for a commit that
+    /// changes the result; empty when none came in time.  An error ends
+    /// the subscription on the server (its table dropped, a privilege
+    /// taken back).
+    pub fn changes(&mut self, client: &mut Client, timeout_ms: u32) -> Result<Vec<Change>, Error> {
+        let reply = client.execute(
+            &format!("CHANGES {} WAIT $1", self.name),
+            &[Value::Int(i64::from(timeout_ms))],
+        )?;
+        self.apply(reply.rows)
+    }
+
+    /// Ends it (`UNSUBSCRIBE`).
+    pub fn close(self, client: &mut Client) -> Result<(), Error> {
+        client.execute(&format!("UNSUBSCRIBE {}", self.name), &[])?;
+        Ok(())
+    }
+
+    /// A batch's rows `(nc_ts, nc_diff, columns…)` applied.
+    fn apply(&mut self, rows: Vec<Vec<Value>>) -> Result<Vec<Change>, Error> {
+        let mut out = Vec::with_capacity(rows.len());
+        for mut r in rows {
+            let (Some(Value::Int(at)), Some(Value::Int(diff))) = (r.first(), r.get(1)) else {
+                return Err(Error::Protocol(
+                    "a live query's row without nc_ts, nc_diff".into(),
+                ));
+            };
+            let (at, diff) = (*at, *diff);
+            self.at = at;
+            let row = r.split_off(2);
+            if diff > 0 {
+                for _ in 0..diff {
+                    self.rows.push(row.clone());
+                }
+            } else {
+                for _ in 0..-diff {
+                    match self.rows.iter().position(|x| *x == row) {
+                        Some(i) => {
+                            self.rows.remove(i);
+                        }
+                        None => {
+                            return Err(Error::Protocol(
+                                "a live query's batch took out a row it did not hold".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            out.push(Change { diff, row });
+        }
+        Ok(out)
+    }
 }
 
 /// A stream's entries, through a [`Client`]'s session (see

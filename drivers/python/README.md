@@ -172,6 +172,19 @@ jobs.process(work, limit=10)            # tasks finished
 jobs.fail(task, "timeout")              # finish(task) / fail(...): "retry" | "dead"
 ```
 
+## Live queries
+
+A query's result kept as the commits change it (nucleus DOCS.md §8.47):
+
+```python
+with conn.subscribe("SELECT id, title FROM tasks WHERE done = $1", [False]) as s:
+    print(s.rows)                       # the result now
+    while True:
+        for diff, row in s.changes(30000):   # waits up to 30 s for a change
+            print(diff, row)            # +1 came, -1 went (an update: both)
+        render(s.rows)                  # kept on this side
+```
+
 ## Licence
 
 The driver: MIT — see [LICENSE](LICENSE).  The embedded edition's library in the wheel is the database,

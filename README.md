@@ -278,8 +278,11 @@ TASK` retries with backoff or moves it to dead letters; every driver's
 and task queue built on them); a protocol
 reaches streams through an adapter module (a sample speaks
 newline-delimited JSON over TCP: appends, and entries replayed from a
-number, a gap named).  Then live
-queries and sync (§F2).  See
+number, a gap named).  Live queries are in progress (§M16.6):
+`SUBSCRIBE name AS <query>`, then `CHANGES name WAIT ms` gives what each
+commit changed in its result as `(nc_ts, nc_diff, columns…)` rows, and
+every driver's `subscribe(sql, params)` keeps the result on its side.
+Sync comes after (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 

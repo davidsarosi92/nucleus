@@ -1233,6 +1233,15 @@ public final class NucleusClient implements AutoCloseable {
     }
 
     /**
+     * Subscribes to a query (nucleus DOCS.md §8.47): its result now, kept by {@link
+     * Subscription#changes} as commits change it. Its parameters are bound now. Not inside a
+     * transaction.
+     */
+    public Subscription subscribe(String sql, Object... params) {
+        return new Subscription(this, sql, params);
+    }
+
+    /**
      * Waits until stream {@code stream} has an entry after {@code after}, or {@code timeoutMs} has
      * passed — one message, the server waiting without holding a transaction. The stream's newest
      * {@code seq}.

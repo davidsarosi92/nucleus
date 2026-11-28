@@ -647,6 +647,59 @@ public final class NucleusTest {
         }
     }
 
+    /** A live query's result kept as commits change it (DOCS.md §8.47). */
+    static void liveQueries() {
+        String t = table();
+        try (NucleusClient db = db()) {
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, title TEXT, done BOOLEAN)");
+            db.query("INSERT INTO " + t + " VALUES (1, 'a', false), (2, 'b', true)");
+            String name;
+            try (Subscription s = db.subscribe("SELECT id, title FROM " + t + " WHERE done = $1 ORDER BY id", false)) {
+                equal(s.columns().stream().map(Column::name).toList(), List.of("id", "title"), "its columns");
+                equal(s.rows(), List.of(List.of(1, "a")), "the first result");
+                long first = s.at();
+                check(s.changes(0).isEmpty(), "nothing since");
+                db.query("INSERT INTO " + t + " VALUES (3, 'c', false)");
+                db.query("UPDATE " + t + " SET title = 'A' WHERE id = 1");
+                List<Subscription.Change> got = s.changes(1000);
+                check(got.contains(new Subscription.Change(-1, List.of(1, "a"))), "the old row out");
+                check(got.contains(new Subscription.Change(1, List.of(1, "A"))), "the new in");
+                List<List<Object>> rows = new java.util.ArrayList<>(s.rows());
+                rows.sort(java.util.Comparator.comparingInt(r -> ((Number) r.get(0)).intValue()));
+                equal(rows, List.of(List.of(1, "A"), List.of(3, "c")), "kept");
+                check(s.at() > first, "a later commit");
+                name = s.name();
+            }
+            equal(errorCode(() -> db.query("CHANGES " + name)), "42704", "ended");
+        }
+    }
+
+    static void liveQueryWakes() {
+        String t = table();
+        try (NucleusClient db = db(); NucleusClient w = db()) {
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
+            Subscription s = db.subscribe("SELECT count(*) FROM " + t);
+            Thread writer = new Thread(() -> {
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                w.query("INSERT INTO " + t + " VALUES (1)");
+            });
+            long began = System.nanoTime();
+            writer.start();
+            List<Subscription.Change> got = s.changes(10000);
+            writer.join();
+            check(System.nanoTime() - began < 10_000_000_000L, "in time");
+            equal(got.size(), 2, "the count's old row out, the new in");
+            equal(((Number) s.rows().get(0).get(0)).longValue(), 1L, "woken");
+            s.close();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     /** A collection's documents by MongoDB's requests (the O message, protocol 9). */
     static void documents() {
         String t = table();
@@ -721,6 +774,7 @@ public final class NucleusTest {
         run("documents", NucleusTest::documents);
         run("streams", NucleusTest::streams);
         run("queues", NucleusTest::queues);
+        run("live queries", NucleusTest::liveQueries);
         return passed;
     }
 
@@ -735,7 +789,8 @@ public final class NucleusTest {
         run("encrypted columns' vectors", NucleusTest::encryptedColumnVectors);
         run("a subject's key", NucleusTest::subjectKey);
         run("a stream's wait wakes", NucleusTest::streamWaitWakes);
-        check(cases == 16 && passed == 25, "all tests ran");
+        run("a live query wakes", NucleusTest::liveQueryWakes);
+        check(cases == 17 && passed == 27, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

@@ -443,6 +443,53 @@ class Conformance(unittest.TestCase):
             self.assertEqual(c.execute(f"SELECT n FROM {t}_count").rows, [(101,)])
             self.assertEqual(c.execute(f"SELECT count(*) FROM {t}").rows, [(0,)])
 
+    def test_live_queries(self):
+        # A subscription's result kept as commits change it (DOCS.md 8.47).
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, title TEXT, done BOOLEAN)")
+            c.execute(f"INSERT INTO {t} VALUES (1, 'a', false), (2, 'b', true)")
+            with c.subscribe(f"SELECT id, title FROM {t} WHERE done = $1 ORDER BY id", [False]) as s:
+                self.assertEqual([col.name for col in s.columns], ["id", "title"])
+                self.assertEqual(s.rows, [(1, "a")])
+                self.assertEqual(s.records(), [{"id": 1, "title": "a"}])
+                first = s.at
+                self.assertEqual(s.changes(), [])
+                c.execute(f"INSERT INTO {t} VALUES (3, 'c', false)")
+                c.execute(f"UPDATE {t} SET title = 'A' WHERE id = 1")
+                got = s.changes(1000)
+                self.assertIn((-1, (1, "a")), got)
+                self.assertIn((1, (1, "A")), got)
+                self.assertEqual(sorted(s.rows), [(1, "A"), (3, "c")])
+                self.assertGreater(s.at, first)
+                name = s.name
+            with self.assertRaises(nucleus.ProgrammingError) as e:
+                c.execute(f"CHANGES {name}")
+            self.assertEqual(e.exception.code, "42704")
+
+    @unittest.skipIf(EMBEDDED, "one connection to a database in the process")
+    def test_live_query_wakes_on_another_session_s_commit(self):
+        import threading
+        t = table()
+        with connect() as c, connect() as other:
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY)")
+            s = c.subscribe(f"SELECT count(*) FROM {t}")
+            self.assertEqual(s.rows, [(0,)])
+
+            def writer():
+                time.sleep(0.05)
+                other.execute(f"INSERT INTO {t} VALUES (1)")
+
+            th = threading.Thread(target=writer)
+            th.start()
+            started = time.monotonic()
+            got = s.changes(10000)
+            th.join()
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertEqual(got, [(-1, (0,)), (1, (1,))])
+            self.assertEqual(s.rows, [(1,)])
+            s.close()
+
     def test_streams(self):
         # A stream appended, a group's batches processed exactly once with
         # their work, waits (protocol 10).

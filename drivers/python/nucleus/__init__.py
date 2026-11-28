@@ -59,7 +59,7 @@ from dataclasses import field as _field
 __all__ = [
     "connect", "open", "Database", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
     "Result", "Column", "Interval", "Ext", "Json", "SparseVector",
-    "Collection", "UpdateResult",
+    "Collection", "UpdateResult", "Subscription",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
     "NotSupportedError", "DEFAULT_PORT", "DEFAULT_FETCH",
@@ -1156,6 +1156,12 @@ class Connection:
         failed — ``QueueOf``."""
         return QueueOf(self, name)
 
+    def subscribe(self, sql, params=()):
+        """Subscribes to a query (``SUBSCRIBE``, nucleus DOCS.md section
+        8.47): its result now, kept by ``Subscription.changes`` as commits
+        change it.  ``params`` are bound now.  Not inside a transaction."""
+        return Subscription(self, sql, params)
+
     def wait_stream(self, stream, after, timeout_ms):
         """Waits until stream ``stream`` has an entry after ``after``, or
         ``timeout_ms`` has passed — one message, the server waiting
@@ -1313,6 +1319,64 @@ class StreamOf:
                 if conn.status != 0:
                     conn.execute("ROLLBACK")
                 raise
+
+
+class Subscription:
+    """A live query (``Connection.subscribe(sql, params)``): ``rows`` its
+    result as of the last batch, kept on this side — the first in the
+    query's order, rows that come after appended, rows gone taken out;
+    ``changes(timeout_ms)`` the next batch, applied; ``close()``.  A batch
+    is a list of ``(diff, row)``: ``diff`` copies of ``row`` came (+n) or
+    went (-n); an update is a -1 and a +1."""
+
+    _next = 0
+
+    def __init__(self, conn, sql, params=()):
+        Subscription._next += 1
+        self._conn = conn
+        self.name = f"nc_live_{_os.getpid()}_{Subscription._next}"
+        r = conn.execute(f"SUBSCRIBE {self.name} AS {sql}", params)
+        self.columns = r.columns[2:]
+        self.rows = []
+        self.at = 0
+        self._apply(r.rows)
+
+    def changes(self, timeout_ms=0):
+        """The next batch (``CHANGES … WAIT``), applied to ``rows``:
+        waiting up to ``timeout_ms`` for a commit that changes the result;
+        ``[]`` when none came in time.  An error ends the subscription on
+        the server (its table dropped, a privilege taken back)."""
+        r = self._conn.execute(f"CHANGES {self.name} WAIT $1", [int(timeout_ms)])
+        return self._apply(r.rows)
+
+    def records(self):
+        """``rows`` as dicts by column name."""
+        names = [c.name for c in self.columns]
+        return [dict(zip(names, r)) for r in self.rows]
+
+    def close(self):
+        """Ends it (``UNSUBSCRIBE``)."""
+        self._conn.execute(f"UNSUBSCRIBE {self.name}")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if exc[0] is None or self._conn.status == 0:
+            self.close()
+
+    def _apply(self, rows):
+        out = []
+        for r in rows:
+            at, diff, row = r[0], r[1], tuple(r[2:])
+            self.at = at
+            if diff > 0:
+                self.rows.extend([row] * diff)
+            else:
+                for _ in range(-diff):
+                    self.rows.remove(row)
+            out.append((diff, row))
+        return out
 
 
 # How many times a task's work runs again after conflicts before the task

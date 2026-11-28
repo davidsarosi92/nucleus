@@ -330,6 +330,21 @@ typedef int (*nc_stream_work)(nc_conn *c, const nc_result *entries, void *arg);
 int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uint32_t limit,
                           uint32_t timeout_ms, nc_stream_work work, void *arg, nc_error *err);
 
+/* Live queries (nucleus DOCS.md 8.47).  nc_subscribe subscribes the
+ * session to sql (its params bound now) under `name`; nc_changes answers
+ * what the commits since changed, waiting up to timeout_ms for a commit
+ * that changes the result.  Both answer rows of (nc_ts, nc_diff,
+ * columns...): nc_ts the commit the batch was read at, nc_diff how many
+ * copies of the row came (+n) or went (-n) -- an update is a -1 and a +1.
+ * nc_subscribe's rows are the first result, each +1; the caller keeps the
+ * result by applying each batch.  NULL with err on an error (which ends
+ * the subscription on the server).  nc_unsubscribe ends it: 0, or -1 with
+ * err.  Not inside a transaction. */
+nc_result *nc_subscribe(nc_conn *c, const char *name, const char *sql, const nc_value *params, size_t nparams,
+                        nc_error *err);
+nc_result *nc_changes(nc_conn *c, const char *name, uint32_t timeout_ms, nc_error *err);
+int nc_unsubscribe(nc_conn *c, const char *name, nc_error *err);
+
 /* Task queues (nucleus DOCS.md 8.45).  Adding a task is an INSERT, taking
  * TAKE FROM q LIMIT n, finishing FINISH TASK id OF q ATTEMPT n (in the
  * work's transaction), failing FAIL TASK id OF q ATTEMPT n [ERROR text].

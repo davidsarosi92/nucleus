@@ -98,6 +98,17 @@ auto task = jobs.take(1, 60000).at(0);           // or by hand: take, then
 jobs.fail(task, std::string("timeout"));         // finish(task) / fail(...): "retry" | "dead"
 ```
 
+## Live queries
+
+A query's result kept as the commits change it (nucleus DOCS.md §8.47):
+
+```cpp
+auto s = db.subscribe("SELECT id, title FROM tasks WHERE done = $1", {nucleus::Value(false)});
+for (const auto& c : s.changes(30000)) { /* c.diff: +1 came, -1 went; c.row */ }
+// s.rows(): the result, kept on this side
+s.close();
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

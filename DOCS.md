@@ -8374,6 +8374,17 @@ UNSUBSCRIBE open_tasks;          -- or UNSUBSCRIBE ALL
 The difference is mostly the diff, which hashes both results. §M16.6 S4
 works on it.
 
+**In the drivers** (§M16.6 S3). Every driver has `subscribe(sql, params)`.
+Its subscription is named by the driver (`nc_live_…`) and keeps the
+result on the client's side: the first result in the query's order, rows
+that come appended, a row gone taken out by equality.
+
+- `changes(timeout)` sends `CHANGES name WAIT $1`, applies the batch,
+  and returns it as (diff, row) pairs.
+- `close()` sends `UNSUBSCRIBE`.
+- C answers the raw `(nc_ts, nc_diff, …)` results (`nc_subscribe`,
+  `nc_changes`, `nc_unsubscribe`) for the caller to apply.
+
 ## 9. Server (`nucleus-server`)
 
 ```

@@ -112,6 +112,19 @@ Map<String, Object> task = jobs.take(1, 60_000).get(0);   // or by hand
 jobs.fail(task, "timeout", null);               // finish(task) / fail(...): "retry" | "dead"
 ```
 
+## Live queries
+
+A query's result kept as the commits change it (nucleus DOCS.md §8.47):
+
+```java
+try (Subscription s = db.subscribe("SELECT id, title FROM tasks WHERE done = $1", false)) {
+    System.out.println(s.rows());                // the result now
+    for (Subscription.Change c : s.changes(30_000)) {
+        System.out.println(c.diff() + " " + c.row()); // +1 came, -1 went
+    }
+}
+```
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).  The database itself is AGPL-3.0-only; a

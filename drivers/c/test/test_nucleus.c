@@ -1204,6 +1204,42 @@ static void queues(void) {
     nc_close(db);
 }
 
+/* A live query: its first result, a batch per change, its end. */
+static void live_queries(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    nc_result *r;
+    nc_value p = nc_bool(0);
+    char t[64], sql[256];
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY, title TEXT, done BOOLEAN)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (1, 'a', false), (2, 'b', true)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "SELECT id, title FROM %s WHERE done = $1 ORDER BY id", t);
+    r = nc_subscribe(db, "c_live", sql, &p, 1, &err);
+    CHECK(r && nc_columns(r) == 4 && strcmp(nc_column_name(r, 0), "nc_ts") == 0 &&
+          strcmp(nc_column_name(r, 1), "nc_diff") == 0 && nc_rows(r) == 1 &&
+          strcmp(text_of(r, 0, 1), "1") == 0 && strcmp(text_of(r, 0, 3), "a") == 0);
+    nc_result_free(r);
+    r = nc_changes(db, "c_live", 0, &err);
+    CHECK(r && nc_rows(r) == 0);
+    nc_result_free(r);
+    snprintf(sql, sizeof sql, "UPDATE %s SET title = 'A' WHERE id = 1", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    r = nc_changes(db, "c_live", 1000, &err);
+    CHECK(r && nc_rows(r) == 2 && strcmp(text_of(r, 0, 1), "-1") == 0 && strcmp(text_of(r, 0, 3), "a") == 0 &&
+          strcmp(text_of(r, 1, 1), "1") == 0 && strcmp(text_of(r, 1, 3), "A") == 0);
+    nc_result_free(r);
+    CHECK(nc_unsubscribe(db, "c_live", &err) == 0);
+    CHECK(nc_changes(db, "c_live", 0, &err) == NULL && strcmp(err.code, "42704") == 0);
+    CHECK(nc_unsubscribe(db, "c_live", &err) == -1 && strcmp(err.code, "42704") == 0);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -1227,6 +1263,7 @@ int main(void) {
     documents();
     streams();
     queues();
+    live_queries();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

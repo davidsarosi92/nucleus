@@ -269,6 +269,28 @@ enum Conformance {
         assertFails("42P01") { _ = try db.queueOf("swift_nosuch").take() }
     }
 
+    static func liveQueries(_ db: Connection) throws {
+        // A live query's result kept as commits change it (DOCS.md §8.47).
+        let t = table()
+        try db.query("CREATE TABLE \(t) (id INT PRIMARY KEY, title TEXT, done BOOLEAN)")
+        try db.query("INSERT INTO \(t) VALUES (1, 'a', false), (2, 'b', true)")
+        let s = try db.subscribe("SELECT id, title FROM \(t) WHERE done = $1 ORDER BY id", [.bool(false)])
+        XCTAssertEqual(s.columns.map(\.name), ["id", "title"])
+        XCTAssertEqual(s.rows.map { $0[1] }, [.text("a")])
+        let first = s.at
+        XCTAssertEqual(try s.changes(), [])
+        try db.query("INSERT INTO \(t) VALUES (3, 'c', false)")
+        try db.query("UPDATE \(t) SET title = 'A' WHERE id = 1")
+        let got = try s.changes(timeoutMs: 1000)
+        XCTAssertEqual(got.count, 3)
+        XCTAssertTrue(got.contains { $0.diff == -1 && $0.row[1] == .text("a") })
+        XCTAssertEqual(Set(s.rows.map { $0[1] }), [.text("A"), .text("c")])
+        XCTAssertGreaterThan(s.at, first)
+        let name = s.name
+        try s.close()
+        assertFails("42704") { try db.query("CHANGES \(name)") }
+    }
+
     static func cursors(_ db: Connection) throws {
         // Ten billion rows: only what is read is produced.
         let big = try db.cursor("SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b",

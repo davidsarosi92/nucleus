@@ -432,6 +432,62 @@ test("a queue's conflict runs the work again", { skip: embedded && "one connecti
   await db.close();
 });
 
+test("live queries", async () => {
+  // A subscription's result kept as commits change it (DOCS.md 8.47).
+  const db = await connect(options);
+  const t = table();
+  await db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, title TEXT, done BOOLEAN)");
+  await db.query("INSERT INTO " + t + " VALUES (1, 'a', false), (2, 'b', true)");
+  const s = await db.subscribe("SELECT id, title FROM " + t + " WHERE done = $1 ORDER BY id", [false]);
+  assert.deepEqual(
+    s.columns.map((c) => c.name),
+    ["id", "title"],
+  );
+  assert.deepEqual(s.rows, [[1, "a"]]);
+  assert.deepEqual(s.records(), [{ id: 1, title: "a" }]);
+  const first = s.at;
+  assert.deepEqual(await s.changes(), []);
+  await db.query("INSERT INTO " + t + " VALUES (3, 'c', false)");
+  await db.query("UPDATE " + t + " SET title = 'A' WHERE id = 1");
+  const got = await s.changes(1000);
+  assert.ok(got.some((c) => c.diff === -1 && c.row[1] === "a"));
+  assert.ok(got.some((c) => c.diff === 1 && c.row[1] === "A"));
+  assert.deepEqual(
+    [...s.rows].sort((x, y) => Number(x[0]) - Number(y[0])),
+    [
+      [1, "A"],
+      [3, "c"],
+    ],
+  );
+  assert.ok(s.at > first);
+  await s.close();
+  await assert.rejects(db.query("CHANGES " + s.name), (e: NucleusError) => e.code === "42704");
+  await db.close();
+});
+
+test("a live query wakes on another session's commit", { skip: embedded && "one connection to a database in the process" }, async () => {
+  const db = await connect(options);
+  const w = await connect(options);
+  const t = table();
+  await db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
+  const s = await db.subscribe("SELECT count(*) FROM " + t);
+  assert.equal(Number(s.rows[0][0]), 0);
+  const began = Date.now();
+  setTimeout(() => void w.query("INSERT INTO " + t + " VALUES (1)"), 50);
+  const got = await s.changes(10000);
+  assert.ok(Date.now() - began < 10000);
+  assert.deepEqual(
+    got.map((c) => [c.diff, Number(c.row[0])]),
+    [
+      [-1, 0],
+      [1, 1],
+    ],
+  );
+  await s.close();
+  await w.close();
+  await db.close();
+});
+
 test("a stream's wait wakes on a commit", { skip: embedded && "one connection to a database in the process" }, async () => {
   const db = await connect(options);
   const w = await connect(options);

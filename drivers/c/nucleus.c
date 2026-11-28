@@ -2588,6 +2588,58 @@ static int run_plain(nc_conn *c, const char *sql, const nc_value *params, size_t
     return 0;
 }
 
+nc_result *nc_subscribe(nc_conn *c, const char *name, const char *sql, const nc_value *params, size_t nparams,
+                        nc_error *err) {
+    buf q = {0};
+    nc_result *r;
+    put(&q, "SUBSCRIBE ", 10);
+    put_ident(&q, name);
+    put(&q, " AS ", 4);
+    put(&q, sql, strlen(sql));
+    put(&q, "", 1);
+    if (q.failed) {
+        free(q.b);
+        set_error(err, "", "out of memory");
+        return NULL;
+    }
+    r = nc_query(c, (const char *)q.b, params, nparams, err);
+    free(q.b);
+    return r;
+}
+
+nc_result *nc_changes(nc_conn *c, const char *name, uint32_t timeout_ms, nc_error *err) {
+    buf q = {0};
+    nc_result *r;
+    nc_value wait = nc_int((int64_t)timeout_ms);
+    put(&q, "CHANGES ", 8);
+    put_ident(&q, name);
+    put(&q, " WAIT $1", 9);
+    if (q.failed) {
+        free(q.b);
+        set_error(err, "", "out of memory");
+        return NULL;
+    }
+    r = nc_query(c, (const char *)q.b, &wait, 1, err);
+    free(q.b);
+    return r;
+}
+
+int nc_unsubscribe(nc_conn *c, const char *name, nc_error *err) {
+    buf q = {0};
+    int r;
+    put(&q, "UNSUBSCRIBE ", 12);
+    put_ident(&q, name);
+    put(&q, "", 1);
+    if (q.failed) {
+        free(q.b);
+        set_error(err, "", "out of memory");
+        return -1;
+    }
+    r = run_plain(c, (const char *)q.b, NULL, 0, err);
+    free(q.b);
+    return r;
+}
+
 int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uint32_t limit,
                           uint32_t timeout_ms, nc_stream_work work, void *arg, nc_error *err) {
     buf consume = {0};
@@ -2601,7 +2653,7 @@ int64_t nc_stream_process(nc_conn *c, const char *stream, const char *group, uin
     put(&consume, " LIMIT $1", 10); /* with its NUL */
     if (consume.failed) {
         free(consume.b);
-        set_error(err, "53200", "out of memory");
+        set_error(err, "", "out of memory");
         return -1;
     }
     for (;;) {
@@ -2678,7 +2730,7 @@ int64_t nc_queue_process(nc_conn *c, const char *queue, uint32_t limit, uint32_t
     put_ident(&fail, queue);
     put(&fail, " ATTEMPT $2 ERROR $3", 21);
     if (take.failed || finish.failed || fail.failed) {
-        set_error(err, "53200", "out of memory");
+        set_error(err, "", "out of memory");
         goto done;
     }
     tasks = nc_query(c, (const char *)take.b, NULL, 0, err);

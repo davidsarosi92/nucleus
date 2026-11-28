@@ -2422,3 +2422,82 @@ fn queues_over_the_protocol() {
     let e = c.queue_of("nowhere").take(1, None).unwrap_err();
     assert!(matches!(&e, Error::Server(s) if s.code == "42P01"), "{e:?}");
 }
+
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+fn a_subscription_keeps_its_result_as_commits_change_it() {
+    let addr = start(None);
+    let mut c = Client::connect(config(addr)).unwrap();
+    let mut w = Client::connect(config(addr)).unwrap();
+    c.execute(
+        "CREATE TABLE tasks (id int PRIMARY KEY, title text, done boolean); \
+         INSERT INTO tasks VALUES (1, 'a', false), (2, 'b', true)",
+        &[],
+    )
+    .unwrap();
+    let mut s = c
+        .subscribe(
+            "SELECT id, title FROM tasks WHERE done = $1 ORDER BY id",
+            &[Value::Bool(false)],
+        )
+        .unwrap();
+    assert_eq!(
+        s.columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "title"]
+    );
+    assert_eq!(s.rows(), [vec![Value::Integer(1), Value::Text("a".into())]]);
+    let first = s.at();
+    assert!(s.changes(&mut c, 0).unwrap().is_empty());
+    w.execute("INSERT INTO tasks VALUES (3, 'c', false)", &[])
+        .unwrap();
+    w.execute("UPDATE tasks SET title = 'A' WHERE id = 1", &[])
+        .unwrap();
+    let mut seen = Vec::new();
+    while s.rows().len() != 2 || s.rows().iter().any(|r| r[1] == Value::Text("a".into())) {
+        seen.extend(s.changes(&mut c, 5000).unwrap());
+    }
+    assert!(s.at() > first);
+    let mut rows = s.rows().to_vec();
+    rows.sort_by_key(|r| match r[0] {
+        Value::Integer(n) => n,
+        _ => 0,
+    });
+    assert_eq!(
+        rows,
+        [
+            vec![Value::Integer(1), Value::Text("A".into())],
+            vec![Value::Integer(3), Value::Text("c".into())]
+        ]
+    );
+    assert!(seen.contains(&nucleus_client::Change {
+        diff: -1,
+        row: vec![Value::Integer(1), Value::Text("a".into())]
+    }));
+    // Waiting, then woken by another session's commit.
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            w.execute("UPDATE tasks SET done = true WHERE id = 3", &[])
+                .unwrap();
+        });
+        let t0 = std::time::Instant::now();
+        let got = s.changes(&mut c, 10_000).unwrap();
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(
+            got,
+            [nucleus_client::Change {
+                diff: -1,
+                row: vec![Value::Integer(3), Value::Text("c".into())]
+            }]
+        );
+    });
+    let name = s.name().to_string();
+    s.close(&mut c).unwrap();
+    let Err(Error::Server(e)) = c.execute(&format!("CHANGES {name}"), &[]) else {
+        panic!()
+    };
+    assert_eq!(e.code, "42704");
+}

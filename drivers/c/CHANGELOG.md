@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Live queries (nucleus PLAN.md §M16.6 S3): `nc_subscribe(c, name, sql,
+  params, n, err)`, `nc_changes(c, name, timeout_ms, err)` — results of
+  `(nc_ts, nc_diff, columns...)`, the first result and then each batch of
+  changes, which the caller applies — and `nc_unsubscribe(c, name, err)`.
 - Task queues (nucleus PLAN.md §M16.5 S7): `nc_queue_process(c, queue,
   limit, lease_ms, work, arg, err)`: tasks taken and each done exactly
   once — the work (`nc_task_work`, 0 to finish), `FINISH` and the commit

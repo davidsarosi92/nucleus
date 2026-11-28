@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Live queries (nucleus PLAN.md §M16.6 S3): `conn.subscribe(sql,
+  params)` → `Subscription` — `rows` (the result, kept on this side: the
+  first in the query's order, rows that come appended, rows gone taken
+  out), `records()`, `at` (the batch's commit), `changes(timeout_ms)` (the
+  next batch as `(diff, row)` pairs, applied; `[]` when none came), and
+  `close()`; a context manager.  Embedded too.
 - Task queues (nucleus PLAN.md §M16.5 S7): `conn.queue_of(name)` →
   `QueueOf` — `add(dict)` (its id), `take(limit, lease_ms)` (dicts: id,
   attempt, the columns), `finish(task)`, `fail(task, error,
