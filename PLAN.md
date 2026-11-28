@@ -15171,6 +15171,44 @@ commit that affects it.
       diffs build equals the query at each batch's `ts`;
     - joins, aggregates, `ORDER BY … LIMIT`;
     - privileges revoked, DDL.
+  - *Done (2026-11-28).*
+    - The statements are parsed into `Statement::Subscribe`, `Changes`
+      and `Unsubscribe`. `crates/sql/src/live.rs` holds the session's
+      `Subscriptions`.
+    - Each run gets its own read-only snapshot, under the session's
+      identity and a fresh statement budget. The tables come from
+      `audit::noting`, a nesting-safe version of the privilege checks'
+      notes, and are mapped to their 5-byte key prefixes, partitions
+      included, plus the catalog's watched ranges.
+    - The result is a multiset of rows (`HashMap<Row, i64>`). The diff
+      gives the rows gone first, then the rows come, each sorted by
+      their key encoding.
+    - Found on the way: the first version ran in the session's early
+      match arms, outside `with_who`, so a `SUBSCRIBE` skipped the
+      privilege checks. It now runs under the identity, and tests cover
+      it: a table not granted, a grant revoked, row-level security.
+    - Tests (`crates/sql/tests/live.rs`, 12):
+      - inserts, updates, deletes, and writes elsewhere;
+      - aggregates, joins, derived tables, `ORDER BY … LIMIT` and
+        subqueries;
+      - duplicates;
+      - parameters;
+      - what is refused, and the limits;
+      - a grant revoked and a table dropped;
+      - `SELECT *` after `ADD COLUMN`;
+      - row-level security and a policy changed;
+      - partitions;
+      - a table made again under its name;
+      - a model test: 4 writers, and after each batch the subscriber's
+        result equals `AS OF COMMIT nc_ts`.
+    - Mutation-checked: 17 mutants, all killed. Not checked: the cap on
+      `WAIT` (an hour) and the stopping server, which S5 covers.
+    - Measured (10 000 rows, `CHANGES` after a commit against the query
+      alone): a point read 0.037 / 0.007 ms, a 1% filter 1.0 / 0.6 ms,
+      all rows 8.6 / 2.3 ms. The diff's hashing is the gap, and S4's
+      work.
+    - Views: nucleus has none yet (no `CREATE VIEW`), so a derived table
+      stands in for them.
 - **S3 — every driver.**
   - `subscribe(sql, params)` returns a subscription: its current rows and
     `changes(timeout)` giving the diff batches, with an iterator or a

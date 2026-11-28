@@ -2,6 +2,15 @@
 
 use crate::types::{DataType, Value};
 
+/// `CHANGES … WAIT`'s milliseconds: a number, or a parameter (`$n`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Wait {
+    /// Written in the statement.
+    Ms(u64),
+    /// Parameter `$n` (1-based).
+    Param(usize),
+}
+
 /// A statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
@@ -259,6 +268,26 @@ pub enum Statement {
         /// Whether it is a `RESET`.
         reset: bool,
     },
+    /// `SUBSCRIBE name AS query`: a live query (PLAN.md §M16.6 S2) — its
+    /// first result as `(nc_ts, nc_diff, columns…)`, every row `+1`, and
+    /// the session keeps it for [`Changes`](Statement::Changes).
+    Subscribe {
+        /// The subscription's name, in this session.
+        name: String,
+        /// The query.
+        query: Box<Query>,
+    },
+    /// `CHANGES name [WAIT ms]`: what changed in subscription `name`'s
+    /// result since its last batch, as `(nc_ts, nc_diff, columns…)` —
+    /// waiting up to `ms` for a commit that writes a table it reads.
+    Changes {
+        /// The subscription.
+        name: String,
+        /// `WAIT ms`: a number, or a parameter.
+        wait: Option<Wait>,
+    },
+    /// `UNSUBSCRIBE name` or `UNSUBSCRIBE ALL` (`None`).
+    Unsubscribe(Option<String>),
     /// `TAKE [column, …] FROM queue [LIMIT n] [LEASE interval]`: the next
     /// available tasks, leased (PLAN.md §M16.5 S5).  The expressions as
     /// their text (each a constant or a parameter).

@@ -8297,6 +8297,83 @@ to the columns, a replay from a number and then entries live, gaps by
 `max_entries` and by a retention that trimmed all, refusals that keep
 the connection), `slt/97_streams.slt` (`stream_start`).
 
+### 8.47 Live queries (`live`, §M16.6 S2)
+
+A session subscribes to a query and asks for what changed since:
+
+```sql
+SUBSCRIBE open_tasks AS SELECT id, title FROM tasks WHERE done = false;
+CHANGES open_tasks WAIT 30000;   -- what the commits since changed
+UNSUBSCRIBE open_tasks;          -- or UNSUBSCRIBE ALL
+```
+
+**What they answer.**
+
+- Both statements answer rows of `(nc_ts, nc_diff, columns…)`.
+  `nc_ts` is the commit the batch was read at. `nc_diff` is how many
+  copies of the row came (+n) or went (−n). An update is a −1 and a +1 at
+  the same `nc_ts`. This is Materialize's `SUBSCRIBE` form (`mz_timestamp`,
+  `mz_diff`).
+- `SUBSCRIBE` answers the first result, every row +1, in the query's
+  order. The client keeps the result by applying each batch. Order is the
+  client's to keep; `ORDER BY … LIMIT` still picks which rows are in.
+- `CHANGES name` answers at once: a batch, or no rows.
+- `CHANGES name WAIT ms` (a number or `$n`, at most an hour) waits for a
+  commit that changes the result. While it waits it holds no transaction
+  and no snapshot.
+- Parameters are bound at `SUBSCRIBE`.
+- All three are refused in a transaction block (`25001`).
+
+**How it works.**
+
+- The subscription keeps:
+  - the query and its parameters;
+  - its result, as a multiset of rows;
+  - the snapshot it was read at;
+  - a watch of writes (§M16.6 S1) on the key ranges it read. These are
+    each table its privilege checks looked at, whole, with the table's
+    indexes; a partitioned table's partitions; and the catalog's
+    definitions, which cover DDL, grants and policies.
+- `CHANGES` re-runs the query at a new snapshot once the watch's mark is
+  past the last run's snapshot. It answers the difference between the
+  two multisets, the rows gone first, each part in the rows' key order.
+- A run that changes nothing it answers is no batch: the wait goes on.
+- Each run is made as the session's identity, with its privileges, its
+  row-level security and the subjects' keys it presented. Each run has a
+  statement budget of its own; the wait is not counted.
+- When the tables it reads change (a table dropped and made again under
+  its name), the new ranges are watched from that run on.
+- A run that fails ends the subscription with its error: a privilege
+  revoked (`42501`), a table dropped (`42P01`). So does a run whose
+  columns differ from the first's (`55000`, as `SELECT *` after
+  `ADD COLUMN`).
+
+**What is refused.**
+
+- Functions whose answer changes without a commit (`0A000`): volatile
+  ones (`random()`, `clock_timestamp()`, `nextval`) and the time ones
+  (`now()`, `current_date`, `current_timestamp`, `localtime`,
+  `localtimestamp`, `statement_timestamp`, `transaction_timestamp`),
+  subqueries included.
+
+**Limits.**
+
+- 64 subscriptions per session (`54000`).
+- 10 000 in the database, every session's together (`53400`).
+- 100 000 rows per result (`54000`).
+
+**Cost.** Measured on a table of 10 000 rows, 200 commits each, as a
+`CHANGES` answering after a commit against the query run alone:
+
+| query | `CHANGES` after a commit | the query alone |
+|---|---:|---:|
+| a point read | 0.037 ms | 0.007 ms |
+| a 1% filter | 1.0 ms | 0.6 ms |
+| all 10 000 rows | 8.6 ms | 2.3 ms |
+
+The difference is mostly the diff, which hashes both results. §M16.6 S4
+works on it.
+
 ## 9. Server (`nucleus-server`)
 
 ```

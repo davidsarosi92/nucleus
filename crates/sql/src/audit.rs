@@ -490,6 +490,24 @@ pub fn touched(table: &str) {
     });
 }
 
+/// `f` run noting the tables its checks look at, apart from what the
+/// statement around it notes (which notes them too): those tables (a
+/// live query's, PLAN.md §M16.6 S2).
+pub(crate) fn noting<T>(f: impl FnOnce() -> T) -> (T, BTreeSet<String>) {
+    let outer = TOUCHED.with(|t| t.borrow_mut().replace(BTreeSet::new()));
+    let r = f();
+    let mine = TOUCHED.with(|t| {
+        let mut t = t.borrow_mut();
+        let mine = t.take().unwrap_or_default();
+        *t = outer.map(|mut o| {
+            o.extend(mine.iter().cloned());
+            o
+        });
+        mine
+    });
+    (r, mine)
+}
+
 /// The tables noted so far (none when not noting).
 pub(crate) fn noted() -> BTreeSet<String> {
     TOUCHED.with(|t| t.borrow().clone().unwrap_or_default())

@@ -381,6 +381,8 @@ pub struct Session {
     /// The secrets presented for subjects whose users hold their keys
     /// ([`Session::present_subject_key`]): in memory, until it ends.
     presented: Arc<crate::sealed::Presented>,
+    /// Its live queries (`SUBSCRIBE`; PLAN.md §M16.6 S2).
+    live: crate::live::Subscriptions,
 }
 
 /// A text's statements, each with its own text.
@@ -492,6 +494,7 @@ impl Session {
             parsed: Default::default(),
             normalized: Default::default(),
             presented: Default::default(),
+            live: Default::default(),
         }
     }
 
@@ -1229,6 +1232,49 @@ impl Session {
             Statement::Forget { .. } if self.block.is_some() => Err(Error::active_txn(
                 "FORGET SUBJECT cannot run inside a transaction block",
             )),
+            // Live queries: each run at a snapshot of its own, waits with
+            // no transaction held (PLAN.md §M16.6 S2).
+            Statement::Subscribe { .. } | Statement::Changes { .. } | Statement::Unsubscribe(_)
+                if self.block.is_some() =>
+            {
+                Err(Error::active_txn(
+                    "SUBSCRIBE, CHANGES and UNSUBSCRIBE cannot run inside a transaction block",
+                ))
+            }
+            Statement::Subscribe { .. } | Statement::Changes { .. } | Statement::Unsubscribe(_) => {
+                // As the session's identity (its privileges, its policies,
+                // the subjects' keys it presented), each run under a
+                // statement's budget of its own (not the wait).
+                let mut who = (*self.who).clone();
+                who.settings = self.settings.clone();
+                let who = Arc::new(who);
+                self.charge_rate(&who)?;
+                let presented = Arc::clone(&self.presented);
+                let mut live = std::mem::take(&mut self.live);
+                let this = &*self;
+                let budget = || this.budget(&who);
+                let r = crate::access::with_who(&who, || {
+                    crate::sealed::with_presented(&presented, || {
+                        let ctx = crate::live::Context {
+                            kv: &*this.kv,
+                            reg: &this.registry,
+                            budget: &budget,
+                        };
+                        match stmt {
+                            Statement::Subscribe { name, query } => {
+                                live.subscribe(&ctx, name, query, params)
+                            }
+                            Statement::Changes { name, wait } => {
+                                live.changes(&ctx, name, wait.as_ref(), params)
+                            }
+                            Statement::Unsubscribe(name) => live.unsubscribe(name.as_deref()),
+                            _ => unreachable!(),
+                        }
+                    })
+                });
+                self.live = live;
+                r
+            }
             Statement::Backup { to, full, keep } => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
@@ -1803,6 +1849,10 @@ impl Session {
                 | Statement::Consume { .. }
                 | Statement::Take { .. }
                 | Statement::EndTask { .. }
+                // Live queries: reads.
+                | Statement::Subscribe { .. }
+                | Statement::Changes { .. }
+                | Statement::Unsubscribe(_)
         )
     }
 
@@ -2111,6 +2161,20 @@ impl Session {
                         })
                         .collect(),
                 )
+            }
+            Statement::Subscribe { query, .. } => {
+                let b = binder.query(query)?;
+                let cols: Vec<OutColumn> = b
+                    .scope
+                    .cols
+                    .into_iter()
+                    .map(|c| OutColumn {
+                        name: c.name,
+                        ty: c.ty.unwrap_or(DataType::Text),
+                        not_null: c.not_null,
+                    })
+                    .collect();
+                Some(crate::live::out_columns(&cols))
             }
             Statement::Consume {
                 stream, columns, ..
@@ -2520,6 +2584,12 @@ pub(crate) fn execute_statement(
     crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
     crate::stream::refuse_change(&*txn, stmt)?;
     Ok(match stmt {
+        // The session's own (no transaction of theirs).
+        Statement::Subscribe { .. } | Statement::Changes { .. } | Statement::Unsubscribe(_) => {
+            return Err(Error::active_txn(
+                "SUBSCRIBE, CHANGES and UNSUBSCRIBE run as statements of their own",
+            ));
+        }
         Statement::SetStorage { .. } | Statement::SetStoragePolicy { .. } => {
             return Err(Error::active_txn(
                 "ALTER TABLE … SET STORAGE runs as a statement of its own",

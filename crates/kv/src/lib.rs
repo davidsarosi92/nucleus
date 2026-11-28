@@ -41,7 +41,7 @@ pub use nucleus_storage::scan;
 /// (PLAN.md §M14.30 K3f).
 pub use nucleus_storage::store::RESEAL_BATCH;
 pub use nucleus_txn::mvcc::unescape_onto;
-pub use nucleus_txn::{Chunk, Fill, Isolation, Timestamp, stream_key};
+pub use nucleus_txn::{Chunk, Fill, Isolation, Timestamp, WriteWatch, stream_key};
 
 /// Errors of the KV contract.
 #[derive(Debug)]
@@ -574,6 +574,19 @@ pub trait Kv: Send + Sync {
     fn wait_appended(&self, head: &[u8], after: u64, timeout: Duration) -> Result<u64> {
         let _ = (head, after, timeout);
         Err(Error::Storage("this store has no streams".into()))
+    }
+
+    /// Watches the key ranges `ranges` for commits that write them
+    /// (`nucleus_txn::Engine::watch_writes`; PLAN.md §M16.6): what a live
+    /// query re-runs on.  `None` (the default) from a store that cannot.
+    fn watch_writes(&self, ranges: Vec<(Vec<u8>, Vec<u8>)>) -> Option<WriteWatch> {
+        let _ = ranges;
+        None
+    }
+
+    /// How many [`watch_writes`](Self::watch_writes) watches live.
+    fn write_watches(&self) -> usize {
+        0
     }
 
     /// Erasure (PLAN.md §M14.24 R2): once no snapshot older than now
@@ -1600,6 +1613,14 @@ impl Kv for Database {
 
     fn wait_appended(&self, head: &[u8], after: u64, timeout: Duration) -> Result<u64> {
         Ok(self.engine.wait_appended(head, after, timeout)?)
+    }
+
+    fn watch_writes(&self, ranges: Vec<(Vec<u8>, Vec<u8>)>) -> Option<WriteWatch> {
+        Some(self.engine.watch_writes(ranges))
+    }
+
+    fn write_watches(&self) -> usize {
+        self.engine.write_watches()
     }
 
     fn scrub(&self, ranges: &[(Vec<u8>, Vec<u8>)], wait: Duration) -> Result<Option<Scrub>> {

@@ -41,6 +41,12 @@ use crate::writes::WriteSet;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(pub(crate) u64);
 
+impl From<Timestamp> for u64 {
+    fn from(t: Timestamp) -> u64 {
+        t.0
+    }
+}
+
 impl std::fmt::Display for Timestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)

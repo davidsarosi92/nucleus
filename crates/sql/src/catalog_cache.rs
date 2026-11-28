@@ -26,7 +26,7 @@ use crate::error::Result;
 /// The catalog's key ranges, `[start, end)`: every catalog key but the
 /// counters (ids `00 02`, hidden row ids `00 03`, sequences' values `00
 /// 1F`) and the audit log (`00 12`, `00 13`), which ordinary writes change.
-const WATCHED: [(&[u8], &[u8]); 4] = [
+pub(crate) const WATCHED: [(&[u8], &[u8]); 4] = [
     (&[0x00, 0x00], &[0x00, 0x02]),
     (&[0x00, 0x04], &[0x00, 0x12]),
     // Secrets (`00 14`), models (`00 15`).

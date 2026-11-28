@@ -1054,6 +1054,43 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Describe(Box::new(self.statement()?)))
             }
             "remember" => self.remember(),
+            "subscribe" => {
+                self.pos += 1;
+                let name = self.ident()?;
+                self.expect_kw("as")?;
+                let query = Box::new(self.query()?);
+                Ok(Statement::Subscribe { name, query })
+            }
+            "changes" => {
+                self.pos += 1;
+                let name = self.ident()?;
+                let wait = if self.eat_kw("wait") {
+                    Some(match self.peek().cloned() {
+                        Some(Token::Number(n)) => {
+                            self.pos += 1;
+                            crate::ast::Wait::Ms(n.parse().map_err(|_| {
+                                self.error("WAIT takes milliseconds: a whole number")
+                            })?)
+                        }
+                        Some(Token::Param(n)) => {
+                            self.pos += 1;
+                            crate::ast::Wait::Param(n)
+                        }
+                        _ => return Err(self.error("WAIT takes milliseconds: a number or $n")),
+                    })
+                } else {
+                    None
+                };
+                Ok(Statement::Changes { name, wait })
+            }
+            "unsubscribe" => {
+                self.pos += 1;
+                if self.eat_kw("all") {
+                    Ok(Statement::Unsubscribe(None))
+                } else {
+                    Ok(Statement::Unsubscribe(Some(self.ident()?)))
+                }
+            }
             "take" => {
                 self.pos += 1;
                 let mut columns = Vec::new();
