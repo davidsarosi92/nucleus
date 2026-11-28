@@ -206,6 +206,14 @@ struct Inner {
     /// waking [`Engine::wait_appended`]'s waiters.
     stream_visible: Mutex<HashMap<Vec<u8>, u64>>,
     appended: Condvar,
+    /// The watches of writes ([`Engine::watch_writes`]; PLAN.md §M16.6
+    /// S1), changed under the commit lock (taken first); how many there
+    /// are (a commit looks at it first); and what their waiters wait on,
+    /// woken after a commit that wrote one of their ranges is visible.
+    write_watches: RwLock<Arc<Vec<Arc<WriteSlot>>>>,
+    write_watching: AtomicUsize,
+    written: Mutex<()>,
+    written_cv: Condvar,
     /// How many pairs `mirrors` holds (writes look at it first).
     mirroring: AtomicUsize,
     /// The platform (its clock gives commits their times).
@@ -633,6 +641,81 @@ impl Drop for Mirror {
     }
 }
 
+/// One watch's ranges and its mark: the newest commit that wrote one of
+/// them, as of when it became visible (at first, the newest commit then).
+struct WriteSlot {
+    ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    last: AtomicU64,
+}
+
+/// Commits that write some key ranges, waited on ([`Engine::watch_writes`];
+/// PLAN.md §M16.6 S1) — what a live query re-runs on.  Its ranges are
+/// watched while it lives.
+pub struct WriteWatch {
+    engine: Arc<Inner>,
+    slot: Arc<WriteSlot>,
+}
+
+impl std::fmt::Debug for WriteWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteWatch")
+            .field("ranges", &self.slot.ranges.len())
+            .field("last", &self.last())
+            .finish()
+    }
+}
+
+impl WriteWatch {
+    /// The newest commit known to have written one of its ranges — at
+    /// first, the newest commit when it began (what happened before is
+    /// not known): a snapshot at this timestamp or later sees it.
+    pub fn last(&self) -> Timestamp {
+        Timestamp(self.slot.last.load(Ordering::Acquire))
+    }
+
+    /// Waits until [`last`](Self::last) is past `after` — a snapshot's
+    /// timestamp: something it did not see was written — or `timeout`
+    /// has passed; then [`last`](Self::last).
+    pub fn wait(&self, after: Timestamp, timeout: std::time::Duration) -> Timestamp {
+        let mut guard = lock(&self.engine.written);
+        // Without threads nothing else can commit while this waits
+        // (WebAssembly's single-threaded builds).
+        if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
+            return self.last();
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let last = self.last();
+            let now = std::time::Instant::now();
+            if last > after || now >= deadline {
+                return last;
+            }
+            guard = self
+                .engine
+                .written_cv
+                .wait_timeout(guard, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+impl Drop for WriteWatch {
+    fn drop(&mut self) {
+        let _last = lock(&self.engine.commit);
+        let mut all = write(&self.engine.write_watches);
+        let rest: Vec<_> = all
+            .iter()
+            .filter(|s| !Arc::ptr_eq(s, &self.slot))
+            .cloned()
+            .collect();
+        self.engine
+            .write_watching
+            .store(rest.len(), Ordering::Release);
+        *all = Arc::new(rest);
+    }
+}
+
 /// A database of versioned keys.  Cloning gives another handle to the same
 /// engine.
 #[derive(Clone)]
@@ -723,6 +806,10 @@ impl Engine {
                 stream_last: Mutex::new(HashMap::new()),
                 stream_visible: Mutex::new(HashMap::new()),
                 appended: Condvar::new(),
+                write_watches: RwLock::new(Arc::new(Vec::new())),
+                write_watching: AtomicUsize::new(0),
+                written: Mutex::new(()),
+                written_cv: Condvar::new(),
                 mirroring: AtomicUsize::new(0),
                 platform,
                 last_time: AtomicU64::new(0),
@@ -946,6 +1033,38 @@ impl Engine {
             // What was derived before is not known to be current.
             self.inner.watched_at.fetch_max(*last, Ordering::SeqCst);
         }
+    }
+
+    /// Watches the key ranges `ranges` (each `[start, end)`) for writes
+    /// (PLAN.md §M16.6 S1): from now on, a commit that writes one of them
+    /// — a key, a spilled span, a fresh range, a stream's entries — raises
+    /// the watch's mark once it is visible, waking its waiters.  Its mark
+    /// starts at the newest commit now: whatever a snapshot taken after
+    /// this sees, a commit it did not see marks the watch past the
+    /// snapshot.  A commit pays one atomic read while no watch lives.
+    pub fn watch_writes(&self, ranges: Vec<(Vec<u8>, Vec<u8>)>) -> WriteWatch {
+        let last = lock(&self.inner.commit);
+        let slot = Arc::new(WriteSlot {
+            ranges,
+            last: AtomicU64::new(*last),
+        });
+        let mut all = write(&self.inner.write_watches);
+        let mut list = all.as_ref().clone();
+        list.push(Arc::clone(&slot));
+        self.inner
+            .write_watching
+            .store(list.len(), Ordering::Release);
+        *all = Arc::new(list);
+        WriteWatch {
+            engine: Arc::clone(&self.inner),
+            slot,
+        }
+    }
+
+    /// How many watches of writes ([`watch_writes`](Self::watch_writes))
+    /// live — what a limit on live queries counts.
+    pub fn write_watches(&self) -> usize {
+        self.inner.write_watching.load(Ordering::Acquire)
     }
 
     /// Mirrors writes (PLAN.md §M14.28 L3b): until the returned guard is
@@ -2917,12 +3036,40 @@ impl Transaction {
             return false;
         }
         let watched = read(&self.engine.watched);
-        watched.iter().any(|(s, e)| {
-            let (start, end) = (Bound::Included(s.as_slice()), Bound::Excluded(e.as_slice()));
-            self.writes.range(start, end).next().is_some()
-                || self.spans.overlaps(start, end)
-                || self.fresh.iter().any(|f| f.start < *e && *s < f.end)
-        })
+        watched.iter().any(|(s, e)| self.writes_in(s, e))
+    }
+
+    /// Whether this transaction writes a key in `[s, e)`: one of its
+    /// writes, a span it spilled, a fresh range it loaded.
+    fn writes_in(&self, s: &[u8], e: &[u8]) -> bool {
+        let (start, end) = (Bound::Included(s), Bound::Excluded(e));
+        self.writes.range(start, end).next().is_some()
+            || self.spans.overlaps(start, end)
+            || self
+                .fresh
+                .iter()
+                .any(|f| f.start.as_slice() < e && s < f.end.as_slice())
+    }
+
+    /// The watches of writes ([`Engine::watch_writes`]) whose ranges this
+    /// commit writes — its keys, or what it `appended` to streams.  Under
+    /// the commit lock.
+    fn watches_written(&self, engine: &Inner, appended: &[Appended]) -> Vec<Arc<WriteSlot>> {
+        let all = Arc::clone(&read(&engine.write_watches));
+        let within = |k: &[u8], s: &[u8], e: &[u8]| s <= k && k < e;
+        all.iter()
+            .filter(|w| {
+                w.ranges.iter().any(|(s, e)| {
+                    self.writes_in(s, e)
+                        || appended.iter().any(|a| {
+                            within(&a.head, s, e)
+                                || (stream_key(&a.entries, a.first).as_slice() < e.as_slice()
+                                    && s.as_slice() <= stream_key(&a.entries, a.last).as_slice())
+                        })
+                })
+            })
+            .cloned()
+            .collect()
     }
 
     /// The value of `key` in this transaction (its own writes included).
@@ -3622,7 +3769,7 @@ impl Transaction {
         }
         let spilled = self.spilled;
         engine.refresh_time_floor()?;
-        let (ts, lsn, appended) = {
+        let (ts, lsn, appended, hit) = {
             let mut last = lock(&engine.commit);
             let wm = engine.current_watermark();
             let mut ops = Vec::with_capacity(self.writes.len() + 1);
@@ -3677,6 +3824,11 @@ impl Transaction {
             // The appends: each its stream's next number, and the
             // stream's head the last one given.
             let appended = engine.number_appends(&self.appends, *last, ts, &mut ops)?;
+            let hit = if engine.write_watching.load(Ordering::Acquire) == 0 {
+                Vec::new()
+            } else {
+                self.watches_written(&engine, &appended)
+            };
             for (key, value) in self.writes.iter() {
                 if let Some(id) = spilled
                     && self
@@ -3769,10 +3921,19 @@ impl Transaction {
                 recent.prune(oldest);
             }
             drop(recent);
-            (ts, lsn, appended)
+            (ts, lsn, appended, hit)
         };
         engine.store.wait_durable(lsn)?;
         engine.visible.fetch_max(ts, Ordering::AcqRel);
+        if !hit.is_empty() {
+            for w in &hit {
+                w.last.fetch_max(ts, Ordering::AcqRel);
+            }
+            // Taken between a waiter's look at its mark and its wait:
+            // the wake-up is not lost.
+            drop(lock(&engine.written));
+            engine.written_cv.notify_all();
+        }
         if !appended.is_empty() {
             let mut visible = lock(&engine.stream_visible);
             for a in appended {

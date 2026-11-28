@@ -15078,12 +15078,119 @@ pgmq / River (leases, visibility, dead letters).
 ### §M16.6 — Live queries ⬜
 
 A client subscribes to a query and receives its changes after every
-commit that affects it — built on the changefeeds (§M16.5).
+commit that affects it.
 
-- `ncp` subscription messages; driver APIs (`subscribe(sql, params)` →
-  initial rows, then inserts / updates / deletes).
-- Incremental maintenance where the plan allows (filters, projections,
-  joins on keys), re-evaluation otherwise; a limit on subscriptions.
+**Study (2026-11-28).**
+
+- *What exists.* Commits already tell waiters about streams:
+  `Engine::wait_appended` uses a condition variable raised after a commit
+  is visible (§M16.5 S4). Watched ranges (`Engine::watch`,
+  `wrote_watched`) raise a mark when a commit writes them. That is how
+  the catalog cache knows its copy is stale. The privilege checks note
+  every table a statement reads (`audit::touched`). A table's keys are all
+  under its prefix, so "a commit wrote this table" is one range check.
+- *Prior art.*
+  - Convex: invalidation by a query's read set. A query is re-run when a
+    commit writes what it read.
+  - Hasura: many subscribers multiplexed onto one query, and the result
+    polled and compared.
+  - Meteor's oplog tailing: a query is re-run when a write matches it.
+  - RethinkDB changefeeds: `old_val` / `new_val` pairs.
+  - Materialize and RisingWave `SUBSCRIBE`: a stream of
+    `(timestamp, diff, row…)`, where `diff` is +n or −n, so updates are a
+    −1 and a +1 at the same timestamp.
+  - DBSP / differential dataflow and pg_ivm: incremental view maintenance
+    by the change of each operator.
+- *Choice.*
+  - Invalidation by the tables a query reads, at commit time, and then
+    re-running the query and diffing the result. This works for every
+    query nucleus can run: joins, aggregates, vector and text search.
+  - Incremental maintenance comes later and only where it is measured to
+    be cheaper (S4).
+  - The answer is Materialize's form: rows of `(ts, diff, columns…)`,
+    each batch at one snapshot. The client keeps the current result by
+    applying the diffs. Order is the client's to keep, as in Materialize:
+    the first batch comes in the query's order, and `ORDER BY … LIMIT`
+    still picks which rows are in the result.
+  - It uses no wire message of its own: `SUBSCRIBE` and `CHANGES` are SQL
+    statements, so every driver and the HTTP and WebSocket transports
+    (D19) carry it as they are. Waiting happens at session level and
+    holds no transaction, as `wait_stream` does.
+
+**Steps.**
+
+- **S1 — commits that wrote a table, waited on.**
+  - `Engine::wait_written(prefixes, after, timeout)` returns the newest
+    timestamp of a visible commit that wrote under one of the prefixes.
+  - It is kept per registered prefix and raised after the commit is
+    visible, with a condition variable. With no prefix registered it costs
+    nothing: one atomic read on the commit path.
+  - Writes, spans, fresh ranges and mirrored writes all count.
+  - Tests: threads, mutation-checked. Measured: commit latency with and
+    without 100 registered prefixes.
+  - *Done (2026-11-28).*
+    - `Engine::watch_writes(ranges)` returns a `WriteWatch`, and
+      `Engine::write_watches()` counts the live ones.
+    - The mark is a `Timestamp`, and `WriteWatch::wait(after, timeout)`
+      returns it once it is past `after`.
+    - The watch registers under the commit lock, and its mark starts at
+      the newest assigned commit. So a commit that was assigned but not
+      yet visible when the watch began is never missed: a reader at a
+      snapshot S waits for a mark past S.
+    - The commit checks the watches only when one is registered: its
+      writes, spilled spans, fresh ranges and stream appends. It raises
+      the matching marks after the commit is visible, and wakes waiters
+      under a mutex they check their mark under.
+    - `Transaction::writes_in` is shared with the catalog's
+      `wrote_watched`.
+    - Tests (`crates/txn/tests/write_watch.rs`): ranges and their ends;
+      several watches; appends; a spilled transaction; a fresh range; a
+      waiter woken by a commit and not before; a reader led by its watch
+      under 4 writers missing no commit. Mutation-checked (9 mutants, all
+      killed).
+    - Measured (single-row commits, ABBA, 20 000 each): on SimPlatform,
+      with no fsync, ≈17.2 µs with no watch and ≈18.0 µs with 100
+      watches (+0.8 µs). On a real disk ≈150 µs, where the difference is
+      within noise.
+- **S2 — `SUBSCRIBE` and `CHANGES` in SQL.**
+  - `SUBSCRIBE name AS <query>` (with parameters) answers the first
+    result as `(ts, diff, columns…)` with every diff +1.
+  - `CHANGES name [WAIT ms]` returns the diffs since the last batch, or
+    waits up to `ms` for a commit to a table the query reads, at most an
+    hour. Outside a transaction only.
+  - `UNSUBSCRIBE name | ALL`.
+  - The query is re-run at a new snapshot and diffed against the
+    session's copy of the result, a multiset of rows by hash.
+  - Privileges and row-level security are checked at each run. A table
+    dropped or altered ends the subscription with an error.
+  - Volatile functions are refused (`now()`, `random()`, sequences).
+  - Limits: subscriptions per session and in the server, and rows kept
+    per subscription.
+  - Tests:
+    - a model test: concurrent writers, and the result a subscriber's
+      diffs build equals the query at each batch's `ts`;
+    - joins, aggregates, `ORDER BY … LIMIT`;
+    - privileges revoked, DDL.
+- **S3 — every driver.**
+  - `subscribe(sql, params)` returns a subscription: its current rows and
+    `changes(timeout)` giving the diff batches, with an iterator or a
+    callback where the language has one.
+  - Rust client, Python, JS (Node, browser, WebSocket), Java, C, C++,
+    Swift. Embedded editions too.
+  - Tests in each; the `nucleus sql` shell's `\watch`-like use.
+- **S4 — less work per commit, measured.**
+  - Skip a re-run when no commit touched the query's tables (from S1).
+  - One run shared by subscriptions to the same query and parameters
+    (Hasura's multiplexing).
+  - For a query over one table with filters and a projection, apply only
+    the commit's written keys of that table instead of re-running it.
+  - Each kept only if measured faster (A/B), against re-running.
+- **S5 — under crashes and kills; done.**
+  - A killed server: clients re-subscribe and get the full result again.
+  - Writers under load, with no batch lost or doubled.
+  - `examples/` (a live dashboard, an agent watching a task table).
+  - DOCS, driver READMEs and CHANGELOGs, benchmarks (latency from commit
+    to delivered diff, cost per commit with N subscribers).
 
 **Done when:** subscribers see exactly the query's result after each
 commit, under concurrent writes, in every driver.

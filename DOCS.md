@@ -1473,6 +1473,25 @@ sees its mark, so what a reader derived from the watched keys at `at`
 (the SQL layer's catalog, §8.2) holds for every transaction that answers
 yes.
 
+**Watches of writes** (§M16.6 S1; what live queries re-run on).
+
+- `Engine::watch_writes(ranges)` returns a `WriteWatch` that has a mark
+  of its own. The mark is the timestamp of the newest commit that wrote
+  into one of its ranges. Writes in memory, spilled spans, fresh ranges
+  and stream appends all count.
+- A watch begins under the commit lock with its mark at the newest
+  commit assigned then. So a reader that read at a snapshot S, then
+  waits with `WriteWatch::wait(S, timeout)` until the mark is past S,
+  misses no commit it did not see.
+- A commit looks at the watches only while one lives (one atomic read
+  otherwise). It raises the marks of those it wrote into after it is
+  visible, then wakes the waiters under the mutex they check their
+  marks under.
+- With 100 watches a single-row commit takes ≈0.8 µs more on the
+  in-memory platform. On a real disk the difference is within fsync's
+  noise.
+- `Engine::write_watches()` counts the live watches.
+
 Errors: `Storage`, `Conflict { key }`, `SnapshotTooOld`, `ReadOnly`,
 `KeyTooLarge`, `Corrupt`; `is_retryable()`.
 
