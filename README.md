@@ -267,8 +267,13 @@ every driver (`db.collection("people").find(…)`) and the shell
 tables numbered by the commit (`CREATE STREAM`, consumer groups whose
 position moves in the consumer's transaction — exactly once) and
 changefeeds (`CREATE CHANGEFEED f ON t`: every committed change of a
-table, in commit order, appended in the writing transaction).  Then task
-queues, live queries and sync (§F2).  See
+table, in commit order, appended in the writing transaction), every
+driver consuming them (`stream_of(name).process(group, work)`: a batch
+and its work committed together) and waiting without a transaction
+held, and task queues (`CREATE QUEUE`: `TAKE` leases the next task by
+priority, `FINISH TASK` in the work's transaction does it once, `FAIL
+TASK` retries with backoff or moves it to dead letters).  Then live
+queries and sync (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 

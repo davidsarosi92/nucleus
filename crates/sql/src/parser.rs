@@ -1054,6 +1054,62 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Describe(Box::new(self.statement()?)))
             }
             "remember" => self.remember(),
+            "take" => {
+                self.pos += 1;
+                let mut columns = Vec::new();
+                if !self.eat_op("*") && !self.peek_kw("from") {
+                    columns = self.name_list()?;
+                }
+                self.expect_kw("from")?;
+                let queue = self.relation()?;
+                let mut limit = None;
+                let mut lease = None;
+                loop {
+                    if limit.is_none() && self.eat_kw("limit") {
+                        limit = Some(self.text_of(|p| p.expr())?.1);
+                    } else if lease.is_none() && self.eat_kw("lease") {
+                        lease = Some(self.text_of(|p| p.expr())?.1);
+                    } else {
+                        break;
+                    }
+                }
+                Ok(Statement::Take {
+                    columns,
+                    queue,
+                    limit,
+                    lease,
+                })
+            }
+            "finish" | "fail" if self.peek_at(1).is_some_and(|t| t.is("task")) => {
+                let fail = self.peek_kw("fail");
+                self.pos += 2;
+                let id = self.text_of(|p| p.expr())?.1;
+                self.expect_kw("of")?;
+                let queue = self.relation()?;
+                self.expect_kw("attempt")?;
+                let attempt = self.text_of(|p| p.expr())?.1;
+                let mut error = None;
+                let mut retry_after = None;
+                if fail {
+                    loop {
+                        if error.is_none() && self.eat_kw("error") {
+                            error = Some(self.text_of(|p| p.expr())?.1);
+                        } else if retry_after.is_none() && self.eat_kws(&["retry", "after"]) {
+                            retry_after = Some(self.text_of(|p| p.expr())?.1);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Ok(Statement::EndTask {
+                    fail,
+                    queue,
+                    id,
+                    attempt,
+                    error,
+                    retry_after,
+                })
+            }
             "consume" => {
                 self.pos += 1;
                 let mut columns = Vec::new();
@@ -1717,7 +1773,11 @@ impl<'a> Parser<'a> {
                 options,
             });
         }
-        if self.eat_kw("stream") {
+        if self.peek_kw("stream") || self.peek_kw("queue") {
+            let queue = self.eat_kw("queue");
+            if !queue {
+                self.expect_kw("stream")?;
+            }
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.relation()?;
             let mut columns = Vec::new();
@@ -1741,6 +1801,15 @@ impl<'a> Parser<'a> {
                 self.expect_op(")")?;
             }
             let options = self.table_options()?;
+            if queue {
+                return Ok(Statement::CreateQueue {
+                    name,
+                    columns,
+                    constraints,
+                    if_not_exists,
+                    options,
+                });
+            }
             return Ok(Statement::CreateStream {
                 name,
                 columns,
@@ -2428,6 +2497,14 @@ impl<'a> Parser<'a> {
             }
             return Ok(Statement::DropStream { names, if_exists });
         }
+        if self.eat_kw("queue") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let mut names = vec![self.relation()?];
+            while self.eat_op(",") {
+                names.push(self.relation()?);
+            }
+            return Ok(Statement::DropQueue { names, if_exists });
+        }
         if self.eat_kw("changefeed") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let mut names = vec![self.relation()?];
@@ -2903,6 +2980,26 @@ impl<'a> Parser<'a> {
                 AlterStream::DropGroup(self.ident()?)
             };
             return Ok(Statement::AlterStream { name, action });
+        }
+        if self.eat_kw("queue") {
+            let name = self.relation()?;
+            if self.eat_kw("set") {
+                let set = self.option_list()?;
+                return Ok(Statement::AlterQueue {
+                    name,
+                    set,
+                    reset: false,
+                });
+            }
+            self.expect_kw("reset")?;
+            self.expect_op("(")?;
+            let keys = self.name_list()?;
+            self.expect_op(")")?;
+            return Ok(Statement::AlterQueue {
+                name,
+                set: keys.into_iter().map(|k| (k, String::new())).collect(),
+                reset: true,
+            });
         }
         if self.eat_kw("collection") {
             let name = self.relation()?;

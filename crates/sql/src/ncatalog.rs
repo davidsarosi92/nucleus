@@ -13,7 +13,8 @@
 //! | `nc_catalog.schemas` | schema (of the session's registry) |
 //! | `nc_catalog.tables` | table |
 //! | `nc_catalog.collections` | collection (`CREATE COLLECTION`), its JSON Schema |
-//! | `nc_catalog.streams` | stream (`CREATE STREAM`, `CREATE CHANGEFEED`): its retention, last `seq` and its time, the table a changefeed follows |
+//! | `nc_catalog.streams` | stream (`CREATE STREAM`, `CREATE CHANGEFEED`): its retention, last `seq` and its time, the table a changefeed follows, the queue whose dead letters it keeps |
+//! | `nc_catalog.queues` | task queue (`CREATE QUEUE`): its dead letters' stream, lease, attempts, backoff |
 //! | `nc_catalog.consumers` | consumer group of a stream: its position and how far behind it is |
 //! | `nc_catalog.columns` | column |
 //! | `nc_catalog.indexes` | index (the primary index is index 0) |
@@ -411,6 +412,20 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("last_time", DataType::TimestampTz),
             ("engine", T),
             ("changefeed_of", T),
+            ("queue_of", T),
+        ],
+    ),
+    (
+        "queues",
+        &[
+            ("name", T),
+            ("owner", T),
+            ("dead_letter", T),
+            ("lease", DataType::Interval),
+            ("max_attempts", I),
+            ("backoff", DataType::Interval),
+            ("max_backoff", DataType::Interval),
+            ("engine", T),
         ],
     ),
     (
@@ -1109,6 +1124,27 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     at.map_or(Value::Null, Value::TimestampTz),
                     text(t.engine.name().to_string()),
                     crate::changefeed::source_of(txn, t)?.map_or(Value::Null, text),
+                    match spec.queue {
+                        Some(id) => crate::changefeed::table_by_id(txn, id)?
+                            .map_or(Value::Null, |q| text(q.name)),
+                        None => Value::Null,
+                    },
+                ]);
+            }
+        }
+        "queues" => {
+            for t in &tables {
+                let Some(spec) = &t.queue else { continue };
+                let dead = crate::changefeed::table_by_id(txn, spec.dead)?;
+                out.push(vec![
+                    text(t.name.clone()),
+                    t.owner.clone().map_or(Value::Null, text),
+                    dead.map_or(Value::Null, |d| text(d.name)),
+                    Value::Interval(spec.lease),
+                    Value::Int(i64::from(spec.max_attempts)),
+                    Value::Interval(spec.backoff),
+                    Value::Interval(spec.max_backoff),
+                    text(t.engine.name().to_string()),
                 ]);
             }
         }

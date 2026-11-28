@@ -277,6 +277,8 @@ pub fn command_tag(stmt: &Statement, out: &Output) -> String {
             Statement::Delete { .. } => format!("DELETE {}", rows.len()),
             Statement::Show(_) => "SHOW".into(),
             Statement::Explain(..) => "EXPLAIN".into(),
+            Statement::Take { .. } => format!("TAKE {}", rows.len()),
+            Statement::EndTask { .. } => "FAIL 1".into(),
             _ => format!("SELECT {}", rows.len()),
         },
     }
@@ -1797,6 +1799,10 @@ impl Session {
                 | Statement::Set { .. }
                 | Statement::Reset(_)
                 | Statement::SetRole(_)
+                // A stream's and a queue's reads and writes: data's.
+                | Statement::Consume { .. }
+                | Statement::Take { .. }
+                | Statement::EndTask { .. }
         )
     }
 
@@ -1928,6 +1934,8 @@ impl Session {
             let now = crate::datetime::from_system(self.kv.wall_clock());
             let who = crate::access::current();
             let mut apart = None;
+            // (A `TAKE` run again after a conflict spreads its choice.)
+            crate::queue::set_retry(attempt);
             let r = self.check_format(txn.as_mut()).and_then(|()| {
                 crate::datetime::with_now(now, &self.kv, || {
                     crate::catalog_cache::with_text(stmt, text, || {
@@ -2107,6 +2115,10 @@ impl Session {
             Statement::Consume {
                 stream, columns, ..
             } => Some(crate::stream::columns(txn, stream, columns)?),
+            Statement::Take { queue, columns, .. } => {
+                Some(crate::queue::take_columns(txn, queue, columns)?)
+            }
+            Statement::EndTask { fail: true, .. } => Some(crate::queue::fail_columns()),
             Statement::Lint(_) => Some(columns_of(
                 ["rule", "place", "finding", "fix"].map(|c| (c.to_string(), Some(DataType::Text))),
             )),
@@ -3117,6 +3129,88 @@ pub(crate) fn execute_statement(
             crate::stream::alter(txn, name, action)?;
             Output::Command("ALTER STREAM".into())
         }
+        Statement::CreateQueue {
+            name,
+            columns,
+            constraints,
+            if_not_exists,
+            options,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE QUEUE".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            crate::queue::create(txn, reg, name, columns, constraints, options)?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
+            Output::Command("CREATE QUEUE".into())
+        }
+        Statement::DropQueue { names, if_exists } => {
+            let mut there = Vec::new();
+            for name in names {
+                match catalog::get_table(&*txn, name)? {
+                    None if *if_exists => {}
+                    None => {
+                        return Err(Error::undefined_table(format!(
+                            "queue \"{name}\" does not exist"
+                        )));
+                    }
+                    Some(_) => {
+                        crate::queue::of(&*txn, name)?;
+                        there.push(name.clone());
+                    }
+                }
+            }
+            if !there.is_empty() {
+                let drop = Statement::DropTable {
+                    names: there,
+                    if_exists: false,
+                    cascade: false,
+                };
+                execute_statement(txn, reg, &drop, params, sink)?;
+            }
+            Output::Command("DROP QUEUE".into())
+        }
+        Statement::AlterQueue { name, set, reset } => {
+            crate::queue::alter(txn, name, set, *reset)?;
+            Output::Command("ALTER QUEUE".into())
+        }
+        Statement::Take {
+            columns,
+            queue,
+            limit,
+            lease,
+        } => crate::queue::take(
+            txn,
+            reg,
+            queue,
+            columns,
+            limit.as_deref(),
+            lease.as_deref(),
+            params,
+        )?,
+        Statement::EndTask {
+            fail,
+            queue,
+            id,
+            attempt,
+            error,
+            retry_after,
+        } => crate::queue::end(
+            txn,
+            reg,
+            *fail,
+            queue,
+            id,
+            attempt,
+            error.as_deref(),
+            retry_after.as_deref(),
+            params,
+        )?,
         Statement::Consume {
             columns,
             stream,
@@ -3288,7 +3382,9 @@ pub(crate) fn execute_statement(
                         checker.require_owner(&*txn, crate::privileges::Kind::Table, name)?;
                         // Its changefeeds (with CASCADE) first; a feed
                         // leaves its table's list.
-                        let feeds = crate::changefeed::on_drop(txn, &t, names, *cascade)?;
+                        let mut feeds = crate::changefeed::on_drop(txn, &t, names, *cascade)?;
+                        // A queue's dead letters go with it.
+                        feeds.extend(crate::queue::on_drop(txn, &t, names)?);
                         if !feeds.is_empty() {
                             let drop = Statement::DropTable {
                                 names: feeds,
@@ -4832,6 +4928,7 @@ pub(crate) fn create_table(
         collection: false,
         stream: None,
         changefeeds: Vec::new(),
+        queue: None,
         engine: opts.engine,
         relative_directory: true,
     };

@@ -785,7 +785,8 @@ fn same_rows(plan: Plan) -> Plan {
 /// order already; ties, in a stable sort in input order, are too.  Once
 /// the whole key is ordered on, the keys after it are (it is unique).
 /// (PostgreSQL's pathkeys, an index scan for an ordering; DuckDB's and
-/// Umbra's order properties.)
+/// Umbra's order properties.)  A secondary B-tree index's range is read
+/// in its entries' order too: its columns, then the primary key's.
 fn sorted(plan: Plan) -> Plan {
     match map_children(plan, &sorted) {
         Plan::Sort { input, keys } if provides(&input, &keys) => *input,
@@ -835,11 +836,44 @@ fn key_order(plan: &Plan) -> Option<(Vec<usize>, bool)> {
                         | T::TimestampTz
                 )
             };
-            (primary
-                && table.partition_by.is_none()
+            let keyed = table.partition_by.is_none()
                 && !table.primary_key.is_empty()
-                && table.primary_key.iter().all(ordered))
-            .then(|| (table.primary_key.clone(), true))
+                && table.primary_key.iter().all(ordered);
+            if primary {
+                return keyed.then(|| (table.primary_key.clone(), true));
+            }
+            // A B-tree's range: its entries' order — the index's columns,
+            // then (a plain index's ties) the primary key's — when each is
+            // never NULL (a NULL's key sorts first, `ORDER BY`'s last) and
+            // indexed by its own value.
+            let Access::Key { index: Some(i), .. } = access else {
+                return None;
+            };
+            let ix = &table.indexes[*i];
+            let plain = ix.method.is_none()
+                && !ix.has_exprs()
+                && ix.orderings.iter().all(Option::is_none)
+                && table.partition_by.is_none()
+                && ix
+                    .columns
+                    .iter()
+                    .all(|c| ordered(c) && !table.columns[*c].nullable);
+            if !plain {
+                return None;
+            }
+            let mut order = ix.columns.clone();
+            if ix.unique {
+                return Some((order, true));
+            }
+            if !keyed {
+                return Some((order, false));
+            }
+            for c in &table.primary_key {
+                if !order.contains(c) {
+                    order.push(*c);
+                }
+            }
+            Some((order, true))
         }
         Plan::Filter { input, .. } | Plan::Secure { input, .. } => key_order(input),
         Plan::Project { input, exprs } => {

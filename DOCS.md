@@ -8073,6 +8073,102 @@ same transaction, replayed onto the copy in `seq` order gives the table
 — row, column and LSM storage, three seeds each; a write between the
 feed's snapshot and its commit fails the commit).
 
+### 8.45 Task queues (`queue`, §M16.5 S5)
+
+A queue is a table of tasks that workers take under a lease, finish in
+the transaction of their work, and fail into a retry with backoff or,
+past their attempts, into a stream of dead letters:
+
+```sql
+CREATE QUEUE jobs (kind TEXT NOT NULL, payload JSON, UNIQUE (kind, payload))
+  WITH (lease = '2 minutes', max_attempts = 5, backoff = '1 second', max_backoff = '1 hour');
+INSERT INTO jobs (kind, payload) VALUES ('resize', '{"image": 42}');
+INSERT INTO jobs (kind, priority, available_at) VALUES ('report', 5, now() + interval '1 hour');
+TAKE kind, payload FROM jobs LIMIT 10;          -- id, attempt, kind, payload
+BEGIN;
+INSERT INTO thumbnails VALUES (42, …);          -- the work
+FINISH TASK 1 OF jobs ATTEMPT 1;                -- done with it, exactly once
+COMMIT;
+FAIL TASK 2 OF jobs ATTEMPT 1 ERROR 'timeout';  -- retry | dead, available_at
+SELECT task_id, attempts, error, kind FROM jobs_dead;
+```
+
+- **Its table:** the queue's own columns first — `id` (its key, an
+  identity: `INSERT` leaves it to the queue), `priority` (`integer`,
+  lower first, 0 by default), `available_at` (when it may be taken: a
+  delay is a later one; `now()` by default), `attempts` (how many times
+  it was taken), `taken_at` (while taken), `last_error` — then the
+  columns given, with their constraints (a `UNIQUE` one makes an
+  idempotency key); an index `<q>_ready` on `(priority, available_at,
+  id)`.  It is a table otherwise: `INSERT` adds tasks, `UPDATE`
+  reschedules or reprioritizes them, `DELETE` cancels them, `SELECT`
+  sees them.  `WITH`: `lease` (30 s), `max_attempts` (5), `backoff` (1
+  s), `max_backoff` (1 h), `dead_letter` (the stream's name, `<q>_dead`),
+  `engine`; `ALTER QUEUE q SET (…) | RESET (…)` changes the first four.
+- **Taking:** `TAKE [columns] FROM q [LIMIT n] [LEASE interval]` (1 task,
+  the queue's lease by default) returns `id`, `attempt` and the columns
+  (by default the queue's columns after its own) of the next available
+  tasks — `available_at <= now()`, lower `priority` first, then earlier
+  `available_at`, then `id` — and leases them: `attempts` counted,
+  `taken_at` set, `available_at` moved past the lease (SQS's visibility
+  timeout).  An expired lease makes the task available again with no
+  sweeper; a task whose last attempt's lease ran out is moved to the
+  dead letters by the take that finds it.  Alone, a `TAKE` is a short
+  transaction of its own, retried on a conflict as every statement; in
+  a transaction block, its leases commit with the block.  It reads one
+  priority at a time (a skip scan over `<q>_ready`: the next priority,
+  then its ready tasks as a range), so tasks delayed or leased at one
+  priority cost the others nothing, and takes the head in order; run
+  again after a conflict (another taker took the same task) it chooses
+  at random among four times as many as it takes, twice as many after
+  each further conflict, so competing takers part — under contention
+  the order within a priority is roughly first in, first out.
+- **Finishing:** `FINISH TASK id OF q ATTEMPT n` deletes the task, in the
+  transaction of the work, if attempt `n` holds it; otherwise `55000`
+  (finished, cancelled or a dead letter; failed; or taken again by a
+  later attempt after its lease ran out).  A worker whose lease ran out
+  while it worked, the task taken again by another, finds the task
+  changed after its snapshot: its finish or its commit fails (`40001`),
+  and the work's effects with it — the work is committed once, by
+  whoever finishes.
+- **Failing:** `FAIL TASK id OF q ATTEMPT n [ERROR text] [RETRY AFTER
+  interval]` returns `outcome` and `available_at`: `retry` — the task
+  available again after `RETRY AFTER`, or the backoff, `backoff ·
+  2^(n − 1)` at most `max_backoff`, its `last_error` kept — or, on
+  attempt `max_attempts`, `dead`: the task moved to its dead letters.
+- **Dead letters:** a stream (§8.43) of `task_id`, `attempts`, `error`,
+  `priority` and the queue's columns (those it had when it was made),
+  appended by the queue itself (no privilege on the stream needed);
+  consumed, waited on and retained as any stream.
+  `nc_catalog.streams.queue_of` names its queue.
+- **Privileges:** `TAKE`, `FINISH` and `FAIL` run statements over the
+  queue's table, with their privileges and its row policies: `SELECT`
+  and `UPDATE` to take or fail a task, `DELETE` to finish it or move it
+  to the dead letters.  The audit log counts them, as `CONSUME`, among
+  data statements.
+- **Dropped:** `DROP QUEUE q` (or `DROP TABLE q`) drops its dead letters
+  too; the dead letters alone are refused (`2BP01`).  `nucleus dump
+  --schema` writes `CREATE QUEUE q (…) WITH (…)`; `nc_catalog.queues`
+  lists queues and their settings; `ncsql`'s `\d q` says "Queue".
+
+The planner reads a secondary B-tree index's range in its entries'
+order — its columns, then the primary key's — so an `ORDER BY` they
+satisfy needs no sort when the index's columns are never `NULL` (a
+`NULL`'s key sorts first, `ORDER BY`'s last) and indexed by their own
+value (`optimizer::key_order`); `TAKE`'s reads are such.
+
+Tests: `slt/99_queues.slt` (taking by priority and delay, leases,
+finishing in a transaction rolled back and committed, refusals, the
+backoff doubling, `RETRY AFTER`, dead letters by failing and by an
+expired last lease, a window full of them, a column added since,
+settings, dropping, a secondary index's order with `NULL`s, an
+expression, ties and no primary key; every storage path), `crates/sql/tests/queues.rs` (four workers competing
+for 200 tasks of three priorities, some failing once: every task's
+work committed exactly once; a lost lease's work refused at its finish
+or commit; a crashed worker's task back after its lease, then a dead
+letter, across a reopening; a take past 200 000 delayed and leased
+tasks).
+
 ## 9. Server (`nucleus-server`)
 
 ```

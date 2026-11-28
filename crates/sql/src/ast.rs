@@ -228,6 +228,68 @@ pub enum Statement {
         /// `LIMIT n` (100 by default).
         limit: Option<Expr>,
     },
+    /// `CREATE QUEUE [IF NOT EXISTS] name (columns, constraints) [WITH
+    /// (lease = …, max_attempts = n, backoff = …, max_backoff = …,
+    /// dead_letter = name, engine = …)]`: a task queue (PLAN.md §M16.5 S5).
+    CreateQueue {
+        /// The queue.
+        name: String,
+        /// Its columns after its own.
+        columns: Vec<ColumnSpec>,
+        /// Its constraints.
+        constraints: Vec<TableConstraint>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// `WITH (…)`.
+        options: Vec<(String, String)>,
+    },
+    /// `DROP QUEUE [IF EXISTS] name, …`: with its dead letters.
+    DropQueue {
+        /// The queues.
+        names: Vec<String>,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
+    /// `ALTER QUEUE name SET (…) | RESET (…)`.
+    AlterQueue {
+        /// The queue.
+        name: String,
+        /// `SET (key = value, …)`, or `RESET (key, …)` (values empty).
+        set: Vec<(String, String)>,
+        /// Whether it is a `RESET`.
+        reset: bool,
+    },
+    /// `TAKE [column, …] FROM queue [LIMIT n] [LEASE interval]`: the next
+    /// available tasks, leased (PLAN.md §M16.5 S5).  The expressions as
+    /// their text (each a constant or a parameter).
+    Take {
+        /// The columns returned after `id` and `attempt` (empty: the
+        /// queue's own).
+        columns: Vec<String>,
+        /// The queue.
+        queue: String,
+        /// `LIMIT n` (1 by default).
+        limit: Option<String>,
+        /// `LEASE interval` (the queue's by default).
+        lease: Option<String>,
+    },
+    /// `FINISH TASK id OF queue ATTEMPT n` (a delete, in the work's
+    /// transaction) or `FAIL TASK id OF queue ATTEMPT n [ERROR text]
+    /// [RETRY AFTER interval]`.  The expressions as their text.
+    EndTask {
+        /// `FAIL` (else `FINISH`).
+        fail: bool,
+        /// The queue.
+        queue: String,
+        /// The task's id.
+        id: String,
+        /// The attempt the taker holds.
+        attempt: String,
+        /// `ERROR text`.
+        error: Option<String>,
+        /// `RETRY AFTER interval`.
+        retry_after: Option<String>,
+    },
     /// `DROP COLLECTION [IF EXISTS] name, … [CASCADE | RESTRICT]`.
     DropCollection {
         /// The collections.

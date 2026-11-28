@@ -181,6 +181,9 @@ enum Shape {
     Chunks,
     Collection,
     Stream,
+    Queue,
+    /// A queue's dead letters: its `CREATE QUEUE` makes them.
+    DeadLetters,
 }
 
 fn shape(t: &Table) -> Shape {
@@ -192,6 +195,10 @@ fn shape(t: &Table) -> Shape {
         Shape::Chunks
     } else if t.collection {
         Shape::Collection
+    } else if crate::queue::is_queue(t) {
+        Shape::Queue
+    } else if t.stream.as_ref().is_some_and(|s| s.queue.is_some()) {
+        Shape::DeadLetters
     } else if crate::stream::is_stream(t) {
         Shape::Stream
     } else {
@@ -217,7 +224,7 @@ fn made_column(t: &Table, c: usize) -> bool {
         Shape::Memory => c < MEMORY_COLUMNS,
         Shape::Chunks => crate::chunk_tables::derives(t, c),
         Shape::Collection => c < 2,
-        Shape::Stream => true,
+        Shape::Stream | Shape::Queue | Shape::DeadLetters => true,
     }
 }
 
@@ -541,6 +548,56 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
             ),
         );
     }
+    for t in by_shape(Shape::Queue) {
+        let Some(spec) = &t.queue else { continue };
+        // Its columns after its own, its constraints but the key.
+        let mut parts: Vec<String> = t.columns[crate::queue::OWN.len()..]
+            .iter()
+            .map(|c| column_sql_with(c, &identities))
+            .collect();
+        for c in catalog::constraints(std::slice::from_ref(t)) {
+            if matches!(
+                c.kind,
+                catalog::ConstraintKind::ForeignKey(_) | catalog::ConstraintKind::PrimaryKey
+            ) {
+                continue;
+            }
+            parts.push(format!("CONSTRAINT {} {}", ident(&c.name), c.definition));
+        }
+        let base = crate::queue::defaults();
+        let mut options = Vec::new();
+        for (k, v, d) in [
+            ("lease", spec.lease, base.lease),
+            ("backoff", spec.backoff, base.backoff),
+            ("max_backoff", spec.max_backoff, base.max_backoff),
+        ] {
+            if v != d {
+                options.push((k.to_string(), v.to_string()));
+            }
+        }
+        if spec.max_attempts != base.max_attempts {
+            options.push(("max_attempts".to_string(), spec.max_attempts.to_string()));
+        }
+        if let Some(dead) = tables.iter().find(|d| d.id == spec.dead)
+            && dead.name != format!("{}_dead", t.name)
+        {
+            options.push(("dead_letter".to_string(), dead.name.clone()));
+        }
+        if t.engine != catalog::TableEngine::BTree {
+            options.push(("engine".to_string(), t.engine.name().to_string()));
+        }
+        def(
+            "queue",
+            &t.name,
+            Some(&t.name),
+            format!(
+                "CREATE QUEUE {} ({}){}",
+                ident(&t.name),
+                parts.join(", "),
+                with(&options)
+            ),
+        );
+    }
     // What a memory store, chunk table or collection has beyond what its
     // statement made: columns, unique constraints, checks.
     for t in tables
@@ -595,10 +652,11 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Definition>> {
     for t in tables.iter().filter(|t| shape(t) != Shape::Partition) {
         for (i, ix) in t.indexes.iter().enumerate() {
             let own = match shape(t) {
-                Shape::Plain => t.is_unique_constraint(i),
+                Shape::Plain | Shape::Queue => t.is_unique_constraint(i),
                 Shape::Memory => memory_index(t, ix),
                 _ => false,
             };
+            let own = own || (shape(t) == Shape::Queue && ix.name == format!("{}_ready", t.name));
             if !own && !t.is_unique_constraint(i) {
                 def("index", &ix.name, Some(&t.name), index_sql(t, ix));
             }

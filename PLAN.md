@@ -14842,6 +14842,72 @@ pgmq / River (leases, visibility, dead letters).
   short transaction), finishing it in the transaction of its work,
   failing it schedules a retry with backoff; past `max_attempts` it
   moves to a dead-letter stream; an expired lease returns it.
+  *Study (2026-11-28).*  A queue's tasks are rows that change — taken,
+  failed, rescheduled, finished — so a queue is a table, not a stream; a
+  stream holds its dead letters.  The lease is the visibility timeout of
+  SQS: taking a task moves its `available_at` past the lease and counts
+  the attempt, in a short transaction of its own (a statement in
+  autocommit, retried on a conflict as every one is); an expired lease
+  needs no sweeper, the task is simply available again.  Finishing is
+  a delete in the work's transaction, conditioned on the attempt the
+  worker holds: if the lease expired and another worker took the task,
+  the row changed after the work's snapshot, so the work's commit fails
+  — the work is done once, by whoever finishes.  Order: lower `priority`
+  first (River's, graphile-worker's and `nice`'s convention, so an
+  ascending index serves it), then `available_at`, then `id`; read
+  through an index on `(priority, available_at, id)` one priority at a
+  time (a skip scan: the next priority found by the index, then its
+  ready tasks as a range), so delayed or leased tasks of a priority cost
+  nothing to the others.  Competing takers reach for the same head task
+  and conflict; one run again after a conflict takes from a window of
+  the head at random (four times what it asks for, doubled after each
+  further conflict, within one priority) — uncontended the order is
+  first in, first out, contended roughly so (as SQS's standard queues).  Prior art: SQS
+  (visibility timeouts, receive counts, redrive to a dead-letter queue),
+  pgmq (`vt`, `read_ct`, archive), River and graphile-worker (priorities,
+  attempts, exponential backoff, a job finished in the transaction of
+  its work), Oban (unique, snoozing — not taken); their documentation
+  read, none of their source.
+  *Done:* `CREATE QUEUE q (columns) [WITH (lease, max_attempts, backoff,
+  max_backoff, dead_letter, engine)]` (`crate::queue`): a table with the
+  queue's own columns first (`id` an identity key, `priority`,
+  `available_at`, `attempts`, `taken_at`, `last_error`), an index
+  `<q>_ready (priority, available_at, id)`, and a stream `<q>_dead`;
+  `Table::queue` and `StreamSpec::queue` (table record version 32 — not
+  31 extended again: databases with 31's streams may exist).  `TAKE
+  [columns] FROM q [LIMIT n] [LEASE interval]`, `FINISH TASK id OF q
+  ATTEMPT n`, `FAIL TASK id OF q ATTEMPT n [ERROR text] [RETRY AFTER
+  interval]` (`55000` for a task not held by that attempt), `ALTER
+  QUEUE`, `DROP QUEUE` (the dead letters with it; alone refused,
+  `2BP01`), `nc_catalog.queues`, `nc_catalog.streams.queue_of`, the
+  dump's `CREATE QUEUE`, `schema_diff`'s kind, `\d`'s "Queue".  The
+  statements run SQL over the queue's table in the statement's
+  transaction (its privileges and row policies); the dead letters are
+  appended as the queue's own act.  Two fixes on the way: `CONSUME`,
+  `TAKE`, `FINISH` and `FAIL` were counted as DDL, so each wrote a DDL
+  audit record and any two of them conflicted on the audit log — four
+  takers lost ~3 % of their takes after ten retries each; now data
+  statements (S2's consumers were retrying for it).  And the planner
+  drops a sort a secondary B-tree index's range satisfies (its columns
+  never `NULL`, by their own value; then the primary key's): before, an
+  `ORDER BY … LIMIT` over an index range sorted the whole range — a
+  take past 200 000 delayed and leased tasks now reads a handful.  Not
+  yet: a lease extended while the work runs (a heartbeat; take with a
+  longer `LEASE`), the queue's own columns refused to `ALTER`, the
+  drivers' helpers (with S7's examples).  Tests: `slt/99_queues.slt`
+  (every storage path), `crates/sql/tests/queues.rs` (four workers, 200
+  tasks of three priorities, every seventh failing once: each task's
+  work committed exactly once; a lost lease's work refused; a crashed
+  worker's task back after its lease and then a dead letter, across a
+  reopening; twenty takes past 200 000 delayed and leased tasks reading
+  less than one read of all); mutations — the dead letter's bounds in
+  taking and failing, the attempt held, the finish's delete, the lease,
+  the count, the backoff's doubling and its cap, the priority's range,
+  the drop's refusal and unlinking, the dead letters' columns, the first
+  try in order, the window read again, `id` not twice, the expressions'
+  order; in the planner the `NULL`s, expressions, a unique index, the
+  primary key's ties and a table without one — each failing (the method
+  check survives as equivalent: a key range is never a method's).
 - **S6 — protocol adapters (D21):** the extension point for a module
   mapping an external protocol onto appends or a changefeed's
   subscription; replay from an offset, a gap an error naming it; a

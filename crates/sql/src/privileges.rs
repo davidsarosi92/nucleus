@@ -985,6 +985,7 @@ pub fn authorize_ddl(
         | Statement::CreateMemoryStore { .. }
         | Statement::CreateCollection { .. }
         | Statement::CreateStream { .. }
+        | Statement::CreateQueue { .. }
         | Statement::CreateSequence { .. } => {
             c.require(txn, Kind::Schema, "public", CREATE, None)?
         }
@@ -1026,6 +1027,7 @@ pub fn authorize_ddl(
         | Statement::AlterTable { table, .. }
         | Statement::AlterCollection { name: table, .. }
         | Statement::AlterStream { name: table, .. }
+        | Statement::AlterQueue { name: table, .. }
         | Statement::SetRowSecurity { table, .. }
         | Statement::DropPolicy { table, .. }
         | Statement::CreatePolicy(crate::policies::Policy { table, .. }) => {

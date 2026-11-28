@@ -102,9 +102,10 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// whether it is a collection ([`Table::collection`]); version 30 the
 /// identity columns; version 31 a stream's retention and the table a
 /// changefeed follows ([`Table::stream`]), a table's changefeeds
-/// ([`Table::changefeeds`]);
+/// ([`Table::changefeeds`]); version 32 a queue ([`Table::queue`]) and
+/// the queue a stream holds the dead letters of ([`StreamSpec::queue`]);
 /// older versions still read.
-const TABLE_VERSION: u8 = 31;
+const TABLE_VERSION: u8 = 32;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -419,6 +420,24 @@ pub struct StreamSpec {
     /// A changefeed (`CREATE CHANGEFEED`, [`crate::changefeed`]): the id
     /// of the table whose changes it holds.
     pub source: Option<u32>,
+    /// A queue's dead letters ([`crate::queue`]): the queue's id.
+    pub queue: Option<u32>,
+}
+
+/// A task queue (`CREATE QUEUE … WITH (…)`, [`crate::queue`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueueSpec {
+    /// How long a taken task is the taker's (`lease`).
+    pub lease: crate::datetime::Interval,
+    /// How many times a task is taken at most (`max_attempts`).
+    pub max_attempts: u32,
+    /// The wait before the first retry, doubled for each one after
+    /// (`backoff`).
+    pub backoff: crate::datetime::Interval,
+    /// The longest wait before a retry (`max_backoff`).
+    pub max_backoff: crate::datetime::Interval,
+    /// The id of the stream its dead letters go to.
+    pub dead: u32,
 }
 
 /// A changefeed of a table ([`Table::changefeeds`]): the feed's id (its
@@ -494,6 +513,8 @@ pub struct Table {
     pub stream: Option<StreamSpec>,
     /// The changefeeds its writes append to ([`crate::changefeed`]).
     pub changefeeds: Vec<Changefeed>,
+    /// A task queue (`CREATE QUEUE`, [`crate::queue`]).
+    pub queue: Option<QueueSpec>,
     /// `SET SUBJECT (column, …)`: the columns that say whose a row is —
     /// `FORGET SUBJECT` erases the rows any of them names
     /// ([`crate::forget`]).
@@ -1255,11 +1276,28 @@ impl Table {
                     None => w.u8(0),
                     Some(id) => w.u8(1).u32(id),
                 };
+                match s.queue {
+                    None => w.u8(0),
+                    Some(id) => w.u8(1).u32(id),
+                };
             }
         }
         w.u32(self.changefeeds.len() as u32);
         for f in &self.changefeeds {
             w.u32(f.id).u8(u8::from(f.before));
+        }
+        match &self.queue {
+            None => {
+                w.u8(0);
+            }
+            Some(q) => {
+                w.u8(1)
+                    .value(&Value::Interval(q.lease))
+                    .u32(q.max_attempts)
+                    .value(&Value::Interval(q.backoff))
+                    .value(&Value::Interval(q.max_backoff))
+                    .u32(q.dead);
+            }
         }
         w.0
     }
@@ -1569,10 +1607,16 @@ impl Table {
                 0 => None,
                 _ => Some(r.u32()?),
             };
+            let queue = if version >= 32 && r.u8()? == 1 {
+                Some(r.u32()?)
+            } else {
+                None
+            };
             Some(StreamSpec {
                 retention,
                 max_entries,
                 source,
+                queue,
             })
         } else {
             None
@@ -1589,6 +1633,25 @@ impl Table {
             out
         } else {
             Vec::new()
+        };
+        let queue = if version >= 32 && r.u8()? == 1 {
+            let interval = |r: &mut Reader| match r.value()? {
+                Value::Interval(i) => Ok(i),
+                _ => Err(Error::internal("a queue's setting is no interval")),
+            };
+            let lease = interval(&mut r)?;
+            let max_attempts = r.u32()?;
+            let backoff = interval(&mut r)?;
+            let max_backoff = interval(&mut r)?;
+            Some(QueueSpec {
+                lease,
+                max_attempts,
+                backoff,
+                max_backoff,
+                dead: r.u32()?,
+            })
+        } else {
+            None
         };
         let building = if version >= 24 {
             let n = building_n;
@@ -1626,6 +1689,7 @@ impl Table {
             collection,
             stream,
             changefeeds,
+            queue,
             subject,
             converting,
             building,
@@ -2625,11 +2689,31 @@ mod tests {
                 }),
                 max_entries: Some(1000),
                 source: Some(9),
+                queue: Some(14),
             }),
             changefeeds: vec![Changefeed {
                 id: 12,
                 before: true,
             }],
+            queue: Some(QueueSpec {
+                lease: crate::datetime::Interval {
+                    months: 0,
+                    days: 0,
+                    micros: 30_000_000,
+                },
+                max_attempts: 5,
+                backoff: crate::datetime::Interval {
+                    months: 0,
+                    days: 0,
+                    micros: 1_000_000,
+                },
+                max_backoff: crate::datetime::Interval {
+                    months: 0,
+                    days: 1,
+                    micros: 0,
+                },
+                dead: 15,
+            }),
             converting: Some(Conversion {
                 column: 1,
                 ty: DataType::Numeric,

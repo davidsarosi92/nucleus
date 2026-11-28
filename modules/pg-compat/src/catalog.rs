@@ -656,6 +656,7 @@ fn def_table(k: usize) -> Table {
         collection: false,
         stream: None,
         changefeeds: Vec::new(),
+        queue: None,
         engine: Default::default(),
         relative_directory: true,
     }

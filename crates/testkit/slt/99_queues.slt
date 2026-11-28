@@ -1,0 +1,493 @@
+# Task queues (PLAN.md §M16.5 S5): tasks taken under a lease, finished in
+# the transaction of their work, retried with backoff, dead letters past
+# their attempts.  nucleus-only.
+
+statement ok
+CREATE QUEUE jobs (kind TEXT NOT NULL, n INT DEFAULT 0, UNIQUE (kind, n)) WITH (max_attempts = 3, backoff = '1 hour', max_backoff = '3 hours')
+
+statement ok
+CREATE QUEUE IF NOT EXISTS jobs (kind TEXT)
+
+statement error 42P07
+CREATE QUEUE jobs (kind TEXT)
+
+# Its dead letters' name is taken
+statement error 42P07
+CREATE QUEUE jobs_dead (kind TEXT)
+
+statement error 42701
+CREATE QUEUE bad (attempts INT)
+
+statement error 0A000
+CREATE QUEUE bad (k INT PRIMARY KEY)
+
+statement error 22023
+CREATE QUEUE bad (k INT) WITH (lease = 'soon')
+
+statement error 22023
+CREATE QUEUE bad (k INT) WITH (max_attempts = 0)
+
+statement error 22023
+CREATE QUEUE bad (k INT) WITH (visibility = '1 minute')
+
+query TT
+SELECT name, dead_letter FROM nc_catalog.queues ORDER BY name
+----
+jobs jobs_dead
+
+query TITT
+SELECT lease, max_attempts, backoff, max_backoff FROM nc_catalog.queues
+----
+00:00:30 3 01:00:00 03:00:00
+
+# Nothing to take
+query II
+TAKE FROM jobs
+----
+
+statement ok
+INSERT INTO jobs (kind, n) VALUES ('mail', 1), ('mail', 2), ('mail', 3)
+
+# A unique key: a task added twice is refused (an idempotency key)
+statement error 23505
+INSERT INTO jobs (kind, n) VALUES ('mail', 1)
+
+# The queue's own values: given by default, the key by the queue
+statement error 428C9
+INSERT INTO jobs (id, kind) VALUES (100, 'x')
+
+statement ok
+INSERT INTO jobs (kind, priority) VALUES ('urgent', -10)
+
+statement ok
+INSERT INTO jobs (kind, priority, available_at) VALUES ('later', -20, now() + interval '1 day')
+
+query IIITT
+SELECT id, priority, attempts, taken_at IS NULL, last_error IS NULL FROM jobs ORDER BY id
+----
+1 0 0 t t
+2 0 0 t t
+3 0 0 t t
+5 -10 0 t t
+6 -20 0 t t
+
+# Lower priority first; a delayed task not yet (4: the key the refused
+# insert drew, as a sequence's)
+query IITI
+TAKE FROM jobs
+----
+5 1 urgent 0
+
+query IIT
+TAKE id, kind FROM jobs LIMIT 2 LEASE '10 minutes'
+----
+1 1 mail
+2 1 mail
+
+query IIITT
+SELECT id, attempts, available_at > now() + interval '9 minutes', taken_at IS NOT NULL, available_at < now() + interval '11 minutes' FROM jobs WHERE id IN (1, 2) ORDER BY id
+----
+1 1 t t t
+2 1 t t t
+
+# Its own columns, given by name; a limit of 0
+query II
+TAKE FROM jobs LIMIT 0
+----
+
+query IIII
+TAKE n, priority FROM jobs LIMIT 1
+----
+3 1 3 0
+
+# Nothing left: taken or delayed
+query II
+TAKE FROM jobs LIMIT 10
+----
+
+statement error 22023
+TAKE FROM jobs LIMIT -1
+
+statement error 22023
+TAKE FROM jobs LEASE '-1 minute'
+
+statement error 42703
+TAKE nosuch FROM jobs
+
+statement error 42809
+TAKE FROM jobs_dead
+
+statement error 42P01
+TAKE FROM nosuch
+
+# Finished in the work's transaction: rolled back, it stays
+statement ok
+CREATE TABLE sent (task BIGINT PRIMARY KEY)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO sent VALUES (1)
+
+statement ok
+FINISH TASK 1 OF jobs ATTEMPT 1
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM jobs WHERE id = 1
+----
+1
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO sent VALUES (1)
+
+statement ok
+FINISH TASK 1 OF jobs ATTEMPT 1
+
+statement ok
+COMMIT
+
+query II
+SELECT (SELECT count(*) FROM jobs WHERE id = 1), (SELECT count(*) FROM sent)
+----
+0 1
+
+# Not there any more; not this attempt's; not taken
+statement error 55000
+FINISH TASK 1 OF jobs ATTEMPT 1
+
+statement error 55000
+FINISH TASK 2 OF jobs ATTEMPT 2
+
+statement error 55000
+FINISH TASK 6 OF jobs ATTEMPT 0
+
+statement error 55000
+FAIL TASK 6 OF jobs ATTEMPT 1
+
+statement error 22023
+FINISH TASK NULL OF jobs ATTEMPT 1
+
+statement error 42809
+FINISH TASK 1 OF sent ATTEMPT 1
+
+# Failed: the backoff, 1 hour on the first attempt
+statement ok
+FAIL TASK 2 OF jobs ATTEMPT 1 ERROR 'smtp down'
+
+statement error
+FAIL TASK 2 OF jobs ATTEMPT 1
+
+query ITTT
+SELECT attempts, taken_at IS NULL, last_error, available_at BETWEEN now() + interval '59 minutes' AND now() + interval '1 hour' FROM jobs WHERE id = 2
+----
+1 t smtp down t
+
+# Its lease run out: available again, the next attempt
+statement ok
+UPDATE jobs SET available_at = now() - interval '1 second' WHERE id IN (2, 3)
+
+query IIT
+TAKE id, kind FROM jobs LIMIT 2
+----
+2 2 mail
+3 2 mail
+
+# Attempt 1 lost task 3 to attempt 2: refused, and attempt 2 finishes it
+statement error 55000
+FINISH TASK 3 OF jobs ATTEMPT 1
+
+statement ok
+FINISH TASK 3 OF jobs ATTEMPT 2
+
+# The backoff doubles: 2 hours on the second attempt; RETRY AFTER chooses
+statement ok
+FAIL TASK 2 OF jobs ATTEMPT 2
+
+query T
+SELECT available_at BETWEEN now() + interval '119 minutes' AND now() + interval '2 hours' FROM jobs WHERE id = 2
+----
+t
+
+statement ok
+UPDATE jobs SET available_at = now() - interval '1 second' WHERE id = 2
+
+query IIT
+TAKE id, kind FROM jobs
+----
+2 3 mail
+
+# Past max_attempts: a dead letter, with its columns
+query TT
+FAIL TASK 2 OF jobs ATTEMPT 3 ERROR 'gave up'
+----
+dead NULL
+
+query IIITTII
+SELECT seq, task_id, attempts, error, kind, n, priority FROM jobs_dead
+----
+1 2 3 gave up mail 2 0
+
+# A lease run out on the last attempt: a dead letter at the next TAKE
+statement ok
+INSERT INTO jobs (kind, n) VALUES ('mail', 9)
+
+statement ok
+UPDATE jobs SET attempts = 3, available_at = now() - interval '1 second' WHERE n = 9
+
+statement ok
+UPDATE jobs SET available_at = now() - interval '1 second' WHERE id = 5
+
+query IIT
+TAKE id, kind FROM jobs LIMIT 5
+----
+5 2 urgent
+
+query ITT
+SELECT task_id, error, kind FROM jobs_dead ORDER BY seq
+----
+2 gave up mail
+7 its lease ran out on its last attempt mail
+
+# RETRY AFTER: the wait given
+statement ok
+FAIL TASK 5 OF jobs ATTEMPT 2 RETRY AFTER '0 seconds' ERROR 'later'
+
+query IIT
+TAKE id, kind FROM jobs
+----
+5 3 urgent
+
+# Its settings changed and reset
+statement ok
+ALTER QUEUE jobs SET (lease = '5 minutes', max_attempts = 10)
+
+query TI
+SELECT lease, max_attempts FROM nc_catalog.queues WHERE name = 'jobs'
+----
+00:05:00 10
+
+statement ok
+ALTER QUEUE jobs RESET (lease, max_attempts)
+
+query TI
+SELECT lease, max_attempts FROM nc_catalog.queues WHERE name = 'jobs'
+----
+00:00:30 5
+
+statement error 22023
+ALTER QUEUE jobs SET (dead_letter = 'other')
+
+statement error 42809
+ALTER QUEUE sent SET (lease = '1 minute')
+
+# Its dead letters go only with it
+statement error 2BP01
+DROP STREAM jobs_dead
+
+statement error 42809
+DROP QUEUE sent
+
+statement ok
+DROP QUEUE jobs
+
+query I
+SELECT count(*) FROM nc_catalog.tables WHERE name IN ('jobs', 'jobs_dead')
+----
+0
+
+statement ok
+DROP QUEUE IF EXISTS jobs
+
+statement error 42P01
+DROP QUEUE jobs
+
+# Named dead letters; DROP TABLE takes them too
+statement ok
+CREATE QUEUE q2 (k TEXT) WITH (dead_letter = graveyard, lease = '1 minute')
+
+query T
+SELECT dead_letter FROM nc_catalog.queues
+----
+graveyard
+
+statement ok
+DROP TABLE q2
+
+query I
+SELECT count(*) FROM nc_catalog.tables WHERE name IN ('q2', 'graveyard')
+----
+0
+
+statement ok
+DROP TABLE sent
+
+# A window full of dead letters: the same priority read again
+statement ok
+CREATE QUEUE q3 (k INT) WITH (max_attempts = 1)
+
+statement ok
+INSERT INTO q3 (k) VALUES (1), (2)
+
+statement ok
+UPDATE q3 SET attempts = 1 WHERE k = 1
+
+query III
+TAKE k FROM q3
+----
+2 1 2
+
+# A column added since: the dead letters keep the columns they have
+statement ok
+ALTER TABLE q3 ADD COLUMN extra TEXT
+
+query TT
+FAIL TASK 2 OF q3 ATTEMPT 1
+----
+dead NULL
+
+query III
+SELECT task_id, k, attempts FROM q3_dead ORDER BY seq
+----
+1 1 1
+2 2 1
+
+statement ok
+DROP QUEUE q3
+
+# The backoff at most max_backoff: 2 hours capped to 90 minutes
+statement ok
+CREATE QUEUE q4 (k INT) WITH (backoff = '1 hour', max_backoff = '90 minutes')
+
+statement ok
+INSERT INTO q4 (k) VALUES (1)
+
+query III
+TAKE FROM q4
+----
+1 1 1
+
+statement ok
+FAIL TASK 1 OF q4 ATTEMPT 1 RETRY AFTER '0 seconds'
+
+query III
+TAKE FROM q4
+----
+1 2 1
+
+statement ok
+FAIL TASK 1 OF q4 ATTEMPT 2
+
+query T
+SELECT available_at BETWEEN now() + interval '89 minutes' AND now() + interval '90 minutes' FROM q4
+----
+t
+
+statement ok
+DROP QUEUE q4
+
+# A secondary index's range read in its order (the queue's take reads
+# through it): only where its columns are never NULL (a NULL's key sorts
+# first, ORDER BY's last)
+statement ok
+CREATE TABLE ordered (id INT PRIMARY KEY, v INT, w INT NOT NULL)
+
+statement ok
+CREATE INDEX ordered_wv ON ordered (w, v)
+
+statement ok
+INSERT INTO ordered VALUES (1, NULL, 3), (2, 5, 1), (3, 1, 2), (4, 3, 1), (5, NULL, 1)
+
+query I
+SELECT id FROM ordered WHERE w = 1 ORDER BY w, v
+----
+4
+2
+5
+
+query I
+SELECT id FROM ordered WHERE w >= 1 ORDER BY w, v, id
+----
+4
+2
+5
+3
+1
+
+statement ok
+CREATE TABLE ordered2 (id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL)
+
+statement ok
+CREATE INDEX ordered2_a ON ordered2 (a)
+
+statement ok
+INSERT INTO ordered2 VALUES (1, 2, 9), (2, 1, 8), (3, 2, 7), (4, 1, 6)
+
+query I
+SELECT id FROM ordered2 WHERE a >= 1 ORDER BY a, b
+----
+4
+2
+3
+1
+
+query I
+SELECT id FROM ordered2 WHERE a >= 1 ORDER BY a, id
+----
+2
+4
+1
+3
+
+# Without a primary key an index's ties are in no order the plan knows
+statement ok
+CREATE TABLE ordered4 (a INT NOT NULL, b INT NOT NULL)
+
+statement ok
+CREATE INDEX ordered4_a ON ordered4 (a)
+
+statement ok
+INSERT INTO ordered4 VALUES (1, 9), (1, 3), (0, 5), (1, 1)
+
+query II
+SELECT a, b FROM ordered4 WHERE a >= 0 ORDER BY a, b
+----
+0 5
+1 1
+1 3
+1 9
+
+statement ok
+DROP TABLE ordered4
+
+# An expression's index orders by the expression, not its column
+statement ok
+CREATE TABLE ordered3 (id INT PRIMARY KEY, a INT NOT NULL)
+
+statement ok
+CREATE INDEX ordered3_neg ON ordered3 ((-a))
+
+statement ok
+INSERT INTO ordered3 VALUES (1, 3), (2, 1), (3, 2)
+
+query I
+SELECT id FROM ordered3 WHERE -a >= -10 ORDER BY a
+----
+2
+3
+1
+
+statement ok
+DROP TABLE ordered
+
+statement ok
+DROP TABLE ordered2
+
+statement ok
+DROP TABLE ordered3
