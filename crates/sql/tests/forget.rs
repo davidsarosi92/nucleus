@@ -272,16 +272,30 @@ fn the_scrub_leaves_no_key_of_hers_in_a_separator() {
     );
 }
 
-/// The same in a table whose keys an LSM tree holds (PLAN.md §M14.28):
-/// its runs keep what was deleted until compacted.
+/// The same in a table whose keys an LSM tree holds (PLAN.md §M14.28,
+/// issue #26): its runs keep what was deleted until merged, so the scrub
+/// merges each engine's runs into one without it, and the search reads
+/// the runs' blocks decompressed.
 #[test]
-#[ignore = "issue #26: the scrub does not rewrite an LSM tree's runs"]
 fn the_scrub_leaves_none_of_hers_in_an_lsm_table() {
+    lsm_scrub_leaves_none(None);
+}
+
+/// The same, encrypted: the runs sealed, opened by the search.
+#[test]
+fn the_scrub_leaves_none_of_hers_in_an_encrypted_lsm_table() {
+    lsm_scrub_leaves_none(Some(PageCipher::new([5; 32])));
+}
+
+fn lsm_scrub_leaves_none(key: Option<PageCipher>) {
     let local = Arc::new(
         Database::open_on(
             Arc::new(SimPlatform::new(7)),
             Path::new("/db"),
-            Options::default(),
+            Options {
+                encryption_key: key,
+                ..Options::default()
+            },
         )
         .unwrap(),
     );
@@ -299,16 +313,29 @@ fn the_scrub_leaves_none_of_hers_in_an_lsm_table() {
         .step_by(7)
         .flat_map(|g| [format!("user-{g:05}@example.org"), format!("note-{g}-")])
         .collect();
-    let all: Vec<Vec<u8>> = hers.iter().map(|e| e.as_bytes().to_vec()).collect();
-    // In the tree's runs, the log trimmed: the search reads them.
+    // In the tree's runs, the log trimmed: each found there.
     local.checkpoint().unwrap();
-    let before = kv.find_bytes(&all).unwrap().unwrap();
-    assert!(before > 400, "{before}");
+    for e in &hers {
+        assert!(kv.find_bytes(&needle(e)).unwrap().unwrap() > 0, "{e}");
+    }
     assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 428 t 0"]);
     for e in &hers {
         assert_eq!(kv.find_bytes(&needle(e)).unwrap(), Some(0), "{e}");
     }
+    assert!(
+        kv.find_bytes(&needle("user-00001@example.org"))
+            .unwrap()
+            .unwrap()
+            > 0
+    );
     assert_eq!(texts(&mut s, "SELECT count(*) FROM people"), ["2572"]);
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT owner FROM people WHERE email = 'user-02999@example.org'"
+        ),
+        ["bob"]
+    );
 }
 
 fn scrub_leaves_none(kv: Arc<dyn Kv>) {

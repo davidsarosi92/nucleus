@@ -120,6 +120,15 @@ pub trait Engine: Send + Sync {
     fn job(&self) -> Option<Job> {
         None
     }
+    /// An erasure's work (issue #26): everything the engine keeps in its
+    /// files merged into what it holds now, nothing a snapshot cannot see
+    /// kept — an LSM tree's runs into one, its tombstones and the versions
+    /// its garbage filter drops left out — so that the files it replaces,
+    /// zeroed as the scrub removes them, take what was deleted with them.
+    /// `None` when its files hold nothing.
+    fn compact_all(&self) -> Option<Job> {
+        None
+    }
     /// Work the writer does before it goes on — an LSM tree's memtable,
     /// grown by a bulk load, written as a run (§M14.28 L4b) — planned and
     /// run with the branch's writer lock held (nothing changes the engine

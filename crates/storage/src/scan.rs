@@ -160,6 +160,20 @@ pub fn find_with(
     needles: &[Vec<u8>],
     cipher: Option<&PageCipher>,
 ) -> Result<Vec<Found>> {
+    find_in(fs, dir, needles, cipher, None)
+}
+
+/// [`find_with`], an LSM tree's runs (`engines/run-…`) read through
+/// `engines` too — the store's file system for them, sealed on an
+/// encrypted database — each block decompressed and searched (issue
+/// #26: a compressed block's bytes are not the raw search's).
+pub fn find_in(
+    fs: &dyn FileSystem,
+    dir: &Path,
+    needles: &[Vec<u8>],
+    cipher: Option<&PageCipher>,
+    engines: Option<&dyn FileSystem>,
+) -> Result<Vec<Found>> {
     let n = Needles::new(needles);
     // The data file's own cipher, from its header.
     let adopted = match cipher {
@@ -194,6 +208,22 @@ pub fn find_with(
             .parent()
             .and_then(Path::file_name)
             .is_some_and(|f| f == "scratch");
+        let edir = dir.join("engines");
+        if let (Some(efs), Some(name)) = (engines, name.as_deref())
+            && path.parent() == Some(edir.as_path())
+            && name.starts_with("run-")
+            && !name.ends_with(".tmp")
+        {
+            crate::lsm::search_run(efs, &edir, name, |at, bytes| {
+                n.search(bytes, usize::MAX, |_, needle| {
+                    out.insert(Found {
+                        file: path.clone(),
+                        offset: at,
+                        needle,
+                    });
+                });
+            })?;
+        }
         if let Some(c) = cipher {
             if log {
                 search_records(file.as_ref(), c, &n, |at, needle| {

@@ -88,6 +88,7 @@ checked against.
 - **ARIES redo by page; PostgreSQL recovery prefetch** — replayed writes applied sorted by key. §M14.28 issue #14.
 - **O'Neil, Cheng, Gawlick & O'Neil, "The Log-Structured Merge-Tree" (1996); LevelDB and RocksDB** — the LSM engine: column families on one WAL, ingested runs, range deletions, rate limiting, the block cache, compaction filters, version edits. §M14.28.
 - **Dostoevsky (Dayan & Idreos, SIGMOD 2018); Cassandra 5's Unified Compaction Strategy** — one parameterized merge policy, lazy leveling. §M14.28 L2.
+- **RocksDB's `CompactRange` (a manual full compaction)** — the erasure's merge of an LSM tree's runs into one, tombstones dropped, the old files zeroed before removal. §M14.24 R2b, issue #26.
 - **Apache Parquet's split-block Bloom filter** — per-run filters. §M14.28 L2.
 - **bLSM (Sears & Ramakrishnan, SIGMOD 2012); MyRocks (Matsunobu, Dong & Lee, VLDB 2020); WiredTiger's and CockroachDB's LSM histories; the RUM conjecture (Athanassoulis et al., EDBT 2016)** — merge scheduling, and the engine chosen per table. §M14.28.
 - **ZFS births and dead lists** — copy-on-write branches in one file. §M14.13.

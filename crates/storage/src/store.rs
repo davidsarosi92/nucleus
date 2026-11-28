@@ -1759,7 +1759,7 @@ impl Store {
         let mut go_on = || true;
         let go_on: &mut dyn FnMut() -> bool = &mut go_on;
         let go_on = std::cell::RefCell::new(go_on);
-        while self.run_job(|e| e.spill(), &go_on, false)? {}
+        while self.run_job(|_, e| e.spill(), &go_on, false)? {}
         Ok(())
     }
 
@@ -2056,6 +2056,23 @@ impl Store {
         let before = sh.wal_zeroed.load(Ordering::Acquire);
         let r = (|| {
             self.checkpoint()?;
+            // Each engine's files merged into one, what was deleted left
+            // out (issue #26): the next checkpoint's manifests no longer
+            // name the old ones, which go zeroed.  One merge at a time in
+            // the store, as compaction's.
+            {
+                let _one = sh.compacting.lock().unwrap_or_else(|e| e.into_inner());
+                let mut go_on = || true;
+                let go_on = std::cell::RefCell::new(&mut go_on as &mut dyn FnMut() -> bool);
+                let n = self.b.tree.read().engines.len();
+                for i in 0..n {
+                    self.run_job(
+                        |j, e| if j == i { e.compact_all() } else { None },
+                        &go_on,
+                        false,
+                    )?;
+                }
+            }
             let all: Vec<Arc<Branch>> = sh.branches().values().cloned().collect();
             for b in all {
                 b.wal.roll()?;
@@ -2068,6 +2085,19 @@ impl Store {
             pages: r?,
             wal_bytes: sh.wal_zeroed.load(Ordering::Acquire) - before,
         })
+    }
+
+    /// Every place in the store's files where one of `needles` is
+    /// ([`scan::find_in`](crate::scan::find_in)): pages and log records
+    /// opened under `cipher`, the engines' runs through the store's own
+    /// file system for them (sealed on an encrypted database).
+    pub fn find_bytes(
+        &self,
+        needles: &[Vec<u8>],
+        cipher: Option<&crate::PageCipher>,
+    ) -> Result<Vec<crate::scan::Found>> {
+        let sh = &*self.shared;
+        crate::scan::find_in(sh.platform.fs(), &sh.dir, needles, cipher, Some(&sh.efs))
     }
 
     /// Erasure (issue #25): this branch's tree's separators in `ranges`
@@ -2134,7 +2164,7 @@ impl Store {
         let b = &self.b;
         let mut done = 0;
         while !b.dropped.load(Ordering::Acquire) && (go_on.borrow_mut())() {
-            if !self.run_job(|e| e.job(), &go_on, true)? {
+            if !self.run_job(|_, e| e.job(), &go_on, true)? {
                 break;
             }
             done += 1;
@@ -2148,7 +2178,7 @@ impl Store {
     /// its write lock; whether one was installed.
     fn run_job(
         &self,
-        plan: impl Fn(&dyn Engine) -> Option<engines::Job>,
+        plan: impl Fn(usize, &dyn Engine) -> Option<engines::Job>,
         go_on: &std::cell::RefCell<&mut dyn FnMut() -> bool>,
         paced: bool,
     ) -> Result<bool> {
@@ -2159,7 +2189,8 @@ impl Store {
             t.routes
                 .iter()
                 .zip(&t.engines)
-                .find_map(|(r, e)| plan(&**e).map(|j| (r.id, j)))
+                .enumerate()
+                .find_map(|(i, (r, e))| plan(i, &**e).map(|j| (r.id, j)))
         };
         let Some((route, job)) = job else {
             return Ok(false);
@@ -2840,7 +2871,15 @@ fn remove_stale_engine_files<'a>(
         if n.starts_with("run-") {
             let run = n.strip_suffix(".tmp").unwrap_or(n);
             if !live.contains(n) && !in_flight.contains(run) {
-                fs.remove_file(&edir.join(&name))?;
+                let path = edir.join(&name);
+                // A scrub's: what it held overwritten first, as the WAL's
+                // dropped segments are (issue #26).
+                if sh.scrubbing.load(Ordering::Acquire) {
+                    let f = fs.open(&path, OpenMode::ReadWrite)?;
+                    crate::wal::zero(f.as_ref(), 0, f.size()?)?;
+                    f.sync()?;
+                }
+                fs.remove_file(&path)?;
             }
             continue;
         }

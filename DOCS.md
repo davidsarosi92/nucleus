@@ -875,7 +875,17 @@ and the data file's leaves and internal nodes — reachable or free —
 decoded: keys put together from their shared prefix (a separator split
 across it is found whole), packed values decompressed, overflow chains
 read; results once per file offset (per page for the data file).  An LSM
-tree's runs are not yet rewritten by a scrub (issue #26).  Needles
+tree's runs keep deleted entries until merged, so the scrub first has
+each engine merge all its files into one without them
+(`Engine::compact_all`: for an LSM tree, every run merged into the last
+level, its tombstones and the versions its garbage filter drops left
+out; one merge at a time with compaction), and the checkpoint after
+removes the runs no manifest names any more, each overwritten with
+zeros and synced first while a scrub runs (issue #26).  On an LSM table
+of 100,000 rows a `FORGET SUBJECT` takes ≈440 ms (≈360 ms on the
+B+tree).  `Store::find_bytes` (what `Kv::find_bytes` calls) also reads
+each run's blocks, decompressed, through the store's file system for the
+engines (sealed on an encrypted database).  Needles
 under 4 bytes are not looked for; each is anchored at the four-byte
 window the fewest other needles share (then the least like zeros and
 runs), and a place reaches the map of anchors only through a bitmap of

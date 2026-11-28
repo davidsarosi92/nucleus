@@ -8,6 +8,7 @@
 //!
 //! Without `ERASURE_DIR` (the CI's run of ignored tests) it runs as a
 //! test: 10 000 rows in a temporary directory, removed after.
+//! `ERASURE_ENGINE=lsm` keeps the table in an LSM tree.
 //!
 //! A table of `ROWS` (100 000) rows — a subject column, a text with a
 //! text index, a vector with an HNSW index — of 1 000 subjects.  A
@@ -62,12 +63,17 @@ fn erasure() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(if given.is_some() { 100_000 } else { 10_000 });
-    s.execute(
-        "CREATE TABLE m (id int PRIMARY KEY, who text, body text, v vector(4)); \
+    // `ERASURE_ENGINE=lsm`: the table in an LSM tree (issue #26).
+    let with = match std::env::var("ERASURE_ENGINE").as_deref() {
+        Ok("lsm") => " WITH (engine = lsm)",
+        _ => "",
+    };
+    s.execute(&format!(
+        "CREATE TABLE m (id int PRIMARY KEY, who text, body text, v vector(4)){with}; \
          ALTER TABLE m SET SUBJECT (who); \
          CREATE INDEX ON m USING text (body); \
          CREATE INDEX ON m USING hnsw (v)",
-    )
+    ))
     .unwrap();
     let t = Instant::now();
     s.execute(&format!(

@@ -1562,6 +1562,27 @@ fn next_run_id() -> u64 {
 /// shards' locks).
 pub(crate) static CACHE: BlockCache = BlockCache::new(true);
 
+/// Each block of run `name` in `dir`, decompressed, with its offset
+/// (issue #26: what the search for erased bytes reads of a run).  A run
+/// that does not open — written partly, or removed meanwhile — holds
+/// nothing to search.
+pub(crate) fn search_run(
+    fs: &dyn FileSystem,
+    dir: &Path,
+    name: &str,
+    mut each: impl FnMut(u64, &[u8]),
+) -> Result<()> {
+    let Ok(run) = Run::open(fs, dir, name) else {
+        return Ok(());
+    };
+    for i in 0..run.index.len() {
+        if let Ok(d) = run.read_block(i) {
+            each(run.index[i].offset, &d.data);
+        }
+    }
+    Ok(())
+}
+
 const SHARDS: usize = 16;
 
 pub(crate) struct BlockCache {
@@ -2121,6 +2142,13 @@ struct Spilled {
 }
 
 /// A compaction's result ([`Engine::install`]).
+/// [`Engine::compact_all`]'s result: every run there was, `inputs`, now
+/// `run` (the last level).
+struct CompactedAll {
+    inputs: Vec<String>,
+    run: Option<Arc<Run>>,
+}
+
 struct Compacted {
     /// The tier merged: its oldest runs, these.
     tier: usize,
@@ -2483,6 +2511,35 @@ impl Engine for LsmEngine {
         }))
     }
 
+    fn compact_all(&self) -> Option<Job> {
+        let levels = self.current();
+        let runs: Vec<Arc<Run>> = levels.runs().cloned().collect();
+        if runs.is_empty() {
+            return None;
+        }
+        Some(Box::new(move |room: &dyn JobRoom| {
+            let inputs = runs.iter().map(|r| r.name.clone()).collect();
+            let name = room.name()?;
+            let wrote = |n| room.wrote(n);
+            let filter = room.filter();
+            // Into the last level: its tombstones hide nothing older.
+            let run = merge_runs(
+                room.fs(),
+                room.dir(),
+                &name,
+                &runs,
+                false,
+                filter.as_deref().map(|f| f as &dyn LeafFilter),
+                &wrote,
+            )?;
+            if run.is_none() && !room.wrote(0) {
+                return Ok(None); // stopped
+            }
+            let done: Done = Box::new(CompactedAll { inputs, run });
+            Ok(Some(done))
+        }))
+    }
+
     fn spill(&self) -> Option<Job> {
         let m = &self.mem;
         if m.tail_bytes < SPILL {
@@ -2527,6 +2584,28 @@ impl Engine for LsmEngine {
                     let gone: usize = tail.drain(..sp.n).map(|(k, v)| entry_bytes(&k, &v)).sum();
                     self.mem.tail_bytes -= gone;
                     Self::put_first(&mut self.levels, sp.run);
+                }
+                return Ok(());
+            }
+            Err(d) => d,
+        };
+        let c = match c.downcast::<CompactedAll>() {
+            Ok(all) => {
+                self.settle();
+                let l = &mut self.levels;
+                // Every input still there (no other merge ran: the store
+                // runs one at a time); the runs flushed since are newer
+                // and stay above the one made of the inputs.
+                let mut there: BTreeSet<&String> = l.runs().map(|r| &r.name).collect();
+                if !all.inputs.iter().all(|n| there.remove(n)) {
+                    return Ok(());
+                }
+                for t in &mut l.tiers {
+                    t.retain(|r| !all.inputs.contains(&r.name));
+                }
+                l.bottom = all.run;
+                while l.tiers.last().is_some_and(Vec::is_empty) {
+                    l.tiers.pop();
                 }
                 return Ok(());
             }

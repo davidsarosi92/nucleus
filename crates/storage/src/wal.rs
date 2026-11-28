@@ -654,7 +654,7 @@ fn zeros_or_older(file: &dyn File, start: Lsn, at: u64, form: Form) -> Result<bo
 }
 
 /// Writes zeros over `from..to`.
-fn zero(file: &dyn File, from: u64, to: u64) -> Result<()> {
+pub(crate) fn zero(file: &dyn File, from: u64, to: u64) -> Result<()> {
     let zeros = vec![0u8; (to - from).min(GROW) as usize];
     let mut at = from;
     while at < to {

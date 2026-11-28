@@ -1146,8 +1146,6 @@ impl Default for Options {
 pub struct Database {
     engine: nucleus_txn::Engine,
     platform: Arc<dyn Platform>,
-    /// Its directory.
-    dir: PathBuf,
     /// Where scratch files go (`<dir>/scratch`), and how many were made.
     scratch_dir: PathBuf,
     scratch_made: Arc<AtomicU64>,
@@ -1371,7 +1369,6 @@ impl Database {
         Ok(Self {
             engine,
             platform,
-            dir: path.to_path_buf(),
             scratch_dir,
             scratch_made: Arc::new(AtomicU64::new(0)),
             page_key,
@@ -1642,13 +1639,11 @@ impl Kv for Database {
         // The data file's key as it is now — its generation, and the
         // previous key while pages are sealed again (PLAN.md §M14.30 K3f).
         let key = self.engine.store().pool().pager().cipher();
-        let found = nucleus_storage::scan::find_with(
-            self.platform.fs(),
-            &self.dir,
-            needles,
-            key.as_deref().or(self.page_key.as_ref()),
-        )
-        .map_err(|e| Error::Storage(Box::new(e)))?;
+        let found = self
+            .engine
+            .store()
+            .find_bytes(needles, key.as_deref().or(self.page_key.as_ref()))
+            .map_err(|e| Error::Storage(Box::new(e)))?;
         Ok(Some(found.len() as u64))
     }
 

@@ -1295,8 +1295,8 @@ Apple M2 Pro; 10 logical CPUs; 32 GiB; macOS-26.7.3-arm64-arm-64bit-Mach-O — n
 subjects — a subject column, a text with a text index, a 4-dimensional
 vector with an HNSW index — on real files; a subject's 100 texts are
 planted, erased by `FORGET SUBJECT`, and every file searched for them
-(`Kv::find_bytes`: the files raw and the data file's leaves and internal
-nodes decoded).
+(`Kv::find_bytes`: the files raw, the data file's leaves and internal
+nodes decoded, an LSM tree's runs' blocks decompressed).
 
 | erasure | nucleus |
 |---|---:|
@@ -1316,6 +1316,12 @@ A `DELETE` removes the rows from what queries see, not from the files:
 the old versions, the WAL and the freed pages still hold every planted
 text after the indexes' upkeep and a vacuum.  `FORGET SUBJECT` scrubs
 them — the search finds none — and the files shrink with it.
+
+With the table in an LSM tree (`ERASURE_ENGINE=lsm`; issue #26; one run
+on this machine, 2026-11-28, not yet a bench/all.sh step): `FORGET
+SUBJECT` takes ≈440 ms (≈360 ms with the B+tree in the same run): the
+scrub merges the tree's runs into one, what was deleted left out, and
+zeroes the ones it replaces.  The planted texts are found 0 times after.
 
 ## Backups
 

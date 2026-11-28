@@ -8370,10 +8370,27 @@ built.
     separators need not be keys present (Bayer and McCreight; suffix
     truncation, Bayer and Unterauer 1977, makes them shorter but still
     derived from keys) — what erasure cannot allow of a removed one.
-    *Still open — LSM tables (issue #26):* a scrub does not rewrite an
+    *LSM tables (issue #26, 2026-11-28):* a scrub did not rewrite an
     LSM tree's runs, which keep deleted rows until compacted (`found`
-    61 of 856 after `FORGET` on an `engine = lsm` table checkpointed;
-    `tests/forget.rs`, ignored until fixed).
+    61 of 856 after `FORGET` on an `engine = lsm` table checkpointed).
+    Now the scrub has each engine merge all its files into one without
+    them (`Engine::compact_all`: every run into the last level,
+    tombstones and the garbage filter's versions dropped), the
+    checkpoint after removes the runs no manifest names, zeroed and
+    synced first while scrubbing, and the search reads each run's blocks
+    decompressed (sealed ones opened through the store's file system).
+    Tests: `tests/forget.rs` (an LSM table, and an encrypted one);
+    mutation-checked (the merge, its install, the run search).  Not
+    taken: emptying the shared block cache — its keys are run ids never
+    used again, so the old blocks are out of reach and age out, while a
+    clear would cost every other database in the process.  The zeroing
+    of removed runs is not seen by the search (a removed file is gone
+    from it) and has no test of its own.  Measured
+    (`ERASURE_ENGINE=lsm`, one run, 100 000 rows): `FORGET` ≈440 ms
+    against ≈360 ms on the B+tree — the price of one full merge.  Prior
+    art: a major compaction with tombstones dropped at the last level
+    (RocksDB's `CompactRange`, LevelDB) — here run by the erasure, the
+    old files zeroed before removal.
   - **R2c — the verification scan**: every file of the directory
     searched for the forgotten values (strings' bytes, vectors'),
     the data file's compressed values decompressed; its result in the
