@@ -719,11 +719,38 @@ struct Wait;
 /// `stream_position(stream, group)`: the group's position.
 struct Position;
 
-/// Registers `stream_wait` and `stream_position`.
+/// `stream_start(stream)`: the first `seq` the stream keeps (PLAN.md
+/// §M16.5 S6) — the newest's next when it keeps none; the entries before
+/// it were trimmed by its retention, whatever its row policies show.
+struct Start;
+
+/// Registers `stream_wait`, `stream_position` and `stream_start`.
 pub fn register(r: &mut Registry) -> Result<()> {
     r.add_function(&["stream_wait"], Arc::new(Wait))?;
     r.add_function(&["stream_position"], Arc::new(Position))?;
+    r.add_function(&["stream_start"], Arc::new(Start))?;
     Ok(())
+}
+
+/// The first `seq` `t` keeps as `txn` sees it (the newest's next when it
+/// keeps none).
+pub fn start(txn: &dyn KvTxn, t: &Table) -> Result<i64> {
+    let from = t.index_prefix(0);
+    let end = nucleus_kv::prefix_end(&from).expect("a table's prefix ends");
+    if let Some(item) = txn
+        .scan(
+            std::ops::Bound::Included(&from),
+            std::ops::Bound::Excluded(&end),
+        )?
+        .next()
+    {
+        let (_, v) = item?;
+        if let Some(Value::Int(seq)) = crate::encoding::decode_row(&v, 1)?.first() {
+            return Ok(*seq);
+        }
+        return Err(Error::internal("a stream's entry without its seq"));
+    }
+    Ok(last(txn, t)?.0 + 1)
 }
 
 fn readable(cx: &CallContext<'_>, name: &str) -> Result<Table> {
@@ -812,6 +839,35 @@ impl ScalarFunction for Position {
         };
         let t = readable(cx, name)?;
         Ok(Value::Int(position(cx.txn(), &t, group, false)?))
+    }
+}
+
+impl ScalarFunction for Start {
+    fn name(&self) -> &str {
+        "stream_start"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        1..=1
+    }
+
+    fn resolve(&self, _: &[crate::ext::ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(DataType::Text)],
+            Returns::Type(Some(DataType::BigInt)),
+        ))
+    }
+
+    fn volatility(&self) -> Volatility {
+        Volatility::Stable
+    }
+
+    fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let Value::Text(name) = &args[0] else {
+            return Ok(Value::Null);
+        };
+        let t = readable(cx, name)?;
+        Ok(Value::Int(start(cx.txn(), &t)?))
     }
 }
 

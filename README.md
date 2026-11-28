@@ -272,7 +272,10 @@ driver consuming them (`stream_of(name).process(group, work)`: a batch
 and its work committed together) and waiting without a transaction
 held, and task queues (`CREATE QUEUE`: `TAKE` leases the next task by
 priority, `FINISH TASK` in the work's transaction does it once, `FAIL
-TASK` retries with backoff or moves it to dead letters).  Then live
+TASK` retries with backoff or moves it to dead letters); a protocol
+reaches streams through an adapter module (a sample speaks
+newline-delimited JSON over TCP: appends, and entries replayed from a
+number, a gap named).  Then live
 queries and sync (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.

@@ -39,6 +39,7 @@
 | `crates/testkit` | `nucleus-testkit` | the sqllogictest runner and the SQL layer's scripts, for the core, front ends and modules | §M14.19 |
 | `modules/pg-compat` | `nucleus-pg-compat` | PostgreSQL compatibility: the protocol, `pg_catalog`, `information_schema`, the `pg_*` functions (its own README) | §M12, §M14.5, §M14.19 |
 | `modules/mongo-compat` | `nucleus-mongo-compat` | MongoDB compatibility: the wire protocol's CRUD and queries over collections, BSON as Extended JSON (§8.42; its own README) | §M16 Q5 |
+| `modules/ndjson` | `nucleus-ndjson` | the sample protocol adapter: newline-delimited JSON over TCP onto streams' appends and entries from a `seq` (§8.46; its own README) | §M16.5 S6 |
 | `modules/tls` | `nucleus-tls` | TLS over rustls, for the front ends and the Rust client | §M14.25 ✅ |
 | `modules/oidc` | `nucleus-oidc` | OpenID Connect: logins by identity tokens | §M14.25 ✅ |
 | `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
@@ -7990,6 +7991,9 @@ COMMIT;                                                               -- both, o
   takes the next ones.  `ALTER STREAM s SEEK GROUP g TO n` sets a
   position (a replay), `ALTER STREAM s DROP GROUP g` forgets one;
   `stream_position(s, g)` reads one.
+- **Where it begins:** `stream_start(s)` is the first `seq` the stream
+  keeps (the newest's next when it keeps none): entries before it were
+  trimmed (§8.46's gaps).
 - **Waiting:** `stream_wait(s, after, timeout_ms)` returns the stream's
   newest `seq` once it is past `after` or the time is up (at most an
   hour) — woken by the commit that makes an entry visible, not by
@@ -8168,6 +8172,67 @@ work committed exactly once; a lost lease's work refused at its finish
 or commit; a crashed worker's task back after its lease, then a dead
 letter, across a reopening; a take past 200 000 delayed and leased
 tasks).
+
+### 8.46 Protocol adapters (`adapters`, `modules/ndjson`, §M16.5 S6)
+
+An external protocol reaches streams through a module — a front end
+that maps its messages onto two acts of a session, in the public API
+(`nucleus_sql::ext::adapters`):
+
+- **Appending:** `append_json(session, stream, json)` appends a JSON
+  object, or each object of an array, in one statement: fields by the
+  stream's column names, converted to their types as `JSON_TABLE`
+  converts (`ERROR ON ERROR`: a value that does not convert refuses the
+  whole append), fields without a column passed over, columns without
+  a field `NULL`; the user's privileges, the stream's constraints.
+  Anything but an object or an array of objects: `22023`.
+- **Reading from a number:** `Subscription::new(stream, after)`;
+  `next(session, max, timeout)` gives the entries after the last it
+  gave, as JSON objects (`seq`, `time` and the stream's columns), in
+  `seq` order with no gap — waiting up to `timeout` for one when there
+  is none, holding no transaction (in a transaction block: `25001`).
+  The position is the caller's (a protocol's own sequence number, a
+  resend request, a rewind); `CONSUME`'s groups keep one in the database
+  instead.  Entries after the position that the retention trimmed are
+  a gap: `22000`, naming them and where the stream now begins
+  (`start`), the position unchanged — the caller goes on with
+  `skip_to` if it accepts the gap.  Entries row policies hide are no
+  gap: the stream's start is `stream_start(stream)` (SQL too: the first
+  `seq` it keeps, the newest's next when it keeps none).
+- **Requests:** `members(text)` reads a JSON object's members
+  (`Member::{Null, Bool, Int, Text, Json}`); `trim_all(kv, now)` is
+  the retention's trim, as the server's maintenance runs it.
+
+The sample, `modules/ndjson` (`nucleus server --front-end ndjson
+[addr]`, default `127.0.0.1:20038`), speaks newline-delimited JSON over
+TCP, one object a line each way:
+
+```text
+→ {"login": "app", "password": "…"}
+← {"ok": "login"}
+→ {"append": "ticks", "entries": [{"symbol": "X", "price": 1.5}]}
+← {"ok": "append", "appended": 1}
+→ {"subscribe": "ticks", "after": 0}
+← {"price": 1.5, "seq": 1, "symbol": "X", "time": "2026-11-28T10:00:00+00:00"}
+← {"heartbeat": 1}
+```
+
+`login` first (the server's users, its login throttle, refused logins
+audited; refused, the connection ends; the password as written, so on
+a network the server's TLS — a client starting with a handshake gets
+it); `append` with `entries` (an array) or `entry` (an object);
+`subscribe` makes the connection the stream's entries after `after`,
+with `{"heartbeat": seq}` after ten seconds with none, until the client
+goes away; a gap is `{"error": {"code": "22000", "message": …,
+"begins": n}}` and ends it.  Errors are `{"error": {"code", "message"}}`;
+a refused `append` leaves the connection usable; a line is at most 16
+MiB (`54000`).  A protocol such as FIX or ITCH is a module of the same
+shape (D21).
+
+Tests: `modules/ndjson/tests/adapter.rs` (over a socket: appends typed
+to the columns, a replay from a number and then entries live, gaps by
+`max_entries` and by a retention that trimmed all, refusals that keep
+the connection), `slt/97_streams.slt` (`stream_start`).
 
 ## 9. Server (`nucleus-server`)
 
@@ -8849,8 +8914,8 @@ error, to stderr — to see what a tool asks for.
 **Front ends and authentication are registered** (principle 12): a
 front end is a `FrontEnd` (`name`, `default_addr`, `handle(stream, kv,
 config, id)`) — the built-in `Ncp` in `FrontEnds::builtin()`, `Pg` from
-the pg-compat module and `Mongo` from the mongo-compat module, which the
-`nucleus` edition adds;
+the pg-compat module, `Mongo` from the mongo-compat module and `Ndjson`
+from the ndjson module (§8.46), which the `nucleus` edition adds;
 `serve_front_end(front, listener, kv, config)` runs any.  The server
 starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
 pg`, `--mongo-compat` `--front-end mongo`).  `Config { auth, registry, log_queries, tls }` (`tls`: a

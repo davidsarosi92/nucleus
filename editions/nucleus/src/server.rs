@@ -1,7 +1,9 @@
 //! `nucleus server`: the front ends a command line names — the nucleus
 //! protocol by default, PostgreSQL compatibility (the `pg-compat` module,
-//! which this edition includes) and MongoDB's (`mongo-compat`) on request; TLS (the `tls` module) for
-//! clients that ask, given a certificate and its key.
+//! which this edition includes) and MongoDB's (`mongo-compat`) on request,
+//! and the sample protocol adapter (`--front-end ndjson`, newline-delimited
+//! JSON onto streams); TLS (the `tls` module) for clients that ask, given a
+//! certificate and its key.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -18,6 +20,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut fronts = FrontEnds::builtin();
     fronts.add(Arc::new(nucleus_pg_compat::Pg))?;
     fronts.add(Arc::new(nucleus_mongo_compat::Mongo))?;
+    fronts.add(Arc::new(nucleus_ndjson::Ndjson))?;
     fronts.add(Arc::new(nucleus_console::Console::new()))?;
     // (front end, address): ncp always, on `--listen`'s address.
     let mut listen: Option<String> = None;

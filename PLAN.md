@@ -14912,6 +14912,62 @@ pgmq / River (leases, visibility, dead letters).
   mapping an external protocol onto appends or a changefeed's
   subscription; replay from an offset, a gap an error naming it; a
   sample adapter (newline-delimited JSON over TCP) as the pattern.
+  *Study (2026-11-28).*  An adapter is a front end (`FrontEnd`, as
+  `pg` and `mongo` are) that logs in a session and turns its protocol's
+  messages into two acts: appending entries to a stream, and reading a
+  stream's entries in order from a sequence number.  So the extension
+  point is those two acts over a session, in the public API
+  (`nucleus_sql::ext::adapters`), not a new kind of plug-in: what a
+  protocol's messages look like is the module's; the database gives the
+  order, the numbers and the transactions.  Appending: a JSON object per
+  entry, its fields by the stream's column names and converted to their
+  types as `JSON_TABLE` converts — one statement, one transaction, the
+  user's privileges and the stream's constraints; a value that does not
+  convert refuses the append (`ERROR ON ERROR`; `JSON_TABLE`'s default,
+  `NULL ON ERROR`, would turn a bad price into a missing one).  Reading:
+  D23 makes a stream's numbers dense and visible in order, so a reader
+  that holds the last number it gave needs nothing else — no consumer
+  group: a protocol keeps its own position (FIX's sequence numbers, a
+  client's resend request, a rewind), and replays from any number the
+  stream still keeps.  A number it no longer keeps — trimmed by the
+  retention — is a gap: an error naming the numbers gone and where the
+  stream now begins, the choice of going on left to the caller (Kafka's
+  `OFFSET_OUT_OF_RANGE` and its reset policy; FIX's sequence reset);
+  found by `stream_start(stream)`, the first number kept, not by the
+  rows a reader sees — row policies hide entries, the retention removes
+  them.  Waiting for the next entry holds no transaction (S4's
+  `Session::wait_stream`).  The sample speaks newline-delimited JSON
+  over TCP (JSON Lines): a login, `append`, `subscribe` (then the
+  entries, a heartbeat after ten idle seconds — FIX's heartbeat, so a
+  side learns the other is gone); TLS as the server has it.  A trading
+  protocol stays outside the public repository (D21: an adapter, and
+  the hot path not nucleus's).
+  *Done:* `nucleus_sql::ext::adapters` (`crate::adapters`):
+  `append_json(session, stream, json)` (an object or an array of them;
+  anything else `22023`), `Subscription::new(stream, after)` with
+  `next(session, max, timeout)` (entries as JSON objects in `seq` order;
+  a gap `22000`, naming it; in a transaction block `25001`), `start`,
+  `skip_to`, `after`; `members(text)` (a request's members); SQL
+  `stream_start(stream)`.  `modules/ndjson` (`nucleus-ndjson`, the
+  front end `ndjson`, `--front-end ndjson`, default `127.0.0.1:20038`;
+  in the `nucleus` edition): `{"login", "password"}` (the server's
+  users, throttle and refused-login audit), `{"append", "entries" |
+  "entry"}`, `{"subscribe", "after"}`, errors as `{"error": {"code",
+  "message"}}` (and `"begins"` for a gap), lines at most 16 MiB.  Not
+  yet: a subscription egress over a changefeed is the same reading (a
+  changefeed is a stream); its statements parsed per read (a prepared
+  form if an adapter needs the rate).  Tests:
+  `modules/ndjson/tests/adapter.rs` over a socket (appends typed to the
+  stream's columns, a replay from a number then entries live, a gap by
+  `max_entries` and by a retention that trimmed all, refusals that keep
+  the connection — not JSON, not an object, a bad value, a missing
+  `NOT NULL`, a table that is not a stream, a privilege lacking, a line
+  too long), `slt/97_streams.slt` (`stream_start`); mutations — the gap's
+  bound, `ERROR ON ERROR`, objects only, the position kept, the wait,
+  the first number kept and an empty stream's, the line's limit, a
+  negative `after`, `entries` an array, the refused login ending the
+  connection, the gap's `begins` — each failing (a `FORMAT JSON` for
+  `json` columns survived as equivalent and was removed).
 - **S7 — the proofs and the patterns:** crash tests (exactly-once
   consume-write-commit, the task queue with no lost or doubled task,
   changefeeds' order) on the simulation and against a server killed

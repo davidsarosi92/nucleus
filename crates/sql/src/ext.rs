@@ -157,6 +157,16 @@ pub mod documents {
     pub use crate::documents::{Op, Request, statement};
 }
 
+/// The extension point for protocol adapters (PLAN.md §M16.5 S6, D21):
+/// JSON appended to a stream, a stream's entries read in order from a
+/// `seq` with gaps named, a JSON request's members.
+pub mod adapters {
+    pub use crate::adapters::{Member, Subscription, append_json, members};
+    /// The retention's trim of every stream, as the server's maintenance
+    /// runs it (what makes a gap).
+    pub use crate::stream::trim_all;
+}
+
 /// `json` values: their text.
 pub mod json {
     pub use crate::json::to_text;

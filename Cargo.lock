@@ -518,6 +518,7 @@ dependencies = [
  "nucleus-local-models",
  "nucleus-mcp",
  "nucleus-mongo-compat",
+ "nucleus-ndjson",
  "nucleus-oidc",
  "nucleus-otlp",
  "nucleus-pg-compat",
@@ -684,6 +685,16 @@ dependencies = [
 
 [[package]]
 name = "nucleus-mongo-compat"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+ "nucleus-server",
+ "nucleus-sql",
+]
+
+[[package]]
+name = "nucleus-ndjson"
 version = "0.1.0"
 dependencies = [
  "nucleus-kv",

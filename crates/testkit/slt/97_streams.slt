@@ -219,6 +219,30 @@ SELECT stream_wait('small', 5, 10)
 ----
 5
 
+# Where a stream begins: its first kept seq (the newest's next when it
+# keeps none; the retention's trims are tested by modules/ndjson)
+query I
+SELECT stream_start('small')
+----
+1
+
+statement ok
+CREATE STREAM empty_one (n INT)
+
+query I
+SELECT stream_start('empty_one')
+----
+1
+
+statement ok
+DROP STREAM empty_one
+
+statement error 42809
+SELECT stream_start('customers')
+
+statement error 42P01
+SELECT stream_start('nope')
+
 # The catalog (its engine the default's: the scripts run on both)
 query TTIIB
 SELECT name, retention, max_entries, last_seq, last_time > now() - interval '1 hour' FROM nc_catalog.streams ORDER BY name
